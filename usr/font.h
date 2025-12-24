@@ -103,7 +103,7 @@ static const uint8_t font8x8_basic[128][8] = {
 };
 
 static void draw_char(uint32_t* buf, int w, int h, int x, int y, char c, uint32_t color) {
-    if (c < 0 || c > 127) c = '?';
+    if (c < 0) c = '?';
     const uint8_t* glyph = font8x8_basic[(int)c];
     
     for (int row = 0; row < 8; row++) {

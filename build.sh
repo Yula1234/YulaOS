@@ -1,94 +1,81 @@
 #!/bin/bash
+
 set -e
 
-# Папки
-mkdir -p bin/obj
-mkdir -p bin/usr
-mkdir -p bin/tools
+DIRS=("bin/obj" "bin/usr" "bin/tools" "bin/isodir/boot/grub")
+
 ISODIR="bin/isodir"
-mkdir -p "$ISODIR/boot/grub"
-
-gcc tools/yulafs_tool.c -o bin/tools/yulafs_tool
-
-OBJ_FILES=""
-
-echo "[asm] assembling kernel..."
-ASM_FILES=$(find src -name "*.asm" | sort)
-for FILE in $ASM_FILES; do
-  if [[ "$FILE" != *"src/usr"* ]]; then
-      OBJ_NAME=$(echo $FILE | sed 's|src/||' | sed 's|/|_|g' | sed 's|\.asm|.o|')
-      fasm "$FILE" "bin/obj/$OBJ_NAME"
-      OBJ_FILES="$OBJ_FILES bin/obj/$OBJ_NAME"
-  fi
-done
-
-echo "[c] compiling kernel..."
-C_FILES=$(find src -name "*.c" | sort)
-for FILE in $C_FILES; do
-  if [[ "$FILE" != *"src/usr"* ]]; then
-      OBJ_NAME=$(echo $FILE | sed 's|src/||' | sed 's|/|_|g' | sed 's|\.c|.o|')
-      gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-          -mno-sse -mno-sse2 \
-          -std=gnu99 -O3 -Wall -Wextra \
-          -I src \
-          -c "$FILE" -o "bin/obj/$OBJ_NAME"
-      OBJ_FILES="$OBJ_FILES bin/obj/$OBJ_NAME"
-  fi
-done
-
-echo "[ld] linking kernel..."
-ld -m elf_i386 -T src/linker.ld -o bin/kernel.bin $OBJ_FILES
-
-fasm usr/start.asm bin/usr/start.o
-
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c usr/lib/malloc.c -o bin/obj/malloc.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c usr/lib/stdio.c -o bin/obj/stdio.o
-
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/test.c -o bin/usr/test.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/edit.c -o bin/usr/edit.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/geditor.c -o bin/usr/geditor.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/asmc.c -o bin/usr/asmc.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/dasm.c -o bin/usr/dasm.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/grep.c -o bin/usr/grep.o
-gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
-    -I usr -c programs/cat.c -o bin/usr/cat.o
-
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/test.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/test.o
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/edit.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/edit.o
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/geditor.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/geditor.o
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/asmc.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/asmc.o
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/dasm.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/dasm.o
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/grep.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/grep.o
-ld -m elf_i386 --no-warn-rwx-segments -T usr/linker.ld -o bin/usr/cat.exe bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/usr/cat.o
 
 DISK_IMG="disk.img"
 
-if [ ! -f $DISK_IMG ]; then
-    dd if=/dev/zero of=$DISK_IMG bs=1M count=10
-    ./bin/tools/yulafs_tool $DISK_IMG format
+TOOL="bin/tools/yulafs_tool"
+
+USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat")
+
+CC="gcc -m32"
+LD="ld -m elf_i386"
+ASM="fasm"
+
+CFLAGS_BASE="-ffreestanding -fno-pie -fno-stack-protector -fno-builtin"
+
+CFLAGS_KERN="$CFLAGS_BASE -mno-sse -mno-sse2 -std=gnu99 -O3 -Wall -Wextra -I src"
+
+CFLAGS_USER="$CFLAGS_BASE -I usr"
+
+LDFLAGS_USER="--no-warn-rwx-segments -T usr/linker.ld"
+
+for d in "${DIRS[@]}"; do mkdir -p "$d"; done
+
+gcc tools/yulafs_tool.c -o "$TOOL"
+
+echo "[asm] assembling kernel..."
+OBJ_FILES=""
+for FILE in $(find src -name "*.asm" | sort); do
+    if [[ "$FILE" != *"src/usr"* ]]; then
+        # Transform path: src/arch/file.asm -> arch_file.o
+        OBJ_NAME=$(echo $FILE | sed 's|src/||' | sed 's|/|_|g' | sed 's|\.asm|.o|')
+        $ASM "$FILE" "bin/obj/$OBJ_NAME"
+        OBJ_FILES="$OBJ_FILES bin/obj/$OBJ_NAME"
+    fi
+done
+
+echo "[c] compiling kernel..."
+for FILE in $(find src -name "*.c" | sort); do
+    if [[ "$FILE" != *"src/usr"* ]]; then
+        # Transform path: src/kernel/file.c -> kernel_file.o
+        OBJ_NAME=$(echo $FILE | sed 's|src/||' | sed 's|/|_|g' | sed 's|\.c|.o|')
+        $CC $CFLAGS_KERN -c "$FILE" -o "bin/obj/$OBJ_NAME"
+        OBJ_FILES="$OBJ_FILES bin/obj/$OBJ_NAME"
+    fi
+done
+
+echo "[ld] linking kernel..."
+$LD -T src/linker.ld -o bin/kernel.bin $OBJ_FILES
+
+$ASM usr/start.asm bin/usr/start.o
+$CC $CFLAGS_USER -c usr/lib/malloc.c -o bin/obj/malloc.o
+$CC $CFLAGS_USER -c usr/lib/stdio.c  -o bin/obj/stdio.o
+
+USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o"
+
+for APP in "${USER_APPS[@]}"; do
+    $CC $CFLAGS_USER -c "programs/$APP.c" -o "bin/usr/$APP.o"
+    $LD $LDFLAGS_USER -o "bin/usr/$APP.exe" $USER_LIBS "bin/usr/$APP.o"
+done
+
+if [ ! -f "$DISK_IMG" ]; then
+    dd if=/dev/zero of="$DISK_IMG" bs=1M count=10 status=none
+    "$TOOL" "$DISK_IMG" format
 fi
 
-# ./bin/tools/yulafs_tool disk.img format
+for APP in "${USER_APPS[@]}"; do
+    "$TOOL" "$DISK_IMG" import "bin/usr/$APP.exe" "/bin/$APP.exe" > /dev/null
+done
 
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/test.exe /bin/test.exe > /dev/null
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/edit.exe /bin/edit.exe > /dev/null
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/geditor.exe /bin/geditor.exe > /dev/null
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/asmc.exe /bin/asmc.exe > /dev/null
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/dasm.exe /bin/dasm.exe > /dev/null
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/grep.exe /bin/grep.exe > /dev/null
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/cat.exe /bin/cat.exe > /dev/null
-
-./bin/tools/yulafs_tool $DISK_IMG import programs/loop.asm /home/loop.asm
+"$TOOL" "$DISK_IMG" import programs/loop.asm /home/loop.asm > /dev/null
 
 cp bin/kernel.bin "$ISODIR/boot/kernel.bin"
+
 cat << EOF > "$ISODIR/boot/grub/grub.cfg"
 set timeout=0
 set default=0
@@ -97,15 +84,14 @@ menuentry "YulaOS" {
     boot
 }
 EOF
+
 grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
 
 echo "[run] qemu..."
 
-QEMU_DISK_SETUP="-device ahci,id=ahci
+QEMU_ARGS="-device ahci,id=ahci
 -device ide-hd,drive=disk,bus=ahci.0
--drive id=disk,file=${DISK_IMG},if=none,format=raw"
+-drive id=disk,file=${DISK_IMG},if=none,format=raw
+-enable-kvm -vga std -m 512"
 
-qemu-system-i386 \
-    -cdrom bin/yulaos.iso \
-    $QEMU_DISK_SETUP \
-    -enable-kvm -vga std -m 512
+qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS

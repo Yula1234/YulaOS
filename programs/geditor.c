@@ -74,7 +74,6 @@ void render(uint32_t* buf, int w, int h) {
         draw_string(buf, w, h, 10, 8, "FILE SAVED!", 0x00FF00);
         show_status--;
     } else {
-        char title[128];
         draw_string(buf, w, h, 10, 8, "File: ", 0xAAAAAA);
         draw_string(buf, w, h, 60, 8, filename, 0xFFFFFF);
         draw_string(buf, w, h, 260, 8, "[Ctrl+S] Save  [Ctrl+Q] Quit", 0x888888);
