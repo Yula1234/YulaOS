@@ -173,10 +173,20 @@ void term_putc(term_instance_t* term, char c) {
         for(int k=0; k<remaining; k++) {
             term->bg_colors[idx+k] = term->curr_bg;
             term->fg_colors[idx+k] = term->curr_fg;
+            term->buffer[idx+k] = ' ';
         }
 
         term->col = 0; 
         term->row++;
+        
+        if (term->row < TERM_HISTORY) {
+            int new_row_start = term->row * TERM_W;
+            for(int i=0; i<TERM_W; i++) {
+                term->buffer[new_row_start + i] = ' ';
+                term->fg_colors[new_row_start + i] = term->curr_fg;
+                term->bg_colors[new_row_start + i] = term->curr_bg;
+            }
+        }
     } else if (c == '\b') {
         if (term->col > 0) term->col--;
         int idx = term->row * TERM_W + term->col;

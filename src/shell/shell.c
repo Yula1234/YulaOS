@@ -517,7 +517,9 @@ void shell_task(void* arg) {
                         else if (strcmp(args[0], "ls") == 0) shell_ls(my_term, (arg_count > 1) ? args[1] : 0, cwd_inode);
                         else if (strcmp(args[0], "cd") == 0) shell_cd(my_term, (arg_count > 1) ? args[1] : "/", &cwd_inode, path);
                         else if (strcmp(args[0], "pwd") == 0) { term_print(my_term, path); term_print(my_term, "\n"); }
-                        else if (strcmp(args[0], "clear") == 0) { memset(my_term->buffer, ' ', TERM_W * TERM_H); my_term->row = 0; my_term->col = 0; }
+                        else if (strcmp(args[0], "clear") == 0) { 
+                            term_putc(my_term, 0x0C); 
+                        }
                         else if (strcmp(args[0], "mkdir") == 0 && arg_count > 1) yulafs_mkdir(args[1]);
                         else if (strcmp(args[0], "exit") == 0) break;
                         else if (strcmp(args[0], "ps") == 0) shell_ps(my_term);

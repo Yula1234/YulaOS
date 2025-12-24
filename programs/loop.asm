@@ -2,6 +2,8 @@ section .data
 msg: db "Loop!", 10
 
 section .text
+    global _start
+    
 _start:
     mov ecx, 5
 
