@@ -386,7 +386,6 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) outfile = argv[++i];
         } else {
             if (ctx.obj_count >= MAX_OBJECTS) fatal("Too many input files");
-            printf("Loading %s...\n", argv[i]);
             ctx.objects[ctx.obj_count++] = load_object(argv[i]);
             inputs++;
         }
@@ -399,7 +398,6 @@ int main(int argc, char** argv) {
 
     collect_symbols(&ctx);
     if (ctx.entry_addr == 0) printf("Warning: _start symbol not found.\n");
-    else printf("Entry point: 0x%x\n", ctx.entry_addr);
 
     build_image(&ctx, outfile);
     

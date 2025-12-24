@@ -767,7 +767,7 @@ void write_elf(AssemblerCtx* ctx, const char* filename) {
 }
 
 int main(int argc, char** argv) {
-    if(argc < 3) { printf("ASMC v5.1\nUsage: asmc in.asm out.o\n"); return 1; }
+    if(argc < 3) { printf("ASMC\nUsage: asmc in.asm out.o\n"); return 1; }
 
     int fd = open(argv[1], 0);
     if(fd < 0) { printf("Cannot open input file\n"); return 1; }
