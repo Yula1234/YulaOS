@@ -1,12 +1,10 @@
 #include <yula.h>
 
-/* --- 1. Architecture & Configuration --- */
-
 #define MAX_LINE_LEN    256
 #define MAX_TOKEN_LEN   64
-#define MAX_Operands    3
+#define MAX_SYMBOLS     2048
+#define INITIAL_CAP     4096
 
-// ELF Definitions
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
 typedef uint32_t Elf32_Off;
@@ -30,7 +28,7 @@ typedef struct {
     Elf32_Half    e_shentsize;
     Elf32_Half    e_shnum;
     Elf32_Half    e_shstrndx;
-} Elf32_Ehdr;
+} __attribute__((packed)) Elf32_Ehdr;
 
 typedef struct {
     Elf32_Word    sh_name;
@@ -43,7 +41,7 @@ typedef struct {
     Elf32_Word    sh_info;
     Elf32_Word    sh_addralign;
     Elf32_Word    sh_entsize;
-} Elf32_Shdr;
+} __attribute__((packed)) Elf32_Shdr;
 
 typedef struct {
     Elf32_Word    st_name;
@@ -52,44 +50,34 @@ typedef struct {
     unsigned char st_info;
     unsigned char st_other;
     Elf32_Half    st_shndx;
-} Elf32_Sym;
+} __attribute__((packed)) Elf32_Sym;
 
 typedef struct {
     Elf32_Addr    r_offset;
     Elf32_Word    r_info;
-} Elf32_Rel;
+} __attribute__((packed)) Elf32_Rel;
 
-// ELF Constants
-#define ET_REL        1
-#define EM_386        3
-#define EV_CURRENT    1
-
-#define SHT_PROGBITS  1
-#define SHT_SYMTAB    2
-#define SHT_STRTAB    3
-#define SHT_NOBITS    8
-#define SHT_REL       9
-
-#define SHF_WRITE     1
-#define SHF_ALLOC     2
+#define ET_REL 1
+#define EM_386 3
+#define SHT_PROGBITS 1
+#define SHT_SYMTAB 2
+#define SHT_STRTAB 3
+#define SHT_NOBITS 8
+#define SHT_REL 9
+#define SHF_WRITE 1
+#define SHF_ALLOC 2
 #define SHF_EXECINSTR 4
-
-#define STB_LOCAL     0
-#define STB_GLOBAL    1
-#define STT_NOTYPE    0
-#define STT_OBJECT    1
-#define STT_FUNC      2
-#define STT_SECTION   3
-
-#define SHN_UNDEF     0
-
-#define R_386_32      1
-#define R_386_PC32    2
-
+#define STB_LOCAL 0
+#define STB_GLOBAL 1
+#define STT_NOTYPE 0
+#define STT_OBJECT 1
+#define STT_FUNC 2
+#define STT_SECTION 3
+#define SHN_UNDEF 0
+#define R_386_32 1
+#define R_386_PC32 2
 #define ELF32_ST_INFO(b,t) (((b)<<4)+((t)&0xf))
 #define ELF32_R_INFO(s,t)  (((s)<<8)+(unsigned char)(t))
-
-/* --- 2. Dynamic Buffer Utils --- */
 
 typedef struct {
     uint8_t* data;
@@ -97,10 +85,45 @@ typedef struct {
     uint32_t capacity;
 } Buffer;
 
-void buf_init(Buffer* b, uint32_t initial_cap) {
-    b->data = malloc(initial_cap);
+typedef enum { SEC_NULL=0, SEC_TEXT, SEC_DATA, SEC_BSS } SectionID;
+typedef enum { SYM_UNDEF, SYM_LOCAL, SYM_GLOBAL, SYM_EXTERN } SymBind;
+
+typedef struct {
+    char name[64];
+    SymBind bind;
+    SectionID section;
+    uint32_t value;
+    uint32_t elf_idx;
+} Symbol;
+
+typedef struct {
+    int pass;
+    int line_num;
+    SectionID cur_sec;
+    
+    Buffer text;
+    Buffer data;
+    Buffer bss;
+    Buffer rel_text;
+    Buffer rel_data;
+    
+    Symbol symbols[MAX_SYMBOLS];
+    int sym_count;
+} AssemblerCtx;
+
+void panic(AssemblerCtx* ctx, const char* msg) {
+    set_console_color(0xF44747, 0x141414);
+    printf("\n[ASMC ERROR] Line %d: %s\n", ctx->line_num, msg);
+    set_console_color(0xD4D4D4, 0x141414);
+    exit(1);
+}
+
+void buf_init(Buffer* b, uint32_t cap) {
+    if (cap == 0) cap = 64;
+    b->data = malloc(cap);
+    if (!b->data) exit(1);
     b->size = 0;
-    b->capacity = initial_cap;
+    b->capacity = cap;
 }
 
 void buf_free(Buffer* b) {
@@ -108,10 +131,11 @@ void buf_free(Buffer* b) {
     b->data = 0; b->size = 0;
 }
 
-void buf_push_byte(Buffer* b, uint8_t byte) {
+void buf_push(Buffer* b, uint8_t byte) {
     if (b->size >= b->capacity) {
         b->capacity *= 2;
         uint8_t* new_data = malloc(b->capacity);
+        if (!new_data) exit(1);
         memcpy(new_data, b->data, b->size);
         free(b->data);
         b->data = new_data;
@@ -120,532 +144,621 @@ void buf_push_byte(Buffer* b, uint8_t byte) {
 }
 
 void buf_push_u32(Buffer* b, uint32_t val) {
-    buf_push_byte(b, val & 0xFF);
-    buf_push_byte(b, (val >> 8) & 0xFF);
-    buf_push_byte(b, (val >> 16) & 0xFF);
-    buf_push_byte(b, (val >> 24) & 0xFF);
+    buf_push(b, val & 0xFF);
+    buf_push(b, (val >> 8) & 0xFF);
+    buf_push(b, (val >> 16) & 0xFF);
+    buf_push(b, (val >> 24) & 0xFF);
 }
 
-void buf_push_data(Buffer* b, void* src, uint32_t len) {
-    for(uint32_t i=0; i<len; i++) buf_push_byte(b, ((uint8_t*)src)[i]);
+void buf_write(Buffer* b, void* src, uint32_t len) {
+    uint8_t* p = (uint8_t*)src;
+    for(uint32_t i=0; i<len; i++) buf_push(b, p[i]);
 }
 
 uint32_t buf_add_string(Buffer* b, const char* str) {
     uint32_t offset = b->size;
-    while (*str) buf_push_byte(b, *str++);
-    buf_push_byte(b, 0);
+    while (*str) buf_push(b, *str++);
+    buf_push(b, 0);
     return offset;
 }
 
-/* --- 3. Symbol Management --- */
+int parse_number(const char* s) {
+    if (!s) return 0;
+    int sign = 1;
+    if (*s == '-') { sign = -1; s++; }
+    if (s[0] == '0' && s[1] == 'x') {
+        s += 2;
+        uint32_t val = 0;
+        while (*s) {
+            val <<= 4;
+            if (*s >= '0' && *s <= '9') val |= (*s - '0');
+            else if (*s >= 'a' && *s <= 'f') val |= (*s - 'a' + 10);
+            else if (*s >= 'A' && *s <= 'F') val |= (*s - 'A' + 10);
+            else break;
+            s++;
+        }
+        return (int)val * sign;
+    }
+    int val = 0;
+    while (*s >= '0' && *s <= '9') {
+        val = val * 10 + (*s - '0');
+        s++;
+    }
+    return val * sign;
+}
 
-typedef enum { SYM_LOCAL, SYM_GLOBAL, SYM_EXTERN } SymBinding;
-typedef enum { SEC_NULL=0, SEC_TEXT, SEC_DATA, SEC_BSS, SEC_SHSTRTAB, SEC_SYMTAB, SEC_STRTAB, SEC_REL_TEXT, SEC_REL_DATA } SectionID;
-
-typedef struct {
-    char name[64];
-    SectionID section;
-    uint32_t offset;
-    SymBinding binding;
-    uint32_t elf_index; // Index in .symtab
-} Symbol;
-
-#define MAX_SYMBOLS 1024
-Symbol symbols[MAX_SYMBOLS];
-int sym_count = 0;
-
-Symbol* find_symbol(const char* name) {
-    for(int i=0; i<sym_count; i++) {
-        if(strcmp(symbols[i].name, name) == 0) return &symbols[i];
+Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
+    for (int i = 0; i < ctx->sym_count; i++) {
+        if (strcmp(ctx->symbols[i].name, name) == 0) return &ctx->symbols[i];
     }
     return 0;
 }
 
-Symbol* add_symbol(const char* name, SectionID sec, uint32_t off, SymBinding bind) {
-    Symbol* s = find_symbol(name);
-    if (s) {
-        if (s->binding == SYM_EXTERN && bind != SYM_EXTERN) {
-            // Update definition of previously extern symbol
-            s->section = sec;
-            s->offset = off;
-            s->binding = bind; // Now it's defined (GLOBAL or LOCAL)
-            return s;
-        }
-        return s; 
-    }
-    if (sym_count >= MAX_SYMBOLS) return 0;
-    s = &symbols[sym_count++];
+Symbol* sym_add(AssemblerCtx* ctx, const char* name) {
+    Symbol* s = sym_find(ctx, name);
+    if (s) return s;
+    if (ctx->sym_count >= MAX_SYMBOLS) panic(ctx, "Symbol table overflow");
+    s = &ctx->symbols[ctx->sym_count++];
     strcpy(s->name, name);
-    s->section = sec;
-    s->offset = off;
-    s->binding = bind;
-    s->elf_index = 0;
+    s->bind = SYM_UNDEF;
+    s->section = SEC_NULL;
+    s->value = 0;
     return s;
 }
 
-/* --- 4. Instruction Encoding Definitions --- */
-
-typedef enum { OT_NONE=0, OT_REG, OT_IMM, OT_MEM } OpType;
-typedef enum { ENC_NONE, ENC_O, ENC_M, ENC_I, ENC_MI, ENC_MR, ENC_RM, ENC_M_I8, ENC_OI } EncType;
-
-typedef struct {
-    const char* mnem;
-    uint8_t opcode;
-    uint8_t subcode; // Extension for ModRM
-    EncType enc;
-    OpType op1, op2;
-} InstrDef;
-
-// Simplified Instruction Set (Extendable)
-InstrDef instructions[] = {
-    { "nop",  0x90, 0, ENC_NONE, OT_NONE, OT_NONE },
-    { "ret",  0xC3, 0, ENC_NONE, OT_NONE, OT_NONE },
-    { "hlt",  0xF4, 0, ENC_NONE, OT_NONE, OT_NONE },
-    { "cli",  0xFA, 0, ENC_NONE, OT_NONE, OT_NONE },
-    { "sti",  0xFB, 0, ENC_NONE, OT_NONE, OT_NONE },
+void sym_define_label(AssemblerCtx* ctx, const char* name) {
+    Symbol* s = sym_find(ctx, name);
     
-    // PUSH/POP
-    { "push", 0x50, 0, ENC_O,    OT_REG,  OT_NONE },
-    { "push", 0x68, 0, ENC_I,    OT_IMM,  OT_NONE },
-    { "pop",  0x58, 0, ENC_O,    OT_REG,  OT_NONE },
-
-    // MOV
-    { "mov",  0xB8, 0, ENC_OI,   OT_REG,  OT_IMM },  // mov reg, imm
-    { "mov",  0x89, 0, ENC_MR,   OT_MEM,  OT_REG },  // mov [mem], reg
-    { "mov",  0x8B, 0, ENC_RM,   OT_REG,  OT_MEM },  // mov reg, [mem]
-    { "mov",  0x89, 0, ENC_MR,   OT_REG,  OT_REG },  // mov reg, reg
-
-    // Arithmetic
-    { "add",  0x01, 0, ENC_MR,   OT_REG,  OT_REG },
-    { "sub",  0x29, 0, ENC_MR,   OT_REG,  OT_REG },
-    { "xor",  0x31, 0, ENC_MR,   OT_REG,  OT_REG },
-    { "cmp",  0x39, 0, ENC_MR,   OT_REG,  OT_REG },
-    { "test", 0x85, 0, ENC_MR,   OT_REG,  OT_REG },
+    if (ctx->pass == 1) {
+        if (!s) s = sym_add(ctx, name);
+        if (s->bind == SYM_UNDEF) s->bind = SYM_LOCAL;
+        s->section = ctx->cur_sec;
+    }
     
-    { "inc",  0x40, 0, ENC_O,    OT_REG,  OT_NONE },
-    { "dec",  0x48, 0, ENC_O,    OT_REG,  OT_NONE },
+    if (s) {
+        if (ctx->cur_sec == SEC_TEXT) s->value = ctx->text.size;
+        else if (ctx->cur_sec == SEC_DATA) s->value = ctx->data.size;
+        else if (ctx->cur_sec == SEC_BSS) s->value = ctx->bss.size;
+    }
+}
 
-    // Jumps (Only 32-bit relative for simplicity in .o)
-    { "jmp",  0xE9, 0, ENC_I,    OT_IMM,  OT_NONE },
-    { "call", 0xE8, 0, ENC_I,    OT_IMM,  OT_NONE },
-    { "je",   0x84, 0, ENC_M,    OT_IMM,  OT_NONE }, // 0x0F 0x84
-    { "jne",  0x85, 0, ENC_M,    OT_IMM,  OT_NONE },
-    { "jz",   0x84, 0, ENC_M,    OT_IMM,  OT_NONE },
-    { "jnz",  0x85, 0, ENC_M,    OT_IMM,  OT_NONE },
-
-    // INT
-    { "int",  0xCD, 0, ENC_M_I8, OT_IMM,  OT_NONE },
-
-    { 0,0,0,0,0,0 }
-};
-
-const char* reg_names[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
-
-/* --- 5. Context & Logic --- */
+typedef enum { OP_NONE, OP_REG, OP_MEM, OP_IMM } OpType;
 
 typedef struct {
     OpType type;
     int reg;
-    uint32_t val;
+    int size; // 1 = byte, 4 = dword, 0 = unknown
+    int32_t disp;
     char label[64];
     int has_label;
 } Operand;
 
-typedef struct {
-    int pass;
-    int line_num;
-    SectionID cur_section;
-    
-    Buffer text;
-    Buffer data;
-    Buffer bss;
-    
-    Buffer rel_text;
-    Buffer rel_data;
-    
-    // String tables are built at the end or progressively
-} Context;
+const char* reg_names32[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
+const char* reg_names8[]  = { "al",  "cl",  "dl",  "bl",  "ah",  "ch",  "dh",  "bh" };
 
-// Helper to parse "eax" -> 0
-int get_reg(const char* txt) {
-    for(int i=0; i<8; i++) if(strcmp(txt, reg_names[i])==0) return i;
+int get_reg_info(const char* s, int* size) {
+    for(int i=0; i<8; i++) {
+        if(strcmp(s, reg_names32[i])==0) { *size = 4; return i; }
+        if(strcmp(s, reg_names8[i])==0)  { *size = 1; return i; }
+    }
     return -1;
 }
 
-// Helper to parse "123", "0x1A"
-uint32_t get_imm(const char* txt) {
-    if(txt[0]=='0' && txt[1]=='x') {
-        uint32_t v=0; const char* p=txt+2;
-        while(*p) {
-            v<<=4;
-            if(*p>='0' && *p<='9') v|=(*p-'0');
-            else if(*p>='a' && *p<='f') v|=(*p-'a'+10);
-            p++;
+typedef enum {
+    ENC_NONE, ENC_R, ENC_I, ENC_M, ENC_MR, ENC_RM, ENC_MI, ENC_OI, ENC_J, ENC_SHIFT,
+    ENC_0F
+} EncMode;
+
+typedef struct {
+    const char* mnem;
+    uint8_t op_base;
+    uint8_t op_ext;
+    EncMode mode;
+    int size; // 0 = any, 1 = byte, 4 = dword
+} InstrDef;
+
+InstrDef isa[] = {
+    // Control / Misc (Size 0 = Ignore)
+    { "ret",   0xC3, 0, ENC_NONE, 0 }, { "nop",   0x90, 0, ENC_NONE, 0 },
+    { "hlt",   0xF4, 0, ENC_NONE, 0 }, { "cli",   0xFA, 0, ENC_NONE, 0 },
+    { "sti",   0xFB, 0, ENC_NONE, 0 }, { "pusha", 0x60, 0, ENC_NONE, 0 },
+    { "popa",  0x61, 0, ENC_NONE, 0 }, { "leave", 0xC9, 0, ENC_NONE, 0 },
+    { "cld",   0xFC, 0, ENC_NONE, 0 }, { "std",   0xFD, 0, ENC_NONE, 0 },
+    { "int3",  0xCC, 0, ENC_NONE, 0 },
+    
+    // 0F prefixed
+    { "ud2",   0x0B, 0, ENC_0F, 0 },   { "rdtsc", 0x31, 0, ENC_0F, 0 },
+
+    // Push/Pop (32-bit only usually)
+    { "push",  0x50, 0, ENC_R, 4 },    { "pop",   0x58, 0, ENC_R, 4 },
+    { "push",  0x68, 0, ENC_I, 4 },    { "int",   0xCD, 0, ENC_I, 0 }, 
+
+    // Inc/Dec 
+    { "inc",   0x40, 0, ENC_R, 4 },    { "dec",   0x48, 0, ENC_R, 4 },
+    { "inc",   0xFE, 0, ENC_M, 1 },    { "dec",   0xFE, 1, ENC_M, 1 }, // 8-bit inc/dec memory
+    { "inc",   0xFF, 0, ENC_M, 4 },    { "dec",   0xFF, 1, ENC_M, 4 }, // 32-bit inc/dec memory
+
+    // Mul/Div/Neg/Not (Group 3)
+    // 8-bit
+    { "mul",   0xF6, 4, ENC_M, 1 },    { "imul",  0xF6, 5, ENC_M, 1 },
+    { "div",   0xF6, 6, ENC_M, 1 },    { "idiv",  0xF6, 7, ENC_M, 1 },
+    { "neg",   0xF6, 3, ENC_M, 1 },    { "not",   0xF6, 2, ENC_M, 1 },
+    // 32-bit
+    { "mul",   0xF7, 4, ENC_M, 4 },    { "imul",  0xF7, 5, ENC_M, 4 },
+    { "div",   0xF7, 6, ENC_M, 4 },    { "idiv",  0xF7, 7, ENC_M, 4 },
+    { "neg",   0xF7, 3, ENC_M, 4 },    { "not",   0xF7, 2, ENC_M, 4 },
+
+    // Jumps (Size 0 implies label distance check)
+    { "call",  0xE8, 0, ENC_J, 0 },    { "jmp",   0xE9, 0, ENC_J, 0 },
+    { "call",  0xFF, 2, ENC_M, 4 }, 
+    { "je",    0x84, 0, ENC_J, 0 },    { "jz",    0x84, 0, ENC_J, 0 },
+    { "jne",   0x85, 0, ENC_J, 0 },    { "jnz",   0x85, 0, ENC_J, 0 },
+    { "jg",    0x8F, 0, ENC_J, 0 },    { "jge",   0x8D, 0, ENC_J, 0 },
+    { "jl",    0x8C, 0, ENC_J, 0 },    { "jle",   0x8E, 0, ENC_J, 0 },
+    { "ja",    0x87, 0, ENC_J, 0 },    { "jae",   0x83, 0, ENC_J, 0 },
+    { "jb",    0x82, 0, ENC_J, 0 },    { "jbe",   0x86, 0, ENC_J, 0 },
+    { "loop",  0xE2, 0, ENC_J, 0 }, 
+
+    // Mov
+    // 8-bit
+    { "mov",   0x88, 0, ENC_MR, 1 },   // mov r/m8, r8
+    { "mov",   0x8A, 0, ENC_RM, 1 },   // mov r8, r/m8
+    { "mov",   0xB0, 0, ENC_OI, 1 },   // mov r8, imm8
+    { "mov",   0xC6, 0, ENC_MI, 1 },   // mov r/m8, imm8
+    
+    // 32-bit
+    { "mov",   0x89, 0, ENC_MR, 4 },   // mov r/m32, r32
+    { "mov",   0x8B, 0, ENC_RM, 4 },   // mov r32, r/m32
+    { "mov",   0xB8, 0, ENC_OI, 4 },   // mov r32, imm32
+    { "mov",   0xC7, 0, ENC_MI, 4 },   // mov r/m32, imm32
+    { "lea",   0x8D, 0, ENC_RM, 4 },   { "xchg",  0x87, 0, ENC_MR, 4 },
+
+    // Explicit movb alias
+    { "movb",  0xC6, 0, ENC_MI, 1 },   
+    { "movb",  0x88, 0, ENC_MR, 1 },   
+    { "movb",  0x8A, 0, ENC_RM, 1 },   
+
+    // ALU (Add, Sub, And, Or, Xor, Cmp)
+    // 8-bit
+    { "add",   0x00, 0, ENC_MR, 1 }, { "add",   0x02, 0, ENC_RM, 1 }, { "add",   0x80, 0, ENC_MI, 1 },
+    { "or",    0x08, 0, ENC_MR, 1 }, { "or",    0x0A, 0, ENC_RM, 1 }, { "or",    0x80, 1, ENC_MI, 1 },
+    { "and",   0x20, 0, ENC_MR, 1 }, { "and",   0x22, 0, ENC_RM, 1 }, { "and",   0x80, 4, ENC_MI, 1 },
+    { "sub",   0x28, 0, ENC_MR, 1 }, { "sub",   0x2A, 0, ENC_RM, 1 }, { "sub",   0x80, 5, ENC_MI, 1 },
+    { "xor",   0x30, 0, ENC_MR, 1 }, { "xor",   0x32, 0, ENC_RM, 1 }, { "xor",   0x80, 6, ENC_MI, 1 },
+    { "cmp",   0x38, 0, ENC_MR, 1 }, { "cmp",   0x3A, 0, ENC_RM, 1 }, { "cmp",   0x80, 7, ENC_MI, 1 },
+    { "test",  0x84, 0, ENC_MR, 1 }, { "test",  0xF6, 0, ENC_MI, 1 }, 
+
+    // 32-bit
+    { "add",   0x01, 0, ENC_MR, 4 }, { "add",   0x03, 0, ENC_RM, 4 }, { "add",   0x81, 0, ENC_MI, 4 }, { "add", 0x83, 0, ENC_MI, 4 }, // 83 = byte imm sign ext
+    { "or",    0x09, 0, ENC_MR, 4 }, { "or",    0x0B, 0, ENC_RM, 4 }, { "or",    0x81, 1, ENC_MI, 4 }, { "or",  0x83, 1, ENC_MI, 4 },
+    { "and",   0x21, 0, ENC_MR, 4 }, { "and",   0x23, 0, ENC_RM, 4 }, { "and",   0x81, 4, ENC_MI, 4 }, { "and", 0x83, 4, ENC_MI, 4 },
+    { "sub",   0x29, 0, ENC_MR, 4 }, { "sub",   0x2B, 0, ENC_RM, 4 }, { "sub",   0x81, 5, ENC_MI, 4 }, { "sub", 0x83, 5, ENC_MI, 4 },
+    { "xor",   0x31, 0, ENC_MR, 4 }, { "xor",   0x33, 0, ENC_RM, 4 }, { "xor",   0x81, 6, ENC_MI, 4 }, { "xor", 0x83, 6, ENC_MI, 4 },
+    { "cmp",   0x39, 0, ENC_MR, 4 }, { "cmp",   0x3B, 0, ENC_RM, 4 }, { "cmp",   0x81, 7, ENC_MI, 4 }, { "cmp", 0x83, 7, ENC_MI, 4 },
+    { "test",  0x85, 0, ENC_MR, 4 }, { "test",  0xF7, 0, ENC_MI, 4 }, 
+
+    // Shift
+    { "shl",   0xC1, 4, ENC_SHIFT, 4 }, { "shr",   0xC1, 5, ENC_SHIFT, 4 },
+    { "rol",   0xC1, 0, ENC_SHIFT, 4 }, { "ror",   0xC1, 1, ENC_SHIFT, 4 },
+    { "shl",   0xD1, 4, ENC_SHIFT, 4 }, { "shr",   0xD1, 5, ENC_SHIFT, 4 }, // shift by 1
+
+    { 0,0,0,0,0 }
+};
+
+void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
+    memset(op, 0, sizeof(Operand));
+    op->reg = -1;
+    op->size = 0; // Unknown size initially
+    if (!text || !*text) { op->type = OP_NONE; return; }
+
+    if (text[0] == '[') {
+        op->type = OP_MEM;
+        int len = strlen(text);
+        if (text[len-1] != ']') panic(ctx, "Missing ']'");
+        text[len-1] = 0;
+        char* content = text + 1;
+        
+        char* plus = 0; char* ptr = content;
+        while(*ptr) { if(*ptr=='+' || *ptr=='-') plus=ptr; ptr++; }
+
+        char* base_part = content;
+        char* disp_part = 0;
+        int sign = 1;
+
+        if (plus) {
+            if (*plus == '-') sign = -1;
+            *plus = 0;
+            disp_part = plus + 1;
         }
-        return v;
+
+        while (*base_part == ' ') base_part++;
+        int sz;
+        int r = get_reg_info(base_part, &sz);
+        
+        if (r != -1) {
+            if (sz != 4) panic(ctx, "Memory base register must be 32-bit");
+            op->reg = r;
+        } else {
+            if ((base_part[0] >= '0' && base_part[0] <= '9') || base_part[0] == '-') 
+                op->disp = parse_number(base_part);
+            else { strcpy(op->label, base_part); op->has_label = 1; }
+        }
+
+        if (disp_part) {
+            while (*disp_part == ' ') disp_part++;
+            op->disp += (sign * parse_number(disp_part));
+        }
+        return;
     }
-    return (uint32_t)atoi(txt); // atoi from user lib
+
+    int sz;
+    int r = get_reg_info(text, &sz);
+    if (r != -1) { 
+        op->type = OP_REG; 
+        op->reg = r; 
+        op->size = sz; 
+        return; 
+    }
+
+    op->type = OP_IMM;
+    
+    if (text[0] == '\'' && text[2] == '\'' && text[1] != 0) {
+        op->disp = (int)text[1];
+        op->size = 1; 
+        return;
+    }
+
+    if ((text[0] >= '0' && text[0] <= '9') || text[0] == '-') {
+        op->disp = parse_number(text);
+        if (op->disp >= -128 && op->disp <= 255) op->size = 1; 
+        else op->size = 4;
+    } else {
+        strcpy(op->label, text);
+        op->has_label = 1;
+        op->size = 4; 
+    }
 }
 
-void parse_operand(char* txt, Operand* op) {
-    op->type = OT_NONE; op->has_label = 0; op->reg = -1; op->val = 0;
-    if(!txt || !*txt) return;
+void emit_byte(AssemblerCtx* ctx, uint8_t b) {
+    if (ctx->pass == 1) { ctx->text.size++; return; }
+    buf_push(&ctx->text, b);
+}
 
-    if(txt[0]=='[') { // Memory
-        char tmp[64];
-        int len = strlen(txt);
-        if(txt[len-1]==']') {
-            strncpy(tmp, txt+1, len-2); tmp[len-2]=0;
-            int r = get_reg(tmp);
-            if(r != -1) { op->type = OT_MEM; op->reg = r; return; }
-            // Support [label] as memory operand
-            op->type = OT_MEM; op->has_label = 1; strcpy(op->label, tmp); op->reg = 5; // ebp/disp32 encoding
+void emit_dword(AssemblerCtx* ctx, uint32_t d) {
+    if (ctx->pass == 1) { ctx->text.size += 4; return; }
+    buf_push_u32(&ctx->text, d);
+}
+
+void emit_reloc(AssemblerCtx* ctx, int type, char* label, uint32_t offset) {
+    if (ctx->pass != 2) return;
+    Symbol* s = sym_find(ctx, label);
+    if (!s) panic(ctx, "Undefined symbol");
+    
+    Elf32_Rel r;
+    r.r_offset = offset;
+    r.r_info = ELF32_R_INFO(s->elf_idx, type);
+    
+    Buffer* target = (ctx->cur_sec == SEC_TEXT) ? &ctx->rel_text : &ctx->rel_data;
+    buf_write(target, &r, sizeof(r));
+}
+
+void emit_modrm(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
+    if (ctx->pass != 2) return;
+    
+    if (rm->type == OP_REG) {
+        emit_byte(ctx, 0xC0 | ((reg_opcode & 7) << 3) | (rm->reg & 7));
+    } else {
+        if (rm->reg == -1) {
+            emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | 5);
+            uint32_t val = rm->disp;
+            if (rm->has_label) { emit_reloc(ctx, R_386_32, rm->label, ctx->text.size); val = 0; }
+            emit_dword(ctx, val);
+        } else {
+            if (rm->disp == 0 && rm->reg != 5) {
+                emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | (rm->reg & 7));
+                if (rm->reg == 4) emit_byte(ctx, 0x24);
+            } else {
+                if (rm->disp >= -128 && rm->disp <= 127) {
+                    emit_byte(ctx, (1 << 6) | ((reg_opcode & 7) << 3) | (rm->reg & 7));
+                    if (rm->reg == 4) emit_byte(ctx, 0x24);
+                    emit_byte(ctx, (uint8_t)rm->disp);
+                } else {
+                    emit_byte(ctx, (2 << 6) | ((reg_opcode & 7) << 3) | (rm->reg & 7));
+                    if (rm->reg == 4) emit_byte(ctx, 0x24);
+                    emit_dword(ctx, rm->disp);
+                }
+            }
+        }
+    }
+}
+
+void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o1, Operand* o2) {
+    int size = explicit_size;
+    if (size == 0) {
+        if (o1->type == OP_REG) size = o1->size;
+        else if (o2->type == OP_REG) size = o2->size;
+    }
+    if (size == 0) size = 4;
+
+    for (int i = 0; isa[i].mnem; i++) {
+        InstrDef* d = &isa[i];
+        if (strcmp(d->mnem, name) != 0) continue;
+        
+        if (d->size != 0 && d->size != size) continue;
+
+        if (d->mode == ENC_NONE) {
+            if (o1->type != OP_NONE) continue;
+            emit_byte(ctx, d->op_base);
+            return;
+        }
+        if (d->mode == ENC_0F) {
+            if (o1->type != OP_NONE) continue;
+            emit_byte(ctx, 0x0F);
+            emit_byte(ctx, d->op_base);
+            return;
+        }
+        if (d->mode == ENC_R) {
+            if (o1->type != OP_REG) continue;
+            emit_byte(ctx, d->op_base + o1->reg);
+            return;
+        }
+        if (d->mode == ENC_I) {
+            if (o1->type != OP_IMM) continue;
+            if (d->op_base == 0xCD) { emit_byte(ctx, d->op_base); emit_byte(ctx, (uint8_t)o1->disp); }
+            else {
+                emit_byte(ctx, d->op_base);
+                uint32_t val = o1->disp;
+                if (o1->has_label) { emit_reloc(ctx, R_386_32, o1->label, ctx->text.size); val = 0; }
+                emit_dword(ctx, val);
+            }
+            return;
+        }
+        if (d->mode == ENC_J) {
+            if (o1->type != OP_IMM) continue;
+            if (d->op_base == 0xE2) { 
+                 emit_byte(ctx, d->op_base);
+                 int32_t delta = -2;
+                 if (ctx->pass == 2 && o1->has_label) {
+                     Symbol* s = sym_find(ctx, o1->label);
+                     if (s && s->section == ctx->cur_sec) delta = s->value - (ctx->text.size + 1);
+                 }
+                 emit_byte(ctx, (int8_t)delta);
+                 return;
+            }
+
+            if (d->op_base >= 0x80 && d->op_base <= 0x8F) emit_byte(ctx, 0x0F);
+            emit_byte(ctx, d->op_base);
+            
+            uint32_t val = 0;
+            if (ctx->pass == 2) {
+                if (o1->has_label) {
+                    emit_reloc(ctx, R_386_PC32, o1->label, ctx->text.size);
+                    val = -4; 
+                } else {
+                    val = o1->disp;
+                }
+            }
+            emit_dword(ctx, val);
+            return;
+        }
+        if (d->mode == ENC_OI) {
+            if (o1->type != OP_REG || o2->type != OP_IMM) continue;
+            emit_byte(ctx, d->op_base + o1->reg);
+            uint32_t val = o2->disp;
+            if (o2->has_label && ctx->pass == 2) { emit_reloc(ctx, R_386_32, o2->label, ctx->text.size); val = 0; }
+            if (size == 1) emit_byte(ctx, (uint8_t)val); else emit_dword(ctx, val);
+            return;
+        }
+        if (d->mode == ENC_MR) {
+            if (o2->type != OP_REG || o1->type == OP_IMM) continue;
+            emit_byte(ctx, d->op_base); emit_modrm(ctx, o2->reg, o1);
+            return;
+        }
+        if (d->mode == ENC_RM) {
+            if (o1->type != OP_REG || o2->type == OP_IMM) continue;
+            emit_byte(ctx, d->op_base); emit_modrm(ctx, o1->reg, o2);
+            return;
+        }
+        if (d->mode == ENC_MI) {
+            if (o2->type != OP_IMM || o1->type == OP_IMM) continue;
+            if (d->op_base == 0x83) {
+                if (o2->disp < -128 || o2->disp > 127) continue;
+            }
+            
+            emit_byte(ctx, d->op_base); emit_modrm(ctx, d->op_ext, o1);
+            
+            if (size == 1 || d->op_base == 0x83) {
+                emit_byte(ctx, (uint8_t)o2->disp);
+            } else {
+                emit_dword(ctx, o2->disp);
+            }
+            return;
+        }
+        if (d->mode == ENC_M) {
+            if (o1->type == OP_IMM || o2->type != OP_NONE) continue;
+            emit_byte(ctx, d->op_base); emit_modrm(ctx, d->op_ext, o1);
+            return;
+        }
+        if (d->mode == ENC_SHIFT) {
+            if (o1->type == OP_IMM || o2->type != OP_IMM) continue;
+            if (d->op_base == 0xD1 || d->op_base == 0xD0) {
+                if (o2->disp != 1) continue; 
+                emit_byte(ctx, d->op_base); emit_modrm(ctx, d->op_ext, o1);
+                return;
+            }
+            emit_byte(ctx, d->op_base); emit_modrm(ctx, d->op_ext, o1); emit_byte(ctx, (uint8_t)o2->disp);
             return;
         }
     }
-
-    int r = get_reg(txt);
-    if(r != -1) { op->type = OT_REG; op->reg = r; return; }
-
-    if((txt[0]>='0' && txt[0]<='9') || txt[0]=='-') {
-        op->type = OT_IMM; op->val = get_imm(txt);
-    } else {
-        op->type = OT_IMM; op->has_label = 1; strcpy(op->label, txt);
-    }
+    panic(ctx, "Unknown instruction");
 }
 
-void emit_relocation(Context* ctx, Elf32_Addr offset, uint32_t sym_idx, int type) {
-    Elf32_Rel rel;
-    rel.r_offset = offset;
-    rel.r_info = ELF32_R_INFO(sym_idx, type);
-    
-    if (ctx->cur_section == SEC_TEXT) buf_push_data(&ctx->rel_text, &rel, sizeof(rel));
-    else if (ctx->cur_section == SEC_DATA) buf_push_data(&ctx->rel_data, &rel, sizeof(rel));
-}
-
-void assemble_line(Context* ctx, char* line) {
-    char* tokens[4]; int tok_cnt = 0;
+void process_line(AssemblerCtx* ctx, char* line) {
+    char* tokens[16]; int count = 0;
     char* p = line;
-    
-    // Tokenizer
     while(*p) {
-        while(*p==' ' || *p=='\t' || *p==',') *p++=0;
-        if(*p==0 || *p==';') break;
+        while(*p == ' ' || *p == '\t' || *p == ',' || *p == '\r') *p++ = 0;
+        if(*p == 0 || *p == ';') break;
         char* start = p;
-        if(*p=='"') { p++; while(*p && *p!='"') p++; if(*p=='"') p++; } 
-        else { while(*p && *p!=' ' && *p!='\t' && *p!=',' && *p!=';') p++; }
-        tokens[tok_cnt++] = start;
-        if(tok_cnt>=4) break;
+        if (*p == '"') { p++; while(*p && *p != '"') p++; if(*p == '"') p++; }
+        else if (*p == '\'') { p++; while(*p && *p != '\'') p++; if(*p == '\'') p++; }
+        else if (*p == '[') { while(*p && *p != ']') p++; if(*p == ']') p++; }
+        else { while(*p && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && *p != '\r') p++; }
+        tokens[count++] = start;
+        if(count >= 16) break;
     }
-    if(tok_cnt==0) return;
+    if(count == 0) return;
 
-    // Labels
     int len = strlen(tokens[0]);
-    if(tokens[0][len-1]==':') {
+    if(tokens[0][len-1] == ':') {
         tokens[0][len-1] = 0;
-        if(ctx->pass == 1) {
-            uint32_t off = (ctx->cur_section==SEC_TEXT) ? ctx->text.size : ctx->data.size;
-            add_symbol(tokens[0], ctx->cur_section, off, SYM_LOCAL);
-        }
-        // Shift tokens
-        for(int i=0; i<tok_cnt-1; i++) tokens[i]=tokens[i+1];
-        tok_cnt--;
-        if(tok_cnt==0) return;
+        sym_define_label(ctx, tokens[0]);
+        for(int k=0; k<count-1; k++) tokens[k] = tokens[k+1];
+        count--;
+        if(count == 0) return;
     }
 
-    char* mnemonic = tokens[0];
-
-    // Directives
-    if(strcmp(mnemonic, "section")==0) {
-        if(tok_cnt<2) return;
-        if(strcmp(tokens[1], ".text")==0) ctx->cur_section = SEC_TEXT;
-        else if(strcmp(tokens[1], ".data")==0) ctx->cur_section = SEC_DATA;
-        else if(strcmp(tokens[1], ".bss")==0) ctx->cur_section = SEC_BSS;
-        return;
-    }
-    if(strcmp(mnemonic, "global")==0 || strcmp(mnemonic, "public")==0) {
-        if(ctx->pass==1 && tok_cnt>1) add_symbol(tokens[1], SEC_NULL, 0, SYM_GLOBAL);
-        return;
-    }
-    if(strcmp(mnemonic, "extern")==0 || strcmp(mnemonic, "extrn")==0) {
-        if(ctx->pass==1 && tok_cnt>1) add_symbol(tokens[1], SEC_NULL, 0, SYM_EXTERN);
-        return;
-    }
-    if(strcmp(mnemonic, "db")==0) {
-        Buffer* b = (ctx->cur_section==SEC_TEXT)?&ctx->text:&ctx->data;
-        for(int i=1; i<tok_cnt; i++) {
-            if(tokens[i][0]=='"') {
-                char* s = tokens[i]+1;
-                while(*s && *s!='"') { if(ctx->pass==2) buf_push_byte(b, *s); else b->size++; s++; }
-            } else {
-                if(ctx->pass==2) buf_push_byte(b, get_imm(tokens[i])); else b->size++;
-            }
-        }
-        return;
-    }
-    if(strcmp(mnemonic, "dd")==0) {
-        Buffer* b = (ctx->cur_section==SEC_TEXT)?&ctx->text:&ctx->data;
-        if(ctx->pass==2) buf_push_u32(b, get_imm(tokens[1])); else b->size+=4;
-        return;
+    char* cmd_name = tokens[0];
+    int force_size = 0;
+    char* clean_tokens[3];
+    int c_idx = 0;
+    
+    for (int i=1; i<count && c_idx < 2; i++) {
+        if (strcmp(tokens[i], "byte") == 0) { force_size = 1; continue; }
+        if (strcmp(tokens[i], "dword") == 0) { force_size = 4; continue; }
+        if (strcmp(tokens[i], "ptr") == 0) { continue; }
+        clean_tokens[c_idx++] = tokens[i];
     }
     
-    // Instructions
-    Operand op1={0}, op2={0};
-    if(tok_cnt>1) parse_operand(tokens[1], &op1);
-    if(tok_cnt>2) parse_operand(tokens[2], &op2);
+    if (strcmp(cmd_name, "movb") == 0) { cmd_name = "mov"; force_size = 1; }
 
-    for(int i=0; instructions[i].mnem; i++) {
-        InstrDef* def = &instructions[i];
-        if(strcmp(def->mnem, mnemonic)!=0) continue;
-        if(def->op1 != OT_NONE && def->op1 != op1.type) continue;
-        if(def->op2 != OT_NONE && def->op2 != op2.type) continue;
-
-        Buffer* b = &ctx->text;
-        
-        // Pass 1: Just calculate size
-        // Pass 2: Emit code & relocations
-        
-        if(ctx->pass == 2) {
-            uint32_t start_pc = b->size;
-            
-            // Jumps with 0x0F prefix
-            if(def->enc == ENC_M && (def->opcode == 0x84 || def->opcode == 0x85)) buf_push_byte(b, 0x0F);
-            
-            buf_push_byte(b, def->opcode + (def->enc==ENC_O ? op1.reg : 0) + (def->enc==ENC_OI ? op1.reg : 0));
-
-            // ModR/M handling
-            if(def->enc == ENC_MR || def->enc == ENC_RM || def->enc == ENC_M) {
-                uint8_t modrm = 0;
-                int reg_part = (def->enc == ENC_MR) ? op2.reg : (def->enc == ENC_RM ? op1.reg : 0); // Not fully correct for all cases but enough for test
-                int rm_part  = (def->enc == ENC_MR) ? op1.reg : (def->enc == ENC_RM ? op2.reg : 0);
-                
-                // For simplified "jmp/call label" logic (ENC_M treated as REL32) - no ModRM
-                if(def->enc == ENC_M && op1.type == OT_IMM) {
-                    // Logic handled in Immediate block
-                } else {
-                    modrm = 0xC0 | (reg_part << 3) | rm_part;
-                    buf_push_byte(b, modrm);
+    if(strcmp(cmd_name, "section") == 0) {
+        if(strcmp(tokens[1], ".text") == 0) ctx->cur_sec = SEC_TEXT;
+        else if(strcmp(tokens[1], ".data") == 0) ctx->cur_sec = SEC_DATA;
+        else if(strcmp(tokens[1], ".bss") == 0) ctx->cur_sec = SEC_BSS;
+        return;
+    }
+    if(strcmp(cmd_name, "global") == 0) {
+        if(ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_GLOBAL; }
+        return;
+    }
+    if(strcmp(cmd_name, "extern") == 0) {
+        if(ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_EXTERN; }
+        return;
+    }
+    if(strcmp(cmd_name, "db") == 0) {
+        Buffer* b = (ctx->cur_sec == SEC_TEXT) ? &ctx->text : &ctx->data;
+        for(int k=1; k<count; k++) {
+            if(tokens[k][0] == '"') {
+                char* s = tokens[k]+1;
+                while(*s && *s != '"') {
+                    if(ctx->pass == 2) buf_push(b, *s); else b->size++;
+                    s++;
                 }
+            } else {
+                if(ctx->pass == 2) buf_push(b, parse_number(tokens[k])); else b->size++;
             }
-
-            // Immediate / Displacement handling
-            if(op1.type == OT_IMM || op2.type == OT_IMM) {
-                Operand* imm_op = (op1.type == OT_IMM) ? &op1 : &op2;
-                uint32_t val = imm_op->val;
-                
-                if(imm_op->has_label) {
-                    Symbol* sym = find_symbol(imm_op->label);
-                    // Relocation Logic
-                    int rel_type = R_386_32; // Default absolute
-                    if(def->opcode == 0xE8 || def->opcode == 0xE9 || (def->opcode==0x84 && def->enc==ENC_M)) {
-                        rel_type = R_386_PC32; // Relative for calls/jumps
-                    }
-
-                    if(sym) {
-                        if(sym->binding == SYM_EXTERN || sym->section != ctx->cur_section) {
-                            emit_relocation(ctx, b->size, sym->elf_index, rel_type);
-                            val = (rel_type == R_386_PC32) ? -4 : 0; // Addend
-                        } else {
-                            // Local symbol in same section
-                            if(rel_type == R_386_PC32) {
-                                val = sym->offset - (b->size + 4); 
-                            } else {
-                                // Absolute reference to local symbol -> still needs relocation in .o
-                                emit_relocation(ctx, b->size, sym->elf_index, R_386_32);
-                                val = sym->offset; 
-                            }
-                        }
-                    } else {
-                        printf("Error: Undefined symbol '%s'\n", imm_op->label);
-                    }
-                }
-                
-                if (def->enc == ENC_M_I8) buf_push_byte(b, val);
-                else buf_push_u32(b, val);
-            }
-        } else {
-            // Pass 1 Size calc (Approximation for simplicity)
-            int sz = 1;
-            if(def->enc == ENC_M && (def->opcode == 0x84 || def->opcode == 0x85)) sz++;
-            if(def->enc == ENC_MR || def->enc == ENC_RM) sz++;
-            if(def->enc == ENC_I || def->enc == ENC_M || def->enc == ENC_OI) sz+=4;
-            if(def->enc == ENC_M_I8) sz+=1;
-            b->size += sz;
         }
         return;
     }
-    printf("Line %d: Unknown instruction '%s'\n", ctx->line_num, mnemonic);
+    if(strcmp(cmd_name, "dd") == 0) {
+        Buffer* b = (ctx->cur_sec == SEC_TEXT) ? &ctx->text : &ctx->data;
+        if(ctx->pass == 2) {
+            if ((tokens[1][0] >= '0' && tokens[1][0] <= '9') || tokens[1][0] == '-') 
+                buf_push_u32(b, parse_number(tokens[1]));
+            else {
+                Symbol* s = sym_find(ctx, tokens[1]);
+                if (s) { emit_reloc(ctx, R_386_32, tokens[1], b->size); buf_push_u32(b, 0); }
+                else buf_push_u32(b, 0);
+            }
+        } else b->size += 4;
+        return;
+    }
+    if(strcmp(cmd_name, "resb") == 0 || strcmp(cmd_name, "rb") == 0) {
+        if(ctx->cur_sec != SEC_BSS) panic(ctx, "resb only in .bss");
+        ctx->bss.size += parse_number(tokens[1]);
+        return;
+    }
+
+    Operand o1 = {0}, o2 = {0};
+    if(c_idx > 0) parse_operand(ctx, clean_tokens[0], &o1);
+    if(c_idx > 1) parse_operand(ctx, clean_tokens[1], &o2);
+    assemble_instr(ctx, cmd_name, force_size, &o1, &o2);
 }
 
-/* --- 6. ELF Output Generation --- */
-
-void write_object_file(Context* ctx, const char* filename) {
-    // 1. Prepare String Table (.strtab) and assign ELF indices
-    Buffer strtab; buf_init(&strtab, 1024);
-    buf_push_byte(&strtab, 0); // Null entry
-
-    // System symbols (sections)
-    // Indices: 0=NULL, 1=.text, 2=.data, 3=.bss
-    
-    int global_start = -1;
-    int current_idx = 4; // Start user symbols after section symbols if we were strictly following standard, but here we simplify.
-                         // Actually, in .o, STT_SECTION symbols are usually local.
-    
-    // Assign indices to symbols
-    for(int i=0; i<sym_count; i++) {
-        symbols[i].elf_index = current_idx++; // Simple sequential indexing
-    }
-
-    // 2. Prepare Symbol Table (.symtab)
+void write_elf(AssemblerCtx* ctx, const char* filename) {
+    Buffer strtab; buf_init(&strtab, 512); buf_push(&strtab, 0);
     Buffer symtab; buf_init(&symtab, 1024);
-    
-    // Entry 0: NULL
-    Elf32_Sym null_sym = {0};
-    buf_push_data(&symtab, &null_sym, sizeof(null_sym)); // 0
+    Elf32_Sym null_sym = {0}; buf_write(&symtab, &null_sym, sizeof(null_sym));
 
-    // Dummy Section Symbols (1=.text, 2=.data, 3=.bss) 
-    // Usually assemblers emit these. We will skip complex logic and just emit user symbols for now.
-    // If we skip section symbols in symtab, relocations must point to user symbols.
-    // But relocations to "section + offset" are common. 
-    // Let's create proper entries for sections.
-    
-    const char* sec_names[] = { "", "", "", "" }; // Logic handled in user symbols loop for simplicity
-    
-    // Emit user symbols
-    // ELF requires LOCALS first, then GLOBALS.
-    // We didn't sort, so this might be non-compliant if we mix them.
-    // Ideally we should sort symbols or write in two passes.
-    // For this educational OS, we will write as is, but standard linkers might complain.
-    
-    for(int i=0; i<sym_count; i++) {
-        Symbol* s = &symbols[i];
+    for(int i=0; i<ctx->sym_count; i++) {
+        Symbol* s = &ctx->symbols[i];
         Elf32_Sym es;
         es.st_name = buf_add_string(&strtab, s->name);
-        es.st_value = s->offset;
+        es.st_value = s->value;
         es.st_size = 0;
         es.st_other = 0;
-        
-        int type = STT_NOTYPE;
-        if(s->section == SEC_TEXT) type = STT_FUNC;
-        if(s->section == SEC_DATA || s->section == SEC_BSS) type = STT_OBJECT;
-        
-        int bind = (s->binding == SYM_GLOBAL) ? STB_GLOBAL : STB_LOCAL;
-        if (s->binding == SYM_EXTERN) { bind = STB_GLOBAL; s->section = SEC_NULL; }
-        
+        int bind = (s->bind == SYM_GLOBAL || s->bind == SYM_EXTERN) ? STB_GLOBAL : STB_LOCAL;
+        int type = (s->section == SEC_TEXT) ? STT_FUNC : (s->section != SEC_NULL ? STT_OBJECT : STT_NOTYPE);
         es.st_info = ELF32_ST_INFO(bind, type);
-        
-        // Map internal SectionID to ELF Section Index
-        if(s->section == SEC_TEXT) es.st_shndx = 1;
-        else if(s->section == SEC_DATA) es.st_shndx = 2;
-        else if(s->section == SEC_BSS) es.st_shndx = 3;
+        if (s->bind == SYM_EXTERN) es.st_shndx = SHN_UNDEF;
+        else if (s->section == SEC_TEXT) es.st_shndx = 1;
+        else if (s->section == SEC_DATA) es.st_shndx = 2;
+        else if (s->section == SEC_BSS) es.st_shndx = 3;
         else es.st_shndx = SHN_UNDEF;
-        
-        buf_push_data(&symtab, &es, sizeof(es));
-        // Update index to match table position
-        s->elf_index = i + 1; 
+        buf_write(&symtab, &es, sizeof(es));
+        s->elf_idx = i + 1;
     }
 
-    // 3. Prepare Section Header String Table (.shstrtab)
-    Buffer shstr; buf_init(&shstr, 256);
-    buf_push_byte(&shstr, 0);
-    uint32_t n_text = buf_add_string(&shstr, ".text");
-    uint32_t n_data = buf_add_string(&shstr, ".data");
-    uint32_t n_bss  = buf_add_string(&shstr, ".bss");
-    uint32_t n_shstr= buf_add_string(&shstr, ".shstrtab");
-    uint32_t n_sym  = buf_add_string(&shstr, ".symtab");
-    uint32_t n_str  = buf_add_string(&shstr, ".strtab");
-    uint32_t n_rel  = buf_add_string(&shstr, ".rel.text");
-    uint32_t n_reld = buf_add_string(&shstr, ".rel.data");
+    Buffer shstr; buf_init(&shstr, 256); buf_push(&shstr, 0);
+    int n_txt = buf_add_string(&shstr, ".text");
+    int n_dat = buf_add_string(&shstr, ".data");
+    int n_bss = buf_add_string(&shstr, ".bss");
+    int n_sym = buf_add_string(&shstr, ".symtab");
+    int n_str = buf_add_string(&shstr, ".strtab");
+    int n_shs = buf_add_string(&shstr, ".shstrtab");
+    int n_rt  = buf_add_string(&shstr, ".rel.text");
+    int n_rd  = buf_add_string(&shstr, ".rel.data");
 
-    // 4. Calculate Offsets
-    uint32_t off = sizeof(Elf32_Ehdr);
-    // Section Headers will be at the end, but data is contiguous
-    uint32_t off_text = off; off += ctx->text.size;
-    uint32_t off_data = off; off += ctx->data.size;
-    uint32_t off_bss  = off; // NOBITS
-    uint32_t off_shstr= off; off += shstr.size;
-    uint32_t off_sym  = off; off += symtab.size;
-    uint32_t off_str  = off; off += strtab.size;
-    uint32_t off_rel  = off; off += ctx->rel_text.size;
-    uint32_t off_reld = off; off += ctx->rel_data.size;
-    uint32_t off_shdr = off;
+    uint32_t offset = sizeof(Elf32_Ehdr);
+    uint32_t off_txt = offset; offset += ctx->text.size;
+    uint32_t off_dat = offset; offset += ctx->data.size;
+    uint32_t off_bss = offset;
+    uint32_t off_sym = offset; offset += symtab.size;
+    uint32_t off_str = offset; offset += strtab.size;
+    uint32_t off_shs = offset; offset += shstr.size;
+    uint32_t off_rt  = offset; offset += ctx->rel_text.size;
+    uint32_t off_rd  = offset; offset += ctx->rel_data.size;
+    uint32_t off_shdr = offset;
 
-    // 5. Write File
-    int fd = open(filename, 1); // Write mode
-    if(fd < 0) { printf("Cannot open output file\n"); return; }
-
-    // Header
     Elf32_Ehdr eh = {0};
     eh.e_ident[0]=0x7F; eh.e_ident[1]='E'; eh.e_ident[2]='L'; eh.e_ident[3]='F';
-    eh.e_ident[4]=1; // 32-bit
-    eh.e_ident[5]=1; // Little Endian
-    eh.e_ident[6]=1; // Version
-    eh.e_type = ET_REL;
-    eh.e_machine = EM_386;
-    eh.e_version = 1;
-    eh.e_shoff = off_shdr;
-    eh.e_ehsize = sizeof(Elf32_Ehdr);
-    eh.e_shentsize = sizeof(Elf32_Shdr);
-    eh.e_shnum = 9; // NULL, text, data, bss, shstr, sym, str, rel.text, rel.data
-    eh.e_shstrndx = 4;
-    write(fd, &eh, sizeof(eh));
+    eh.e_ident[4]=1; eh.e_ident[5]=1; eh.e_ident[6]=1;
+    eh.e_type = ET_REL; eh.e_machine = EM_386; eh.e_version = 1;
+    eh.e_shoff = off_shdr; eh.e_ehsize = sizeof(eh);
+    eh.e_shentsize = sizeof(Elf32_Shdr); eh.e_shnum = 9; eh.e_shstrndx = 6;
 
-    // Sections Data
+    int fd = open(filename, 1);
+    if(fd < 0) { printf("Error creating file\n"); return; }
+
+    write(fd, &eh, sizeof(eh));
     if(ctx->text.size) write(fd, ctx->text.data, ctx->text.size);
     if(ctx->data.size) write(fd, ctx->data.data, ctx->data.size);
-    // BSS is empty
-    write(fd, shstr.data, shstr.size);
     write(fd, symtab.data, symtab.size);
     write(fd, strtab.data, strtab.size);
+    write(fd, shstr.data, shstr.size);
     if(ctx->rel_text.size) write(fd, ctx->rel_text.data, ctx->rel_text.size);
     if(ctx->rel_data.size) write(fd, ctx->rel_data.data, ctx->rel_data.size);
 
-    // Section Headers
     Elf32_Shdr sh[9] = {0};
-    
-    // 0: NULL
-    
-    // 1: .text
-    sh[1].sh_name = n_text; sh[1].sh_type = SHT_PROGBITS; sh[1].sh_flags = SHF_ALLOC|SHF_EXECINSTR;
-    sh[1].sh_offset = off_text; sh[1].sh_size = ctx->text.size; sh[1].sh_addralign = 4;
-
-    // 2: .data
-    sh[2].sh_name = n_data; sh[2].sh_type = SHT_PROGBITS; sh[2].sh_flags = SHF_ALLOC|SHF_WRITE;
-    sh[2].sh_offset = off_data; sh[2].sh_size = ctx->data.size; sh[2].sh_addralign = 4;
-
-    // 3: .bss
-    sh[3].sh_name = n_bss; sh[3].sh_type = SHT_NOBITS; sh[3].sh_flags = SHF_ALLOC|SHF_WRITE;
-    sh[3].sh_offset = off_bss; sh[3].sh_size = ctx->bss.size; sh[3].sh_addralign = 4;
-
-    // 4: .shstrtab
-    sh[4].sh_name = n_shstr; sh[4].sh_type = SHT_STRTAB; 
-    sh[4].sh_offset = off_shstr; sh[4].sh_size = shstr.size; sh[4].sh_addralign = 1;
-
-    // 5: .symtab
-    sh[5].sh_name = n_sym; sh[5].sh_type = SHT_SYMTAB; 
-    sh[5].sh_offset = off_sym; sh[5].sh_size = symtab.size; 
-    sh[5].sh_link = 6; // Link to .strtab
-    sh[5].sh_entsize = sizeof(Elf32_Sym); sh[5].sh_addralign = 4;
-    // sh_info should be index of first global symbol (we skipped sorting, leaving 0 or 1)
-    sh[5].sh_info = 1; 
-
-    // 6: .strtab
-    sh[6].sh_name = n_str; sh[6].sh_type = SHT_STRTAB; 
-    sh[6].sh_offset = off_str; sh[6].sh_size = strtab.size; sh[6].sh_addralign = 1;
-
-    // 7: .rel.text
-    sh[7].sh_name = n_rel; sh[7].sh_type = SHT_REL; 
-    sh[7].sh_offset = off_rel; sh[7].sh_size = ctx->rel_text.size; 
-    sh[7].sh_link = 5; // Link to .symtab
-    sh[7].sh_info = 1; // Target section (.text)
-    sh[7].sh_entsize = sizeof(Elf32_Rel); sh[7].sh_addralign = 4;
-
-    // 8: .rel.data
-    sh[8].sh_name = n_reld; sh[8].sh_type = SHT_REL; 
-    sh[8].sh_offset = off_reld; sh[8].sh_size = ctx->rel_data.size; 
-    sh[8].sh_link = 5; 
-    sh[8].sh_info = 2; // Target section (.data)
-    sh[8].sh_entsize = sizeof(Elf32_Rel); sh[8].sh_addralign = 4;
+    sh[1].sh_name=n_txt; sh[1].sh_type=SHT_PROGBITS; sh[1].sh_flags=SHF_ALLOC|SHF_EXECINSTR; sh[1].sh_offset=off_txt; sh[1].sh_size=ctx->text.size; sh[1].sh_addralign=4;
+    sh[2].sh_name=n_dat; sh[2].sh_type=SHT_PROGBITS; sh[2].sh_flags=SHF_ALLOC|SHF_WRITE; sh[2].sh_offset=off_dat; sh[2].sh_size=ctx->data.size; sh[2].sh_addralign=4;
+    sh[3].sh_name=n_bss; sh[3].sh_type=SHT_NOBITS; sh[3].sh_flags=SHF_ALLOC|SHF_WRITE; sh[3].sh_offset=off_bss; sh[3].sh_size=ctx->bss.size; sh[3].sh_addralign=4;
+    sh[4].sh_name=n_sym; sh[4].sh_type=SHT_SYMTAB; sh[4].sh_offset=off_sym; sh[4].sh_size=symtab.size; sh[4].sh_link=5; sh[4].sh_entsize=sizeof(Elf32_Sym); sh[4].sh_addralign=4; sh[4].sh_info=ctx->sym_count;
+    sh[5].sh_name=n_str; sh[5].sh_type=SHT_STRTAB; sh[5].sh_offset=off_str; sh[5].sh_size=strtab.size; sh[5].sh_addralign=1;
+    sh[6].sh_name=n_shs; sh[6].sh_type=SHT_STRTAB; sh[6].sh_offset=off_shs; sh[6].sh_size=shstr.size; sh[6].sh_addralign=1;
+    sh[7].sh_name=n_rt; sh[7].sh_type=SHT_REL; sh[7].sh_offset=off_rt; sh[7].sh_size=ctx->rel_text.size; sh[7].sh_link=4; sh[7].sh_info=1; sh[7].sh_entsize=sizeof(Elf32_Rel); sh[7].sh_addralign=4;
+    sh[8].sh_name=n_rd; sh[8].sh_type=SHT_REL; sh[8].sh_offset=off_rd; sh[8].sh_size=ctx->rel_data.size; sh[8].sh_link=4; sh[8].sh_info=2; sh[8].sh_entsize=sizeof(Elf32_Rel); sh[8].sh_addralign=4;
 
     write(fd, sh, sizeof(sh));
     close(fd);
@@ -653,70 +766,60 @@ void write_object_file(Context* ctx, const char* filename) {
     buf_free(&strtab); buf_free(&symtab); buf_free(&shstr);
 }
 
-/* --- 7. Main Entry Point --- */
-
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        printf("YulaOS Assembler (ELF Relocatable)\n");
-        printf("Usage: asmc <input.asm> <output.o>\n");
-        return 1;
-    }
+    if(argc < 3) { printf("ASMC v5.1\nUsage: asmc in.asm out.o\n"); return 1; }
 
     int fd = open(argv[1], 0);
-    if (fd < 0) { printf("Error opening source file\n"); return 1; }
+    if(fd < 0) { printf("Cannot open input file\n"); return 1; }
     
-    // Read source fully (simple)
-    char* src = malloc(65536); // 64KB limit for now
+    char* src = malloc(65536);
+    if (!src) { printf("Memory error\n"); return 1; }
     int len = read(fd, src, 65535);
-    src[len] = 0;
-    close(fd);
+    src[len] = 0; close(fd);
 
-    Context ctx = {0};
-    buf_init(&ctx.text, 4096);
-    buf_init(&ctx.data, 4096);
-    buf_init(&ctx.bss, 0); // No data, just size
-    buf_init(&ctx.rel_text, 1024);
-    buf_init(&ctx.rel_data, 1024);
+    AssemblerCtx* ctx = malloc(sizeof(AssemblerCtx));
+    if (!ctx) { printf("Out of memory for context\n"); free(src); return 1; }
+    memset(ctx, 0, sizeof(AssemblerCtx));
 
-    // PASS 1
-    ctx.pass = 1;
-    ctx.cur_section = SEC_TEXT;
-    int i = 0; ctx.line_num = 0;
-    char line[MAX_LINE_LEN];
-    
+    buf_init(&ctx->text, 4096); buf_init(&ctx->data, 4096);
+    buf_init(&ctx->bss, 0);     buf_init(&ctx->rel_text, 1024);
+    buf_init(&ctx->rel_data, 1024);
+
+    ctx->pass = 1; ctx->line_num = 0;
+    char line[256]; int i=0;
     while(src[i]) {
-        int j=0;
-        while(src[i] && src[i]!='\n' && j<MAX_LINE_LEN-1) line[j++] = src[i++];
-        line[j]=0; if(src[i]=='\n') i++;
-        ctx.line_num++;
-        assemble_line(&ctx, line);
+        int j=0; 
+        while(src[i] && src[i]!='\n') {
+            if (src[i] != '\r') line[j++] = src[i];
+            i++;
+        }
+        line[j]=0; 
+        if(src[i]=='\n') i++;
+        ctx->line_num++;
+        process_line(ctx, line);
     }
 
-    printf("Pass 1 complete. Predicted size: %d bytes code, %d bytes data.\n", ctx.text.size, ctx.data.size);
+    for(int k=0; k<ctx->sym_count; k++) ctx->symbols[k].elf_idx = k+1;
 
-    // Reset Buffers for Pass 2 (Only size was needed, but we used same buffers)
-    ctx.text.size = 0;
-    ctx.data.size = 0;
-    ctx.bss.size = 0;
-
-    // PASS 2
-    ctx.pass = 2;
-    ctx.cur_section = SEC_TEXT;
-    i = 0; ctx.line_num = 0;
+    ctx->pass = 2; ctx->line_num = 0; i=0;
+    ctx->text.size = 0; ctx->data.size = 0; ctx->bss.size = 0;
     
     while(src[i]) {
-        int j=0;
-        while(src[i] && src[i]!='\n' && j<MAX_LINE_LEN-1) line[j++] = src[i++];
-        line[j]=0; if(src[i]=='\n') i++;
-        ctx.line_num++;
-        assemble_line(&ctx, line);
+        int j=0; 
+        while(src[i] && src[i]!='\n') {
+            if (src[i] != '\r') line[j++] = src[i];
+            i++;
+        }
+        line[j]=0; 
+        if(src[i]=='\n') i++;
+        ctx->line_num++;
+        process_line(ctx, line);
     }
 
-    write_object_file(&ctx, argv[2]);
-    printf("Success, output: %s (%d bytes code, data)\n", argv[2], ctx.text.size + ctx.data.size);
-
+    write_elf(ctx, argv[2]);
+    printf("Success: %s (%d bytes code, %d bytes data)\n", argv[2], ctx->text.size, ctx->data.size);
+    
+    free(ctx);
     free(src);
-    buf_free(&ctx.text); buf_free(&ctx.data);
-    buf_free(&ctx.rel_text); buf_free(&ctx.rel_data);
     return 0;
 }
