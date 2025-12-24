@@ -52,3 +52,28 @@ uint32_t pci_find_ide_bar4() {
     }
     return 0;
 }
+
+uint32_t pci_get_bar5(uint8_t bus, uint8_t slot, uint8_t func) {
+    uint32_t bar5 = pci_read(bus, slot, func, 0x24);
+    return bar5 & 0xFFFFFFF0;
+}
+
+uint32_t pci_find_ahci_device(uint8_t* out_bus, uint8_t* out_slot, uint8_t* out_func) {
+    for (uint16_t bus = 0; bus < 256; bus++) {
+        for (uint8_t slot = 0; slot < 32; slot++) {
+            for (uint8_t func = 0; func < 8; func++) {
+                uint16_t vendor = pci_get_vendor(bus, slot, func);
+                if (vendor == 0xFFFF) continue;
+
+                uint16_t class_sub = pci_get_class_sub(bus, slot, func);
+                if (class_sub == 0x0106) {
+                    *out_bus = (uint8_t)bus;
+                    *out_slot = (uint8_t)slot;
+                    *out_func = (uint8_t)func;
+                    return 1; // Found
+                }
+            }
+        }
+    }
+    return 0;
+}

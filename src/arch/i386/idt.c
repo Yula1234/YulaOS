@@ -27,6 +27,8 @@ volatile uint32_t system_uptime_seconds = 0;
 extern uint32_t isr_stub_table[];
 extern void isr_stub_0x80(void);
 
+extern void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
+
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_low = base & 0xFFFF;
     idt[num].base_high = (base >> 16) & 0xFFFF;
@@ -137,19 +139,14 @@ void isr_handler(registers_t* regs) {
             if (regs->int_no == 14) {
                 curr->pending_signals |= (1 << 11);
             } else {
-                vga_set_color(COLOR_WHITE, COLOR_RED);
-                vga_print("\n[PROCESS CRASH] PID: "); vga_print_u32(curr->pid);
-                vga_print(" Exception: "); vga_print_u32(regs->int_no);
-                vga_print("\n");
                 proc_kill(curr);
                 lapic_eoi();
                 sched_yield();
             }
         } else {
-            vga_clear(0x770000);
-            vga_print("\nKERNEL PANIC! Exception: "); vga_print_u32(regs->int_no);
-            vga_print(" EIP: "); vga_print_u32(regs->eip);
-            __asm__ volatile("cli; hlt");
+            const char* msg = "Unknown Exception";
+            if (regs->int_no < 32) msg = exception_messages[regs->int_no];
+            kernel_panic(msg, "idt.c", regs->int_no, regs);
         }
     }
 

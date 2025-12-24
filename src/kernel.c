@@ -4,7 +4,7 @@
 #include <drivers/keyboard.h>
 #include <drivers/console.h>
 #include <drivers/mouse.h>
-#include <drivers/ata.h>
+#include <drivers/ahci.h>
 #include <drivers/vga.h>
 
 #include <kernel/clipboard.h>
@@ -136,7 +136,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     kbd_init();
     mouse_init();
     
-    ata_init();
+    ahci_init();
     yulafs_init();
     kbd_vfs_init();
     console_init();

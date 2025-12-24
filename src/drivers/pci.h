@@ -4,5 +4,9 @@
 #include <stdint.h>
 
 uint32_t pci_find_ide_bar4();
+uint32_t pci_get_bar5(uint8_t bus, uint8_t slot, uint8_t func);
+uint32_t pci_find_ahci_device(uint8_t* bus, uint8_t* slot, uint8_t* func);
+uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
+void pci_write(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value);
 
 #endif

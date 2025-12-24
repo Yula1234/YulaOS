@@ -100,4 +100,13 @@ EOF
 grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
 
 echo "[run] qemu..."
-qemu-system-i386 -cdrom bin/yulaos.iso -drive file=$DISK_IMG,format=raw,index=0,media=disk -enable-kvm -vga std -m 512 -cpu host
+#qemu-system-i386 -cdrom bin/yulaos.iso -drive file=$DISK_IMG,format=raw,index=0,media=disk -enable-kvm -vga std -m 512 -cpu host
+
+QEMU_DISK_SETUP="-device ahci,id=ahci
+-device ide-hd,drive=disk,bus=ahci.0
+-drive id=disk,file=${DISK_IMG},if=none,format=raw"
+
+qemu-system-i386 \
+    -cdrom bin/yulaos.iso \
+    $QEMU_DISK_SETUP \
+    -enable-kvm -vga std -m 512

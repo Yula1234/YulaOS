@@ -2,7 +2,7 @@
 #include <mm/heap.h>
 #include <kernel/proc.h>
 
-#include <drivers/ata.h>
+#include <drivers/ahci.h>
 #include <drivers/vga.h>
 
 #include "yulafs.h"
@@ -13,7 +13,7 @@ static uint8_t block_map[BLOCK_SIZE];
 static int bitmap_get(uint8_t* map, int bit) { return (map[bit / 8] & (1 << (bit % 8))) != 0; }
 static void bitmap_set(uint8_t* map, int bit) { map[bit / 8] |= (1 << (bit % 8)); }
 static void bitmap_clear(uint8_t* map, int bit) { map[bit / 8] &= ~(1 << (bit % 8)); }
-static void sync_metadata() { ata_write_sector(INODE_MAP_LBA, inode_map); ata_write_sector(BLOCK_MAP_LBA, block_map); }
+static void sync_metadata() { ahci_write_sector(INODE_MAP_LBA, inode_map); ahci_write_sector(BLOCK_MAP_LBA, block_map); }
 
 static int bitmap_alloc(uint8_t* map) {
     for (int i = 0; i < BLOCK_SIZE * 8; i++) {
@@ -26,7 +26,7 @@ static void read_inode(uint32_t idx, yfs_inode_t* inode) {
     uint8_t buf[BLOCK_SIZE];
     uint32_t lba = INODE_TABLE_LBA + (idx * 256) / BLOCK_SIZE;
     uint32_t off = (idx * 256) % BLOCK_SIZE;
-    ata_read_sector(lba, buf);
+    ahci_read_sector(lba, buf);
     memcpy(inode, buf + off, sizeof(yfs_inode_t));
 }
 
@@ -34,9 +34,9 @@ static void write_inode(uint32_t idx, yfs_inode_t* inode) {
     uint8_t buf[BLOCK_SIZE];
     uint32_t lba = INODE_TABLE_LBA + (idx * 256) / BLOCK_SIZE;
     uint32_t off = (idx * 256) % BLOCK_SIZE;
-    ata_read_sector(lba, buf);
+    ahci_read_sector(lba, buf);
     memcpy(buf + off, inode, sizeof(yfs_inode_t));
-    ata_write_sector(lba, buf);
+    ahci_write_sector(lba, buf);
 }
 
 static uint32_t get_real_block(yfs_inode_t* inode, uint32_t logical_blk, int allocate) {
@@ -60,17 +60,17 @@ static uint32_t get_real_block(yfs_inode_t* inode, uint32_t logical_blk, int all
         inode->blocks[INDIRECT_BLOCK_IDX] = DATA_START_LBA + b;
         
         uint8_t zeros[512]; memset(zeros, 0, 512);
-        ata_write_sector(inode->blocks[INDIRECT_BLOCK_IDX], zeros);
+        ahci_write_sector(inode->blocks[INDIRECT_BLOCK_IDX], zeros);
     }
 
     uint32_t indices[128];
-    ata_read_sector(inode->blocks[INDIRECT_BLOCK_IDX], (uint8_t*)indices);
+    ahci_read_sector(inode->blocks[INDIRECT_BLOCK_IDX], (uint8_t*)indices);
 
     if (indices[indirect_idx] == 0 && allocate) {
         int b = bitmap_alloc(block_map);
         if (b == -1) return 0;
         indices[indirect_idx] = DATA_START_LBA + b;
-        ata_write_sector(inode->blocks[INDIRECT_BLOCK_IDX], (uint8_t*)indices);
+        ahci_write_sector(inode->blocks[INDIRECT_BLOCK_IDX], (uint8_t*)indices);
     }
 
     return indices[indirect_idx];
@@ -90,21 +90,21 @@ void yulafs_format() {
     yfs_dir_entry_t* ent = (yfs_dir_entry_t*)buffer;
     ent[0].inode_idx = 1; strlcpy(ent[0].name, ".", 28);
     ent[1].inode_idx = 1; strlcpy(ent[1].name, "..", 28);
-    ata_write_sector(root.blocks[0], buffer);
+    ahci_write_sector(root.blocks[0], buffer);
 
     yfs_superblock_t sb = { YFS_MAGIC, MAX_INODES, 4096 };
-    ata_write_sector(SB_LBA, (uint8_t*)&sb);
+    ahci_write_sector(SB_LBA, (uint8_t*)&sb);
     sync_metadata();
 }
 
 void yulafs_init() {
     uint8_t buf[BLOCK_SIZE];
-    ata_read_sector(SB_LBA, buf);
+    ahci_read_sector(SB_LBA, buf);
     yfs_superblock_t* sb = (yfs_superblock_t*)buf;
     if (sb->magic != YFS_MAGIC) yulafs_format();
     else {
-        ata_read_sector(INODE_MAP_LBA, inode_map);
-        ata_read_sector(BLOCK_MAP_LBA, block_map);
+        ahci_read_sector(INODE_MAP_LBA, inode_map);
+        ahci_read_sector(BLOCK_MAP_LBA, block_map);
     }
 }
 
@@ -112,7 +112,7 @@ static int find_in_dir(uint32_t dir_idx, const char* name) {
     yfs_inode_t dir; read_inode(dir_idx, &dir);
     if (dir.type != YFS_TYPE_DIR) return -1;
     yfs_dir_entry_t entries[16]; 
-    ata_read_sector(dir.blocks[0], (uint8_t*)entries);
+    ahci_read_sector(dir.blocks[0], (uint8_t*)entries);
     for (int i = 0; i < 16; i++) {
         if (entries[i].inode_idx > 0 && strcmp(entries[i].name, name) == 0) return (int)entries[i].inode_idx;
     }
@@ -140,13 +140,13 @@ int yulafs_lookup(const char* path) {
 static int add_entry_to_dir(uint32_t dir_idx, const char* name, uint32_t inode_idx) {
     yfs_inode_t dir; read_inode(dir_idx, &dir);
     yfs_dir_entry_t entries[16];
-    ata_read_sector(dir.blocks[0], (uint8_t*)entries);
+    ahci_read_sector(dir.blocks[0], (uint8_t*)entries);
     for (int i = 0; i < 16; i++) {
         if (entries[i].inode_idx == 0) {
             memset(&entries[i], 0, sizeof(yfs_dir_entry_t));
             entries[i].inode_idx = inode_idx;
             strlcpy(entries[i].name, name, 28);
-            ata_write_sector(dir.blocks[0], (uint8_t*)entries);
+            ahci_write_sector(dir.blocks[0], (uint8_t*)entries);
             return 0;
         }
     }
@@ -181,7 +181,7 @@ static int yfs_create_internal(const char* path, yfs_type_t type) {
         yfs_dir_entry_t* de = (yfs_dir_entry_t*)buf;
         de[0].inode_idx = new_idx; strlcpy(de[0].name, ".", 28);
         de[1].inode_idx = parent_idx; strlcpy(de[1].name, "..", 28);
-        ata_write_sector(ni.blocks[0], buf);
+        ahci_write_sector(ni.blocks[0], buf);
     }
     write_inode(new_idx, &ni);
     if (add_entry_to_dir(parent_idx, name, new_idx) == -1) return -1;
@@ -196,13 +196,13 @@ void yulafs_update_size(uint32_t inode_idx, uint32_t new_size) {
     uint8_t buf[BLOCK_SIZE];
     uint32_t lba = INODE_TABLE_LBA + (inode_idx * 256) / BLOCK_SIZE;
     uint32_t off = (inode_idx * 256) % BLOCK_SIZE;
-    ata_read_sector(lba, buf);
+    ahci_read_sector(lba, buf);
     
     yfs_inode_t* pinode = (yfs_inode_t*)(buf + off);
     
     pinode->size = new_size;
     
-    ata_write_sector(lba, buf);
+    ahci_write_sector(lba, buf);
 }
 
 int yulafs_read(uint32_t inode_idx, void* buf, uint32_t offset, uint32_t size) {
@@ -224,7 +224,7 @@ int yulafs_read(uint32_t inode_idx, void* buf, uint32_t offset, uint32_t size) {
         if (phys_lba == 0) {
             memset(block_buf, 0, BLOCK_SIZE);
         } else {
-            ata_read_sector(phys_lba, block_buf);
+            ahci_read_sector(phys_lba, block_buf);
         }
         
         uint32_t chunk = BLOCK_SIZE - block_off;
@@ -256,11 +256,11 @@ int yulafs_write(uint32_t inode_idx, const void* buf, uint32_t offset, uint32_t 
         if (chunk > (size - written)) chunk = size - written;
         
         if (chunk < BLOCK_SIZE) {
-            ata_read_sector(phys_lba, block_buf);
+            ahci_read_sector(phys_lba, block_buf);
         }
         
         memcpy(block_buf + block_off, (uint8_t*)buf + written, chunk);
-        ata_write_sector(phys_lba, block_buf);
+        ahci_write_sector(phys_lba, block_buf);
         
         written += chunk;
     }
@@ -309,7 +309,7 @@ int yulafs_unlink(const char* path) {
     if (parent.blocks[0] == 0) return -1;
 
     yfs_dir_entry_t entries[16];
-    ata_read_sector(parent.blocks[0], (uint8_t*)entries);
+    ahci_read_sector(parent.blocks[0], (uint8_t*)entries);
 
     int entry_idx = -1;
     uint32_t target_inode_idx = 0;
@@ -338,7 +338,7 @@ int yulafs_unlink(const char* path) {
 
     if (target.blocks[INDIRECT_BLOCK_IDX] != 0) {
         uint32_t indices[128];
-        ata_read_sector(target.blocks[INDIRECT_BLOCK_IDX], (uint8_t*)indices);
+        ahci_read_sector(target.blocks[INDIRECT_BLOCK_IDX], (uint8_t*)indices);
         
         for(int i=0; i<128; i++) {
             if (indices[i] != 0) {
@@ -354,7 +354,7 @@ int yulafs_unlink(const char* path) {
     bitmap_clear(inode_map, target_inode_idx);
     
     memset(&entries[entry_idx], 0, sizeof(yfs_dir_entry_t));
-    ata_write_sector(parent.blocks[0], (uint8_t*)entries);
+    ahci_write_sector(parent.blocks[0], (uint8_t*)entries);
     
     sync_metadata();
     
