@@ -1,0 +1,17 @@
+*.o
+*.obj
+
+*.bin
+*.exe
+*.elf
+*.iso
+*.img
+
+*.tmp
+*.log
+*.swp
+
+*.txt
+*.py
+
+bin/

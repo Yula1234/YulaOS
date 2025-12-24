@@ -1,0 +1,155 @@
+#include "vfs.h"
+#include "yulafs.h"
+#include "../kernel/proc.h"
+#include "../lib/string.h"
+#include "../mm/heap.h"
+
+static vfs_node_t* dev_nodes[16];
+static int dev_count = 0;
+
+void devfs_register(vfs_node_t* node) {
+    if (dev_count < 16) dev_nodes[dev_count++] = node;
+}
+
+vfs_node_t* devfs_fetch(const char* name) {
+    for (int i = 0; i < dev_count; i++) {
+        if (strcmp(dev_nodes[i]->name, name) == 0) return dev_nodes[i];
+    }
+    return 0;
+}
+
+static int yfs_read_wrapper(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
+    return yulafs_read(node->inode_idx, buffer, offset, size);
+}
+
+static int yfs_write_wrapper(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {
+    return yulafs_write(node->inode_idx, buffer, offset, size);
+}
+
+static vfs_ops_t yfs_vfs_ops = {
+    .read = yfs_read_wrapper,
+    .write = yfs_write_wrapper,
+    .open = 0, .close = 0
+};
+
+int vfs_open(const char* path, int flags) {
+    task_t* curr = proc_current();
+    if (!curr) return -1;
+
+    int fd = -1;
+    for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+        if (!curr->fds[i].used) {
+            fd = i;
+            break;
+        }
+    }
+    if (fd == -1) return -1;
+
+    vfs_node_t* node = 0;
+
+    const char* internal_path = path;
+    if (internal_path[0] == '/') internal_path++;
+
+    if (strncmp(internal_path, "dev/", 4) == 0) {
+        vfs_node_t* dev = devfs_fetch(internal_path + 4);
+        if (dev) {
+            node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+            if (node) {
+                memcpy(node, dev, sizeof(vfs_node_t));
+            }
+        }
+    } 
+    else {
+        int inode = yulafs_lookup(path);
+        
+        if (inode == -1 && flags == 1) {
+            inode = yulafs_create(path);
+        }
+
+        if (inode != -1) {
+            if (flags == 1) {
+                yfs_inode_t info;
+                yulafs_get_inode(inode, &info);
+                if (info.type == YFS_TYPE_FILE) {
+                    yulafs_update_size(inode, 0);
+                }
+            }
+
+            node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+            if (node) {
+                memset(node, 0, sizeof(vfs_node_t));
+                node->inode_idx = inode;
+                node->ops = &yfs_vfs_ops;
+                
+                yfs_inode_t info;
+                if (yulafs_get_inode(inode, &info) == 0) {
+                    node->size = info.size;
+                }
+                strlcpy(node->name, path, sizeof(node->name));
+            }
+        }
+    }
+
+    if (!node) return -1;
+
+    node->refs = 1;
+
+    if (node->ops && node->ops->open) {
+        node->ops->open(node);
+    }
+
+    curr->fds[fd].node = node;
+    curr->fds[fd].offset = 0;
+    curr->fds[fd].used = 1;
+
+    return fd;
+}
+
+int vfs_read(int fd, void* buf, uint32_t size) {
+    task_t* curr = proc_current();
+    if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used) return -1;
+    file_t* f = &curr->fds[fd];
+    if (!f->node->ops->read) return -1;
+
+    int res = f->node->ops->read(f->node, f->offset, size, buf);
+    if (res > 0) f->offset += res;
+    return res;
+}
+
+int vfs_write(int fd, const void* buf, uint32_t size) {
+    task_t* curr = proc_current();
+    if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used) return -1;
+    file_t* f = &curr->fds[fd];
+    if (!f->node->ops->write) return -1;
+
+    int res = f->node->ops->write(f->node, f->offset, size, buf);
+    if (res > 0) f->offset += res;
+    return res;
+}
+
+int vfs_close(int fd) {
+    task_t* curr = proc_current();
+    if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used) return -1;
+    
+    file_t* f = &curr->fds[fd];
+    vfs_node_t* node = f->node;
+
+    if (node) {
+        if (node->refs > 0) {
+            node->refs--;
+        }
+
+        if (node->refs == 0) {
+            if (node->ops && node->ops->close) {
+                node->ops->close(node);
+            } 
+            else {
+                kfree(node);
+            }
+        }
+    }
+    
+    f->node = 0;
+    f->used = 0;
+    return 0;
+}

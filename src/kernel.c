@@ -1,0 +1,150 @@
+#include "arch/i386/gdt.h"
+#include "arch/i386/idt.h"
+#include "arch/i386/paging.h"
+#include "mm/pmm.h"
+#include "mm/heap.h"
+#include "fs/yulafs.h"
+#include "drivers/vga.h"
+#include "drivers/keyboard.h"
+#include "drivers/mouse.h"
+#include "drivers/ata.h"
+#include "drivers/console.h"
+#include "kernel/proc.h"
+#include "kernel/sched.h"
+#include "shell/shell.h"
+#include "hal/pit.h"
+#include "hal/io.h"
+#include "hal/apic.h"
+#include "hal/simd.h"
+#include "kernel/gui_task.h"
+#include "kernel/window.h"
+#include "kernel/clipboard.h"
+#include <stdint.h>
+
+
+typedef struct {
+    uint32_t flags;
+
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+
+    uint32_t boot_device;
+    uint32_t cmdline;
+
+    uint32_t mods_count;
+    uint32_t mods_addr;
+
+    uint32_t unused[4];
+
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+
+    uint32_t drives_length;
+    uint32_t drives_addr;
+
+    uint32_t config_table;
+    uint32_t boot_loader_name;
+    uint32_t apm_table;
+
+    uint32_t vbe_control_info;
+    uint32_t vbe_mode_info;
+    uint16_t vbe_mode;
+    uint16_t vbe_interface_seg;
+    uint16_t vbe_interface_off;
+    uint16_t vbe_interface_len;
+
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t  framebuffer_bpp;
+    uint8_t  framebuffer_type;
+} __attribute__((packed)) multiboot_info_t;
+
+uint32_t* fb_ptr;
+uint32_t  fb_width;
+uint32_t  fb_height;
+uint32_t  fb_pitch;
+
+extern void put_pixel(int x, int y, uint32_t color);
+
+void idle_task_func(void* arg) {
+    (void)arg;
+    while(1) {
+        __asm__ volatile("sti");
+        cpu_hlt();
+        sched_yield();
+    }
+}
+
+
+__attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
+    if (magic != 0x2BADB002) return;
+
+    kernel_init_simd(); 
+
+    fb_ptr = (uint32_t*)(uint32_t)mb_info->framebuffer_addr;
+    fb_width = mb_info->framebuffer_width;
+    fb_height = mb_info->framebuffer_height;
+    fb_pitch = mb_info->framebuffer_pitch;
+
+    gdt_init();
+    idt_init();
+
+
+    lapic_init();
+    lapic_timer_init(15000);
+
+    // PIC
+    // Opened:
+    // IRQ 1 (keyboard)
+    // IRQ 2 (cascade for mouse)
+    // IRQ 12 (mouse)
+    
+    // Master PIC (port 0x21): 
+    // Бит 0 - Timer (closed, we had APIC)
+    // Бит 1 - Клавиатура (открыт - 0)
+    // Бит 2 - Каскад (открыт - 0)
+    outb(0x21, 0xF9); 
+
+        
+    // Slave PIC (port 0xA1):
+    // Bit 4 - Mouse (IRQ 12, opened - 0)
+    // Bit 6 - HDD (IRQ 14).
+    outb(0xA1, 0xAF); // Opens IRQ 14 for Primary ATA
+    
+    pmm_init(1024 * 1024 * 64);
+    paging_init();
+    heap_init();  
+
+    // mapping video memory
+    uint32_t fb_size = fb_width * fb_height * 4;
+    for (uint32_t i = 0; i < fb_size; i += 4096) {
+        paging_map(kernel_page_directory, (uint32_t)fb_ptr + i, (uint32_t)fb_ptr + i, 3);
+    }
+
+    vga_init();
+    vga_init_graphics();
+    clipboard_init();
+    
+    kbd_init();
+    mouse_init();
+    
+    ata_init();
+    yulafs_init();
+    kbd_vfs_init();
+    console_init();
+
+    proc_init();
+    sched_init();
+    
+    window_init_system(); 
+
+    __attribute__((unused)) task_t* idle = proc_spawn_kthread("idle", PRIO_IDLE, idle_task_func, 0);
+    __attribute__((unused)) task_t* sys_reaper = proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
+
+    task_t* gui_t = proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
+    
+    __asm__ volatile("sti"); 
+    sched_start(gui_t);
+}
