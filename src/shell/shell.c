@@ -251,42 +251,48 @@ static void shell_ls(term_instance_t* term, const char* arg, uint32_t cwd_inode)
         else { term->curr_fg = C_ERROR; term_print(term, "ls: directory not found\n"); return; }
     }
 
-    yfs_dirent_t entries[8]; 
-    int bytes = yulafs_read(target_inode, (uint8_t*)entries, 0, 512);
-    if (bytes <= 0) return;
-
     term->curr_fg = C_SIZE;
     print_padded(term, "MOD", 5, C_SIZE);
     print_padded(term, "SIZE", 10, C_SIZE);
     print_padded(term, "NAME", 20, C_SIZE);
     term_print(term, "\n");
 
-    int count = bytes / sizeof(yfs_dirent_t);
+    yfs_dirent_t entries[8]; 
+    int offset = 0;
+    
+    while (1) {
+        int bytes = yulafs_read(target_inode, (uint8_t*)entries, offset, 512);
+        if (bytes <= 0) break;
 
-    for (int i = 0; i < count; i++) {
-        if (entries[i].inode > 0) {
-            yfs_inode_t info;
-            yulafs_stat(entries[i].inode, &info);
-            
-            if (info.type == YFS_TYPE_DIR) print_padded(term, "DIR", 5, C_DIR);
-            else print_padded(term, "FILE", 5, C_SIZE);
+        int count = bytes / sizeof(yfs_dirent_t);
+        
+        for (int i = 0; i < count; i++) {
+            if (entries[i].inode > 0) {
+                yfs_inode_t info;
+                yulafs_stat(entries[i].inode, &info);
+                
+                if (info.type == YFS_TYPE_DIR) print_padded(term, "DIR", 5, C_DIR);
+                else print_padded(term, "FILE", 5, C_SIZE);
 
-            term->curr_fg = C_SIZE;
-            if (info.type == YFS_TYPE_DIR) {
-                print_padded(term, "-", 10, C_SIZE);
-            } else {
-                char sz_buf[16];
-                int sz = info.size;
-                if (sz < 1024) { char* s = itoa(sz); int l = strlen(s); memcpy(sz_buf, s, l); sz_buf[l] = 'B'; sz_buf[l+1] = 0; } 
-                else { char* s = itoa(sz/1024); int l = strlen(s); memcpy(sz_buf, s, l); sz_buf[l] = 'K'; sz_buf[l+1] = 0; }
-                print_padded(term, sz_buf, 10, C_SIZE);
+                term->curr_fg = C_SIZE;
+                if (info.type == YFS_TYPE_DIR) {
+                    print_padded(term, "-", 10, C_SIZE);
+                } else {
+                    char sz_buf[16];
+                    int sz = info.size;
+                    if (sz < 1024) { char* s = itoa(sz); int l = strlen(s); memcpy(sz_buf, s, l); sz_buf[l] = 'B'; sz_buf[l+1] = 0; } 
+                    else { char* s = itoa(sz/1024); int l = strlen(s); memcpy(sz_buf, s, l); sz_buf[l] = 'K'; sz_buf[l+1] = 0; }
+                    print_padded(term, sz_buf, 10, C_SIZE);
+                }
+
+                uint32_t name_col = (info.type == YFS_TYPE_DIR) ? C_DIR : get_file_color(entries[i].name);
+                print_padded(term, entries[i].name, 20, name_col);
+                term_print(term, "\n");
             }
-
-            uint32_t name_col = (info.type == YFS_TYPE_DIR) ? C_DIR : get_file_color(entries[i].name);
-            print_padded(term, entries[i].name, 20, name_col);
-            term_print(term, "\n");
         }
+        offset += bytes;
     }
+    
     term->curr_fg = C_TEXT; term->curr_bg = C_BG;
 }
 
