@@ -1,15 +1,20 @@
-#include "proc.h"
+#include <drivers/vga.h>
+#include <lib/string.h>
+#include <fs/yulafs.h>
+
+#include <arch/i386/paging.h>
+#include <arch/i386/gdt.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
+#include <hal/lock.h>
+#include <hal/io.h>
+
+
 #include "sched.h"
-#include "../mm/heap.h"
-#include "../lib/string.h"
-#include "../arch/i386/paging.h"
-#include "../arch/i386/gdt.h"
-#include "../hal/io.h" 
-#include "../mm/pmm.h"
+#include "proc.h"
 #include "elf.h"
-#include "../fs/yulafs.h"
-#include "../drivers/vga.h"
-#include "../hal/lock.h"
 
 #define KSTACK_SIZE 16384  
 

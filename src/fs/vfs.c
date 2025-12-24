@@ -1,8 +1,9 @@
+#include <kernel/proc.h>
+#include <lib/string.h>
+#include <mm/heap.h>
+
 #include "vfs.h"
 #include "yulafs.h"
-#include "../kernel/proc.h"
-#include "../lib/string.h"
-#include "../mm/heap.h"
 
 static vfs_node_t* dev_nodes[16];
 static int dev_count = 0;

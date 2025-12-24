@@ -1,8 +1,9 @@
 #ifndef KERNEL_PROC_H
 #define KERNEL_PROC_H
 
-#include "../fs/vfs.h"
-#include "../arch/i386/idt.h"
+#include <arch/i386/idt.h>
+#include <fs/vfs.h>
+
 #include <stdint.h>
 
 typedef enum {

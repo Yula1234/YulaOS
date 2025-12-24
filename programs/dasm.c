@@ -1,4 +1,4 @@
-#include "yula.h"
+#include <yula.h>
 
 #define MAX_FILE_SIZE   65536
 #define MAX_INSTR_LEN   15

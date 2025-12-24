@@ -1,9 +1,11 @@
+#include <arch/i386/context.h>
+#include <arch/i386/paging.h>
+#include <arch/i386/gdt.h>
+
+#include <hal/lock.h>
+#include <hal/io.h>
+
 #include "sched.h"
-#include "../arch/i386/context.h"
-#include "../arch/i386/paging.h"
-#include "../arch/i386/gdt.h"
-#include "../hal/io.h"
-#include "../hal/lock.h"
 
 static task_t* runq_head = 0;
 static task_t* runq_tail = 0;

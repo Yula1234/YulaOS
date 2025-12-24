@@ -1,15 +1,20 @@
+#include <lib/string.h>
+
+#include <kernel/clipboard.h>
+#include <kernel/window.h>
+#include <kernel/proc.h>
+
+#include <drivers/keyboard.h>
+#include <drivers/vga.h>
+
+#include <fs/yulafs.h>
+#include <fs/pipe.h>
+#include <fs/vfs.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
 #include "shell.h"
-#include "../drivers/vga.h"
-#include "../drivers/keyboard.h"
-#include "../fs/yulafs.h"
-#include "../fs/vfs.h"
-#include "../fs/pipe.h"
-#include "../kernel/proc.h"
-#include "../kernel/window.h"
-#include "../mm/heap.h"
-#include "../mm/pmm.h"
-#include "../lib/string.h"
-#include "../kernel/clipboard.h"
 
 #define LINE_MAX 256
 #define TOK_MAX 16

@@ -1,26 +1,32 @@
-#include "arch/i386/gdt.h"
-#include "arch/i386/idt.h"
-#include "arch/i386/paging.h"
-#include "mm/pmm.h"
-#include "mm/heap.h"
-#include "fs/yulafs.h"
-#include "drivers/vga.h"
-#include "drivers/keyboard.h"
-#include "drivers/mouse.h"
-#include "drivers/ata.h"
-#include "drivers/console.h"
-#include "kernel/proc.h"
-#include "kernel/sched.h"
-#include "shell/shell.h"
-#include "hal/pit.h"
-#include "hal/io.h"
-#include "hal/apic.h"
-#include "hal/simd.h"
-#include "kernel/gui_task.h"
-#include "kernel/window.h"
-#include "kernel/clipboard.h"
-#include <stdint.h>
+#include <shell/shell.h>
+#include <fs/yulafs.h>
 
+#include <drivers/keyboard.h>
+#include <drivers/console.h>
+#include <drivers/mouse.h>
+#include <drivers/ata.h>
+#include <drivers/vga.h>
+
+#include <kernel/clipboard.h>
+#include <kernel/gui_task.h>
+#include <kernel/window.h>
+#include <kernel/sched.h>
+#include <kernel/proc.h>
+
+#include <arch/i386/paging.h>
+#include <arch/i386/gdt.h>
+#include <arch/i386/idt.h>
+
+#include <hal/apic.h>
+#include <hal/simd.h>
+#include <hal/pit.h>
+#include <hal/io.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
+
+#include <stdint.h>
 
 typedef struct {
     uint32_t flags;

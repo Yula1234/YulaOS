@@ -1,8 +1,10 @@
+#include <drivers/vga.h>
+#include <kernel/proc.h>
+#include <lib/string.h>
+#include <hal/lock.h>
+#include <mm/heap.h>
+
 #include "window.h"
-#include "../drivers/vga.h"
-#include "../lib/string.h"
-#include "../kernel/proc.h"
-#include "../hal/lock.h"
 
 window_t window_list[MAX_WINDOWS];
 int window_z_order[MAX_WINDOWS];

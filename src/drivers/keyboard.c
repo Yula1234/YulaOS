@@ -1,11 +1,15 @@
+#include <arch/i386/idt.h>
+#include <fs/vfs.h>
+
+#include <kernel/sched.h>
+#include <kernel/window.h>
+#include <kernel/proc.h>
+
+#include <hal/io.h>
+#include <hal/irq.h>
+
+
 #include "keyboard.h"
-#include "../hal/io.h"
-#include "../hal/irq.h"
-#include "../arch/i386/idt.h"
-#include "../fs/vfs.h"
-#include "../kernel/sched.h"
-#include "../kernel/window.h" 
-#include "../kernel/proc.h"
 
 static int shift_pressed = 0;
 static int ctrl_pressed = 0;

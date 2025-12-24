@@ -1,4 +1,4 @@
-#include "../yula.h"
+#include <yula.h>
 
 #define PAGE_SIZE 4096
 #define ALIGNMENT 8

@@ -5,7 +5,7 @@
 #include <stdarg.h> 
 #include <stddef.h>
 
-#include "lib/syscall.h"
+#include <lib/syscall.h>
 
 #define YULA_EVENT_NONE       0
 #define YULA_EVENT_MOUSE_MOVE 1

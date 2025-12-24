@@ -1,9 +1,11 @@
+#include <lib/string.h>
+#include <mm/heap.h>
+#include <kernel/proc.h>
+
+#include <drivers/ata.h>
+#include <drivers/vga.h>
+
 #include "yulafs.h"
-#include "../drivers/ata.h"
-#include "../lib/string.h"
-#include "../drivers/vga.h"
-#include "../mm/heap.h"
-#include "../kernel/proc.h"
 
 static uint8_t inode_map[BLOCK_SIZE];
 static uint8_t block_map[BLOCK_SIZE];

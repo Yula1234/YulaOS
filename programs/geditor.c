@@ -1,5 +1,5 @@
-#include "yula.h"
-#include "font.h"
+#include <yula.h>
+#include <font.h>
 
 #define MAX_TEXT 8192
 #define WIN_W 500

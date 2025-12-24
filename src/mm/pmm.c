@@ -1,6 +1,7 @@
+#include <lib/string.h>
+#include <hal/lock.h>
+
 #include "pmm.h"
-#include "../lib/string.h"
-#include "../hal/lock.h"
 
 #define MAX_MEM 128*1024*1024
 #define BLOCK_SIZE 4096

@@ -1,16 +1,20 @@
-#include "syscall.h"
-#include "../drivers/vga.h"
-#include "../drivers/keyboard.h"
-#include "../lib/string.h"
-#include "proc.h"
-#include "sched.h"
-#include "../arch/i386/paging.h"
-#include "../mm/pmm.h"
-#include "../fs/yulafs.h"
-#include "../kernel/window.h"
-#include "../mm/heap.h" 
+#include <arch/i386/paging.h>
+#include <kernel/window.h>
+#include <lib/string.h>
+
+#include <drivers/vga.h>
+#include <drivers/keyboard.h>
+
+#include <fs/yulafs.h>
+#include <fs/pipe.h>
+
+#include <mm/pmm.h>
+#include <mm/heap.h>
+
 #include "clipboard.h"
-#include "../fs/pipe.h"
+#include "syscall.h"
+#include "sched.h"
+#include "proc.h"
 
 extern volatile uint32_t timer_ticks;
 

@@ -1,8 +1,9 @@
+#include <kernel/sched.h>
+#include <lib/string.h>
+#include <hal/lock.h>
+#include <mm/heap.h>
+
 #include "vfs.h"
-#include "../mm/heap.h"
-#include "../lib/string.h"
-#include "../kernel/sched.h"
-#include "../hal/lock.h"
 
 #define PIPE_SIZE 4096
 

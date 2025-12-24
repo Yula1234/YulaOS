@@ -1,7 +1,10 @@
-#include "vga.h"
-#include "../lib/string.h"
+#include <lib/string.h>
+#include <mm/heap.h>
+
 #include "font8x8.h"
 #include "font8x16.h"
+
+#include "vga.h"
 
 extern uint32_t* fb_ptr;
 extern uint32_t  fb_width;

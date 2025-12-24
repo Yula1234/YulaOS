@@ -1,7 +1,9 @@
+#include <arch/i386/idt.h>
+
+#include <hal/io.h>
+#include <hal/irq.h>
+
 #include "mouse.h"
-#include "../hal/io.h"
-#include "../hal/irq.h"
-#include "../arch/i386/idt.h"
 
 int mouse_x = 512, mouse_y = 384;
 int mouse_buttons = 0;

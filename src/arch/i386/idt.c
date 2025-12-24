@@ -1,13 +1,17 @@
+#include <lib/string.h>
+
+#include <drivers/vga.h>
+#include <drivers/mouse.h>
+#include <drivers/keyboard.h>
+
+#include <kernel/syscall.h>
+#include <kernel/sched.h>
+
+#include <hal/io.h>
+#include <hal/apic.h>
+#include <hal/irq.h>
+
 #include "idt.h"
-#include "../../lib/string.h"
-#include "../../drivers/vga.h"
-#include "../../kernel/syscall.h"
-#include "../../hal/io.h" 
-#include "../../hal/apic.h" 
-#include "../../kernel/sched.h"
-#include "../../drivers/mouse.h"
-#include "../../drivers/keyboard.h"
-#include "../../hal/irq.h"
 
 struct idt_entry {
     uint16_t base_low; uint16_t sel; uint8_t always0; uint8_t flags; uint16_t base_high;

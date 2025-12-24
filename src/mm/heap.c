@@ -1,9 +1,10 @@
+#include <arch/i386/paging.h>
+#include <drivers/vga.h>
+#include <lib/string.h>
+#include <hal/lock.h>
+#include <mm/pmm.h>
+
 #include "heap.h"
-#include "../arch/i386/paging.h"
-#include "../mm/pmm.h"
-#include "../lib/string.h"
-#include "../drivers/vga.h"
-#include "../hal/lock.h"
 
 #define HEAP_START_ADDR 0xD0000000
 #define PAGE_SIZE 4096

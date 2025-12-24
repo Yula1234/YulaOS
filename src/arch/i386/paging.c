@@ -1,7 +1,9 @@
+#include <lib/string.h>
+
+#include <mm/pmm.h>
+#include <mm/heap.h>
+
 #include "paging.h"
-#include "../../mm/pmm.h"
-#include "../../mm/heap.h"
-#include "../../lib/string.h"
 
 extern void load_page_directory(uint32_t*);
 extern void enable_paging(void);

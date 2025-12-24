@@ -1,4 +1,4 @@
-#include "yula.h"
+#include <yula.h>
 
 int main() {
     char buf[128];

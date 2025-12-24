@@ -1,10 +1,12 @@
+#include <drivers/vga.h>
+#include <lib/string.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
 #include "monitor_task.h"
 #include "window.h"
 #include "proc.h"
-#include "../drivers/vga.h"
-#include "../mm/heap.h"
-#include "../mm/pmm.h"
-#include "../lib/string.h"
 
 extern volatile uint32_t timer_ticks;
 extern uint32_t heap_current_limit;

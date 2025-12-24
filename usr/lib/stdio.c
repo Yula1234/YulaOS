@@ -1,8 +1,8 @@
-#include "syscall.h"
-
 #include <stdint.h>
 #include <stdarg.h> 
 #include <stddef.h>
+
+#include "syscall.h"
 
 int open(const char* path, int flags) {
     return syscall(3, (int)path, flags, 0);

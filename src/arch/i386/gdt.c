@@ -1,5 +1,6 @@
+#include <lib/string.h>
+
 #include "gdt.h"
-#include "../../lib/string.h"
 
 struct gdt_entry {
     uint16_t limit_low;

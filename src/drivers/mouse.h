@@ -1,8 +1,9 @@
 #ifndef DRIVERS_MOUSE_H
 #define DRIVERS_MOUSE_H
 
-#include "../arch/i386/idt.h"
 #include <stdint.h>
+
+#include <arch/i386/idt.h>
 
 extern int mouse_x, mouse_y;
 extern int mouse_buttons;

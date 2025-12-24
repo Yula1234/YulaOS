@@ -1,8 +1,9 @@
 #ifndef DRIVERS_KEYBOARD_H
 #define DRIVERS_KEYBOARD_H
 
-#include "../arch/i386/idt.h"
 #include <stdint.h>
+
+#include <arch/i386/idt.h>
 
 void kbd_init(void);
 void keyboard_irq_handler(registers_t* regs);

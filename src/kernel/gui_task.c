@@ -1,12 +1,12 @@
+#include <arch/i386/idt.h>
+#include <drivers/vga.h>
+#include <kernel/proc.h>
+#include <shell/shell.h>
+#include <lib/string.h>
+#include <hal/io.h>
+
 #include "gui_task.h"
 #include "window.h"
-#include "../drivers/vga.h"
-#include "../kernel/proc.h"
-#include "../shell/shell.h"
-#include "../hal/io.h"
-#include "../lib/string.h"
-#include "../arch/i386/idt.h"
-#include <stdint.h>
 
 extern uint32_t fb_width, fb_height;
 extern int mouse_x, mouse_y, mouse_buttons;

@@ -1,13 +1,17 @@
+#include <arch/i386/paging.h>
+#include <drivers/vga.h>
+#include <lib/string.h>
+#include <mm/heap.h>
+
+#include <hal/io.h>
+#include <hal/irq.h>
+
+#include <kernel/proc.h>
+#include <kernel/sched.h>
+
+
 #include "ata.h"
 #include "pci.h"
-#include "../hal/io.h"
-#include "../hal/irq.h"
-#include "../kernel/proc.h"
-#include "../kernel/sched.h"
-#include "../arch/i386/paging.h"
-#include "../mm/heap.h"
-#include "../lib/string.h"
-#include "../drivers/vga.h"
 
 #define ATA_DATA        0x1F0
 #define ATA_SEC_COUNT   0x1F2

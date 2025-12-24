@@ -1,9 +1,12 @@
-#include "console.h"
-#include "../hal/irq.h"
-#include "../fs/vfs.h"
-#include "../kernel/proc.h"
-#include "vga.h"
 #include <stdint.h>
+
+#include <hal/irq.h>
+#include <fs/vfs.h>
+#include <kernel/proc.h>
+
+#include "console.h"
+#include "vga.h"
+
 
 static int console_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {
     (void)node;  

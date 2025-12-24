@@ -1,6 +1,7 @@
+#include <drivers/vga.h>
+
 #include "apic.h"
 #include "io.h"
-#include "../drivers/vga.h"
 
 static inline void lapic_write(uint32_t reg, uint32_t val) {
     volatile uint32_t* addr = (volatile uint32_t*)(LAPIC_BASE + reg);

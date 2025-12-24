@@ -1,5 +1,6 @@
+#include <hal/io.h>
+
 #include "pci.h"
-#include "../hal/io.h"
 
 #define PCI_CONFIG_ADDR 0xCF8
 #define PCI_CONFIG_DATA 0xCFC

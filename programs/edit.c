@@ -1,4 +1,4 @@
-#include "yula.h"
+#include <yula.h>
 
 #define EDITOR_BUF_SIZE 16384
 #define VIEW_HEIGHT     7

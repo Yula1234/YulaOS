@@ -1,6 +1,7 @@
+#include <lib/string.h>
+#include <hal/lock.h>
+
 #include "clipboard.h"
-#include "../lib/string.h"
-#include "../hal/lock.h"
 
 #define CLIPBOARD_SIZE 4096
 

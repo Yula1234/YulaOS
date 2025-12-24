@@ -1,7 +1,6 @@
 #ifndef DRIVERS_VGA_H
 #define DRIVERS_VGA_H
 
-#include "../mm/heap.h"
 #include <stdint.h>
 
 enum VgaColor {
