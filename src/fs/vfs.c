@@ -1,9 +1,8 @@
-#include <kernel/proc.h>
-#include <lib/string.h>
-#include <mm/heap.h>
-
 #include "vfs.h"
 #include "yulafs.h"
+#include "../kernel/proc.h"
+#include "../lib/string.h"
+#include "../mm/heap.h"
 
 static vfs_node_t* dev_nodes[16];
 static int dev_count = 0;
@@ -70,9 +69,10 @@ int vfs_open(const char* path, int flags) {
         if (inode != -1) {
             if (flags == 1) {
                 yfs_inode_t info;
-                yulafs_get_inode(inode, &info);
+                yulafs_stat(inode, &info);
+                
                 if (info.type == YFS_TYPE_FILE) {
-                    yulafs_update_size(inode, 0);
+                    yulafs_resize(inode, 0);
                 }
             }
 
@@ -83,7 +83,7 @@ int vfs_open(const char* path, int flags) {
                 node->ops = &yfs_vfs_ops;
                 
                 yfs_inode_t info;
-                if (yulafs_get_inode(inode, &info) == 0) {
+                if (yulafs_stat(inode, &info) == 0) {
                     node->size = info.size;
                 }
                 strlcpy(node->name, path, sizeof(node->name));

@@ -251,8 +251,9 @@ static void shell_ls(term_instance_t* term, const char* arg, uint32_t cwd_inode)
         else { term->curr_fg = C_ERROR; term_print(term, "ls: directory not found\n"); return; }
     }
 
-    yfs_dir_entry_t entries[16]; 
-    if (yulafs_read(target_inode, (uint8_t*)entries, 0, 512) <= 0) return;
+    yfs_dirent_t entries[8]; 
+    int bytes = yulafs_read(target_inode, (uint8_t*)entries, 0, 512);
+    if (bytes <= 0) return;
 
     term->curr_fg = C_SIZE;
     print_padded(term, "MOD", 5, C_SIZE);
@@ -260,10 +261,12 @@ static void shell_ls(term_instance_t* term, const char* arg, uint32_t cwd_inode)
     print_padded(term, "NAME", 20, C_SIZE);
     term_print(term, "\n");
 
-    for (int i = 0; i < 16; i++) {
-        if (entries[i].inode_idx > 0) {
+    int count = bytes / sizeof(yfs_dirent_t);
+
+    for (int i = 0; i < count; i++) {
+        if (entries[i].inode > 0) {
             yfs_inode_t info;
-            yulafs_get_inode(entries[i].inode_idx, &info);
+            yulafs_stat(entries[i].inode, &info);
             
             if (info.type == YFS_TYPE_DIR) print_padded(term, "DIR", 5, C_DIR);
             else print_padded(term, "FILE", 5, C_SIZE);
@@ -290,8 +293,12 @@ static void shell_ls(term_instance_t* term, const char* arg, uint32_t cwd_inode)
 static void shell_cd(term_instance_t* term, const char* new_path, uint32_t* cwd_inode, char* path_str) {
     int inode = yulafs_lookup(new_path);
     if (inode == -1) { term_print(term, "cd: no such directory\n"); return; }
-    yfs_inode_t info; yulafs_get_inode(inode, &info);
+    
+    yfs_inode_t info; 
+    yulafs_stat(inode, &info);
+    
     if (info.type != YFS_TYPE_DIR) { term_print(term, "cd: not a directory\n"); return; }
+    
     *cwd_inode = (uint32_t)inode;
     if (new_path[0] == '/') strlcpy(path_str, new_path, 64);
     else {

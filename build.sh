@@ -78,13 +78,13 @@ fi
 
 # ./bin/tools/yulafs_tool disk.img format
 
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/test.exe /bin/test.exe
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/edit.exe /bin/edit.exe
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/geditor.exe /bin/geditor.exe
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/asmc.exe /bin/asmc.exe
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/dasm.exe /bin/dasm.exe
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/grep.exe /bin/grep.exe
-./bin/tools/yulafs_tool $DISK_IMG import bin/usr/cat.exe /bin/cat.exe
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/test.exe /bin/test.exe > /dev/null
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/edit.exe /bin/edit.exe > /dev/null
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/geditor.exe /bin/geditor.exe > /dev/null
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/asmc.exe /bin/asmc.exe > /dev/null
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/dasm.exe /bin/dasm.exe > /dev/null
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/grep.exe /bin/grep.exe > /dev/null
+./bin/tools/yulafs_tool $DISK_IMG import bin/usr/cat.exe /bin/cat.exe > /dev/null
 
 ./bin/tools/yulafs_tool $DISK_IMG import programs/loop.asm /home/loop.asm
 
@@ -100,7 +100,6 @@ EOF
 grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
 
 echo "[run] qemu..."
-#qemu-system-i386 -cdrom bin/yulaos.iso -drive file=$DISK_IMG,format=raw,index=0,media=disk -enable-kvm -vga std -m 512 -cpu host
 
 QEMU_DISK_SETUP="-device ahci,id=ahci
 -device ide-hd,drive=disk,bus=ahci.0
