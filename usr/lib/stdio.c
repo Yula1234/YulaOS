@@ -127,9 +127,7 @@ void print_hex_raw(uint32_t n) {
     print(buf);
 }
 
-void printf(const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
+void vprintf(const char* fmt, va_list args) {
     char* p = (char*)fmt;
     while (*p) {
         if (*p == '%') {
@@ -152,6 +150,12 @@ void printf(const char* fmt, ...) {
             p++;
         }
     }
+}
+
+void printf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
     va_end(args);
 }
 
