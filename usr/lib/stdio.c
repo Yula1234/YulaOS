@@ -160,3 +160,32 @@ void* memset(void* dst, int v, uint32_t n) {
     while (n--) *p++ = (uint8_t)v;
     return dst;
 }
+
+void* memcpy(void* dest, const void* src, uint32_t n) {
+    char* d = (char*)dest;
+    const char* s = (const char*)src;
+    while (n--) *d++ = *s++;
+    return dest;
+}
+
+int atoi(const char* str) {
+    int res = 0;
+    int sign = 1;
+    int i = 0;
+    
+    // Skip spaces
+    while(str[i] == ' ') i++;
+    
+    if(str[i] == '-') {
+        sign = -1;
+        i++;
+    } else if (str[i] == '+') {
+        i++;
+    }
+    
+    while(str[i] >= '0' && str[i] <= '9') {
+        res = res * 10 + (str[i] - '0');
+        i++;
+    }
+    return res * sign;
+}
