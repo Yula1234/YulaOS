@@ -72,6 +72,8 @@ uint32_t  fb_width;
 uint32_t  fb_height;
 uint32_t  fb_pitch;
 
+extern uint32_t kernel_end; 
+
 extern void put_pixel(int x, int y, uint32_t color);
 
 void idle_task_func(void* arg) {
@@ -108,9 +110,9 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     // IRQ 12 (mouse)
     
     // Master PIC (port 0x21): 
-    // Бит 0 - Timer (closed, we had APIC)
-    // Бит 1 - Клавиатура (открыт - 0)
-    // Бит 2 - Каскад (открыт - 0)
+    // Bit 0 - Timer (closed, we had APIC)
+    // Bit 1 - Keyboard (открыт - 0)
+    // Bit 2 - Cascade (открыт - 0)
     outb(0x21, 0xF9); 
 
         
@@ -119,7 +121,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     // Bit 6 - HDD (IRQ 14).
     outb(0xA1, 0xAF); // Opens IRQ 14 for Primary ATA
     
-    pmm_init(1024 * 1024 * 64);
+    pmm_init(1024 * 1024 * 64, (uint32_t)&kernel_end);
     paging_init();
     heap_init();  
 
