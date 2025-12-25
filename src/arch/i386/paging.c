@@ -1,15 +1,12 @@
 #include <lib/string.h>
-
 #include <mm/pmm.h>
 #include <mm/heap.h>
-
 #include "paging.h"
 
 extern void load_page_directory(uint32_t*);
 extern void enable_paging(void);
 
 uint32_t* kernel_page_directory = 0;
-
 static uint32_t* current_pd_phys = 0;
 
 uint32_t page_dir[1024] __attribute__((aligned(4096)));
@@ -41,13 +38,17 @@ static void paging_allocate_table(uint32_t virt) {
     }
 }
 
-void paging_init() {
+void paging_init(uint32_t ram_size_bytes) {
     for(int i = 0; i < 1024; i++) {
         page_dir[i] = 2;
     }
 
-    for(uint32_t i = 0; i < 0x8000000; i += 4096) { 
+    if (ram_size_bytes & 0xFFF) ram_size_bytes = (ram_size_bytes & ~0xFFF) + 4096;
+
+    for(uint32_t i = 0; i < ram_size_bytes; i += 4096) { 
         paging_map(page_dir, i, i, 3);
+        
+        if (i + 4096 < i) break; 
     }
 
     paging_map(page_dir, 0xFEE00000, 0xFEE00000, 3);

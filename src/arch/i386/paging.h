@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 
-void paging_init(void);
+void paging_init(uint32_t ram_size_bytes);
+
 void paging_switch(uint32_t* dir_phys);
 uint32_t* paging_get_dir(void);
 uint32_t* paging_clone_directory(void); 

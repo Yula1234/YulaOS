@@ -29,6 +29,13 @@
 #include <stdint.h>
 
 typedef struct {
+    uint32_t size;
+    uint64_t addr;
+    uint64_t len;
+    uint32_t type;
+} __attribute__((packed)) multiboot_memory_map_t;
+
+typedef struct {
     uint32_t flags;
 
     uint32_t mem_lower;
@@ -103,6 +110,31 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     lapic_init();
     lapic_timer_init(15000);
 
+    uint32_t memory_end_addr = 0;
+
+    if (mb_info->flags & (1 << 6)) {
+        multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)mb_info->mmap_addr;
+        
+        while((uint32_t)mmap < mb_info->mmap_addr + mb_info->mmap_length) {
+            // Тип 1 = Доступная RAM
+            if (mmap->type == 1) {
+                uint64_t end = mmap->addr + mmap->len;
+                if (end > memory_end_addr) {
+                    memory_end_addr = (uint32_t)end;
+                }
+            }
+            mmap = (multiboot_memory_map_t*)((uint32_t)mmap + mmap->size + sizeof(uint32_t));
+        }
+    } 
+
+    else if (mb_info->flags & (1 << 0)) {
+        memory_end_addr = (mb_info->mem_upper * 1024) + 0x100000;
+    }
+
+    if (memory_end_addr == 0) {
+        memory_end_addr = 1024 * 1024 * 64; 
+    }
+
     // PIC
     // Opened:
     // IRQ 1 (keyboard)
@@ -121,8 +153,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     // Bit 6 - HDD (IRQ 14).
     outb(0xA1, 0xAF); // Opens IRQ 14 for Primary ATA
     
-    pmm_init(1024 * 1024 * 64, (uint32_t)&kernel_end);
-    paging_init();
+    pmm_init(memory_end_addr, (uint32_t)&kernel_end);
+    paging_init(memory_end_addr);
     heap_init();  
 
     // mapping video memory
