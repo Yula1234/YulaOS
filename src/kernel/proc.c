@@ -110,16 +110,23 @@ void proc_free_resources(task_t* t) {
     }
     
     if (t->page_dir && t->page_dir != kernel_page_directory) {
-        for (int i = 32; i < 768; i++) {
-            if (t->page_dir[i] & 1) {
-                int is_shared_memory = (i == 256); 
-                uint32_t* pt = (uint32_t*)(t->page_dir[i] & ~0xFFF);
+        for (int i = 0; i < 1024; i++) {
+            uint32_t pde = t->page_dir[i];
+            
+            if (!(pde & 1)) continue;
+            
+            if (kernel_page_directory[i] == pde) {
+                continue; 
+            }
+            
+            if (pde & 4) { 
+                uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
+                
                 for (int j = 0; j < 1024; j++) {
-                    if (pt[j] & 1) {
-                        if (!is_shared_memory) {
-                            void* physical_page = (void*)(pt[j] & ~0xFFF);
-                            pmm_free_block(physical_page);
-                        }
+                    uint32_t pte = pt[j];
+                    if ((pte & 1) && (pte & 4)) {
+                        void* physical_page = (void*)(pte & ~0xFFF);
+                        pmm_free_block(physical_page);
                     }
                 }
                 pmm_free_block(pt);
@@ -344,11 +351,18 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     t->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
     kfree(phdrs);
 
-    uint32_t ustack_base = 0xB0000000;
-    for (int i = 0; i < 4; i++) {
+    uint32_t stack_size = 4 * 1024 * 1024; 
+    uint32_t ustack_top_limit = 0xB0400000;
+    uint32_t ustack_bottom = ustack_top_limit - stack_size;
+
+    t->stack_bottom = ustack_bottom;
+    t->stack_top = ustack_top_limit;
+
+    for (int i = 1; i <= 4; i++) {
+        uint32_t addr = ustack_top_limit - i * 4096;
         void* p = pmm_alloc_block();
         if (p) {
-            paging_map(t->page_dir, ustack_base + i*4096, (uint32_t)p, 7);
+            paging_map(t->page_dir, addr, (uint32_t)p, 7);
             t->mem_pages++;
         }
     }
@@ -356,7 +370,8 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     __asm__ volatile("cli");
     paging_switch(t->page_dir);
 
-    uint32_t ustack_top = ustack_base + 16384;
+    uint32_t ustack_top = ustack_top_limit; 
+
     uint32_t arg_ptrs[16];
     int actual_argc = (argc > 16) ? 16 : argc;
 

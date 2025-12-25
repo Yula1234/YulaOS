@@ -58,6 +58,8 @@ typedef struct task {
     
     void* kstack;       
     uint32_t kstack_size;
+    uint32_t stack_bottom;
+    uint32_t stack_top;
     file_t fds[MAX_PROCESS_FDS];
     uint32_t cwd_inode;
 

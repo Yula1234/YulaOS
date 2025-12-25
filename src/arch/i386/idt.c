@@ -1,4 +1,5 @@
 #include <lib/string.h>
+#include <mm/pmm.h>
 
 #include <drivers/vga.h>
 #include <drivers/mouse.h>
@@ -7,10 +8,12 @@
 #include <kernel/syscall.h>
 #include <kernel/sched.h>
 
+
 #include <hal/io.h>
 #include <hal/apic.h>
 #include <hal/irq.h>
 
+#include "paging.h"
 #include "idt.h"
 
 struct idt_entry {
@@ -137,7 +140,37 @@ void isr_handler(registers_t* regs) {
     else if (regs->int_no < 32) {
         if (regs->cs == 0x1B) {
             if (regs->int_no == 14) {
-                curr->pending_signals |= (1 << 11);
+                uint32_t cr2;
+                __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+
+                int handled = 0;
+
+                if (!(regs->err_code & 1) && curr) {
+                    if (cr2 >= curr->stack_bottom && cr2 < curr->stack_top) {
+                        
+                        void* new_page = pmm_alloc_block();
+                        
+                        if (new_page) {
+                            uint32_t vaddr = cr2 & ~0xFFF;
+                            paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7); // User, RW, Present
+                            curr->mem_pages++;
+                            
+                            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                            
+                            handled = 1;
+                        } else {
+                            proc_kill(curr);
+                            sched_yield();
+                            return; 
+                        }
+                    }
+                }
+
+                if (handled) {
+                    return;
+                } else {
+                    curr->pending_signals |= (1 << 11); // SIGSEGV
+                }
             } else {
                 proc_kill(curr);
                 lapic_eoi();
