@@ -2,22 +2,25 @@
 #define MM_PMM_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define PAGE_SIZE       4096
 #define PAGE_SHIFT      12
 #define PAGE_ALIGN(x)   (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
+
+#define PMM_MAX_ORDER   11
 
 typedef enum {
     PMM_FLAG_FREE     = 0,
     PMM_FLAG_USED     = (1 << 0),
     PMM_FLAG_KERNEL   = (1 << 1),
     PMM_FLAG_DMA      = (1 << 2),
-    PMM_FLAG_SLAB     = (1 << 3),
 } page_flags_t;
 
 typedef struct page {
     uint32_t flags; 
     int32_t  ref_count;
+    uint32_t order;
 
     void* slab_cache;  
     void* freelist;    
@@ -31,6 +34,9 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr);
 
 void* pmm_alloc_block(void);     
 void  pmm_free_block(void* addr);
+
+void* pmm_alloc_pages(uint32_t order);
+void  pmm_free_pages(void* addr, uint32_t order);
 
 page_t*  pmm_phys_to_page(uint32_t phys_addr);
 uint32_t pmm_page_to_phys(page_t* page);
