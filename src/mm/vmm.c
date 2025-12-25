@@ -6,68 +6,262 @@
 
 #include "vmm.h"
 
-#define BITMAP_SIZE (KERNEL_HEAP_SIZE / PAGE_SIZE / 8)
+typedef enum { RED, BLACK } rb_color_t;
 
-static uint8_t vmm_bitmap[BITMAP_SIZE];
+typedef struct vm_free_block {
+    uint32_t start;     
+    uint32_t size;      
+    
+    rb_color_t color;
+    struct vm_free_block *left, *right, *parent;
+    
+    int is_active;   
+} vm_free_block_t;
+
+#define MAX_VMM_NODES 4096
+
+static vm_free_block_t node_pool[MAX_VMM_NODES];
+static vm_free_block_t* root = 0;
 static spinlock_t vmm_lock;
-static size_t vmm_used_pages = 0;
+static size_t vmm_used_pages_count = 0;
 
 extern uint32_t* kernel_page_directory;
 
-static void set_bit(uint32_t bit) {
-    vmm_bitmap[bit / 8] |= (1 << (bit % 8));
+static vm_free_block_t* alloc_node(void) {
+    for (int i = 0; i < MAX_VMM_NODES; i++) {
+        if (!node_pool[i].is_active) {
+            node_pool[i].is_active = 1;
+            node_pool[i].left = node_pool[i].right = node_pool[i].parent = 0;
+            node_pool[i].color = RED;
+            return &node_pool[i];
+        }
+    }
+    return 0; 
 }
 
-static void clear_bit(uint32_t bit) {
-    vmm_bitmap[bit / 8] &= ~(1 << (bit % 8));
+static void free_node(vm_free_block_t* node) {
+    node->is_active = 0;
 }
 
-static int test_bit(uint32_t bit) {
-    return vmm_bitmap[bit / 8] & (1 << (bit % 8));
+static void rotate_left(vm_free_block_t* x) {
+    vm_free_block_t* y = x->right;
+    x->right = y->left;
+    if (y->left) y->left->parent = x;
+    y->parent = x->parent;
+    if (!x->parent) root = y;
+    else if (x == x->parent->left) x->parent->left = y;
+    else x->parent->right = y;
+    y->left = x;
+    x->parent = y;
+}
+
+static void rotate_right(vm_free_block_t* x) {
+    vm_free_block_t* y = x->left;
+    x->left = y->right;
+    if (y->right) y->right->parent = x;
+    y->parent = x->parent;
+    if (!x->parent) root = y;
+    else if (x == x->parent->right) x->parent->right = y;
+    else x->parent->left = y;
+    y->right = x;
+    x->parent = y;
+}
+
+static void insert_fixup(vm_free_block_t* z) {
+    while (z->parent && z->parent->color == RED) {
+        if (z->parent == z->parent->parent->left) {
+            vm_free_block_t* y = z->parent->parent->right;
+            if (y && y->color == RED) {
+                z->parent->color = BLACK;
+                y->color = BLACK;
+                z->parent->parent->color = RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->right) {
+                    z = z->parent;
+                    rotate_left(z);
+                }
+                z->parent->color = BLACK;
+                z->parent->parent->color = RED;
+                rotate_right(z->parent->parent);
+            }
+        } else {
+            vm_free_block_t* y = z->parent->parent->left;
+            if (y && y->color == RED) {
+                z->parent->color = BLACK;
+                y->color = BLACK;
+                z->parent->parent->color = RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->left) {
+                    z = z->parent;
+                    rotate_right(z);
+                }
+                z->parent->color = BLACK;
+                z->parent->parent->color = RED;
+                rotate_left(z->parent->parent);
+            }
+        }
+    }
+    root->color = BLACK;
+}
+
+static void rb_insert(vm_free_block_t* z) {
+    vm_free_block_t* y = 0;
+    vm_free_block_t* x = root;
+    while (x) {
+        y = x;
+        if (z->start < x->start) x = x->left;
+        else x = x->right;
+    }
+    z->parent = y;
+    if (!y) root = z;
+    else if (z->start < y->start) y->left = z;
+    else y->right = z;
+    
+    z->left = z->right = 0;
+    z->color = RED;
+    insert_fixup(z);
+}
+
+static void rb_transplant(vm_free_block_t* u, vm_free_block_t* v) {
+    if (!u->parent) root = v;
+    else if (u == u->parent->left) u->parent->left = v;
+    else u->parent->right = v;
+    if (v) v->parent = u->parent;
+}
+
+static vm_free_block_t* tree_minimum(vm_free_block_t* x) {
+    while (x->left) x = x->left;
+    return x;
+}
+
+static void delete_fixup(vm_free_block_t* x) {
+    while (x != root && x->color == BLACK) {
+        if (x == x->parent->left) {
+            vm_free_block_t* w = x->parent->right;
+            if (w->color == RED) {
+                w->color = BLACK;
+                x->parent->color = RED;
+                rotate_left(x->parent);
+                w = x->parent->right;
+            }
+            if ((!w->left || w->left->color == BLACK) && (!w->right || w->right->color == BLACK)) {
+                w->color = RED;
+                x = x->parent;
+            } else {
+                if (!w->right || w->right->color == BLACK) {
+                    if (w->left) w->left->color = BLACK;
+                    w->color = RED;
+                    rotate_right(w);
+                    w = x->parent->right;
+                }
+                w->color = x->parent->color;
+                x->parent->color = BLACK;
+                if (w->right) w->right->color = BLACK;
+                rotate_left(x->parent);
+                x = root;
+            }
+        } else {
+            vm_free_block_t* w = x->parent->left;
+            if (w->color == RED) {
+                w->color = BLACK;
+                x->parent->color = RED;
+                rotate_right(x->parent);
+                w = x->parent->left;
+            }
+            if ((!w->right || w->right->color == BLACK) && (!w->left || w->left->color == BLACK)) {
+                w->color = RED;
+                x = x->parent;
+            } else {
+                if (!w->left || w->left->color == BLACK) {
+                    if (w->right) w->right->color = BLACK;
+                    w->color = RED;
+                    rotate_left(w);
+                    w = x->parent->left;
+                }
+                w->color = x->parent->color;
+                x->parent->color = BLACK;
+                if (w->left) w->left->color = BLACK;
+                rotate_right(x->parent);
+                x = root;
+            }
+        }
+    }
+    x->color = BLACK;
+}
+
+static void rb_delete(vm_free_block_t* z) {
+    vm_free_block_t* y = z;
+    vm_free_block_t* x;
+    rb_color_t y_original_color = y->color;
+
+    if (!z->left) {
+        x = z->right;
+        rb_transplant(z, z->right);
+    } else if (!z->right) {
+        x = z->left;
+        rb_transplant(z, z->left);
+    } else {
+        y = tree_minimum(z->right);
+        y_original_color = y->color;
+        x = y->right;
+        if (y->parent == z) {
+            if (x) x->parent = y;
+        } else {
+            rb_transplant(y, y->right);
+            y->right = z->right;
+            if (y->right) y->right->parent = y;
+        }
+        rb_transplant(z, y);
+        y->left = z->left;
+        y->left->parent = y;
+        y->color = z->color;
+    }
+    if (y_original_color == BLACK && x) delete_fixup(x);
+    free_node(z);
 }
 
 void vmm_init(void) {
     spinlock_init(&vmm_lock);
-    memset(vmm_bitmap, 0, BITMAP_SIZE);
-    vmm_used_pages = 0;
+    memset(node_pool, 0, sizeof(node_pool));
+    root = 0;
+    vmm_used_pages_count = 0;
+
+    vm_free_block_t* initial_block = alloc_node();
+    initial_block->start = KERNEL_HEAP_START;
+    initial_block->size = KERNEL_HEAP_SIZE / PAGE_SIZE;
+    
+    rb_insert(initial_block);
 }
 
-static int vmm_find_free_range(size_t count) {
-    size_t total_pages = KERNEL_HEAP_SIZE / PAGE_SIZE;
-    size_t found = 0;
-    int start_bit = -1;
-
-    for (size_t i = 0; i < total_pages; i++) {
-        if (!test_bit(i)) {
-            if (found == 0) start_bit = i;
-            found++;
-            if (found == count) return start_bit;
-        } else {
-            found = 0;
-            start_bit = -1;
-        }
-    }
-    return -1;
+static vm_free_block_t* find_fit(vm_free_block_t* node, size_t pages) {
+    if (!node) return 0;
+    
+    if (node->size >= pages) return node;
+    
+    vm_free_block_t* l = find_fit(node->left, pages);
+    if (l) return l;
+    
+    return find_fit(node->right, pages);
 }
 
 void* vmm_alloc_pages(size_t pages) {
     if (pages == 0) return 0;
-
     uint32_t flags = spinlock_acquire_safe(&vmm_lock);
 
-    int start_bit = vmm_find_free_range(pages);
-    if (start_bit == -1) {
+    vm_free_block_t* node = find_fit(root, pages);
+    if (!node) {
         spinlock_release_safe(&vmm_lock, flags);
-        return 0;
-    }
-
-    for (size_t i = 0; i < pages; i++) {
-        set_bit(start_bit + i);
+        return 0; // OOM
     }
     
-    vmm_used_pages += pages;
+    uint32_t alloc_virt_addr = node->start + (node->size - pages) * PAGE_SIZE;
+    node->size -= pages;
 
-    uint32_t virt_start = KERNEL_HEAP_START + (start_bit * PAGE_SIZE);
+    if (node->size == 0) {
+        rb_delete(node);
+    }
 
     for (size_t i = 0; i < pages; i++) {
         void* phys = pmm_alloc_block();
@@ -75,39 +269,94 @@ void* vmm_alloc_pages(size_t pages) {
             spinlock_release_safe(&vmm_lock, flags);
             return 0;
         }
-        
-        uint32_t vaddr = virt_start + i * PAGE_SIZE;
-        paging_map(kernel_page_directory, vaddr, (uint32_t)phys, 3);
+        paging_map(kernel_page_directory, alloc_virt_addr + i * PAGE_SIZE, (uint32_t)phys, 3);
     }
 
+    vmm_used_pages_count += pages;
     spinlock_release_safe(&vmm_lock, flags);
-    return (void*)virt_start;
+    
+    return (void*)alloc_virt_addr;
+}
+
+static vm_free_block_t* find_predecessor(uint32_t addr) {
+    vm_free_block_t* current = root;
+    vm_free_block_t* best = 0;
+    
+    while (current) {
+        if (current->start < addr) {
+            best = current;
+            current = current->right;
+        } else {
+            current = current->left;
+        }
+    }
+    return best;
+}
+
+static vm_free_block_t* find_successor(uint32_t addr) {
+    vm_free_block_t* current = root;
+    vm_free_block_t* best = 0;
+    
+    while (current) {
+        if (current->start > addr) {
+            best = current;
+            current = current->left;
+        } else {
+            current = current->right;
+        }
+    }
+    return best;
 }
 
 void vmm_free_pages(void* virt, size_t pages) {
     if (!virt || pages == 0) return;
-
     uint32_t vaddr = (uint32_t)virt;
-    if (vaddr < KERNEL_HEAP_START || vaddr >= KERNEL_HEAP_START + KERNEL_HEAP_SIZE) return;
-
-    uint32_t start_bit = (vaddr - KERNEL_HEAP_START) / PAGE_SIZE;
     
     uint32_t flags = spinlock_acquire_safe(&vmm_lock);
 
     for (size_t i = 0; i < pages; i++) {
-        uint32_t curr_v = vaddr + i * PAGE_SIZE;
-        
-        uint32_t phys = paging_get_phys(kernel_page_directory, curr_v);
-        if (phys) {
-            pmm_free_block((void*)phys);
-        }
-
-        __asm__ volatile("invlpg (%0)" :: "r" (curr_v) : "memory");
-        clear_bit(start_bit + i);
+        uint32_t curr = vaddr + i * PAGE_SIZE;
+        uint32_t phys = paging_get_phys(kernel_page_directory, curr);
+        if (phys) pmm_free_block((void*)phys);
+        __asm__ volatile("invlpg (%0)" :: "r" (curr) : "memory");
     }
+    vmm_used_pages_count -= pages;
+
+    vm_free_block_t* prev = find_predecessor(vaddr);
+    vm_free_block_t* next = find_successor(vaddr);
     
-    if (vmm_used_pages >= pages) vmm_used_pages -= pages;
-    else vmm_used_pages = 0;
+    int merged_prev = 0;
+    int merged_next = 0;
+
+    if (prev && (prev->start + prev->size * PAGE_SIZE == vaddr)) {
+        prev->size += pages;
+        vaddr = prev->start;
+        pages = prev->size;
+        merged_prev = 1;
+    }
+
+    if (next && (vaddr + pages * PAGE_SIZE == next->start)) {
+        if (merged_prev) {
+            prev->size += next->size;
+            rb_delete(next);
+        } else {
+            size_t new_size = pages + next->size;
+            rb_delete(next);
+            
+            vm_free_block_t* new_node = alloc_node();
+            new_node->start = vaddr;
+            new_node->size = new_size;
+            rb_insert(new_node);
+        }
+        merged_next = 1;
+    }
+
+    if (!merged_prev && !merged_next) {
+        vm_free_block_t* new_node = alloc_node();
+        new_node->start = vaddr;
+        new_node->size = pages;
+        rb_insert(new_node);
+    }
 
     spinlock_release_safe(&vmm_lock, flags);
 }
@@ -118,5 +367,5 @@ int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
 }
 
 size_t vmm_get_used_pages(void) {
-    return vmm_used_pages;
+    return vmm_used_pages_count;
 }
