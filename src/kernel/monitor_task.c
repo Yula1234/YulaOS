@@ -3,6 +3,7 @@
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
+#include <mm/vmm.h>
 
 #include "monitor_task.h"
 #include "window.h"
@@ -103,7 +104,7 @@ static void monitor_draw_handler(window_t* self, int x, int y) {
     vga_print_at(itoa(f_blocks * 4), tx + 50, y + 74, C_TEXT_MAIN);
 
     draw_section_frame(x, y + 140, 270, 45, "KERNEL VIRTUAL HEAP");
-    uint32_t heap_committed = (heap_current_limit - HEAP_BASE_ADDR);
+    uint32_t heap_committed = vmm_get_used_pages() * PAGE_SIZE;
     
     vga_print_at("Committed:", x + 10, y + 152, C_TEXT_DIM);
     vga_print_at(itoa(heap_committed / 1024), x + 100, y + 152, C_ORANGE);

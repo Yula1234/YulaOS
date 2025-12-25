@@ -5,8 +5,8 @@
 #include <mm/pmm.h>
 
 #include "heap.h"
+#include "vmm.h"
 
-#define HEAP_START_ADDR 0xD0000000
 #define KMALLOC_MIN_SIZE 8
 #define KMALLOC_MAX_SIZE 2048
 
@@ -23,10 +23,6 @@ struct kmem_cache {
 #define KMALLOC_SHIFT_LOW  3
 #define KMALLOC_SHIFT_HIGH 11
 static kmem_cache_t kmalloc_caches[KMALLOC_SHIFT_HIGH - KMALLOC_SHIFT_LOW + 1];
-
-uint32_t heap_current_limit = HEAP_START_ADDR;
-
-static spinlock_t vmm_lock;
 
 static void slab_list_add(page_t** head, page_t* page) {
     page->next = *head;
@@ -48,27 +44,6 @@ static void slab_list_remove(page_t** head, page_t* page) {
     }
     page->next = NULL;
     page->prev = NULL;
-}
-
-static void* vmm_alloc_page(uint32_t flags) {
-    (void)flags;
-    uint32_t lock_flags = spinlock_acquire_safe(&vmm_lock);
-
-    void* phys = pmm_alloc_block();
-    if (!phys) {
-        spinlock_release_safe(&vmm_lock, lock_flags);
-        return 0; 
-    }
-
-    uint32_t virt = heap_current_limit;
-    heap_current_limit += PAGE_SIZE;
-
-    paging_map(kernel_page_directory, virt, (uint32_t)phys, 3);
-
-    spinlock_release_safe(&vmm_lock, lock_flags);
-    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
-
-    return (void*)virt;
 }
 
 static int slub_init_page(kmem_cache_t* cache, page_t* page, void* virt_addr) {
@@ -116,16 +91,14 @@ void* kmem_cache_alloc(kmem_cache_t* cache) {
     
     if (cache->partial) {
         page = cache->partial;
-        
         slab_list_remove(&cache->partial, page);
-        
         cache->cpu_slab = page;
         void* obj = slub_alloc_from_page(page);
         spinlock_release_safe(&cache->lock, flags);
         return obj;
     }
 
-    void* new_virt = vmm_alloc_page(0);
+    void* new_virt = vmm_alloc_pages(1);
     if (!new_virt) {
         spinlock_release_safe(&cache->lock, flags);
         return 0;
@@ -161,13 +134,19 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
     page->objects--;
     
     if (page == cache->cpu_slab) {
-       
+
     } else {
         uint32_t max_objs = PAGE_SIZE / cache->object_size;
         
         if (page->objects == 0) {
             slab_list_remove(&cache->partial, page);
-            slab_list_add(&cache->partial, page);
+            
+            uint32_t page_virt = virt & ~0xFFF;
+
+            spinlock_release_safe(&cache->lock, flags);
+            
+            vmm_free_pages((void*)page_virt, 1);
+            return;
             
         } else if (page->objects == max_objs - 1) {
             slab_list_add(&cache->partial, page);
@@ -186,13 +165,12 @@ static inline int get_cache_index(size_t size) {
 }
 
 void heap_init(void) {
-    spinlock_init(&vmm_lock);
+    vmm_init();
+
     size_t size = 8;
     for (int i = 0; i <= (KMALLOC_SHIFT_HIGH - KMALLOC_SHIFT_LOW); i++) {
         kmem_cache_t* c = &kmalloc_caches[i];
-        
         c->name[0] = 's'; c->name[1] = 0;
-        
         c->object_size = size;
         c->align = 0;
         c->flags = 0;
@@ -211,32 +189,25 @@ void* kmalloc(size_t size) {
     }
     
     uint32_t pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    uint32_t flags = spinlock_acquire_safe(&vmm_lock);
-    uint32_t virt_start = heap_current_limit;
     
-    for (uint32_t i = 0; i < pages_needed; i++) {
-        void* phys = pmm_alloc_block();
-        if (!phys) {
-            spinlock_release_safe(&vmm_lock, flags);
-            return 0;
-        }
-        paging_map(kernel_page_directory, heap_current_limit, (uint32_t)phys, 3);
-        
-        page_t* p = pmm_phys_to_page((uint32_t)phys);
+    void* ptr = vmm_alloc_pages(pages_needed);
+    if (!ptr) return 0;
+
+    uint32_t phys = paging_get_phys(kernel_page_directory, (uint32_t)ptr);
+    page_t* p = pmm_phys_to_page(phys);
+    if (p) {
         p->slab_cache = NULL; 
-        if (i == 0) p->objects = pages_needed; 
-        else p->objects = 0;
-        
-        heap_current_limit += PAGE_SIZE;
+        p->objects = pages_needed; 
     }
-    spinlock_release_safe(&vmm_lock, flags);
-    return (void*)virt_start;
+    
+    return ptr;
 }
 
 void kfree(void* ptr) {
     if (!ptr) return;
     uint32_t addr = (uint32_t)ptr;
-    if (addr < HEAP_START_ADDR) return;
+    
+    if (addr < KERNEL_HEAP_START || addr >= KERNEL_HEAP_START + KERNEL_HEAP_SIZE) return;
     
     uint32_t phys = paging_get_phys(kernel_page_directory, addr);
     if (!phys) return;
@@ -247,7 +218,11 @@ void kfree(void* ptr) {
     if (page->slab_cache) {
         kmem_cache_free((kmem_cache_t*)page->slab_cache, ptr);
     } else {
-        if (page->objects > 0) page->objects = 0; 
+        uint32_t pages_count = page->objects;
+        if (pages_count > 0) {
+            vmm_free_pages(ptr, pages_count);
+            page->objects = 0;
+        }
     }
 }
 
@@ -262,9 +237,7 @@ void* kmalloc_aligned(size_t size, uint32_t align) {
         if (size < align) size = align;
         return kmalloc(size);
     }
-    if (align > size) {
-        return kmalloc(align);
-    }
+    if (align > size) return kmalloc(align);
     return kmalloc(size);
 }
 
