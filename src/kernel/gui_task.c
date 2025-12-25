@@ -153,9 +153,6 @@ void gui_task(void* arg) {
                     ticks_per_100ms = ticks_passed / 10;
                 }
 
-                extern volatile uint32_t system_uptime_seconds;
-                system_uptime_seconds++;
-
                 last_tick_count = timer_ticks;
                 last_s = s;
             }
