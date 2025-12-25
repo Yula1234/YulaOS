@@ -1,4 +1,5 @@
 #include <lib/string.h>
+#include <hal/lock.h>
 
 #include <kernel/clipboard.h>
 #include <kernel/window.h>
@@ -50,6 +51,7 @@ typedef struct {
 typedef struct {
     term_instance_t* term;
     shell_history_t* hist;
+    spinlock_t lock;
 } shell_context_t;
 
 static char* itoa(uint32_t n) {
@@ -161,6 +163,8 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
     if (!ctx || !ctx->term) return;
     term_instance_t* term = ctx->term;
     if(!term) return;
+
+    uint32_t flags = spinlock_acquire_safe(&ctx->lock);
     
     int canvas_w = self->target_w - 12;
     int canvas_h = self->target_h - 44; 
@@ -212,6 +216,8 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
             vga_draw_rect(x + term->col * 8, y + rel_cursor_row * 16 + 12, 8, 2, 0x00FF00);
         }
     }
+
+    spinlock_release_safe(&ctx->lock, flags);
 }
 
 static void print_padded(term_instance_t* term, const char* text, int width, uint32_t color) {
@@ -414,10 +420,10 @@ static void shell_ps(term_instance_t* term) {
 
 void shell_task(void* arg) {
     (void)arg;
-    shell_context_t* ctx = kmalloc(sizeof(shell_context_t));
+    shell_context_t* ctx = kzalloc(sizeof(shell_context_t));
     if (!ctx) return;
-    term_instance_t* my_term = kmalloc(sizeof(term_instance_t));
-    shell_history_t* my_hist = kmalloc(sizeof(shell_history_t));
+    term_instance_t* my_term = kzalloc(sizeof(term_instance_t));
+    shell_history_t* my_hist = kzalloc(sizeof(shell_history_t));
     
     if (!my_term || !my_hist) {
         if(ctx) kfree(ctx);
@@ -425,6 +431,8 @@ void shell_task(void* arg) {
         if(my_hist) kfree(my_hist);
         return;
     }
+
+    spinlock_init(&ctx->lock);
 
     ctx->term = my_term; ctx->hist = my_hist;
     hist_init(my_hist);
@@ -434,7 +442,10 @@ void shell_task(void* arg) {
     for(int i=0; i<TERM_W * TERM_HISTORY; i++) {
         my_term->buffer[i] = ' '; my_term->fg_colors[i] = my_term->curr_fg; my_term->bg_colors[i] = my_term->curr_bg;
     }
-    my_term->col = 0; my_term->row = 0;
+    my_term->col = 0; 
+    my_term->row = 0;
+    my_term->view_row = 0;
+    my_term->max_row = 0;
 
     char line[LINE_MAX]; memset(line, 0, LINE_MAX);
     int line_len = 0; int cursor_pos = 0;
@@ -460,8 +471,16 @@ void shell_task(void* arg) {
         int bytes_read = vfs_read(kbd_fd, &c, 1);
 
         if (bytes_read > 0) {
+
+            uint32_t flags = spinlock_acquire_safe(&ctx->lock);
+
             if (c == '\n') {
+                
+                my_term->col = get_prompt_len(path) + line_len;
+                if (my_term->col >= TERM_W) my_term->col = TERM_W - 1;
+
                 term_putc(my_term, '\n');
+
                 line[line_len] = '\0';
                 hist_add(my_hist, line);
                 
@@ -547,11 +566,22 @@ void shell_task(void* arg) {
                             }
                         }
                     }
-                    my_term->curr_fg = C_TEXT; my_term->curr_bg = C_BG;
+                }
+
+                my_term->curr_fg = C_TEXT; 
+                my_term->curr_bg = C_BG;
+
+                if (my_term->col > 0) {
+                    term_putc(my_term, '\n');
                 }
                 
-                line_len = 0; cursor_pos = 0; memset(line, 0, LINE_MAX);
+                line_len = 0; 
+                cursor_pos = 0; 
+                memset(line, 0, LINE_MAX);
+                
                 print_prompt_text(my_term, path);
+                
+                win->is_dirty = 1;
             } 
             else if (c == 0x13) { 
                 const char* h_str = hist_get_prev(my_hist);
@@ -591,6 +621,7 @@ void shell_task(void* arg) {
                 line_len++; cursor_pos++; line[line_len] = 0;
                 refresh_line(my_term, path, line, cursor_pos);
             }
+            spinlock_release_safe(&ctx->lock, flags);
             win->is_dirty = 1;
         }
     }

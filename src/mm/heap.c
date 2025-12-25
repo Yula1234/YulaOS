@@ -1,143 +1,297 @@
 #include <arch/i386/paging.h>
-#include <drivers/vga.h>
 #include <lib/string.h>
 #include <hal/lock.h>
+#include <drivers/vga.h>
 #include <mm/pmm.h>
 
 #include "heap.h"
 
 #define HEAP_START_ADDR 0xD0000000
-#define PAGE_SIZE 4096
+#define KMALLOC_MIN_SIZE 8
+#define KMALLOC_MAX_SIZE 2048
 
-typedef struct heap_header {
-    size_t size;     
-    uint8_t is_free; 
-    struct heap_header* next;
-} heap_header_t;
+struct kmem_cache {
+    char name[16];
+    size_t object_size;
+    uint32_t align;
+    uint32_t flags;
+    spinlock_t lock;
+    page_t* cpu_slab;
+    page_t* partial;
+};
 
-static heap_header_t* head = 0;
+#define KMALLOC_SHIFT_LOW  3
+#define KMALLOC_SHIFT_HIGH 11
+static kmem_cache_t kmalloc_caches[KMALLOC_SHIFT_HIGH - KMALLOC_SHIFT_LOW + 1];
+
 uint32_t heap_current_limit = HEAP_START_ADDR;
-static spinlock_t heap_lock;
 
-static int heap_expand(size_t size_needed) {
-    size_t total_needed = size_needed + sizeof(heap_header_t);
-    size_t pages = (total_needed + PAGE_SIZE - 1) / PAGE_SIZE;
+static spinlock_t vmm_lock;
 
-    for (size_t i = 0; i < pages; i++) {
-        void* phys = pmm_alloc_block();
-        if (!phys) return 0;
-
-        paging_map(kernel_page_directory, heap_current_limit, (uint32_t)phys, 3);
-        heap_current_limit += PAGE_SIZE;
+static void slab_list_add(page_t** head, page_t* page) {
+    page->next = *head;
+    page->prev = NULL;
+    if (*head) {
+        (*head)->prev = page;
     }
+    *head = page;
+}
+
+static void slab_list_remove(page_t** head, page_t* page) {
+    if (page->prev) {
+        page->prev->next = page->next;
+    } else {
+        *head = page->next;
+    }
+    if (page->next) {
+        page->next->prev = page->prev;
+    }
+    page->next = NULL;
+    page->prev = NULL;
+}
+
+static void* vmm_alloc_page(uint32_t flags) {
+    (void)flags;
+    uint32_t lock_flags = spinlock_acquire_safe(&vmm_lock);
+
+    void* phys = pmm_alloc_block();
+    if (!phys) {
+        spinlock_release_safe(&vmm_lock, lock_flags);
+        return 0; 
+    }
+
+    uint32_t virt = heap_current_limit;
+    heap_current_limit += PAGE_SIZE;
+
+    paging_map(kernel_page_directory, virt, (uint32_t)phys, 3);
+
+    spinlock_release_safe(&vmm_lock, lock_flags);
+    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+
+    return (void*)virt;
+}
+
+static int slub_init_page(kmem_cache_t* cache, page_t* page, void* virt_addr) {
+    page->slab_cache = cache;
+    page->objects = 0;
+    
+    page->next = NULL;
+    page->prev = NULL;
+    
+    uint32_t obj_count = PAGE_SIZE / cache->object_size;
+    uint8_t* base = (uint8_t*)virt_addr;
+    void** prev_link = NULL;
+    
+    for (uint32_t i = 0; i < obj_count; i++) {
+        void** current_obj = (void**)(base + i * cache->object_size);
+        if (i == 0) page->freelist = current_obj;
+        else *prev_link = current_obj;
+        prev_link = current_obj;
+    }
+    if (prev_link) *prev_link = NULL;
     return 1;
 }
 
-void heap_init(void) {
-    spinlock_init(&heap_lock);
+static void* slub_alloc_from_page(page_t* page) {
+    void* obj = page->freelist;
+    if (!obj) return 0;
     
-    if (!heap_expand(PAGE_SIZE)) {
-        vga_print("Failed to initialize kernel heap!\n");
-        return;
+    page->freelist = *(void**)obj;
+    page->objects++;
+    
+    *(uint32_t*)obj = 0; 
+    return obj;
+}
+
+void* kmem_cache_alloc(kmem_cache_t* cache) {
+    uint32_t flags = spinlock_acquire_safe(&cache->lock);
+    
+    page_t* page = cache->cpu_slab;
+    
+    if (page && page->freelist) {
+        void* obj = slub_alloc_from_page(page);
+        spinlock_release_safe(&cache->lock, flags);
+        return obj;
+    }
+    
+    if (cache->partial) {
+        page = cache->partial;
+        
+        slab_list_remove(&cache->partial, page);
+        
+        cache->cpu_slab = page;
+        void* obj = slub_alloc_from_page(page);
+        spinlock_release_safe(&cache->lock, flags);
+        return obj;
     }
 
-    head = (heap_header_t*)HEAP_START_ADDR;
-    head->size = PAGE_SIZE - sizeof(heap_header_t);
-    head->is_free = 1;
-    head->next = 0;
+    void* new_virt = vmm_alloc_page(0);
+    if (!new_virt) {
+        spinlock_release_safe(&cache->lock, flags);
+        return 0;
+    }
+    
+    uint32_t phys = paging_get_phys(kernel_page_directory, (uint32_t)new_virt);
+    page = pmm_phys_to_page(phys);
+    
+    slub_init_page(cache, page, new_virt);
+    
+    cache->cpu_slab = page;
+    
+    void* obj = slub_alloc_from_page(page);
+    spinlock_release_safe(&cache->lock, flags);
+    return obj;
+}
+
+void kmem_cache_free(kmem_cache_t* cache, void* obj) {
+    if (!obj) return;
+    uint32_t flags = spinlock_acquire_safe(&cache->lock);
+    
+    uint32_t virt = (uint32_t)obj;
+    uint32_t phys = paging_get_phys(kernel_page_directory, virt);
+    page_t* page = pmm_phys_to_page(phys);
+    
+    if (!page || page->slab_cache != cache) {
+        spinlock_release_safe(&cache->lock, flags);
+        return;
+    }
+    
+    *(void**)obj = page->freelist;
+    page->freelist = obj;
+    page->objects--;
+    
+    if (page == cache->cpu_slab) {
+       
+    } else {
+        uint32_t max_objs = PAGE_SIZE / cache->object_size;
+        
+        if (page->objects == 0) {
+            slab_list_remove(&cache->partial, page);
+            slab_list_add(&cache->partial, page);
+            
+        } else if (page->objects == max_objs - 1) {
+            slab_list_add(&cache->partial, page);
+        }
+    }
+    
+    spinlock_release_safe(&cache->lock, flags);
+}
+
+static inline int get_cache_index(size_t size) {
+    if (size <= 8) return 0;
+    int idx = 0;
+    size_t s = 8;
+    while (s < size) { s <<= 1; idx++; }
+    return idx;
+}
+
+void heap_init(void) {
+    spinlock_init(&vmm_lock);
+    size_t size = 8;
+    for (int i = 0; i <= (KMALLOC_SHIFT_HIGH - KMALLOC_SHIFT_LOW); i++) {
+        kmem_cache_t* c = &kmalloc_caches[i];
+        
+        c->name[0] = 's'; c->name[1] = 0;
+        
+        c->object_size = size;
+        c->align = 0;
+        c->flags = 0;
+        c->cpu_slab = 0;
+        c->partial = 0;
+        spinlock_init(&c->lock);
+        size <<= 1;
+    }
 }
 
 void* kmalloc(size_t size) {
     if (size == 0) return 0;
+    if (size <= KMALLOC_MAX_SIZE) {
+        int idx = get_cache_index(size);
+        return kmem_cache_alloc(&kmalloc_caches[idx]);
+    }
     
-    uint32_t flags = spinlock_acquire_safe(&heap_lock);
-
-    size = (size + 3) & ~3;
-    heap_header_t* curr = head;
-    heap_header_t* last = 0;
-
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            if (curr->size > size + sizeof(heap_header_t) + 4) {
-                heap_header_t* split = (heap_header_t*)((uint8_t*)curr + sizeof(heap_header_t) + size);
-                split->is_free = 1;
-                split->size = curr->size - size - sizeof(heap_header_t);
-                split->next = curr->next;
-                
-                curr->size = size;
-                curr->next = split;
-            }
-            curr->is_free = 0;
-            spinlock_release_safe(&heap_lock, flags);
-            return (void*)((uint8_t*)curr + sizeof(heap_header_t));
+    uint32_t pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint32_t flags = spinlock_acquire_safe(&vmm_lock);
+    uint32_t virt_start = heap_current_limit;
+    
+    for (uint32_t i = 0; i < pages_needed; i++) {
+        void* phys = pmm_alloc_block();
+        if (!phys) {
+            spinlock_release_safe(&vmm_lock, flags);
+            return 0;
         }
-        last = curr;
-        curr = curr->next;
+        paging_map(kernel_page_directory, heap_current_limit, (uint32_t)phys, 3);
+        
+        page_t* p = pmm_phys_to_page((uint32_t)phys);
+        p->slab_cache = NULL; 
+        if (i == 0) p->objects = pages_needed; 
+        else p->objects = 0;
+        
+        heap_current_limit += PAGE_SIZE;
     }
-
-    uint32_t old_limit = heap_current_limit;
-    if (!heap_expand(size)) {
-        spinlock_release_safe(&heap_lock, flags);
-        vga_set_color(COLOR_WHITE, COLOR_RED);
-        vga_print("\n[KERNEL PANIC] Out Of Memory (Heap Expansion Failed)!\n");
-        __asm__ volatile("cli; hlt");
-        return 0;
-    }
-
-    heap_header_t* new_block = (heap_header_t*)old_limit;
-    new_block->size = (heap_current_limit - old_limit) - sizeof(heap_header_t);
-    new_block->is_free = 1;
-    new_block->next = 0;
-
-    if (last) last->next = new_block;
-
-    new_block->is_free = 0;
-    if (new_block->size > size + sizeof(heap_header_t) + 4) {
-        heap_header_t* split = (heap_header_t*)((uint8_t*)new_block + sizeof(heap_header_t) + size);
-        split->is_free = 1;
-        split->size = new_block->size - size - sizeof(heap_header_t);
-        split->next = 0;
-        new_block->size = size;
-        new_block->next = split;
-    }
-
-    spinlock_release_safe(&heap_lock, flags);
-    return (void*)((uint8_t*)new_block + sizeof(heap_header_t));
+    spinlock_release_safe(&vmm_lock, flags);
+    return (void*)virt_start;
 }
 
 void kfree(void* ptr) {
     if (!ptr) return;
-
     uint32_t addr = (uint32_t)ptr;
-    void* ptr_to_free = ptr;
-
-    if ((addr & 0xFFF) == 0) {
-        uint32_t raw_ptr = *((uint32_t*)(addr - 4));
-        if (raw_ptr >= HEAP_START_ADDR && raw_ptr < heap_current_limit) {
-            ptr_to_free = (void*)raw_ptr;
-        }
+    if (addr < HEAP_START_ADDR) return;
+    
+    uint32_t phys = paging_get_phys(kernel_page_directory, addr);
+    if (!phys) return;
+    
+    page_t* page = pmm_phys_to_page(phys);
+    if (!page) return;
+    
+    if (page->slab_cache) {
+        kmem_cache_free((kmem_cache_t*)page->slab_cache, ptr);
+    } else {
+        if (page->objects > 0) page->objects = 0; 
     }
-
-    uint32_t flags = spinlock_acquire_safe(&heap_lock);
-    heap_header_t* header = (heap_header_t*)((uint8_t*)ptr_to_free - sizeof(heap_header_t));
-    header->is_free = 1;
-
-    heap_header_t* curr = head;
-    while (curr && curr->next) {
-        if (curr->is_free && curr->next->is_free) {
-            curr->size += curr->next->size + sizeof(heap_header_t);
-            curr->next = curr->next->next;
-        } else {
-            curr = curr->next;
-        }
-    }
-    spinlock_release_safe(&heap_lock, flags);
 }
 
-void* kmalloc_a(size_t n) {
-    uint32_t raw_addr = (uint32_t)kmalloc(n + 4096 + 16);
-    if (!raw_addr) return 0;
-    uint32_t aligned_addr = (raw_addr + 4096) & ~0xFFF;
-    *((uint32_t*)(aligned_addr - 4)) = raw_addr;
-    return (void*)aligned_addr;
+void* kzalloc(size_t size) {
+    void* ptr = kmalloc(size);
+    if (ptr) memset(ptr, 0, size);
+    return ptr;
+}
+
+void* kmalloc_aligned(size_t size, uint32_t align) {
+    if (align >= 4096) {
+        if (size < align) size = align;
+        return kmalloc(size);
+    }
+    if (align > size) {
+        return kmalloc(align);
+    }
+    return kmalloc(size);
+}
+
+void* kmalloc_a(size_t size) {
+    return kmalloc_aligned(size, 4096);
+}
+
+void* krealloc(void* ptr, size_t new_size) {
+    if (!ptr) return kmalloc(new_size);
+    if (new_size == 0) { kfree(ptr); return 0; }
+    
+    uint32_t phys = paging_get_phys(kernel_page_directory, (uint32_t)ptr);
+    page_t* page = pmm_phys_to_page(phys);
+    
+    size_t old_size;
+    if (page->slab_cache) {
+        old_size = ((kmem_cache_t*)page->slab_cache)->object_size;
+    } else {
+        old_size = page->objects * PAGE_SIZE;
+    }
+    
+    if (new_size <= old_size) return ptr;
+    
+    void* new_ptr = kmalloc(new_size);
+    if (new_ptr) {
+        memcpy(new_ptr, ptr, old_size);
+        kfree(ptr);
+    }
+    return new_ptr;
 }

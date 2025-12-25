@@ -99,6 +99,8 @@ static void port_init(int port_no) {
         cmdheader[i].ctbau = 0;
     }
 
+    spinlock_init(&state->lock);
+
     start_cmd(port);
     state->port_mmio = (HBA_PORT*)port;
     state->active = 1;
@@ -188,31 +190,86 @@ void ahci_init(void) {
 
 static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write) {
     ahci_port_state_t* state = &ports[port_no];
+
+    uint32_t flags = spinlock_acquire_safe(&state->lock);
+
     volatile HBA_PORT* port = (volatile HBA_PORT*)state->port_mmio;
 
     port->is = (uint32_t)-1;
     
     int slot = find_cmdslot(port);
-    if (slot == -1) return 0;
+    if (slot == -1) {
+        return 0;
+        spinlock_release_safe(&state->lock, flags);
+    }
 
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
     cmdheader += slot;
+    
     cmdheader->cfl = sizeof(FIS_REG_H2D)/4;
     cmdheader->w   = is_write ? 1 : 0;
-    cmdheader->prdtl = 1;
+    
+    int use_bounce = 0;
+    uint8_t* dma_target = buf;
+    uint8_t* bounce_buffer = 0;
+    uint32_t addr = (uint32_t)buf;
+
+    if ((addr & 3) != 0 || ((addr & 0xFFFFF000) != ((addr + 512 - 1) & 0xFFFFF000))) {
+        use_bounce = 1;
+        
+        bounce_buffer = (uint8_t*)kmalloc(512); 
+        if (!bounce_buffer) {
+            vga_print("[AHCI] Critical: OOM for bounce buffer\n");
+            spinlock_release_safe(&state->lock, flags);
+            return 0;
+        }
+        dma_target = bounce_buffer;
+
+        if (is_write) {
+            memcpy(bounce_buffer, buf, 512);
+        }
+    }
 
     HBA_CMD_TBL* cmdtbl = (HBA_CMD_TBL*)(state->ctba_virt[slot]);
     memset(cmdtbl, 0, sizeof(HBA_CMD_TBL));
 
-    uint32_t buf_phys = paging_get_phys(kernel_page_directory, (uint32_t)buf);
+    int prdt_idx = 0;
+    uint32_t bytes_left = 512;
+    uint32_t virt_curr = (uint32_t)dma_target;
     
-    cmdtbl->prdt_entry[0].dba = buf_phys;
-    cmdtbl->prdt_entry[0].dbc = 512 - 1;
-    cmdtbl->prdt_entry[0].i   = 1;
+    while (bytes_left > 0) {
+        uint32_t phys_addr = paging_get_phys(kernel_page_directory, virt_curr);
+        
+        if (!phys_addr) {
+            if (use_bounce) kfree(bounce_buffer);
+            kernel_panic("AHCI DMA Fault: Page not mapped", "ahci.c", virt_curr, 0);
+            spinlock_release_safe(&state->lock, flags);
+            return 0;
+        }
+
+        uint32_t page_offset = virt_curr & 0xFFF;
+        uint32_t bytes_in_page = 4096 - page_offset;
+        
+        uint32_t chunk_size = (bytes_left < bytes_in_page) ? bytes_left : bytes_in_page;
+
+        cmdtbl->prdt_entry[prdt_idx].dba = phys_addr;
+        cmdtbl->prdt_entry[prdt_idx].dbc = chunk_size - 1;
+        cmdtbl->prdt_entry[prdt_idx].i   = 0;
+
+        virt_curr += chunk_size;
+        bytes_left -= chunk_size;
+        prdt_idx++;
+        
+        if (prdt_idx >= 8) break; 
+    }
+    
+    cmdheader->prdtl = prdt_idx;
+    cmdtbl->prdt_entry[prdt_idx - 1].i = 1;
+
 
     FIS_REG_H2D* cmdfis = (FIS_REG_H2D*)(&cmdtbl->cfis);
     cmdfis->fis_type = FIS_TYPE_REG_H2D;
-    cmdfis->c        = 1;
+    cmdfis->c        = 1; // Command bit
     cmdfis->command  = is_write ? 0x35 : 0x25; // DMA EXT Write / Read
     
     cmdfis->lba0     = (uint8_t)lba;
@@ -224,37 +281,57 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
     cmdfis->lba4     = 0;
     cmdfis->lba5     = 0;
     
-    cmdfis->countl   = 1;
+    cmdfis->countl   = 1; 
     cmdfis->counth   = 0;
 
-    // Wait for BSY and DRQ to clear
     int spin = 0;
-    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 1000000) {
+    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 10000000) {
         spin++;
-    }
-    if (spin == 1000000) {
-        kernel_panic("AHCI Port Hung (BUSY Timeout)", "ahci.c", port_no, 0);
-        return 0;
-    }
-
-    port->ci = 1 << slot; // Issue Command
-
-    // Wait for completion
-    int timeout = 1000000;
-    while (timeout--) {
-        if ((port->ci & (1 << slot)) == 0) break;
-        if (port->is & (1 << 30)) { // Task File Error
-             kernel_panic("AHCI Task File Error (Disk I/O)", "ahci.c", lba, 0);
-             return 0;
-        }
+        __asm__ volatile("pause"); 
     }
     
-    if (timeout <= 0) {
-        kernel_panic("AHCI Command Timeout (Disk not responding)", "ahci.c", lba, 0);
+    if (spin == 10000000) {
+        if (use_bounce) kfree(bounce_buffer);
+        vga_print("[AHCI] Error: Port Hung (BUSY timeout)\n");
+        spinlock_release_safe(&state->lock, flags);
         return 0;
     }
 
-    return 1;
+    port->ci = 1 << slot;
+
+    int timeout = 0;
+    int success = 0;
+    
+    while (1) {
+        if ((port->ci & (1 << slot)) == 0) {
+            success = 1;
+            break;
+        }
+        
+        if (port->is & (1 << 30)) { 
+             success = 0;
+             vga_print("[AHCI] I/O Disk Error\n");
+             break;
+        }
+        
+        if (timeout++ > 20000000) {
+            success = 0;
+            vga_print("[AHCI] I/O Timeout\n");
+            break;
+        }
+        __asm__ volatile("pause");
+    }
+
+    if (use_bounce) {
+        if (success && !is_write) {
+            memcpy(buf, bounce_buffer, 512);
+        }
+        kfree(bounce_buffer);
+    }
+
+    spinlock_release_safe(&state->lock, flags);
+
+    return success;
 }
 
 void ahci_read_sector(uint32_t lba, uint8_t* buf) {

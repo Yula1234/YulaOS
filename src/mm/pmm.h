@@ -23,6 +23,7 @@ typedef struct page {
     void* freelist;    
     uint16_t objects;  
 
+    struct page* prev;
     struct page* next;
 } page_t;
 

@@ -2,8 +2,7 @@
 #define DRIVERS_AHCI_H
 
 #include <stdint.h>
-
-// --- Hardware Structures (Defined by Intel AHCI Spec) ---
+#include <hal/lock.h>
 
 typedef enum {
     FIS_TYPE_REG_H2D    = 0x27,
@@ -110,8 +109,6 @@ typedef struct {
     uint8_t  rsv1[4];
 } __attribute__((packed)) FIS_REG_H2D;
 
-// --- Software Management Structures (No Hacks!) ---
-
 typedef struct {
     int active;
     HBA_PORT* port_mmio; // Pointer to MMIO (mapped virtual address)
@@ -121,6 +118,7 @@ typedef struct {
     void* clb_virt;         // Command List (Virtual)
     void* fb_virt;          // FIS (Virtual)
     void* ctba_virt[32];    // Command Tables (Virtual), one per slot
+    spinlock_t lock;
 } ahci_port_state_t;
 
 void ahci_init(void);

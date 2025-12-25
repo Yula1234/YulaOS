@@ -30,6 +30,17 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
     pt[pt_idx] = (phys & ~0xFFF) | flags;
 }
 
+static void paging_allocate_table(uint32_t virt) {
+    uint32_t pd_idx = virt >> 22;
+    if (!(kernel_page_directory[pd_idx] & 1)) {
+        void* new_pt_phys = pmm_alloc_block();
+        if (new_pt_phys) {
+            memset(new_pt_phys, 0, 4096);
+            kernel_page_directory[pd_idx] = ((uint32_t)new_pt_phys) | 7;
+        }
+    }
+}
+
 void paging_init() {
     for(int i = 0; i < 1024; i++) {
         page_dir[i] = 2;
@@ -42,6 +53,11 @@ void paging_init() {
     paging_map(page_dir, 0xFEE00000, 0xFEE00000, 3);
 
     kernel_page_directory = page_dir;
+
+    for (uint32_t addr = 0xD0000000; addr < 0xE0000000; addr += 0x400000) {
+        paging_allocate_table(addr);
+    }
+
     paging_switch(page_dir);
     enable_paging();
 }
