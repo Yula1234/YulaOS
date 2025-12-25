@@ -285,12 +285,12 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
     cmdfis->counth   = 0;
 
     int spin = 0;
-    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 10000000) {
+    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 100000000) {
         spin++;
         __asm__ volatile("pause"); 
     }
     
-    if (spin == 10000000) {
+    if (spin == 100000000) {
         if (use_bounce) kfree(bounce_buffer);
         vga_print("[AHCI] Error: Port Hung (BUSY timeout)\n");
         spinlock_release_safe(&state->lock, flags);
@@ -314,7 +314,7 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
              break;
         }
         
-        if (timeout++ > 20000000) {
+        if (timeout++ > 200000000) {
             success = 0;
             vga_print("[AHCI] I/O Timeout\n");
             break;
@@ -334,14 +334,16 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
     return success;
 }
 
-void ahci_read_sector(uint32_t lba, uint8_t* buf) {
+int ahci_read_sector(uint32_t lba, uint8_t* buf) {
     if (primary_port_idx != -1) {
-        ahci_send_command(primary_port_idx, lba, buf, 0);
+        return ahci_send_command(primary_port_idx, lba, buf, 0);
     }
+    return 0;
 }
 
-void ahci_write_sector(uint32_t lba, const uint8_t* buf) {
+int ahci_write_sector(uint32_t lba, const uint8_t* buf) {
     if (primary_port_idx != -1) {
         ahci_send_command(primary_port_idx, lba, (uint8_t*)buf, 1);
     }
+    return 0;
 }

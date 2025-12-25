@@ -34,6 +34,9 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
 
 #define MAX_TASKS 32
 
+#define MAP_SHARED  1
+#define MAP_PRIVATE 2
+
 void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti"); 
     uint32_t sys_num = regs->eax;
@@ -436,6 +439,48 @@ void syscall_handler(registers_t* regs) {
             }
             
             regs->eax = newfd;
+        }
+        break;
+
+        case 31: // mmap(fd, size, flags)
+        {
+            int fd = (int)regs->ebx;
+            uint32_t size = (uint32_t)regs->ecx;
+            int flags = (int)regs->edx;
+
+            if (!(flags & MAP_PRIVATE)) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (size == 0) { regs->eax = 0; break; }
+
+            if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used || !curr->fds[fd].node) {
+                regs->eax = 0; 
+                break;
+            }
+
+            uint32_t vaddr = curr->mmap_top;
+            
+            uint32_t size_aligned = (size + 4095) & ~4095;
+
+            mmap_area_t* area = kmalloc(sizeof(mmap_area_t));
+            if (!area) { regs->eax = 0; break; }
+
+            area->vaddr_start = vaddr;
+            area->vaddr_end = vaddr + size_aligned;
+            area->file_offset = 0;
+            area->length = size;
+            area->file = curr->fds[fd].node;
+            
+            area->file->refs++;
+
+            area->next = curr->mmap_list;
+            curr->mmap_list = area;
+
+            curr->mmap_top += size_aligned;
+
+            regs->eax = vaddr;
         }
         break;
 

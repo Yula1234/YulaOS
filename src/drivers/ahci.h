@@ -122,7 +122,7 @@ typedef struct {
 } ahci_port_state_t;
 
 void ahci_init(void);
-void ahci_read_sector(uint32_t lba, uint8_t* buf);
-void ahci_write_sector(uint32_t lba, const uint8_t* buf);
+int ahci_read_sector(uint32_t lba, uint8_t* buf);
+int ahci_write_sector(uint32_t lba, const uint8_t* buf);
 
 #endif

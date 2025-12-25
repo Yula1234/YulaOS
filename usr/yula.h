@@ -111,6 +111,10 @@ static inline int dup2(int oldfd, int newfd) {
     return syscall(30, oldfd, newfd, 0);
 }
 
+static inline void* mmap(int fd, uint32_t size, int flags) {
+    return (void*)syscall(31, fd, size, flags);
+}
+
 size_t strlen(const char* s);
 int strcmp(const char* s1, const char* s2);
 int strncmp(const char* s1, const char* s2, size_t n);

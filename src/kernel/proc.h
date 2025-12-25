@@ -23,6 +23,17 @@ typedef enum {
 
 typedef void (*sig_handler_t)(int);
 
+typedef struct mmap_area {
+    uint32_t vaddr_start;
+    uint32_t vaddr_end;
+    uint32_t file_offset;
+    uint32_t length;
+    
+    struct vfs_node* file;
+    
+    struct mmap_area* next;
+} mmap_area_t;
+
 typedef enum {
     PRIO_IDLE = 0,
     PRIO_LOW  = 5,
@@ -77,6 +88,9 @@ typedef struct task {
     uint32_t    ticks_left;
 
     uint8_t term_mode;
+
+    mmap_area_t* mmap_list;
+    uint32_t mmap_top;
   
 } task_t;
 

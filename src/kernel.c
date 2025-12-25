@@ -116,7 +116,6 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
         multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)mb_info->mmap_addr;
         
         while((uint32_t)mmap < mb_info->mmap_addr + mb_info->mmap_length) {
-            // Тип 1 = Доступная RAM
             if (mmap->type == 1) {
                 uint64_t end = mmap->addr + mmap->len;
                 if (end > memory_end_addr) {
@@ -172,6 +171,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     
     ahci_init();
     yulafs_init();
+    yulafs_lookup("/"); 
+
     kbd_vfs_init();
     console_init();
 

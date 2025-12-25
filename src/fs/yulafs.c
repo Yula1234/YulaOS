@@ -100,7 +100,7 @@ static void free_inode(yfs_ino_t ino) {
 
 /* --- Inode Management --- */
 
-static void sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
+static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     uint32_t per_block = YFS_BLOCK_SIZE / sizeof(yfs_inode_t);
     uint32_t block_idx = ino / per_block;
     uint32_t offset    = ino % per_block;
@@ -108,7 +108,7 @@ static void sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     yfs_blk_t lba = sb.inode_table_start + block_idx;
     uint8_t buf[YFS_BLOCK_SIZE];
     
-    ahci_read_sector(lba, buf);
+    if(!ahci_read_sector(lba, buf)) return 0;
     yfs_inode_t* table = (yfs_inode_t*)buf;
     
     if (write) {
@@ -117,6 +117,7 @@ static void sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     } else {
         memcpy(data, &table[offset], sizeof(yfs_inode_t));
     }
+    return 1;
 }
 
 static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc) {
@@ -391,7 +392,8 @@ void yulafs_init(void) {
 
 int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     if (!fs_mounted) return -1;
-    yfs_inode_t node; sync_inode(ino, &node, 0);
+    yfs_inode_t node;
+    if(!sync_inode(ino, &node, 0)) return -1;
 
     if (offset >= node.size) return 0;
     if (offset + size > node.size) size = node.size - offset;
@@ -404,7 +406,9 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
         uint32_t blk_off = (offset + read) % YFS_BLOCK_SIZE;
         uint32_t phys_blk = resolve_block(&node, log_blk, 0);
 
-        if (phys_blk) ahci_read_sector(phys_blk, scratch);
+        if (phys_blk) {
+            if(!ahci_read_sector(phys_blk, scratch)) return -1;
+        }
         else memset(scratch, 0, YFS_BLOCK_SIZE);
 
         uint32_t copy = YFS_BLOCK_SIZE - blk_off;

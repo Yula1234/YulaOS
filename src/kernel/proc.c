@@ -108,6 +108,15 @@ void proc_free_resources(task_t* t) {
             f->node = 0;
         }
     }
+
+    mmap_area_t* m = t->mmap_list;
+    while (m) {
+        mmap_area_t* next = m->next;
+        if (m->file && m->file->refs > 0) m->file->refs--; 
+        kfree(m);
+        m = next;
+    }
+    t->mmap_list = 0;
     
     if (t->page_dir && t->page_dir != kernel_page_directory) {
         for (int i = 0; i < 1024; i++) {
@@ -357,6 +366,9 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     t->stack_bottom = ustack_bottom;
     t->stack_top = ustack_top_limit;
+
+    t->mmap_list = 0;
+    t->mmap_top = 0x80001000; 
 
     for (int i = 1; i <= 4; i++) {
         uint32_t addr = ustack_top_limit - i * 4096;
