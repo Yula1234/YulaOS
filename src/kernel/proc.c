@@ -255,13 +255,46 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     return t;
 }
 
-task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
-    int inode_idx = yulafs_lookup(filename);
-    if (inode_idx == -1) return 0;
+static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, uint32_t size, uint32_t file_size, uint32_t offset) {
+    mmap_area_t* area = kmalloc(sizeof(mmap_area_t));
+    if (!area) return;
 
-    elf_header_t header;
-    if (yulafs_read(inode_idx, &header, 0, sizeof(elf_header_t)) < (int)sizeof(elf_header_t)) return 0;
-    if (header.magic != ELF_MAGIC) return 0;
+    uint32_t aligned_vaddr = vaddr & ~0xFFF;
+    
+    uint32_t diff = vaddr - aligned_vaddr;
+    
+    uint32_t aligned_offset = offset - diff;
+    
+    uint32_t aligned_size = (size + diff + 4095) & ~4095;
+
+    area->vaddr_start = aligned_vaddr;
+    area->vaddr_end   = aligned_vaddr + aligned_size;
+    area->file_offset = aligned_offset;
+    area->length      = size;
+    area->file_size   = file_size;
+    area->file        = node;
+    
+    node->refs++;
+
+    area->next = t->mmap_list;
+    t->mmap_list = area;
+}
+
+task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
+    vfs_node_t* exec_node = vfs_create_node_from_path(filename);
+    if (!exec_node) return 0;
+
+    Elf32_Ehdr header;
+
+    if (exec_node->ops->read(exec_node, 0, sizeof(Elf32_Ehdr), &header) < (int)sizeof(Elf32_Ehdr)) {
+        kfree(exec_node);
+        return 0;
+    }
+    
+    if (header.e_ident[0] != 0x7F || header.e_ident[1] != 'E') {
+        kfree(exec_node);
+        return 0;
+    }
 
     char** k_argv = (char**)kmalloc((argc + 1) * sizeof(char*));
     if (!k_argv) return 0;
@@ -311,6 +344,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     t->kstack_size = KSTACK_SIZE;
     t->kstack = kmalloc_a(t->kstack_size);
     if (!t->kstack) {
+        kfree(exec_node);
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         kfree(k_argv);
         proc_free_resources(t);
@@ -319,46 +353,44 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     memset(t->kstack, 0, t->kstack_size);
 
     t->page_dir = paging_clone_directory();
-
-    elf_phdr_t* phdrs = (elf_phdr_t*)kmalloc(header.phnum * sizeof(elf_phdr_t));
-    yulafs_read(inode_idx, phdrs, header.phoff, header.phnum * sizeof(elf_phdr_t));
-
-    uint32_t max_vaddr = 0;
     
     uint32_t* my_pd = paging_get_dir();
 
-    for (int i = 0; i < header.phnum; i++) {
-        if (phdrs[i].type == 1) { // PT_LOAD
-            uint32_t start_v = phdrs[i].vaddr;
-            uint32_t end_v   = phdrs[i].vaddr + phdrs[i].memsz;
+    t->mmap_list = 0;
+    t->mmap_top = 0x80001000;
+
+    Elf32_Phdr* phdrs = (Elf32_Phdr*)kmalloc(header.e_phnum * sizeof(Elf32_Phdr));
+    exec_node->ops->read(exec_node, header.e_phoff, header.e_phnum * sizeof(Elf32_Phdr), phdrs);
+
+    uint32_t max_vaddr = 0;
+
+    for (int i = 0; i < header.e_phnum; i++) {
+        if (phdrs[i].p_type == 1) {
+            uint32_t start_v = phdrs[i].p_vaddr;
+            uint32_t mem_sz  = phdrs[i].p_memsz;
+            uint32_t file_off= phdrs[i].p_offset;
+            uint32_t file_sz = phdrs[i].p_filesz;
+            
+            proc_add_mmap_region(t, exec_node, start_v, mem_sz, file_sz, file_off);
+            
+            uint32_t end_v = start_v + mem_sz;
             if (end_v > max_vaddr) max_vaddr = end_v;
-
-            for (uint32_t v = (start_v & ~0xFFF); v < ((end_v + 0xFFF) & ~0xFFF); v += 4096) {
-                if (!paging_is_user_accessible(t->page_dir, v)) {
-                    void* phys = pmm_alloc_block();
-                    if (phys) {
-                        paging_map(t->page_dir, v, (uint32_t)phys, 7); // User, RW, Present
-                        t->mem_pages++;
-                    }
-                }
-            }
-            void* k_buf = kmalloc(phdrs[i].memsz);
-            memset(k_buf, 0, phdrs[i].memsz);
-            yulafs_read(inode_idx, k_buf, phdrs[i].offset, phdrs[i].filesz);
-
-            __asm__ volatile("cli");
-            paging_switch(t->page_dir);
-            
-            memcpy((void*)start_v, k_buf, phdrs[i].memsz);
-            
-            paging_switch(my_pd);
-            __asm__ volatile("sti");
-
-            kfree(k_buf);
         }
     }
-    t->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
+    
     kfree(phdrs);
+
+    uint32_t start_pde_idx = 0x08000000 >> 22;
+    uint32_t end_pde_idx   = (max_vaddr - 1) >> 22;
+
+    for (uint32_t i = start_pde_idx; i <= end_pde_idx; i++) {
+        t->page_dir[i] = 0;
+    }
+    
+    t->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
+    t->heap_start = t->prog_break;
+    
+    if (t->mmap_top < t->prog_break) t->mmap_top = t->prog_break + 0x100000;
 
     uint32_t stack_size = 4 * 1024 * 1024; 
     uint32_t ustack_top_limit = 0xB0400000;
@@ -366,9 +398,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     t->stack_bottom = ustack_bottom;
     t->stack_top = ustack_top_limit;
-
-    t->mmap_list = 0;
-    t->mmap_top = 0x80001000; 
 
     for (int i = 1; i <= 4; i++) {
         uint32_t addr = ustack_top_limit - i * 4096;
@@ -420,7 +449,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     *--ksp = final_user_esp;   // ESP
     *--ksp = 0x202;            // EFLAGS (Interrupts enabled)
     *--ksp = 0x1B;             // CS (User Code)
-    *--ksp = header.entry;     // EIP (Entry point)
+    *--ksp = header.e_entry;     // EIP (Entry point)
     
     *--ksp = (uint32_t)irq_return; 
     

@@ -37,5 +37,6 @@ int vfs_close(int fd);
 
 void devfs_register(vfs_node_t* node);
 vfs_node_t* devfs_fetch(const char* name);
+vfs_node_t* vfs_create_node_from_path(const char* path);
 
 #endif

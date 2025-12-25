@@ -28,6 +28,7 @@ typedef struct mmap_area {
     uint32_t vaddr_end;
     uint32_t file_offset;
     uint32_t length;
+    uint32_t file_size; 
     
     struct vfs_node* file;
     
@@ -60,6 +61,7 @@ typedef struct task {
     int is_blocked_on_kbd;
 
     uint32_t prog_break;
+    uint32_t heap_start;
     
     uint32_t* esp;
     uint32_t* page_dir;

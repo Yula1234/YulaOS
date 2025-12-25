@@ -154,3 +154,24 @@ int vfs_close(int fd) {
     f->used = 0;
     return 0;
 }
+
+vfs_node_t* vfs_create_node_from_path(const char* path) {
+    int inode = yulafs_lookup(path);
+    if (inode == -1) return 0;
+
+    vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (!node) return 0;
+
+    memset(node, 0, sizeof(vfs_node_t));
+    node->inode_idx = inode;
+    node->ops = &yfs_vfs_ops;
+    
+    yfs_inode_t info;
+    if (yulafs_stat(inode, &info) == 0) {
+        node->size = info.size;
+    }
+    strlcpy(node->name, path, sizeof(node->name));
+    
+    node->refs = 0;
+    return node;
+}

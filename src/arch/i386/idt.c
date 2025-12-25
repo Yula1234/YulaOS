@@ -185,18 +185,23 @@ void isr_handler(registers_t* regs) {
                                 uint32_t offset_in_vma = vaddr_page - m->vaddr_start;
                                 uint32_t file_pos = m->file_offset + offset_in_vma;
                                 
-                                if (m->file->ops && m->file->ops->read) {
-                                    __asm__ volatile("sti");
-                                    
-                                    int res = m->file->ops->read(m->file, file_pos, 4096, (void*)phys_page);
-                                    
-                                    __asm__ volatile("cli"); 
+                                memset(phys_page, 0, 4096);
 
-                                    if (res < 0) {
-                                        kernel_panic("[PF] Mmap Read Error! Killing process.\n", "idt.c", regs->int_no, regs);
-                                        proc_kill(curr);
-                                        sched_yield();
-                                        return;
+                                if (m->file->ops && m->file->ops->read) {
+                                    uint32_t offset_in_vma = vaddr_page - m->vaddr_start;
+                                    
+                                    if (offset_in_vma < m->file_size) {
+                                        
+                                        uint32_t bytes_to_read = m->file_size - offset_in_vma;
+                                        if (bytes_to_read > 4096) bytes_to_read = 4096;
+
+                                        __asm__ volatile("sti");
+                                        int res = m->file->ops->read(m->file, file_pos, bytes_to_read, (void*)phys_page);
+                                        __asm__ volatile("cli");
+                                        
+                                        if (res < 0) {
+                                            kernel_panic("PF] Mmap error, cant read\n", "idt.c", regs->int_no, regs);
+                                        }
                                     }
                                 }
 
@@ -211,6 +216,30 @@ void isr_handler(registers_t* regs) {
                             break; 
                         }
                         m = m->next;
+                    }
+                }
+
+                if (!handled && !(regs->err_code & 1) && curr) {
+                    if (cr2 >= curr->heap_start && cr2 < curr->prog_break) {
+                        
+                        void* new_page = pmm_alloc_block();
+                        if (new_page) {
+                            uint32_t vaddr = cr2 & ~0xFFF;
+                            
+                            paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
+                            curr->mem_pages++;
+                            
+                            memset(new_page, 0, 4096);
+                            
+                            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                            
+                            handled = 1;
+                        } else {
+                            vga_print("[PF] Heap OOM!\n");
+                            proc_kill(curr);
+                            sched_yield();
+                            return;
+                        }
                     }
                 }
 

@@ -3,35 +3,40 @@
 
 #include <stdint.h>
 
-#define ELF_MAGIC 0x464C457F // "\x7FELF" Little Endian
+typedef uint32_t Elf32_Addr;
+typedef uint16_t Elf32_Half;
+typedef uint32_t Elf32_Off;
+typedef int32_t  Elf32_Sword;
+typedef uint32_t Elf32_Word;
+
+#define EI_NIDENT 16
 
 typedef struct {
-    uint32_t magic;
-    uint8_t  elf[12];
-    uint16_t type;
-    uint16_t machine;
-    uint32_t version;
-    uint32_t entry;  
-    uint32_t phoff; 
-    uint32_t shoff;
-    uint32_t flags;
-    uint16_t ehsize;
-    uint16_t phentsize;
-    uint16_t phnum;
-    uint16_t shentsize;
-    uint16_t shnum;
-    uint16_t shstrndx;
-} __attribute__((packed)) elf_header_t;
+    unsigned char e_ident[EI_NIDENT]; 
+    Elf32_Half    e_type;             
+    Elf32_Half    e_machine;          
+    Elf32_Word    e_version;          
+    Elf32_Addr    e_entry;            
+    Elf32_Off     e_phoff;            
+    Elf32_Off     e_shoff;            
+    Elf32_Word    e_flags;            
+    Elf32_Half    e_ehsize;           
+    Elf32_Half    e_phentsize;        
+    Elf32_Half    e_phnum;            
+    Elf32_Half    e_shentsize;        
+    Elf32_Half    e_shnum;            
+    Elf32_Half    e_shstrndx;         
+} __attribute__((packed)) Elf32_Ehdr;
 
 typedef struct {
-    uint32_t type;     // PT_LOAD (1)
-    uint32_t offset; 
-    uint32_t vaddr; 
-    uint32_t paddr;
-    uint32_t filesz; 
-    uint32_t memsz;
-    uint32_t flags;
-    uint32_t align;
-} __attribute__((packed)) elf_phdr_t;
+    Elf32_Word    p_type;        
+    Elf32_Off     p_offset;      
+    Elf32_Addr    p_vaddr;       
+    Elf32_Addr    p_paddr;       
+    Elf32_Word    p_filesz;      
+    Elf32_Word    p_memsz;       
+    Elf32_Word    p_flags;       
+    Elf32_Word    p_align;       
+} __attribute__((packed)) Elf32_Phdr;
 
 #endif

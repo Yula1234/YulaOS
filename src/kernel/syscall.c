@@ -21,17 +21,25 @@ extern volatile uint32_t timer_ticks;
 extern uint32_t* paging_get_dir(void); 
 
 static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
-    extern uint32_t page_dir[]; 
-    if (task->page_dir == (uint32_t*)page_dir || task->page_dir == 0) return 1;
-
     uint32_t start = (uint32_t)buf;
     uint32_t end = start + size;
+
+    if (end > 0xC0000000) return 0; 
     
-    if (!paging_is_user_accessible(task->page_dir, start)) return 0;
-    if (!paging_is_user_accessible(task->page_dir, end - 1)) return 0;
+    if (size == 0) return 1;
+    
+    volatile char* p = (volatile char*)buf;
+    
+    volatile char touch;
+    
+    touch = p[0];       
+    touch = p[size - 1];
+    
+    (void)touch;
+    (void)task;
+
     return 1;
 }
-
 #define MAX_TASKS 32
 
 #define MAP_SHARED  1
@@ -113,20 +121,28 @@ void syscall_handler(registers_t* regs) {
             uint32_t old_brk = curr->prog_break;
             uint32_t new_brk = old_brk + incr;
 
-            if (new_brk >= 0xC0000000) { regs->eax = -1; break; }
+            if (new_brk >= 0x80000000) { 
+                regs->eax = -1; 
+                break; 
+            }
+            
+            if (new_brk < curr->heap_start) {
+                regs->eax = -1;
+                break;
+            }
 
-            if (incr > 0) {
-                uint32_t page_start = (old_brk + 0xFFF) & ~0xFFF;
-                uint32_t page_end   = (new_brk + 0xFFF) & ~0xFFF;
-
-                for (uint32_t v = page_start; v < page_end; v += 4096) {
-                    if (!paging_is_user_accessible(curr->page_dir, v)) {
-                        void* phys = pmm_alloc_block();
-                        if (!phys) { regs->eax = -1; return; }
-                        paging_map(curr->page_dir, v, (uint32_t)phys, 7);
-                        curr->mem_pages++;
+            if (incr < 0) {
+                uint32_t start_free = (new_brk + 0xFFF) & ~0xFFF;
+                uint32_t end_free   = (old_brk + 0xFFF) & ~0xFFF;
+                
+                // Освобождаем страницы, которые стали не нужны
+                for (uint32_t v = start_free; v < end_free; v += 4096) {
+                    if (paging_is_user_accessible(curr->page_dir, v)) {
+                        uint32_t phys = paging_get_phys(curr->page_dir, v);
+                        pmm_free_block((void*)phys);
                     }
                 }
+
                 __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
             }
             
@@ -472,6 +488,7 @@ void syscall_handler(registers_t* regs) {
             area->file_offset = 0;
             area->length = size;
             area->file = curr->fds[fd].node;
+            area->file_size = size;
             
             area->file->refs++;
 
