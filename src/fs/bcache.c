@@ -89,6 +89,7 @@ int bcache_write(uint32_t lba, const uint8_t* buf) {
     memcpy(cache[idx].data, buf, BLOCK_SIZE);
     cache[idx].dirty = 1;
     cache[idx].last_access = access_counter;
+    flush_slot(idx);
     spinlock_release_safe(&cache_lock, flags);
     return 1;
 }

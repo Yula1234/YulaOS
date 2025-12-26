@@ -122,10 +122,12 @@ void keyboard_irq_handler(registers_t* regs) {
         }
 
         if (target_task) {
-            if (target_task->term_mode == 1) {
+            if (target_task->term_mode == 0) {
                 send_key_to_focused(0x03); 
-            } 
-            else {
+                return;
+            }
+
+            if (target_task->term_mode == 1) {
                 if (target_task->wait_for_pid > 0) {
                     int child_pid = target_task->wait_for_pid;
                      for (uint32_t i = 0; i < proc_task_count(); i++) {
@@ -142,7 +144,8 @@ void keyboard_irq_handler(registers_t* regs) {
                     if (target_task->state == TASK_WAITING) target_task->state = TASK_RUNNABLE;
                 }
                 proc_wake_up_kbd_waiters();
-            }
+                send_key_to_focused(0x03); 
+            } 
         }
         return;
     }
