@@ -2,6 +2,7 @@
 #include <drivers/vga.h>
 #include <lib/string.h>
 #include <mm/heap.h>
+#include <kernel/sched.h>
 
 #include "ahci.h"
 #include "pci.h"
@@ -365,8 +366,9 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
 
     port->ci = 1 << slot;
 
-    int timeout = 0;
     int success = 0;
+
+    spinlock_release_safe(&state->lock, flags);
     
     while (1) {
         if ((port->ci & (1 << slot)) == 0) {
@@ -380,12 +382,7 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
              break;
         }
         
-        if (timeout++ > 200000000) {
-            success = 0;
-            vga_print("[AHCI] I/O Timeout\n");
-            break;
-        }
-        __asm__ volatile("pause");
+        sched_yield();
     }
 
     if (use_bounce) {
@@ -394,8 +391,6 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
         }
         kfree(bounce_buffer);
     }
-
-    spinlock_release_safe(&state->lock, flags);
 
     return success;
 }

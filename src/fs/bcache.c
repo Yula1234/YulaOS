@@ -2,6 +2,7 @@
 #include "../drivers/ahci.h"
 #include "../lib/string.h"
 #include "../hal/lock.h"
+#include "../kernel/sched.h"
 
 #define BCACHE_SIZE     2048    // 1MB cache (2048 * 512)
 #define BLOCK_SIZE      512
@@ -94,9 +95,22 @@ int bcache_write(uint32_t lba, const uint8_t* buf) {
 }
 
 void bcache_sync(void) {
-    uint32_t flags = spinlock_acquire_safe(&cache_lock);
-    for (int i = 0; i < BCACHE_SIZE; i++) flush_slot(i);
-    spinlock_release_safe(&cache_lock, flags);
+    for (int i = 0; i < BCACHE_SIZE; i++) {
+        uint32_t flags = spinlock_acquire_safe(&cache_lock);
+        
+        if (cache[i].valid && cache[i].dirty) {
+            uint32_t lba = cache[i].lba;
+            uint8_t temp_buf[BLOCK_SIZE];
+            memcpy(temp_buf, cache[i].data, BLOCK_SIZE);
+            
+            ahci_write_sector(lba, cache[i].data);
+            cache[i].dirty = 0;
+        }
+        
+        spinlock_release_safe(&cache_lock, flags);
+    
+        if (i % 10 == 0) sched_yield(); 
+    }
 }
 
 void bcache_flush_block(uint32_t lba) {

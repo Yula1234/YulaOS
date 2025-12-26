@@ -545,7 +545,7 @@ int main(int argc, char** argv) {
             render_ui();
             update_window(win_id);
         }
-        usleep(2000);
+        usleep(4000);
     }
     
     free(ed.data);
