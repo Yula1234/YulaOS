@@ -108,7 +108,6 @@ void syscall_handler(registers_t* regs) {
         case 7: // sleep(ms)
         {
             uint32_t ms = regs->ebx;
-            // 1 мс теперь это 15 тиков (при 15000 Гц)
             curr->wake_tick = timer_ticks + (ms * 15); 
             curr->state = TASK_WAITING;
             sched_yield();
@@ -135,7 +134,6 @@ void syscall_handler(registers_t* regs) {
                 uint32_t start_free = (new_brk + 0xFFF) & ~0xFFF;
                 uint32_t end_free   = (old_brk + 0xFFF) & ~0xFFF;
                 
-                // Освобождаем страницы, которые стали не нужны
                 for (uint32_t v = start_free; v < end_free; v += 4096) {
                     if (paging_is_user_accessible(curr->page_dir, v)) {
                         uint32_t phys = paging_get_phys(curr->page_dir, v);

@@ -7,15 +7,13 @@ extern uint32_t  fb_width;
 extern uint32_t  fb_height;
 extern uint32_t  fb_pitch;
 
-// Прямая функция рисования символа (на случай если vga.c сломан)
 static void panic_putc(int x, int y, char c) {
     if ((uint8_t)c > 127) return;
     const uint8_t* glyph = font8x16_basic[(uint8_t)c];
     for (int i = 0; i < 16; i++) {
         for (int j = 0; j < 8; j++) {
             if (glyph[i] & (1 << (7 - j))) {
-                // Пишем прямо в видеопамять
-                fb_ptr[(y + i) * fb_width + (x + j)] = 0xFFFFFFFF; // Белый текст
+                fb_ptr[(y + i) * fb_width + (x + j)] = 0xFFFFFFFF;
             }
         }
     }
@@ -36,22 +34,18 @@ static void panic_print_hex(int x, int y, uint32_t val) {
         buf[9 - i] = hex[val & 0xF];
         val >>= 4;
     }
-    buf[10] = 0; // Null terminator
+    buf[10] = 0; 
     panic_print(x, y, buf);
 }
 
-// Глобальная функция паники
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs) {
-    __asm__ volatile("cli"); // Выключаем прерывания НАВСЕГДА
+    __asm__ volatile("cli");
 
-    // 1. Заливаем экран синим цветом (BSOD)
-    // Используем простой цикл, никаких memset/SSE, чтобы точно сработало
     uint32_t total_pixels = fb_width * fb_height;
     for (uint32_t i = 0; i < total_pixels; i++) {
-        fb_ptr[i] = 0xFF000088; // Dark Blue
+        fb_ptr[i] = 0xFF000088;
     }
 
-    // 2. Выводим информацию
     int y = 50;
     panic_print(50, y, "!!! YULAOS KERNEL PANIC !!!"); y += 30;
     
@@ -82,7 +76,7 @@ void kernel_panic(const char* message, const char* file, uint32_t line, register
         panic_print(50, y, "EIP: "); panic_print_hex(90, y, regs->eip);
         panic_print(200, y, "EFLAGS: "); panic_print_hex(280, y, regs->eflags);
         
-        if (regs->int_no == 14) { // Page Fault
+        if (regs->int_no == 14) {
             uint32_t cr2;
             __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
             y += 30;
@@ -91,7 +85,6 @@ void kernel_panic(const char* message, const char* file, uint32_t line, register
         }
     }
 
-    // Вечный стоп
     while(1) {
         __asm__ volatile("hlt");
     }
