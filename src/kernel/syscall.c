@@ -501,6 +501,120 @@ void syscall_handler(registers_t* regs) {
         }
         break;
 
+        case 32: // munmap(addr, length)
+        {
+            uint32_t vaddr = regs->ebx;
+            uint32_t len = regs->ecx;
+            
+            if (vaddr & 0xFFF) { regs->eax = -1; break; } 
+            if (len == 0) { regs->eax = -1; break; }
+            if (vaddr + len < vaddr) { regs->eax = -1; break; } // Overflow
+
+            uint32_t aligned_len = (len + 4095) & ~4095;
+            uint32_t vaddr_end = vaddr + aligned_len;
+
+            for (uint32_t i = 0; i < aligned_len; i += 4096) {
+                uint32_t curr_v = vaddr + i;
+                
+                if (paging_is_user_accessible(curr->page_dir, curr_v)) {
+                    uint32_t phys = paging_get_phys(curr->page_dir, curr_v);
+                    
+                    if (phys) {
+                        pmm_free_block((void*)phys);
+                        if (curr->mem_pages > 0) curr->mem_pages--;
+                    }
+
+                    paging_map(curr->page_dir, curr_v, 0, 0); // Unmap PTE
+                    __asm__ volatile("invlpg (%0)" :: "r"(curr_v) : "memory");
+                }
+            }
+
+            mmap_area_t* prev = 0;
+            mmap_area_t* m = curr->mmap_list;
+
+            while (m) {
+                mmap_area_t* next_node = m->next;
+
+                uint32_t u_start = vaddr;
+                uint32_t u_end   = vaddr_end;
+                uint32_t m_start = m->vaddr_start;
+                uint32_t m_end   = m->vaddr_end;
+
+                if (u_end <= m_start || u_start >= m_end) {
+                    prev = m;
+                    m = next_node;
+                    continue;
+                }
+
+                if (u_start <= m_start && u_end >= m_end) {
+                    if (prev) prev->next = next_node;
+                    else curr->mmap_list = next_node;
+
+                    if (m->file) m->file->refs--;
+                    kfree(m);
+                    
+                    m = next_node;
+                    continue;
+                }
+
+                if (u_start > m_start && u_end < m_end) {
+                    mmap_area_t* new_right = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
+                    if (!new_right) {
+                        regs->eax = -1; 
+                        break; 
+                    }
+
+                    new_right->vaddr_start = u_end;
+                    new_right->vaddr_end   = m_end;
+                    new_right->length      = m_end - u_end;
+                    new_right->file        = m->file;
+                    new_right->file_size   = m->file_size;
+                    
+                    if (m->file) {
+                        new_right->file_offset = m->file_offset + (u_end - m_start);
+                        m->file->refs++;
+                    } else {
+                        new_right->file_offset = 0;
+                    }
+
+                    new_right->next = m->next;
+                    m->next = new_right;
+
+                    m->vaddr_end = u_start;
+                    m->length    = u_start - m_start;
+                    
+                    prev = new_right; 
+                    m = new_right->next;
+                    continue;
+                }
+
+                if (u_start <= m_start && u_end < m_end) {
+                    uint32_t cut_len = u_end - m_start;
+                    m->vaddr_start = u_end;
+                    m->length -= cut_len;
+                    m->file_offset += cut_len;
+                    
+                    prev = m;
+                    m = next_node;
+                    continue;
+                }
+
+                if (u_start > m_start && u_end >= m_end) {
+                    m->vaddr_end = u_start;
+                    m->length = u_start - m_start;
+                    
+                    prev = m;
+                    m = next_node;
+                    continue;
+                }
+                
+                prev = m;
+                m = next_node;
+            }
+            regs->eax = 0;
+        }
+        break;
+
 
         default:
             vga_print("Unknown syscall\n");

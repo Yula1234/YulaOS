@@ -117,6 +117,10 @@ static inline void* mmap(int fd, uint32_t size, int flags) {
     return (void*)syscall(31, fd, size, flags);
 }
 
+static inline int munmap(void* addr, uint32_t length) {
+    return syscall(32, (int)addr, length, 0);
+}
+
 size_t strlen(const char* s);
 int strcmp(const char* s1, const char* s2);
 int strncmp(const char* s1, const char* s2, size_t n);
