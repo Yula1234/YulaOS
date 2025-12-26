@@ -32,15 +32,37 @@ static void kbd_put_char(char c) {
 }
 
 static void send_key_to_focused(char code) {
-    kbd_put_char(code);
-
+    task_t* focused_task = 0;
+    
     if (focused_window_pid > 0) {
+        for (uint32_t i = 0; i < proc_task_count(); i++) {
+            task_t* t = proc_task_at(i);
+            if (t && (int)t->pid == focused_window_pid) {
+                focused_task = t;
+                break;
+            }
+        }
+        
         for(int i=0; i<MAX_WINDOWS; i++) {
             if (window_list[i].is_active && window_list[i].owner_pid == focused_window_pid) {
                 window_push_event(&window_list[i], YULA_EVENT_KEY_DOWN, code, 0, 0);
-                return;
+                break; 
             }
         }
+    }
+    
+    int should_write_to_buffer = 0;
+    
+    if (!focused_task) {
+        should_write_to_buffer = 1;
+    } else {
+        if (focused_task->term_mode == 1) {
+            should_write_to_buffer = 1;
+        }
+    }
+
+    if (should_write_to_buffer) {
+        kbd_put_char(code);
     }
 }
 

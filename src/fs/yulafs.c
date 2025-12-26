@@ -589,3 +589,15 @@ void yulafs_resize(yfs_ino_t ino, uint32_t new_size) {
     node.size = new_size;
     sync_inode(ino, &node, 1);
 }
+
+void yulafs_get_filesystem_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
+    if (fs_mounted) {
+        *total_blocks = sb.total_blocks;
+        *free_blocks = sb.free_blocks;
+        *block_size = sb.block_size;
+    } else {
+        *total_blocks = 0;
+        *free_blocks = 0;
+        *block_size = 0;
+    }
+}

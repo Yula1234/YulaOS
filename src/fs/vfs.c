@@ -47,20 +47,21 @@ int vfs_open(const char* path, int flags) {
 
     vfs_node_t* node = 0;
 
-    const char* internal_path = path;
-    if (internal_path[0] == '/') internal_path++;
-
-    if (strncmp(internal_path, "dev/", 4) == 0) {
-        vfs_node_t* dev = devfs_fetch(internal_path + 4);
+    const char* target_path = path;
+    
+    if (path[0] == '/' && path[1] != '\0') {
+        target_path++; 
+    }
+    
+    if (strncmp(target_path, "dev/", 4) == 0) {
+        vfs_node_t* dev = devfs_fetch(target_path + 4);
         if (dev) {
             node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-            if (node) {
-                memcpy(node, dev, sizeof(vfs_node_t));
-            }
+            if (node) memcpy(node, dev, sizeof(vfs_node_t));
         }
     } 
     else {
-        int inode = yulafs_lookup(path);
+        int inode = yulafs_lookup(path); 
         
         if (inode == -1 && flags == 1) {
             inode = yulafs_create(path);

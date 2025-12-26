@@ -132,4 +132,23 @@ void* memset(void* dst, int v, uint32_t n);
 void* memcpy(void* dest, const void* src, uint32_t n);
 int atoi(const char* str);
 
+typedef struct {
+    uint32_t type; // 1=FILE, 2=DIR
+    uint32_t size;
+} __attribute__((packed)) stat_t;
+
+typedef struct {
+    uint32_t total_blocks;
+    uint32_t free_blocks;
+    uint32_t block_size;
+} __attribute__((packed)) fs_info_t;
+
+static inline int stat(const char* path, stat_t* buf) {
+    return syscall(33, (int)path, (int)buf, 0);
+}
+
+static inline int get_fs_info(fs_info_t* buf) {
+    return syscall(34, (int)buf, 0, 0);
+}
+
 #endif

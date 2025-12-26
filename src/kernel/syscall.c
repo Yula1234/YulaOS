@@ -45,6 +45,17 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
 #define MAP_SHARED  1
 #define MAP_PRIVATE 2
 
+typedef struct {
+    uint32_t type;  // 1=FILE, 2=DIR
+    uint32_t size;
+} __attribute__((packed)) user_stat_t;
+
+typedef struct {
+    uint32_t total_blocks;
+    uint32_t free_blocks;
+    uint32_t block_size;
+} __attribute__((packed)) user_fs_info_t;
+
 void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti"); 
     uint32_t sys_num = regs->eax;
@@ -304,7 +315,7 @@ void syscall_handler(registers_t* regs) {
                 uint32_t offset = i * 4096;
                 uint32_t phys = paging_get_phys(kernel_page_directory, kern_vaddr + offset);
                 if (phys) {
-                    paging_map(curr->page_dir, user_vaddr_start + offset, phys, 7); 
+                    paging_map(curr->page_dir, user_vaddr_start + offset, phys, 0x207); 
                     curr->mem_pages++;
                 }
             }
@@ -609,6 +620,55 @@ void syscall_handler(registers_t* regs) {
                 prev = m;
                 m = next_node;
             }
+            regs->eax = 0;
+        }
+        break;
+
+        case 33: // stat(const char* path, stat_t* buf)
+        {
+            char* path = (char*)regs->ebx;
+            user_stat_t* u_stat = (user_stat_t*)regs->ecx;
+            
+            if (!check_user_buffer(curr, path, 1) || !check_user_buffer(curr, u_stat, sizeof(user_stat_t))) {
+                regs->eax = -1;
+                break;
+            }
+
+            int inode_idx = yulafs_lookup(path);
+            if (inode_idx < 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            yfs_inode_t k_inode;
+            if (yulafs_stat(inode_idx, &k_inode) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            u_stat->type = k_inode.type;
+            u_stat->size = k_inode.size;
+            
+            regs->eax = 0;
+        }
+        break;
+
+        case 34: // get_fs_info(fs_info_t* buf)
+        {
+            user_fs_info_t* u_info = (user_fs_info_t*)regs->ebx;
+
+            if (!check_user_buffer(curr, u_info, sizeof(user_fs_info_t))) {
+                regs->eax = -1;
+                break;
+            }
+
+            uint32_t t, f, b;
+            yulafs_get_filesystem_info(&t, &f, &b);
+
+            u_info->total_blocks = t;
+            u_info->free_blocks = f;
+            u_info->block_size = b;
+
             regs->eax = 0;
         }
         break;

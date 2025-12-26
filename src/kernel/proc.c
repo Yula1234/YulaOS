@@ -133,9 +133,15 @@ void proc_free_resources(task_t* t) {
                 
                 for (int j = 0; j < 1024; j++) {
                     uint32_t pte = pt[j];
-                    if ((pte & 1) && (pte & 4)) {
-                        void* physical_page = (void*)(pte & ~0xFFF);
-                        pmm_free_block(physical_page);
+                    
+                    if ((pte & 1)) {
+                        if (pte & 0x200) {
+                            pt[j] = 0;
+                        } 
+                        else if (pte & 4) {
+                            void* physical_page = (void*)(pte & ~0xFFF);
+                            pmm_free_block(physical_page);
+                        }
                     }
                 }
                 pmm_free_block(pt);

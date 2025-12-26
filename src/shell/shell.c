@@ -437,6 +437,7 @@ void shell_task(void* arg) {
     ctx->term = my_term; ctx->hist = my_hist;
     hist_init(my_hist);
     proc_current()->terminal = my_term;
+    proc_current()->term_mode = 1;
     memset(my_term->buffer, ' ', TERM_W * TERM_H);
     my_term->curr_fg = C_TEXT; my_term->curr_bg = C_BG;
     for(int i=0; i<TERM_W * TERM_HISTORY; i++) {
