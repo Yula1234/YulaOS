@@ -1,32 +1,31 @@
 #include "yulafs.h"
-#include "../drivers/ahci.h"
+#include "bcache.h" 
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../kernel/proc.h"
 #include "../drivers/vga.h"
 
-/* --- Globals & Helpers --- */
-
 static yfs_superblock_t sb;
 static int fs_mounted = 0;
+
+#define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4) // 128
 
 static inline void set_bit(uint8_t* map, int i) { map[i/8] |= (1 << (i%8)); }
 static inline void clr_bit(uint8_t* map, int i) { map[i/8] &= ~(1 << (i%8)); }
 static inline int  chk_bit(uint8_t* map, int i) { return (map[i/8] & (1 << (i%8))); }
 
-/* --- Low Level Storage Access --- */
+extern uint32_t ahci_get_capacity(void);
 
 static void flush_sb(void) {
-    ahci_write_sector(10, (uint8_t*)&sb);
+    bcache_write(10, (uint8_t*)&sb);
+    bcache_flush_block(10);
 }
 
 static void zero_block(yfs_blk_t lba) {
     uint8_t zeroes[YFS_BLOCK_SIZE];
     memset(zeroes, 0, YFS_BLOCK_SIZE);
-    ahci_write_sector(lba, zeroes);
+    bcache_write(lba, zeroes);
 }
-
-/* --- Bitmap Allocator --- */
 
 static yfs_blk_t alloc_block(void) {
     if (sb.free_blocks == 0) return 0;
@@ -35,11 +34,11 @@ static yfs_blk_t alloc_block(void) {
     uint32_t sectors = (sb.total_blocks + 4095) / 4096;
 
     for (uint32_t i = 0; i < sectors; i++) {
-        ahci_read_sector(sb.map_block_start + i, buf);
+        bcache_read(sb.map_block_start + i, buf);
         for (int j = 0; j < YFS_BLOCK_SIZE * 8; j++) {
             if (!chk_bit(buf, j)) {
                 set_bit(buf, j);
-                ahci_write_sector(sb.map_block_start + i, buf);
+                bcache_write(sb.map_block_start + i, buf);
                 
                 sb.free_blocks--;
                 flush_sb();
@@ -61,11 +60,11 @@ static void free_block(yfs_blk_t lba) {
     uint32_t bit    = idx % (YFS_BLOCK_SIZE * 8);
 
     uint8_t buf[YFS_BLOCK_SIZE];
-    ahci_read_sector(sb.map_block_start + sector, buf);
+    bcache_read(sb.map_block_start + sector, buf);
     
     if (chk_bit(buf, bit)) {
         clr_bit(buf, bit);
-        ahci_write_sector(sb.map_block_start + sector, buf);
+        bcache_write(sb.map_block_start + sector, buf);
         sb.free_blocks++;
         flush_sb();
     }
@@ -75,12 +74,12 @@ static yfs_ino_t alloc_inode(void) {
     if (sb.free_inodes == 0) return 0;
 
     uint8_t buf[YFS_BLOCK_SIZE];
-    ahci_read_sector(sb.map_inode_start, buf);
+    bcache_read(sb.map_inode_start, buf);
 
     for (yfs_ino_t i = 1; i < sb.total_inodes; i++) {
         if (!chk_bit(buf, i)) {
             set_bit(buf, i);
-            ahci_write_sector(sb.map_inode_start, buf);
+            bcache_write(sb.map_inode_start, buf);
             sb.free_inodes--;
             flush_sb();
             return i;
@@ -91,14 +90,12 @@ static yfs_ino_t alloc_inode(void) {
 
 static void free_inode(yfs_ino_t ino) {
     uint8_t buf[YFS_BLOCK_SIZE];
-    ahci_read_sector(sb.map_inode_start, buf);
+    bcache_read(sb.map_inode_start, buf);
     clr_bit(buf, ino);
-    ahci_write_sector(sb.map_inode_start, buf);
+    bcache_write(sb.map_inode_start, buf);
     sb.free_inodes++;
     flush_sb();
 }
-
-/* --- Inode Management --- */
 
 static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     uint32_t per_block = YFS_BLOCK_SIZE / sizeof(yfs_inode_t);
@@ -108,12 +105,12 @@ static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     yfs_blk_t lba = sb.inode_table_start + block_idx;
     uint8_t buf[YFS_BLOCK_SIZE];
     
-    if(!ahci_read_sector(lba, buf)) return 0;
+    if(!bcache_read(lba, buf)) return 0;
     yfs_inode_t* table = (yfs_inode_t*)buf;
     
     if (write) {
         memcpy(&table[offset], data, sizeof(yfs_inode_t));
-        ahci_write_sector(lba, buf);
+        bcache_write(lba, buf);
     } else {
         memcpy(data, &table[offset], sizeof(yfs_inode_t));
     }
@@ -130,51 +127,91 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
     }
     file_block -= YFS_DIRECT_PTRS;
 
-    if (file_block < YFS_PTRS_PER_BLOCK) {
+    if (file_block < PTRS_PER_BLOCK) {
         if (node->indirect == 0) {
             if (!alloc) return 0;
             node->indirect = alloc_block();
         }
-        
-        yfs_blk_t table[YFS_PTRS_PER_BLOCK];
-        ahci_read_sector(node->indirect, (uint8_t*)table);
+        yfs_blk_t table[PTRS_PER_BLOCK];
+        bcache_read(node->indirect, (uint8_t*)table);
         
         if (table[file_block] == 0) {
             if (!alloc) return 0;
             table[file_block] = alloc_block();
-            ahci_write_sector(node->indirect, (uint8_t*)table);
+            bcache_write(node->indirect, (uint8_t*)table);
         }
         return table[file_block];
     }
-    file_block -= YFS_PTRS_PER_BLOCK;
+    file_block -= PTRS_PER_BLOCK;
 
-    if (file_block < (YFS_PTRS_PER_BLOCK * YFS_PTRS_PER_BLOCK)) {
+    if (file_block < (PTRS_PER_BLOCK * PTRS_PER_BLOCK)) {
         if (node->doubly_indirect == 0) {
             if (!alloc) return 0;
             node->doubly_indirect = alloc_block();
         }
 
-        yfs_blk_t l1_table[YFS_PTRS_PER_BLOCK];
-        ahci_read_sector(node->doubly_indirect, (uint8_t*)l1_table);
+        yfs_blk_t l1[PTRS_PER_BLOCK];
+        bcache_read(node->doubly_indirect, (uint8_t*)l1);
 
-        uint32_t l1_idx = file_block / YFS_PTRS_PER_BLOCK;
-        uint32_t l2_idx = file_block % YFS_PTRS_PER_BLOCK;
+        uint32_t l1_idx = file_block / PTRS_PER_BLOCK;
+        uint32_t l2_idx = file_block % PTRS_PER_BLOCK;
 
-        if (l1_table[l1_idx] == 0) {
+        if (l1[l1_idx] == 0) {
             if (!alloc) return 0;
-            l1_table[l1_idx] = alloc_block();
-            ahci_write_sector(node->doubly_indirect, (uint8_t*)l1_table);
+            l1[l1_idx] = alloc_block();
+            bcache_write(node->doubly_indirect, (uint8_t*)l1);
         }
 
-        yfs_blk_t l2_table[YFS_PTRS_PER_BLOCK];
-        ahci_read_sector(l1_table[l1_idx], (uint8_t*)l2_table);
+        yfs_blk_t l2[PTRS_PER_BLOCK];
+        bcache_read(l1[l1_idx], (uint8_t*)l2);
 
-        if (l2_table[l2_idx] == 0) {
+        if (l2[l2_idx] == 0) {
             if (!alloc) return 0;
-            l2_table[l2_idx] = alloc_block();
-            ahci_write_sector(l1_table[l1_idx], (uint8_t*)l2_table);
+            l2[l2_idx] = alloc_block();
+            bcache_write(l1[l1_idx], (uint8_t*)l2);
         }
-        return l2_table[l2_idx];
+        return l2[l2_idx];
+    }
+    file_block -= (PTRS_PER_BLOCK * PTRS_PER_BLOCK);
+
+    if (file_block < (PTRS_PER_BLOCK * PTRS_PER_BLOCK * PTRS_PER_BLOCK)) {
+        if (node->triply_indirect == 0) {
+            if (!alloc) return 0;
+            node->triply_indirect = alloc_block();
+        }
+
+        yfs_blk_t l1[PTRS_PER_BLOCK];
+        bcache_read(node->triply_indirect, (uint8_t*)l1);
+
+        uint32_t ptrs_sq = PTRS_PER_BLOCK * PTRS_PER_BLOCK;
+        uint32_t i1 = file_block / ptrs_sq;
+        uint32_t rem = file_block % ptrs_sq;
+        uint32_t i2 = rem / PTRS_PER_BLOCK;
+        uint32_t i3 = rem % PTRS_PER_BLOCK;
+
+        if (l1[i1] == 0) {
+            if (!alloc) return 0;
+            l1[i1] = alloc_block();
+            bcache_write(node->triply_indirect, (uint8_t*)l1);
+        }
+
+        yfs_blk_t l2[PTRS_PER_BLOCK];
+        bcache_read(l1[i1], (uint8_t*)l2);
+        if (l2[i2] == 0) {
+            if (!alloc) return 0;
+            l2[i2] = alloc_block();
+            bcache_write(l1[i1], (uint8_t*)l2);
+        }
+
+        yfs_blk_t l3[PTRS_PER_BLOCK];
+        bcache_read(l2[i2], (uint8_t*)l3);
+        if (l3[i3] == 0) {
+            if (!alloc) return 0;
+            l3[i3] = alloc_block();
+            bcache_write(l2[i2], (uint8_t*)l3);
+        }
+        
+        return l3[i3];
     }
 
     return 0;
@@ -184,9 +221,9 @@ static void free_indir_level(yfs_blk_t block, int level) {
     if (block == 0) return;
     
     if (level > 0) {
-        yfs_blk_t table[YFS_PTRS_PER_BLOCK];
-        ahci_read_sector(block, (uint8_t*)table);
-        for (uint32_t i = 0; i < YFS_PTRS_PER_BLOCK; i++) {
+        yfs_blk_t table[PTRS_PER_BLOCK];
+        bcache_read(block, (uint8_t*)table);
+        for (uint32_t i = 0; i < PTRS_PER_BLOCK; i++) {
             if (table[i]) free_indir_level(table[i], level - 1);
         }
     }
@@ -206,6 +243,10 @@ static void truncate_inode(yfs_inode_t* node) {
         free_indir_level(node->doubly_indirect, 2);
         node->doubly_indirect = 0;
     }
+    if (node->triply_indirect) {
+        free_indir_level(node->triply_indirect, 3);
+        node->triply_indirect = 0;
+    }
     node->size = 0;
 }
 
@@ -219,7 +260,7 @@ static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
         yfs_blk_t lba = resolve_block(dir, i, 0);
         if (!lba) continue;
         
-        ahci_read_sector(lba, (uint8_t*)entries);
+        bcache_read(lba, (uint8_t*)entries);
         for (uint32_t j = 0; j < count; j++) {
             if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
                 return entries[j].inode;
@@ -241,13 +282,13 @@ static int dir_link(yfs_ino_t dir_ino, yfs_ino_t child_ino, const char* name) {
         yfs_blk_t lba = resolve_block(&dir, blk_idx, 1);
         if (!lba) return -1;
 
-        ahci_read_sector(lba, (uint8_t*)entries);
+        bcache_read(lba, (uint8_t*)entries);
         
         for (uint32_t i = 0; i < count; i++) {
             if (entries[i].inode == 0) {
                 entries[i].inode = child_ino;
                 strlcpy(entries[i].name, name, YFS_NAME_MAX);
-                ahci_write_sector(lba, (uint8_t*)entries);
+                bcache_write(lba, (uint8_t*)entries);
                 
                 uint32_t min_size = (blk_idx + 1) * YFS_BLOCK_SIZE;
                 if (dir.size < min_size) {
@@ -273,21 +314,18 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
         yfs_blk_t lba = resolve_block(&dir, i, 0);
         if (!lba) continue;
 
-        ahci_read_sector(lba, (uint8_t*)entries);
+        bcache_read(lba, (uint8_t*)entries);
         for (uint32_t j = 0; j < count; j++) {
             if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
                 yfs_ino_t child_id = entries[j].inode;
                 yfs_inode_t child;
                 sync_inode(child_id, &child, 0);
 
-                if (child.type == YFS_TYPE_DIR) {
-                }
-
                 truncate_inode(&child);
                 free_inode(child_id);
 
                 entries[j].inode = 0;
-                ahci_write_sector(lba, (uint8_t*)entries);
+                bcache_write(lba, (uint8_t*)entries);
                 return 0;
             }
         }
@@ -338,7 +376,13 @@ void yulafs_format(uint32_t disk_sectors) {
     sb.version = YFS_VERSION;
     sb.block_size = YFS_BLOCK_SIZE;
     sb.total_blocks = disk_sectors;
-    sb.total_inodes = 4096;
+    
+    sb.total_inodes = disk_sectors / 32;
+    uint32_t inodes_per_block = YFS_BLOCK_SIZE / sizeof(yfs_inode_t);
+    if (sb.total_inodes % inodes_per_block != 0) {
+        sb.total_inodes += inodes_per_block - (sb.total_inodes % inodes_per_block);
+    }
+    if (sb.total_inodes < 128) sb.total_inodes = 128;
 
     uint32_t sec_per_map = (sb.total_blocks + 4095) / 4096;
     uint32_t sec_per_imap = (sb.total_inodes + 4095) / 4096;
@@ -353,13 +397,14 @@ void yulafs_format(uint32_t disk_sectors) {
     sb.free_blocks = sb.total_blocks - sb.data_start;
 
     uint8_t zero[512] = {0};
-    ahci_write_sector(sb.map_inode_start, zero);
-    ahci_write_sector(sb.map_block_start, zero);
+    for(uint32_t i=0; i<sec_per_imap; i++) bcache_write(sb.map_inode_start + i, zero);
+    for(uint32_t i=0; i<sec_per_map; i++) bcache_write(sb.map_block_start + i, zero);
+    for(uint32_t i=0; i<sec_inodes; i++) bcache_write(sb.inode_table_start + i, zero);
 
     uint8_t map[512] = {0};
     set_bit(map, 0);
     set_bit(map, 1);
-    ahci_write_sector(sb.map_inode_start, map);
+    bcache_write(sb.map_inode_start, map);
     sb.free_inodes -= 2;
 
     yfs_inode_t root; memset(&root, 0, sizeof(root));
@@ -371,20 +416,39 @@ void yulafs_format(uint32_t disk_sectors) {
     yfs_dirent_t dots[2]; memset(dots, 0, sizeof(dots));
     dots[0].inode = 1; strlcpy(dots[0].name, ".", YFS_NAME_MAX);
     dots[1].inode = 1; strlcpy(dots[1].name, "..", YFS_NAME_MAX);
-    ahci_write_sector(root.direct[0], (uint8_t*)dots);
+    bcache_write(root.direct[0], (uint8_t*)dots);
 
     sync_inode(1, &root, 1);
     flush_sb();
+    
+    bcache_sync();
+    
     fs_mounted = 1;
+
+    yulafs_mkdir("/bin");
+    yulafs_mkdir("/home");
+    yulafs_mkdir("/dev");
+    
+    bcache_sync();
 }
 
 void yulafs_init(void) {
+    bcache_init();
+    
     uint8_t buf[YFS_BLOCK_SIZE];
-    ahci_read_sector(10, buf);
-    memcpy(&sb, buf, sizeof(sb));
+    if (!bcache_read(10, buf)) {
+    } else {
+        memcpy(&sb, buf, sizeof(sb));
+    }
 
     if (sb.magic != YFS_MAGIC) {
-        yulafs_format(20480); 
+        uint32_t capacity = ahci_get_capacity();
+        
+        if (capacity == 0) {
+            capacity = 131072; // 64 MB
+        }
+        
+        yulafs_format(capacity); 
     } else {
         fs_mounted = 1;
     }
@@ -407,7 +471,8 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
         uint32_t phys_blk = resolve_block(&node, log_blk, 0);
 
         if (phys_blk) {
-            if(!ahci_read_sector(phys_blk, scratch)) return -1;
+            // bcache speedup here!
+            if(!bcache_read(phys_blk, scratch)) return -1;
         }
         else memset(scratch, 0, YFS_BLOCK_SIZE);
 
@@ -436,14 +501,14 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
         if (!phys_blk) break; 
         
         if (blk_off > 0 || (size - written) < YFS_BLOCK_SIZE) {
-            ahci_read_sector(phys_blk, scratch);
+            bcache_read(phys_blk, scratch);
         }
 
         uint32_t copy = YFS_BLOCK_SIZE - blk_off;
         if (copy > size - written) copy = size - written;
 
         memcpy(scratch + blk_off, (uint8_t*)buf + written, copy);
-        ahci_write_sector(phys_blk, scratch);
+        bcache_write(phys_blk, scratch);
         
         written += copy;
         dirty = 1;
@@ -480,16 +545,10 @@ int yulafs_create_obj(const char* path, int type) {
         
         uint8_t buf[YFS_BLOCK_SIZE];
         memset(buf, 0, YFS_BLOCK_SIZE);
-        
         yfs_dirent_t* dots = (yfs_dirent_t*)buf;
-        
-        dots[0].inode = new_ino; 
-        strlcpy(dots[0].name, ".", YFS_NAME_MAX);
-        
-        dots[1].inode = dir_ino; 
-        strlcpy(dots[1].name, "..", YFS_NAME_MAX);
-        
-        ahci_write_sector(obj.direct[0], buf);
+        dots[0].inode = new_ino; strlcpy(dots[0].name, ".", YFS_NAME_MAX);
+        dots[1].inode = dir_ino; strlcpy(dots[1].name, "..", YFS_NAME_MAX);
+        bcache_write(obj.direct[0], buf);
     }
 
     sync_inode(new_ino, &obj, 1);
@@ -509,24 +568,17 @@ int yulafs_unlink(const char* path) {
 
 int yulafs_lookup(const char* path) {
     if (!path || !*path) return (int)proc_current()->cwd_inode;
-    
     if (strcmp(path, "/") == 0) return 1;
-
     char name[YFS_NAME_MAX];
-
     yfs_ino_t parent_dir = path_to_inode(path, name);
-    
     if (parent_dir == 0) return -1;
-
     yfs_inode_t dir_node;
     sync_inode(parent_dir, &dir_node, 0);
-    
     yfs_ino_t target = dir_find(&dir_node, name);
-    
     if (target == 0) return -1;
-    
     return (int)target;
 }
+
 int yulafs_stat(yfs_ino_t ino, yfs_inode_t* out) {
     sync_inode(ino, out, 0);
     return 0;

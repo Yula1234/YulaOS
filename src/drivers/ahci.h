@@ -124,5 +124,6 @@ typedef struct {
 void ahci_init(void);
 int ahci_read_sector(uint32_t lba, uint8_t* buf);
 int ahci_write_sector(uint32_t lba, const uint8_t* buf);
+uint32_t ahci_get_capacity(void);
 
 #endif

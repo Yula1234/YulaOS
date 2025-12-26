@@ -93,8 +93,16 @@ static void remove_from_bin(Block* block) {
     }
 }
 
-static void extend_heap() {
+static void extend_heap(size_t min_size) {
     size_t req_size = CHUNK_SIZE;
+    
+    if (min_size > req_size) {
+        req_size = min_size;
+    }
+    
+
+    req_size = (req_size + 4095) & ~4095;
+
     void* p = sbrk(req_size);
     
     if ((int)p == -1) return; // OOM
@@ -185,7 +193,7 @@ void* malloc(size_t size) {
     }
 
     if (!top_chunk || top_chunk->size < total_req) {
-        extend_heap();
+        extend_heap(total_req);
         if (!top_chunk || top_chunk->size < total_req) return NULL;
     }
 
@@ -205,6 +213,7 @@ void free(void* ptr) {
 
     block->is_free = BLOCK_FREE;
 
+    // Coalesce Right
     if (block->next_phys && block->next_phys->is_free) {
         Block* next = block->next_phys;
         if (next == top_chunk) {
@@ -218,6 +227,7 @@ void free(void* ptr) {
         if (block->next_phys) block->next_phys->prev_phys = block;
     }
 
+    // Coalesce Left
     if (block->prev_phys && block->prev_phys->is_free) {
         Block* prev = block->prev_phys;
         

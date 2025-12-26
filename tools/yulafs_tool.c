@@ -5,18 +5,20 @@
 #include <time.h>
 #include <stdarg.h>
 
+/* --- FS DEFINITIONS (Must match kernel yulafs.h) --- */
+
 #define YFS_MAGIC       0x59554C41
 #define YFS_VERSION     2
 #define BLOCK_SIZE      512
 #define NAME_MAX        60
 #define DIRECT_PTRS     12
-#define PTRS_PER_BLOCK  (BLOCK_SIZE / 4)
-
+#define PTRS_PER_BLOCK  (BLOCK_SIZE / 4) // 128 pointers per block
 
 typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t block_size;
+    
     uint32_t total_blocks;
     uint32_t total_inodes;
     uint32_t free_blocks;
@@ -51,11 +53,15 @@ typedef struct {
     char     name[NAME_MAX];
 } __attribute__((packed)) yfs_dirent_t;
 
+/* --- TOOL CONTEXT --- */
+
 typedef struct {
     FILE* fp;
     yfs_superblock_t sb;
     char* img_path;
 } YulaCtx;
+
+/* --- HELPERS --- */
 
 static void panic(YulaCtx* ctx, const char* fmt, ...) {
     va_list args;
@@ -78,14 +84,14 @@ static void log_info(const char* fmt, ...) {
 }
 
 static void disk_read(YulaCtx* ctx, uint32_t lba, void* buf) {
-    if (fseek(ctx->fp, lba * BLOCK_SIZE, SEEK_SET) != 0)
+    if (fseek(ctx->fp, (long)lba * BLOCK_SIZE, SEEK_SET) != 0)
         panic(ctx, "Seek error at LBA %u", lba);
     if (fread(buf, 1, BLOCK_SIZE, ctx->fp) != BLOCK_SIZE)
         panic(ctx, "Read error at LBA %u", lba);
 }
 
 static void disk_write(YulaCtx* ctx, uint32_t lba, const void* buf) {
-    if (fseek(ctx->fp, lba * BLOCK_SIZE, SEEK_SET) != 0)
+    if (fseek(ctx->fp, (long)lba * BLOCK_SIZE, SEEK_SET) != 0)
         panic(ctx, "Seek error at LBA %u", lba);
     if (fwrite(buf, 1, BLOCK_SIZE, ctx->fp) != BLOCK_SIZE)
         panic(ctx, "Write error at LBA %u", lba);
@@ -111,6 +117,8 @@ static void bitmap_set(uint8_t* map, int i) {
 static void bitmap_clr(uint8_t* map, int i) {
     map[i / 8] &= ~(1 << (i % 8));
 }
+
+/* --- ALLOCATORS --- */
 
 static uint32_t alloc_block(YulaCtx* ctx) {
     if (ctx->sb.free_blocks == 0) panic(ctx, "No free blocks");
@@ -160,6 +168,8 @@ static uint32_t alloc_inode(YulaCtx* ctx) {
     return 0;
 }
 
+/* --- INODE OPS --- */
+
 static void inode_read(YulaCtx* ctx, uint32_t id, yfs_inode_t* out) {
     uint32_t per_block = BLOCK_SIZE / sizeof(yfs_inode_t);
     uint32_t lba = ctx->sb.inode_table_start + (id / per_block);
@@ -182,6 +192,7 @@ static void inode_write(YulaCtx* ctx, uint32_t id, const yfs_inode_t* in) {
 }
 
 static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t block_idx, int alloc) {
+    // 1. Direct
     if (block_idx < DIRECT_PTRS) {
         if (node->direct[block_idx] == 0) {
             if (!alloc) return 0;
@@ -191,6 +202,7 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
     }
     block_idx -= DIRECT_PTRS;
 
+    // 2. Indirect
     if (block_idx < PTRS_PER_BLOCK) {
         if (node->indirect == 0) {
             if (!alloc) return 0;
@@ -207,6 +219,7 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
     }
     block_idx -= PTRS_PER_BLOCK;
 
+    // 3. Doubly Indirect
     if (block_idx < PTRS_PER_BLOCK * PTRS_PER_BLOCK) {
         if (node->doubly_indirect == 0) {
             if (!alloc) return 0;
@@ -233,10 +246,53 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
         }
         return l2[idx2];
     }
+    block_idx -= PTRS_PER_BLOCK * PTRS_PER_BLOCK;
 
-    panic(ctx, "File size limit exceeded (Triply indirect not supported in tool)");
+    // 4. Triply Indirect (NEW!)
+    if (block_idx < PTRS_PER_BLOCK * PTRS_PER_BLOCK * PTRS_PER_BLOCK) {
+        if (node->triply_indirect == 0) {
+            if (!alloc) return 0;
+            node->triply_indirect = alloc_block(ctx);
+        }
+
+        uint32_t l1[PTRS_PER_BLOCK];
+        disk_read(ctx, node->triply_indirect, l1);
+
+        uint32_t ptrs_sq = PTRS_PER_BLOCK * PTRS_PER_BLOCK;
+        uint32_t i1 = block_idx / ptrs_sq;
+        uint32_t rem = block_idx % ptrs_sq;
+        uint32_t i2 = rem / PTRS_PER_BLOCK;
+        uint32_t i3 = rem % PTRS_PER_BLOCK;
+
+        if (l1[i1] == 0) {
+            if (!alloc) return 0;
+            l1[i1] = alloc_block(ctx);
+            disk_write(ctx, node->triply_indirect, l1);
+        }
+
+        uint32_t l2[PTRS_PER_BLOCK];
+        disk_read(ctx, l1[i1], l2);
+        if (l2[i2] == 0) {
+            if (!alloc) return 0;
+            l2[i2] = alloc_block(ctx);
+            disk_write(ctx, l1[i1], l2);
+        }
+
+        uint32_t l3[PTRS_PER_BLOCK];
+        disk_read(ctx, l2[i2], l3);
+        if (l3[i3] == 0) {
+            if (!alloc) return 0;
+            l3[i3] = alloc_block(ctx);
+            disk_write(ctx, l2[i2], l3);
+        }
+        return l3[i3];
+    }
+
+    panic(ctx, "File too large (exceeds triply indirect limit)");
     return 0;
 }
+
+/* --- DIRECTORY OPS --- */
 
 static uint32_t dir_find(YulaCtx* ctx, uint32_t dir_ino, const char* name) {
     yfs_inode_t dir;
@@ -330,14 +386,14 @@ static uint32_t dir_ensure(YulaCtx* ctx, uint32_t parent_ino, const char* name) 
     node.created = time(NULL);
     
     inode_write(ctx, new_ino, &node);
-    
     dir_init_dots(ctx, new_ino, parent_ino);
-    
     dir_add(ctx, parent_ino, new_ino, name);
     
     log_info("Created directory: %s (inode %u)", name, new_ino);
     return new_ino;
 }
+
+/* --- MAIN COMMANDS --- */
 
 static void op_format(YulaCtx* ctx) {
     fseek(ctx->fp, 0, SEEK_END);
@@ -351,7 +407,15 @@ static void op_format(YulaCtx* ctx) {
     ctx->sb.version = YFS_VERSION;
     ctx->sb.block_size = BLOCK_SIZE;
     ctx->sb.total_blocks = total_sectors;
-    ctx->sb.total_inodes = 4096;
+    
+    // Dynamic Inodes: 1 inode per 16KB
+    ctx->sb.total_inodes = total_sectors / 32;
+    
+    uint32_t inodes_per_block = BLOCK_SIZE / sizeof(yfs_inode_t);
+    if (ctx->sb.total_inodes % inodes_per_block != 0) {
+        ctx->sb.total_inodes += inodes_per_block - (ctx->sb.total_inodes % inodes_per_block);
+    }
+    if (ctx->sb.total_inodes < 128) ctx->sb.total_inodes = 128;
 
     uint32_t imap_sz = (ctx->sb.total_inodes + 4095) / 4096;
     uint32_t bmap_sz = (ctx->sb.total_blocks + 4095) / 4096;
@@ -365,29 +429,28 @@ static void op_format(YulaCtx* ctx) {
     ctx->sb.free_inodes = ctx->sb.total_inodes;
     ctx->sb.free_blocks = ctx->sb.total_blocks - ctx->sb.data_start;
 
+    // Zero out sensitive areas
     uint8_t zero[BLOCK_SIZE] = {0};
-    for (uint32_t i = 10; i < ctx->sb.data_start; i++) {
+    for (uint32_t i = 10; i < ctx->sb.data_start + 100; i++) {
         disk_write(ctx, i, zero);
     }
 
     uint8_t imap[BLOCK_SIZE] = {0};
-    imap[0] |= 3; 
+    imap[0] |= 3; // Inode 0 and 1 taken
     disk_write(ctx, ctx->sb.map_inode_start, imap);
     ctx->sb.free_inodes -= 2;
 
     yfs_inode_t root = {0};
     root.id = 1;
-    root.type = 2;
+    root.type = 2; // DIR
     root.created = time(NULL);
     inode_write(ctx, 1, &root);
-    
-    uint8_t bmap[BLOCK_SIZE] = {0};
     
     dir_init_dots(ctx, 1, 1);
 
     sb_sync(ctx);
     
-    log_info("Formatted. %u blocks, %u inodes.", ctx->sb.total_blocks, ctx->sb.total_inodes);
+    log_info("Formatted. %u blocks, %u inodes (Dynamic).", ctx->sb.total_blocks, ctx->sb.total_inodes);
     
     dir_ensure(ctx, 1, "bin");
     dir_ensure(ctx, 1, "home");
@@ -409,6 +472,7 @@ static void op_import(YulaCtx* ctx, const char* host_path, const char* os_path) 
     char fname[NAME_MAX];
     uint32_t parent = 1;
 
+    // Simple path parsing for standard directories
     if (strncmp(os_path, "/bin/", 5) == 0) {
         parent = dir_find(ctx, 1, "bin");
         strncpy(fname, os_path + 5, NAME_MAX);
@@ -425,7 +489,7 @@ static void op_import(YulaCtx* ctx, const char* host_path, const char* os_path) 
     int is_update = 0;
 
     if (ino) {
-        log_info("File %s exists (inode %u), updating content...", fname, ino);
+        log_info("File %s exists (inode %u), updating...", fname, ino);
         is_update = 1;
     } else {
         ino = alloc_inode(ctx);
@@ -435,7 +499,7 @@ static void op_import(YulaCtx* ctx, const char* host_path, const char* os_path) 
     if (is_update) inode_read(ctx, ino, &node);
     else {
         node.id = ino;
-        node.type = 1;
+        node.type = 1; // FILE
         node.created = time(NULL);
     }
     
@@ -466,14 +530,11 @@ static void op_import(YulaCtx* ctx, const char* host_path, const char* os_path) 
 
     if (!is_update) {
         dir_add(ctx, parent, ino, fname);
-        log_info("Imported %s -> %s (inode %u)", host_path, os_path, ino);
-    } else {
-        log_info("Updated %s (inode %u)", os_path, ino);
+        log_info("Imported %s -> %s (inode %u, size %ld)", host_path, os_path, ino, fsize);
     }
 
     free(data);
 }
-
 
 int main(int argc, char** argv) {
     if (argc < 3) {

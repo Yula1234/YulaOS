@@ -64,7 +64,7 @@ for APP in "${USER_APPS[@]}"; do
 done
 
 if [ ! -f "$DISK_IMG" ]; then
-    dd if=/dev/zero of="$DISK_IMG" bs=1M count=10 status=none
+    dd if=/dev/zero of="$DISK_IMG" bs=1M count=40 status=none
     "$TOOL" "$DISK_IMG" format
 fi
 

@@ -25,6 +25,10 @@ extern void kernel_panic(const char* message, const char* file, uint32_t line, v
 #define AHCI_DEV_BUSY   (1 << 7)
 #define AHCI_DEV_DRQ    (1 << 3)
 
+#define ATA_CMD_IDENTIFY 0xEC
+
+static volatile uint32_t primary_disk_sectors = 0;
+
 static volatile HBA_MEM* ahci_base_virt = 0;
 
 static ahci_port_state_t ports[32];
@@ -146,6 +150,65 @@ static void ahci_reset_controller(volatile HBA_MEM* abar) {
     abar->ghc |= HBA_GHC_AE; 
 }
 
+static int ahci_identify_device(int port_no) {
+    ahci_port_state_t* state = &ports[port_no];
+    volatile HBA_PORT* port = state->port_mmio;
+
+    port->is = (uint32_t)-1;
+
+    int slot = 0; 
+    
+    HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
+    cmdheader += slot;
+    cmdheader->cfl = sizeof(FIS_REG_H2D)/4;
+    cmdheader->w   = 0; 
+    cmdheader->prdtl = 1; 
+
+    HBA_CMD_TBL* cmdtbl = (HBA_CMD_TBL*)(state->ctba_virt[slot]);
+    memset(cmdtbl, 0, sizeof(HBA_CMD_TBL));
+
+    uint16_t* identify_buf = (uint16_t*)kmalloc_a(512);
+    if (!identify_buf) return 0;
+    memset(identify_buf, 0, 512);
+    
+    uint32_t phys_buf = paging_get_phys(kernel_page_directory, (uint32_t)identify_buf);
+
+    cmdtbl->prdt_entry[0].dba = phys_buf;
+    cmdtbl->prdt_entry[0].dbc = 511; // 512 bytes - 1
+    cmdtbl->prdt_entry[0].i   = 1;
+
+    FIS_REG_H2D* cmdfis = (FIS_REG_H2D*)(&cmdtbl->cfis);
+    cmdfis->fis_type = FIS_TYPE_REG_H2D;
+    cmdfis->c        = 1; // Command
+    cmdfis->command  = ATA_CMD_IDENTIFY;
+    cmdfis->device   = 0; // LBA mode off for identify usually, but 0 is fine
+
+    int spin = 0;
+    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 1000000) {
+        spin++;
+        __asm__ volatile("pause");
+    }
+    
+    port->ci = 1 << slot;
+
+    while (1) {
+        if ((port->ci & (1 << slot)) == 0) break;
+        if (port->is & (1 << 30)) { // Error
+             kfree(identify_buf);
+             return 0;
+        }
+    }
+    
+    uint32_t sectors = (uint32_t)identify_buf[60] | ((uint32_t)identify_buf[61] << 16);
+
+    kfree(identify_buf);
+    return sectors;
+}
+
+uint32_t ahci_get_capacity(void) {
+    return primary_disk_sectors;
+}
+
 void ahci_init(void) {
     memset(ports, 0, sizeof(ports));
 
@@ -181,7 +244,10 @@ void ahci_init(void) {
             int dt = check_type(&ahci_base_virt->ports[i]);
             if (dt == 1) {
                 port_init(i);
-                if (primary_port_idx == -1) primary_port_idx = i;
+                if (primary_port_idx == -1) {
+                    primary_port_idx = i;
+                    primary_disk_sectors = ahci_identify_device(i);
+                }
             }
         }
         pi >>= 1;
