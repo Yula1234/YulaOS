@@ -549,8 +549,10 @@ void shell_task(void* arg) {
                         }
                         else if (strcmp(args[0], "rm") == 0 && arg_count > 1) {
                             int ret;
-                            __asm__ volatile("int $0x80" : "=a"(ret) : "a"(14), "b"((int)args[1]));
-                            term_print(my_term, (ret == 0) ? "Deleted\n" : "Fail\n");
+                            ret = yulafs_unlink(args[1]);
+                            
+                            if (ret == 0) term_print(my_term, "Deleted\n");
+                            else term_print(my_term, "Fail\n");
                         }
                         else {
                             task_t* child = spawn_command(args[0], arg_count, args);
