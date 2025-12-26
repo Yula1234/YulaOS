@@ -1,97 +1,299 @@
 #include <yula.h>
 
-#define PAGE_SIZE 4096
-#define ALIGNMENT 8
+#define ALIGNMENT       8       
+#define NUM_BINS        32      
+#define BIN_STEP        16      
+#define CHUNK_SIZE      65536   
+
+#define BLOCK_MAGIC     0xDEADBEEF
+#define BLOCK_USED      0
+#define BLOCK_FREE      1
+
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1))
 
-typedef struct block_header {
-    uint32_t size;         
-    uint32_t is_free;
-    struct block_header* next;
-    struct block_header* prev;
-} block_header_t;
+typedef struct BlockHeader {
+    size_t size;                   
+    struct BlockHeader* next_phys; 
+    struct BlockHeader* prev_phys; 
+    int is_free;                   
+    uint32_t magic;                
+} Block;
 
-#define HEADER_SIZE sizeof(block_header_t)
+typedef struct FreeNode {
+    struct FreeNode* next;
+    struct FreeNode* prev;
+} FreeNode;
 
-static block_header_t* heap_head = 0;
+#define HEADER_SIZE (ALIGN(sizeof(Block)))
 
-static block_header_t* request_space(block_header_t* last, uint32_t size) {
-    uint32_t total_size = ALIGN(size + HEADER_SIZE);
+#define MIN_BLOCK_SIZE (HEADER_SIZE + sizeof(FreeNode))
+
+static FreeNode* bins[NUM_BINS];
+static FreeNode* large_bin = NULL;
+static Block* top_chunk = NULL;
+
+static void panic(const char* msg, void* ptr) {
+    print("\n[MALLOC ERROR] ");
+    print(msg);
+    print(" at 0x");
+    print_hex((uint32_t)ptr);
+    print("\n");
+    exit(1);
+}
+
+static void* get_data_ptr(Block* block) {
+    return (void*)((char*)block + HEADER_SIZE);
+}
+
+static Block* get_header(void* ptr) {
+    return (Block*)((char*)ptr - HEADER_SIZE);
+}
+
+static int validate_block(Block* block) {
+    return block && block->magic == BLOCK_MAGIC;
+}
+
+static int get_bin_index(size_t size) {
+    size_t payload_size = size - HEADER_SIZE;
+    if (payload_size < BIN_STEP) return 0;
+    int idx = (payload_size / BIN_STEP) - 1;
+    if (idx >= NUM_BINS) return -1;
+    return idx;
+}
+
+static void insert_into_bin(Block* block) {
+    FreeNode* node = (FreeNode*)get_data_ptr(block);
+    int idx = get_bin_index(block->size);
     
-    uint32_t pages_to_request = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    uint32_t actual_request_size = pages_to_request * PAGE_SIZE;
+    FreeNode** head_ptr = (idx == -1) ? &large_bin : &bins[idx];
 
-    block_header_t* block = (block_header_t*)sbrk(actual_request_size);
-    if ((int)block == -1) return 0;
+    node->next = *head_ptr;
+    node->prev = NULL;
+    
+    if (*head_ptr) {
+        (*head_ptr)->prev = node;
+    }
+    *head_ptr = node;
+}
 
-    block->size = actual_request_size - HEADER_SIZE;
-    block->is_free = 0;
-    block->next = 0;
-    block->prev = last;
+static void remove_from_bin(Block* block) {
+    FreeNode* node = (FreeNode*)get_data_ptr(block);
+    int idx = get_bin_index(block->size);
+    
+    FreeNode** head_ptr = (idx == -1) ? &large_bin : &bins[idx];
 
-    if (last) last->next = block;
+    if (node->prev) {
+        node->prev->next = node->next;
+    } else {
+        *head_ptr = node->next;
+    }
+
+    if (node->next) {
+        node->next->prev = node->prev;
+    }
+}
+
+static void extend_heap() {
+    size_t req_size = CHUNK_SIZE;
+    void* p = sbrk(req_size);
+    
+    if ((int)p == -1) return; // OOM
+
+    Block* new_region = (Block*)p;
+    new_region->size = req_size;
+    new_region->magic = BLOCK_MAGIC;
+    new_region->is_free = BLOCK_FREE;
+    new_region->next_phys = NULL;
+    
+    if (top_chunk) {
+        char* top_end = (char*)top_chunk + top_chunk->size;
+        if (top_end == (char*)new_region) {
+            top_chunk->size += new_region->size;
+            return; 
+        }
+        
+        top_chunk->next_phys = new_region;
+        new_region->prev_phys = top_chunk;
+    } else {
+        new_region->prev_phys = NULL;
+    }
+    
+    top_chunk = new_region;
+}
+
+static Block* split_chunk(Block* block, size_t size) {
+    if (block->size >= size + MIN_BLOCK_SIZE) {
+        Block* remainder = (Block*)((char*)block + size);
+        
+        remainder->size = block->size - size;
+        remainder->magic = BLOCK_MAGIC;
+        remainder->is_free = BLOCK_FREE;
+        
+        remainder->next_phys = block->next_phys;
+        remainder->prev_phys = block;
+        
+        if (remainder->next_phys) {
+            remainder->next_phys->prev_phys = remainder;
+        }
+        
+        block->size = size;
+        block->next_phys = remainder;
+
+        if (block == top_chunk) {
+            top_chunk = remainder;
+        } else {
+            insert_into_bin(remainder);
+        }
+    }
     return block;
 }
 
-static void split_block(block_header_t* block, uint32_t size) {
-    if (block->size >= size + HEADER_SIZE + ALIGNMENT) {
-        block_header_t* new_free_block = (block_header_t*)((uint8_t*)block + HEADER_SIZE + size);
-        
-        new_free_block->size = block->size - size - HEADER_SIZE;
-        new_free_block->is_free = 1;
-        new_free_block->next = block->next;
-        new_free_block->prev = block;
+void* malloc(size_t size) {
+    if (size == 0) return NULL;
 
-        if (block->next) block->next->prev = new_free_block;
-        
-        block->next = new_free_block;
-        block->size = size;
-    }
-}
+    size_t aligned_size = ALIGN(size);
+    size_t total_req = aligned_size + HEADER_SIZE;
+    
+    if (total_req < MIN_BLOCK_SIZE) total_req = MIN_BLOCK_SIZE;
 
-void* malloc(uint32_t size) {
-    if (size == 0) return 0;
-    size = ALIGN(size);
-
-    block_header_t* curr = heap_head;
-    block_header_t* last = 0;
-
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            split_block(curr, size);
-            curr->is_free = 0;
-            return (void*)(curr + 1);
+    int start_bin = get_bin_index(total_req);
+    if (start_bin != -1) {
+        for (int i = start_bin; i < NUM_BINS; i++) {
+            if (bins[i]) {
+                FreeNode* node = bins[i];
+                Block* block = get_header(node);
+                remove_from_bin(block);
+                block = split_chunk(block, total_req);
+                block->is_free = BLOCK_USED;
+                return get_data_ptr(block);
+            }
         }
-        last = curr;
-        curr = curr->next;
     }
 
-    curr = request_space(last, size);
-    if (!curr) return 0;
+    FreeNode* curr = large_bin;
+    while (curr) {
+        Block* block = get_header(curr);
+        FreeNode* next_node = curr->next; 
+        
+        if (block->size >= total_req) {
+            remove_from_bin(block);
+            block = split_chunk(block, total_req);
+            block->is_free = BLOCK_USED;
+            return get_data_ptr(block);
+        }
+        curr = next_node;
+    }
 
-    if (!heap_head) heap_head = curr;
+    if (!top_chunk || top_chunk->size < total_req) {
+        extend_heap();
+        if (!top_chunk || top_chunk->size < total_req) return NULL;
+    }
 
-    split_block(curr, size);
-    return (void*)(curr + 1);
+    Block* block = top_chunk;
+    block = split_chunk(block, total_req);
+    block->is_free = BLOCK_USED;
+    
+    return get_data_ptr(block);
 }
 
 void free(void* ptr) {
     if (!ptr) return;
 
-    block_header_t* curr = (block_header_t*)ptr - 1;
-    curr->is_free = 1;
+    Block* block = get_header(ptr);
+    if (!validate_block(block)) panic("Heap corruption", ptr);
+    if (block->is_free) return;
 
-    if (curr->next && curr->next->is_free) {
-        curr->size += HEADER_SIZE + curr->next->size;
-        curr->next = curr->next->next;
-        if (curr->next) curr->next->prev = curr;
+    block->is_free = BLOCK_FREE;
+
+    if (block->next_phys && block->next_phys->is_free) {
+        Block* next = block->next_phys;
+        if (next == top_chunk) {
+            top_chunk = block;
+        } else {
+            remove_from_bin(next);
+        }
+        
+        block->size += next->size;
+        block->next_phys = next->next_phys;
+        if (block->next_phys) block->next_phys->prev_phys = block;
     }
 
-    if (curr->prev && curr->prev->is_free) {
-        block_header_t* prev_node = curr->prev;
-        prev_node->size += HEADER_SIZE + curr->size;
-        prev_node->next = curr->next;
-        if (curr->next) curr->next->prev = prev_node;
-        curr = prev_node;
+    if (block->prev_phys && block->prev_phys->is_free) {
+        Block* prev = block->prev_phys;
+        
+        remove_from_bin(prev);
+        
+        if (block == top_chunk) {
+            top_chunk = prev;
+        }
+        
+        prev->size += block->size;
+        prev->next_phys = block->next_phys;
+        if (prev->next_phys) prev->next_phys->prev_phys = prev;
+        
+        block = prev;
     }
+
+    if (block != top_chunk) {
+        insert_into_bin(block);
+    }
+}
+
+void* calloc(size_t nelem, size_t elsize) {
+    size_t size = nelem * elsize;
+    if (nelem != 0 && size / nelem != elsize) return NULL;
+    void* ptr = malloc(size);
+    if (ptr) memset(ptr, 0, size);
+    return ptr;
+}
+
+void* realloc(void* ptr, size_t size) {
+    if (!ptr) return malloc(size);
+    if (size == 0) { free(ptr); return NULL; }
+
+    Block* block = get_header(ptr);
+    if (!validate_block(block)) panic("Heap corruption (realloc)", ptr);
+
+    size_t new_total = ALIGN(size) + HEADER_SIZE;
+    if (new_total < MIN_BLOCK_SIZE) new_total = MIN_BLOCK_SIZE;
+
+    if (block->size >= new_total) return ptr;
+
+    if (block->next_phys && block->next_phys->is_free) {
+        if (block->size + block->next_phys->size >= new_total) {
+            Block* next = block->next_phys;
+            
+            if (next == top_chunk) {
+                top_chunk = block;
+            } else {
+                remove_from_bin(next);
+            }
+            
+            block->size += next->size;
+            block->next_phys = next->next_phys;
+            if (block->next_phys) block->next_phys->prev_phys = block;
+            
+            if (top_chunk == block) {
+                block = split_chunk(block, new_total);
+            }
+            
+            return ptr;
+        }
+    }
+
+    if (block == top_chunk) {
+        size_t needed = new_total - block->size;
+        size_t page_aligned = (needed + 4095) & ~4095; 
+        if ((int)sbrk(page_aligned) != -1) {
+            block->size += page_aligned;
+            block = split_chunk(block, new_total);
+            return ptr;
+        }
+    }
+
+    void* new_ptr = malloc(size);
+    if (!new_ptr) return NULL;
+    memcpy(new_ptr, ptr, block->size - HEADER_SIZE);
+    free(ptr);
+    return new_ptr;
 }

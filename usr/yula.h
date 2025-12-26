@@ -47,7 +47,9 @@ static inline void* sbrk(int incr) {
 }
 
 void* malloc(uint32_t size);
-void  free(void* ptr);
+void free(void* ptr);
+void* calloc(size_t nelem, size_t elsize);
+void* realloc(void* ptr, size_t size);
 
 void print_dec(int n);
 
