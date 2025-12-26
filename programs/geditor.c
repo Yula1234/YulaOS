@@ -514,7 +514,7 @@ int main(int argc, char** argv) {
                 else if (c >= 32 && c <= 126) insert_char((char)c);
                 
                 update = 1;
-            }-
+            }
             else if (ev.type == YULA_EVENT_MOUSE_DOWN) {
                 int pos = get_pos_from_coords(ev.arg1, ev.arg2);
                 ed.cursor = pos;
@@ -545,7 +545,7 @@ int main(int argc, char** argv) {
             render_ui();
             update_window(win_id);
         }
-        usleep(5000);
+        usleep(2000);
     }
     
     free(ed.data);

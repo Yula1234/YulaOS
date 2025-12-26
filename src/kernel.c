@@ -1,5 +1,7 @@
 #include <shell/shell.h>
+
 #include <fs/yulafs.h>
+#include <fs/bcache.h>
 
 #include <drivers/keyboard.h>
 #include <drivers/console.h>
@@ -83,6 +85,10 @@ extern uint32_t kernel_end;
 
 extern void put_pixel(int x, int y, uint32_t color);
 
+static inline void sys_usleep(uint32_t us) {
+    __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
+}
+
 void idle_task_func(void* arg) {
     (void)arg;
     while(1) {
@@ -92,6 +98,14 @@ void idle_task_func(void* arg) {
     }
 }
 
+void syncer_task(void* arg) {
+    (void)arg;
+    while(1) {
+        sys_usleep(1000000); 
+        
+        bcache_sync();
+    }
+}
 
 __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
     if (magic != 0x2BADB002) return;
@@ -142,8 +156,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     
     // Master PIC (port 0x21): 
     // Bit 0 - Timer (closed, we had APIC)
-    // Bit 1 - Keyboard (открыт - 0)
-    // Bit 2 - Cascade (открыт - 0)
+    // Bit 1 - Keyboard (opened - 0)
+    // Bit 2 - Cascade (opened - 0)
     outb(0x21, 0xF9); 
 
         
@@ -183,6 +197,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     __attribute__((unused)) task_t* idle = proc_spawn_kthread("idle", PRIO_IDLE, idle_task_func, 0);
     __attribute__((unused)) task_t* sys_reaper = proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
+    __attribute__((unused)) task_t* syncer = proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
 
     task_t* gui_t = proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
     
