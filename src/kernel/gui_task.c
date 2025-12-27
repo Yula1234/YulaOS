@@ -107,10 +107,6 @@ void draw_desktop_icon(desktop_item_t* item) {
 void gui_task(void* arg) {
     (void)arg;
 
-    for(int y=0; y<100; y++) 
-        for(int x=0; x<100; x++) 
-            fb_ptr[y * fb_width + x] = 0xFFFF00;
-
     uint32_t frames = 0, last_fps_tick = 0, current_fps = 0;
     char fps_str[16], time_str[16];
     static int old_mx = 0, old_my = 0;
@@ -429,7 +425,7 @@ void gui_task(void* arg) {
 
         vga_reset_dirty(); 
 
-        sys_usleep(5); 
+        sys_usleep(400); 
     }
 }
 

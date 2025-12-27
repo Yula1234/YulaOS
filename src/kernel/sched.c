@@ -13,14 +13,27 @@ void sched_init(void) {}
 
 static int get_best_cpu(void) {
     int best_cpu = 0;
-    uint32_t min_load = 0xFFFFFFFF;
+    
+    uint32_t min_load = 101;
+    uint32_t min_count = 0xFFFFFFFF;
 
     int active_cpus = 1 + ap_running_count;
 
     for (int i = 0; i < active_cpus; i++) {
-        if (cpus[i].runq_count < min_load) {
-            min_load = cpus[i].runq_count;
+        uint32_t load = cpus[i].load_percent;
+        uint32_t count = cpus[i].runq_count;
+
+        if (load < min_load) {
+            min_load = load;
+            min_count = count;
             best_cpu = i;
+        } 
+        
+        else if (load == min_load) {
+            if (count < min_count) {
+                min_count = count;
+                best_cpu = i;
+            }
         }
     }
     return best_cpu;

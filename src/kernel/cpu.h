@@ -17,7 +17,16 @@ typedef struct {
     struct task* runq_tail;
     uint32_t runq_count; 
     spinlock_t lock;
-    struct task* idle_task; 
+    struct task* idle_task;
+
+    volatile uint64_t stat_total_ticks;
+    volatile uint64_t stat_idle_ticks;
+
+    volatile uint64_t snap_total_ticks;
+    volatile uint64_t snap_idle_ticks;
+    
+    volatile uint32_t load_percent;
+
 } cpu_t;
 
 extern cpu_t cpus[MAX_CPUS];

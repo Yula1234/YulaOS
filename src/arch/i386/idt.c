@@ -106,6 +106,29 @@ void isr_handler(registers_t* regs) {
                 }
             }
 
+            cpu->stat_total_ticks++;
+            if (curr == cpu->idle_task) {
+                cpu->stat_idle_ticks++;
+            }
+
+            if ((cpu->stat_total_ticks % 100) == 0) {
+                uint64_t delta_total = cpu->stat_total_ticks - cpu->snap_total_ticks;
+                uint64_t delta_idle  = cpu->stat_idle_ticks  - cpu->snap_idle_ticks;
+                
+                cpu->snap_total_ticks = cpu->stat_total_ticks;
+                cpu->snap_idle_ticks  = cpu->stat_idle_ticks;
+
+                uint32_t dt = (uint32_t)delta_total;
+                uint32_t di = (uint32_t)delta_idle;
+
+                if (dt > 0) {
+                    uint32_t busy = dt - di;
+                    cpu->load_percent = (busy * 100) / dt;
+                } else {
+                    cpu->load_percent = 0;
+                }
+            }
+
             if (curr && curr->state == TASK_RUNNING) {
                 if (curr->ticks_left > 0) curr->ticks_left--;
                 if (curr->ticks_left == 0) {

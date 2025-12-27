@@ -11,6 +11,13 @@ void cpu_init_system(void) {
         cpus[i].id = -1;
         cpus[i].index = i;
         cpus[i].started = 0;
+
+        cpus[i].stat_total_ticks = 0;
+        cpus[i].stat_idle_ticks = 0;
+
+        cpus[i].snap_total_ticks = 0;
+        cpus[i].snap_idle_ticks = 0;
+        cpus[i].load_percent = 0;
         
         cpus[i].runq_head = 0;
         cpus[i].runq_tail = 0;

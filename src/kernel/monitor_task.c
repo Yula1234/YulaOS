@@ -1,178 +1,233 @@
 #include <drivers/vga.h>
 #include <lib/string.h>
-
+#include <kernel/cpu.h>
+#include <kernel/proc.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
 #include <mm/vmm.h>
+#include <arch/i386/idt.h>
 
 #include "monitor_task.h"
 #include "window.h"
-#include "proc.h"
 
-extern volatile uint32_t timer_ticks;
-extern uint32_t heap_current_limit;
+#define C_BG            0x1E1E1E 
+#define C_PANEL_BG      0x252526 
+#define C_HEADER_BG     0x333333 
+#define C_BORDER        0x3F3F46 
 
-#define C_PANEL_BG   0x252526 
-#define C_ACCENT     0x007ACC 
-#define C_TEXT_MAIN  0xD4D4D4 
-#define C_TEXT_DIM   0x808080 
-#define C_BAR_BG     0x111111 
-#define C_GREEN      0x4EC9B0 
-#define C_ORANGE     0xCE9178 
-#define C_RED        0xF44747 
+#define C_TEXT_MAIN     0xE0E0E0 
+#define C_TEXT_DIM      0x808080 
+#define C_TEXT_ACCENT   0x4EC9B0 
+#define C_TEXT_WARN     0xF44747
 
-#define HISTORY_MAX 52
-#define HEAP_BASE_ADDR 0xD0000000
+#define C_GRAPH_BG      0x111111 
+#define C_CPU_GRAPH     0x4EC9B0 
+#define C_RAM_GRAPH     0xCE9178 
+
+#define MAX_VISIBLE_CPUS 8
+#define HISTORY_MAX      256     
 
 typedef struct {
-    uint32_t history[HISTORY_MAX];
-    int history_idx;
-    uint32_t last_tick;
-} monitor_internal_t;
+    uint8_t cpu_history[MAX_VISIBLE_CPUS][HISTORY_MAX];
+    uint8_t ram_history[HISTORY_MAX];
+    int head_idx;
+} monitor_state_t;
 
-static char* itoa(uint32_t n) {
+extern volatile uint32_t system_uptime_seconds;
+extern volatile uint32_t timer_ticks;
+extern volatile int ap_running_count;
+
+static char* itoa_p(uint32_t n) {
     static char buf[16];
-    int i = 14; buf[15] = '\0';
+    int i = 14; buf[15] = 0;
     if (n == 0) return "0";
     while (n > 0 && i > 0) { buf[i--] = (n % 10) + '0'; n /= 10; }
     return &buf[i + 1];
 }
 
-static void draw_stat_bar(int x, int y, int w, int h, int val, int max, uint32_t color) {
-    vga_draw_rect(x, y, w, h, C_BAR_BG);
-    if (max <= 0) return;
-    int fill_w = (val * (w - 2)) / max;
-    if (fill_w > w - 2) fill_w = w - 2;
-    if (fill_w < 0) fill_w = 0;
-    vga_draw_rect(x + 1, y + 1, fill_w, h - 2, color);
-}
+static void draw_chart(int x, int y, int w, int h, uint8_t* data, int head, uint32_t color) {
+    vga_draw_rect(x, y, w, h, C_GRAPH_BG);
+    vga_draw_rect(x, y, w, 1, C_BORDER);
+    vga_draw_rect(x, y + h - 1, w, 1, C_BORDER);
+    vga_draw_rect(x, y, 1, h, C_BORDER);
+    vga_draw_rect(x + w - 1, y, 1, h, C_BORDER);
 
-static void draw_section_frame(int x, int y, int w, int h, const char* title) {
-    vga_draw_rect(x, y, w, h, C_PANEL_BG);
-    vga_draw_rect(x, y, w, 1, 0x3d3d3d); 
-    vga_print_at(title, x + 5, y - 10, C_ACCENT);
+    int usable_w = w - 2;
+    int usable_h = h - 2;
+    int start_x = x + w - 2;
+    int bottom_y = y + h - 2;
+
+    int limit = (usable_w > HISTORY_MAX) ? HISTORY_MAX : usable_w;
+
+    for (int i = 0; i < limit; i++) {
+        int data_idx = (head - 1 - i);
+        while (data_idx < 0) data_idx += HISTORY_MAX;
+        
+        int val = data[data_idx];
+        if (val > 100) val = 100;
+
+        int bar_h = (val * usable_h) / 100;
+        
+        if (bar_h == 0 && val > 0) bar_h = 1;
+
+        if (bar_h > 0) {
+            vga_draw_rect(start_x - i, bottom_y - bar_h + 1, 1, bar_h, color);
+        }
+    }
 }
 
 static void monitor_cleanup(window_t* win) {
-    if (win->user_data) {
-        kfree(win->user_data);
-    }
+    if (win->user_data) kfree(win->user_data);
 }
 
-static void monitor_draw_handler(window_t* self, int x, int y) {
-    monitor_internal_t* internal = (monitor_internal_t*)self->user_data;
-    if (!internal) return;
+static void monitor_draw(window_t* win, int x, int y) {
+    monitor_state_t* st = (monitor_state_t*)win->user_data;
+    if (!st) return;
 
-    extern volatile uint32_t system_uptime_seconds;
-    uint32_t sec = system_uptime_seconds; 
-    uint32_t h = sec / 3600;
-    uint32_t m = (sec % 3600) / 60;
-    uint32_t s = sec % 60;
+    int w = win->target_w - 12;
+    int h = win->target_h - 44;
 
-    vga_print_at("KERNEL UPTIME:", x, y, C_TEXT_DIM);
-    vga_print_at(itoa(h), x + 115, y, C_TEXT_MAIN); vga_print_at("h", x + 130, y, C_TEXT_DIM);
-    vga_print_at(itoa(m), x + 150, y, C_TEXT_MAIN); vga_print_at("m", x + 165, y, C_TEXT_DIM);
-    vga_print_at(itoa(s), x + 185, y, C_TEXT_MAIN); vga_print_at("s", x + 200, y, C_TEXT_DIM);
+    vga_draw_rect(x, y, w, h, C_BG);
 
-    draw_section_frame(x, y + 30, 270, 100, "PHYSICAL RAM");
-    
-    uint32_t u_blocks = pmm_get_used_blocks();
-    uint32_t f_blocks = pmm_get_free_blocks();
-    uint32_t total_kb = (u_blocks + f_blocks) * 4;
-    uint32_t used_kb  = u_blocks * 4;
-    uint32_t load_pct = (total_kb > 0) ? (used_kb * 100) / total_kb : 0;
+    int left_w = (w * 45) / 100;
+    int right_x = x + left_w + 10;
+    int right_w = w - left_w - 10;
 
-    vga_draw_rect(x + 10, y + 45, 106, 45, 0x0F0F0F);
-    for (int i = 0; i < HISTORY_MAX - 1; i++) {
-        int idx = (internal->history_idx + i) % HISTORY_MAX;
-        int h_val = (internal->history[idx] * 40) / 100;
-        if (h_val > 40) h_val = 40;
-        vga_draw_rect(x + 12 + (i * 2), y + 88 - h_val, 1, h_val, C_GREEN);
-    }
-    vga_print_at("Load 5s", x + 10, y + 95, 0x444444);
+    int cur_y = y + 10;
 
-    int tx = x + 130;
-    
-    extern volatile int ap_running_count;
+    vga_print_at("CPU HISTORY", x + 10, cur_y, C_TEXT_DIM);
+    cur_y += 20;
+
     int total_cpus = ap_running_count + 1;
-    vga_print_at("CPUs:", tx, y + 42, C_TEXT_DIM);
-    vga_print_at(itoa(total_cpus), tx + 50, y + 42, C_GREEN);
 
-    vga_print_at("Load:", tx, y + 55, C_TEXT_DIM);
-    vga_print_at(itoa(load_pct), tx + 50, y + 55, (load_pct > 80) ? C_RED : C_GREEN);
-    vga_print_at("%", tx + 80, y + 55, C_TEXT_DIM);
+    for (int i = 0; i < total_cpus && i < MAX_VISIBLE_CPUS; i++) {
+        int usage = cpus[i].load_percent;
 
-    vga_print_at("Used:", tx, y + 68, C_TEXT_DIM);
-    vga_print_at(itoa(used_kb), tx + 50, y + 68, C_TEXT_MAIN);
-    vga_print_at("KB", tx + 105, y + 68, 0x444444);
+        st->cpu_history[i][st->head_idx] = (uint8_t)usage;
 
-    vga_print_at("Free:", tx, y + 81, C_TEXT_DIM);
-    vga_print_at(itoa(f_blocks * 4), tx + 50, y + 81, C_TEXT_MAIN);
+        char label[16];
+        strlcpy(label, "CPU ", 16); strlcat(label, itoa_p(i), 16);
+        vga_print_at(label, x + 10, cur_y, C_TEXT_MAIN);
 
+        char pct[8];
+        strlcpy(pct, itoa_p(usage), 8); strlcat(pct, "%", 8);
+        vga_print_at(pct, x + left_w - 30, cur_y, (usage > 80) ? C_TEXT_WARN : C_TEXT_MAIN);
 
-    int heap_y = y + 145;
-    
-    draw_section_frame(x, heap_y, 270, 45, "KERNEL VIRTUAL HEAP");
-    uint32_t heap_committed = vmm_get_used_pages() * PAGE_SIZE;
-    
-    vga_print_at("Committed:", x + 10, heap_y + 12, C_TEXT_DIM);
-    vga_print_at(itoa(heap_committed / 1024), x + 100, heap_y + 12, C_ORANGE);
-    vga_print_at("KB", x + 160, heap_y + 12, 0x444444);
-    
-    draw_stat_bar(x + 10, heap_y + 30, 250, 7, heap_committed / 1024, 32768, C_ORANGE);
-
-    int proc_y = y + 210;
-    
-    vga_print_at("ID   TASK NAME         MEM      STATUS", x + 5, proc_y, C_ACCENT);
-    vga_draw_rect(x + 5, proc_y + 10, 305, 1, 0x333333);
-
-    int row = 0;
-    for (uint32_t i = 0; i < proc_task_count(); i++) {
-        task_t* t = proc_task_at(i);
-        if (t && row < 15) {
-            int ry = proc_y + 20 + (row * 13);
-            vga_print_at(itoa(t->pid), x + 5, ry, C_TEXT_DIM);
-            vga_print_at(t->name, x + 40, ry, C_TEXT_MAIN);
-            vga_print_at(itoa(t->mem_pages * 4), x + 180, ry, C_GREEN);
-            vga_print_at("KB", x + 215, ry, 0x444444);
-            
-            const char* status = "WAIT";
-            uint32_t s_col = C_ORANGE;
-            if (t->state == TASK_RUNNING) { status = "ACTIVE"; s_col = C_GREEN; }
-            vga_print_at(status, x + 250, ry, s_col);
-            
-            row++;
-        }
+        draw_chart(x + 10, cur_y + 12, left_w - 10, 24, st->cpu_history[i], st->head_idx, C_CPU_GRAPH);
+        
+        cur_y += 45;
     }
+
+    cur_y += 10;
+    
+    uint32_t used_mem = pmm_get_used_blocks() * 4;
+    uint32_t total_mem = pmm_get_total_blocks() * 4;
+    int mem_pct = (total_mem > 0) ? (used_mem * 100) / total_mem : 0;
+    
+    st->ram_history[st->head_idx] = (uint8_t)mem_pct;
+
+    vga_print_at("MEMORY USAGE", x + 10, cur_y, C_TEXT_DIM);
+    
+    char mem_s[64];
+    char* m = itoa_p(used_mem / 1024);
+    int mi = 0; while(m[mi]) { mem_s[mi] = m[mi]; mi++; }
+    
+    mem_s[mi++] = ' '; mem_s[mi++] = '/'; mem_s[mi++] = ' ';
+    
+    char* t = itoa_p(total_mem / 1024);
+    int ti = 0; while(t[ti]) { mem_s[mi++] = t[ti++]; }
+    
+    mem_s[mi++] = ' '; mem_s[mi++] = 'M'; mem_s[mi++] = 'B'; mem_s[mi] = 0;
+    
+    vga_print_at(mem_s, x + left_w - (mi * 8), cur_y, C_TEXT_MAIN);
+    
+    draw_chart(x + 10, cur_y + 12, left_w - 10, 24, st->ram_history, st->head_idx, C_RAM_GRAPH);
+    
+    int ov_y = y + h - 60;
+    vga_draw_rect(x + 10, ov_y - 10, left_w - 10, 1, C_BORDER);
+    
+    vga_print_at("SYSTEM UPTIME", x + 10, ov_y, C_TEXT_DIM);
+    char up_s[32];
+    strlcpy(up_s, itoa_p(system_uptime_seconds), 32); strlcat(up_s, " sec", 32);
+    vga_print_at(up_s, x + left_w - 70, ov_y, C_TEXT_ACCENT);
+    
+    ov_y += 16;
+    vga_print_at("TASKS RUNNING", x + 10, ov_y, C_TEXT_DIM);
+    vga_print_at(itoa_p(proc_task_count()), x + left_w - 70, ov_y, C_TEXT_MAIN);
+
+    int tbl_y = y + 10;
+    vga_print_at("PROCESSES", right_x, tbl_y, C_TEXT_DIM);
+    tbl_y += 20;
+
+    vga_draw_rect(right_x, tbl_y, right_w, 20, C_HEADER_BG);
+    vga_print_at("ID",   right_x + 5,   tbl_y + 5, C_TEXT_MAIN);
+    vga_print_at("NAME", right_x + 40,  tbl_y + 5, C_TEXT_MAIN);
+    vga_print_at("CPU",  right_x + 140, tbl_y + 5, C_TEXT_MAIN);
+    vga_print_at("MEM",  right_x + 180, tbl_y + 5, C_TEXT_MAIN);
+    
+    tbl_y += 20;
+
+    int row_h = 18;
+    int max_rows = (h - (tbl_y - y)) / row_h;
+    int printed = 0;
+    
+    uint32_t t_count = proc_task_count();
+    
+    for (uint32_t i = 0; i < t_count; i++) {
+        task_t* t = proc_task_at(i);
+        if (!t || t->state == TASK_UNUSED || t->state == TASK_ZOMBIE) continue;
+        
+        if (printed >= max_rows) break;
+
+        int ry = tbl_y + (printed * row_h);
+        
+        if (printed % 2 == 0) vga_draw_rect(right_x, ry, right_w, row_h, C_PANEL_BG);
+        else vga_draw_rect(right_x, ry, right_w, row_h, C_BG);
+
+        vga_print_at(itoa_p(t->pid), right_x + 5, ry + 4, C_TEXT_DIM);
+        
+        char name_buf[16];
+        strlcpy(name_buf, t->name, 12);
+        uint32_t name_col = (t->pid < 5) ? C_TEXT_ACCENT : C_TEXT_MAIN;
+        vga_print_at(name_buf, right_x + 40, ry + 4, name_col);
+        
+        char cpu_s[8];
+        strlcpy(cpu_s, " ", 8);
+        strlcat(cpu_s, itoa_p(t->assigned_cpu), 8);
+        vga_print_at(cpu_s, right_x + 145, ry + 4, C_TEXT_DIM);
+        
+        char mem_sz[16];
+        strlcpy(mem_sz, itoa_p(t->mem_pages * 4), 16);
+        strlcat(mem_sz, "K", 16);
+        vga_print_at(mem_sz, right_x + 180, ry + 4, C_TEXT_DIM);
+
+        printed++;
+    }
+    
+    vga_draw_rect(right_x - 10, y + 10, 1, h - 20, C_BORDER);
 }
 
 void monitor_task(void* arg) {
     (void)arg;
 
-    monitor_internal_t* internal = kmalloc(sizeof(monitor_internal_t));
-    if (!internal) return;
-    memset(internal, 0, sizeof(monitor_internal_t));
+    monitor_state_t* st = (monitor_state_t*)kmalloc(sizeof(monitor_state_t));
+    if (!st) return;
+    memset(st, 0, sizeof(monitor_state_t));
 
-    window_t* win = window_create(180, 50, 320, 430, "System Architecture Monitor", monitor_draw_handler);
-    if (!win) {
-        kfree(internal);
-        return;
-    }
-    win->user_data = internal;
+    window_t* win = window_create(100, 80, 600, 450, "System Architecture Monitor", monitor_draw);
+    if (!win) { kfree(st); return; }
+    
+    win->user_data = st;
     win->on_close = monitor_cleanup;
 
+    yula_event_t ev;
     while (win->is_active) {
-        uint32_t u = pmm_get_used_blocks();
-        uint32_t f = pmm_get_free_blocks();
-        uint32_t pct = (u * 50) / (u + f);
-        
-        internal->history[internal->history_idx] = pct;
-        internal->history_idx = (internal->history_idx + 1) % HISTORY_MAX;
+        while (window_pop_event(win, &ev)); 
 
+        st->head_idx = (st->head_idx + 1) % HISTORY_MAX;
+        
         win->is_dirty = 1;
-        __asm__ volatile("int $0x80" : : "a"(7), "b"(50));
+        
+        __asm__ volatile("int $0x80" : : "a"(11), "b"(100000));
     }
-    
-    win->on_close = 0;
-    kfree(internal);
 }
