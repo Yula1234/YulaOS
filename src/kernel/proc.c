@@ -323,6 +323,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         t->cwd_inode = proc_current()->cwd_inode;
         t->parent_pid = proc_current()->pid;
         t->terminal = proc_current()->terminal;
+        t->term_mode = proc_current()->term_mode; 
     } else {
         t->cwd_inode = 1;
         t->parent_pid = 0;
