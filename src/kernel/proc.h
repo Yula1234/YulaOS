@@ -54,6 +54,8 @@ typedef struct task {
     
     struct task* sched_next;
     struct task* sched_prev;
+    
+    int assigned_cpu;
 
     uint32_t mem_pages;
     uint32_t wait_for_pid;
@@ -93,6 +95,8 @@ typedef struct task {
 
     mmap_area_t* mmap_list;
     uint32_t mmap_top;
+
+    uint8_t fpu_state[512] __attribute__((aligned(16)));
   
 } task_t;
 
@@ -111,5 +115,6 @@ void reaper_task_func(void* arg);
 task_t* proc_get_list_head();
 uint32_t proc_task_count(void);
 task_t* proc_task_at(uint32_t idx);
+task_t* proc_create_idle(int cpu_index);
 
 #endif

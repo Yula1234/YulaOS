@@ -100,7 +100,10 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
             if (window_list[i].canvas) memset(window_list[i].canvas, 0xFF, canvas_w * canvas_h * 4);
             
             if (window_list[i].canvas) {
-                for(int i = 0; i < w * h; i++) window_list[i].canvas[i] = 0x1E1E1E;
+                int limit = canvas_w * canvas_h;
+                for(int j = 0; j < limit; j++) {
+                    window_list[i].canvas[j] = 0x1E1E1E;
+                }
             }
             window_list[i].is_dirty = 1;
             

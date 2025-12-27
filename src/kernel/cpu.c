@@ -1,5 +1,5 @@
 #include <lib/string.h>
-#include <hal/apic.h> 
+#include <hal/apic.h>
 #include "cpu.h"
 
 cpu_t cpus[MAX_CPUS];
@@ -11,6 +11,11 @@ void cpu_init_system(void) {
         cpus[i].id = -1;
         cpus[i].index = i;
         cpus[i].started = 0;
+        
+        cpus[i].runq_head = 0;
+        cpus[i].runq_tail = 0;
+        cpus[i].runq_count = 0;
+        spinlock_init(&cpus[i].lock);
     }
 }
 
@@ -19,6 +24,8 @@ static inline uint32_t lapic_read_local(uint32_t reg) {
 }
 
 cpu_t* cpu_current(void) {
+    if (cpu_count == 0) return &cpus[0];
+
     uint32_t apic_id_reg = lapic_read_local(LAPIC_ID);
     int apic_id = (apic_id_reg >> 24) & 0xFF;
 
@@ -27,6 +34,5 @@ cpu_t* cpu_current(void) {
             return &cpus[i];
         }
     }
-    
     return &cpus[0];
 }

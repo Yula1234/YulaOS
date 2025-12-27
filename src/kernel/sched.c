@@ -1,84 +1,83 @@
 #include <arch/i386/context.h>
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
-
 #include <hal/lock.h>
 #include <hal/io.h>
+#include <hal/simd.h>
+#include <drivers/vga.h>
 
 #include "sched.h"
 #include "cpu.h"
 
-static task_t* runq_head = 0;
-static task_t* runq_tail = 0;
-static uint32_t runq_count = 0;
+void sched_init(void) {}
 
-static spinlock_t sched_lock;
+static int get_best_cpu(void) {
+    int best_cpu = 0;
+    uint32_t min_load = 0xFFFFFFFF;
 
-static void runq_append(task_t* t) {
-    t->sched_next = 0;
-    t->sched_prev = 0;
-    
-    if (!runq_head) {
-        runq_head = t;
-        runq_tail = t;
-    } else {
-        runq_tail->sched_next = t;
-        t->sched_prev = runq_tail;
-        runq_tail = t;
+    int active_cpus = 1 + ap_running_count;
+
+    for (int i = 0; i < active_cpus; i++) {
+        if (cpus[i].runq_count < min_load) {
+            min_load = cpus[i].runq_count;
+            best_cpu = i;
+        }
     }
-    runq_count++;
+    return best_cpu;
 }
 
-static void runq_remove_node(task_t* t) {
-    
-    if (t->sched_prev) t->sched_prev->sched_next = t->sched_next;
-    else runq_head = t->sched_next;
-
-    if (t->sched_next) t->sched_next->sched_prev = t->sched_prev;
-    else runq_tail = t->sched_prev;
-
+static void runq_append(cpu_t* cpu, task_t* t) {
     t->sched_next = 0;
     t->sched_prev = 0;
-    if (runq_count > 0) runq_count--;
-}
-
-void sched_init(void) {
-    runq_head = 0;
-    runq_tail = 0;
-    runq_count = 0;
-    spinlock_init(&sched_lock);
+    
+    if (!cpu->runq_head) {
+        cpu->runq_head = t;
+        cpu->runq_tail = t;
+    } else {
+        cpu->runq_tail->sched_next = t;
+        t->sched_prev = cpu->runq_tail;
+        cpu->runq_tail = t;
+    }
+    cpu->runq_count++;
 }
 
 void sched_add(task_t* t) {
-    uint32_t flags = spinlock_acquire_safe(&sched_lock);
-    
-    t->quantum = (t->priority + 1) * 3; 
-    t->ticks_left = t->quantum;
+    int target_cpu_idx = get_best_cpu();
+     
+    cpu_t* target = &cpus[target_cpu_idx];
 
-    runq_append(t);
+    t->quantum = (t->priority + 1) * 3;
+    t->ticks_left = t->quantum;
+    t->assigned_cpu = target_cpu_idx;
+
+    uint32_t flags = spinlock_acquire_safe(&target->lock);
     
-    spinlock_release_safe(&sched_lock, flags);
+    runq_append(target, t);
+    
+    spinlock_release_safe(&target->lock, flags);
 }
 
-static task_t* pick_next_rr(void) {
-    if (!runq_head) return 0;
+static task_t* pick_next_rr(cpu_t* cpu) {
+    if (!cpu->runq_head) return 0;
     
     uint32_t inspected = 0;
+    uint32_t count = cpu->runq_count;
     
-    while (inspected < runq_count) {
-        task_t* t = runq_head;
-        runq_head = t->sched_next;
-        if (runq_head) runq_head->sched_prev = 0;
-        else runq_tail = 0;
+    while (inspected < count) {
+        task_t* t = cpu->runq_head;
+        
+        cpu->runq_head = t->sched_next;
+        if (cpu->runq_head) cpu->runq_head->sched_prev = 0;
+        else cpu->runq_tail = 0;
         
         t->sched_next = 0;
-        if (runq_tail) {
-            runq_tail->sched_next = t;
-            t->sched_prev = runq_tail;
-            runq_tail = t;
+        if (cpu->runq_tail) {
+            cpu->runq_tail->sched_next = t;
+            t->sched_prev = cpu->runq_tail;
+            cpu->runq_tail = t;
         } else {
-            runq_head = t;
-            runq_tail = t;
+            cpu->runq_head = t;
+            cpu->runq_tail = t;
         }
         
         if (t->state == TASK_RUNNABLE) {
@@ -87,7 +86,6 @@ static task_t* pick_next_rr(void) {
         
         inspected++;
     }
-    
     return 0;
 }
 
@@ -107,7 +105,7 @@ void sched_set_current(task_t* t) {
 void sched_start(task_t* first) {
     sched_set_current(first);
     first->state = TASK_RUNNING;
-    
+    fpu_restore(first->fpu_state);
     ctx_start(first->esp);
     for (;;) cpu_hlt();
 }
@@ -115,43 +113,72 @@ void sched_start(task_t* first) {
 void sched_yield(void) {
     __asm__ volatile("cli");
     
-    cpu_t* cpu = cpu_current();
-    task_t* prev = cpu->current_task;
-    if(!prev) return;
-
-    if (prev && prev->state == TASK_RUNNING) prev->state = TASK_RUNNABLE;
-
-    task_t* next = pick_next_rr();
+    cpu_t* me = cpu_current();
+    task_t* prev = me->current_task;
     
-    if (!next) {
-        if (prev && prev->state != TASK_ZOMBIE && prev->state != TASK_UNUSED) {
-            prev->state = TASK_RUNNING;
-            return;
-        }
-        
-        __asm__ volatile("sti; hlt");
-        return; 
+    if (prev && prev->state == TASK_RUNNING) {
+        prev->state = TASK_RUNNABLE;
+        fpu_save(prev->fpu_state);
     }
 
-    next->state = TASK_RUNNING;
-    sched_set_current(next);
+    while (1) {
+        uint32_t flags = spinlock_acquire_safe(&me->lock);
+        task_t* next = pick_next_rr(me);
+        spinlock_release_safe(&me->lock, flags);
 
-    if (prev == next) return;
+        if (!next) {
+            next = me->idle_task;
+        }
 
-    ctx_switch(&prev->esp, next->esp);
+        if (next) {
+            if (next == prev) {
+                __asm__ volatile("sti; hlt; cli");
+                return;
+            }
+            
+            me->current_task = next;
+            sched_set_current(next);
+
+            fpu_restore(next->fpu_state);
+
+            if (prev) {
+                ctx_switch(&prev->esp, next->esp);
+            } else {
+                ctx_start(next->esp);
+            }
+            return;
+        }
+
+        me->current_task = 0;
+
+        __asm__ volatile("sti; hlt; cli");
+    }
 }
 
 void sched_remove(task_t* t) {
-    uint32_t flags = spinlock_acquire_safe(&sched_lock);
+    int cpu_idx = t->assigned_cpu;
+    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) return;
     
-    task_t* curr = runq_head;
+    cpu_t* target = &cpus[cpu_idx];
+    
+    uint32_t flags = spinlock_acquire_safe(&target->lock);
+    
+    task_t* curr = target->runq_head;
     while (curr) {
         if (curr == t) {
-            runq_remove_node(t);
+            if (t->sched_prev) t->sched_prev->sched_next = t->sched_next;
+            else target->runq_head = t->sched_next;
+
+            if (t->sched_next) t->sched_next->sched_prev = t->sched_prev;
+            else target->runq_tail = t->sched_prev;
+
+            t->sched_next = 0;
+            t->sched_prev = 0;
+            if (target->runq_count > 0) target->runq_count--;
             break;
         }
         curr = curr->sched_next;
     }
     
-    spinlock_release_safe(&sched_lock, flags);
+    spinlock_release_safe(&target->lock, flags);
 }

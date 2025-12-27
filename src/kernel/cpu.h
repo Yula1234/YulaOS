@@ -2,15 +2,22 @@
 #define KERNEL_CPU_H
 
 #include <stdint.h>
+#include <hal/lock.h>
 #include "proc.h"
 
 #define MAX_CPUS 32
 
 typedef struct {
-    int id; 
+    int id;                 // LAPIC ID
     int index; 
     struct task* current_task;
     volatile int started; 
+    
+    struct task* runq_head;
+    struct task* runq_tail;
+    uint32_t runq_count; 
+    spinlock_t lock;
+    struct task* idle_task; 
 } cpu_t;
 
 extern cpu_t cpus[MAX_CPUS];

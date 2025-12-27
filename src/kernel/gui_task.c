@@ -11,6 +11,7 @@
 extern uint32_t fb_width, fb_height;
 extern int mouse_x, mouse_y, mouse_buttons;
 extern volatile uint32_t timer_ticks;
+extern uint32_t* fb_ptr;
 
 static window_t* dragged_window = 0;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -105,6 +106,11 @@ void draw_desktop_icon(desktop_item_t* item) {
 
 void gui_task(void* arg) {
     (void)arg;
+
+    for(int y=0; y<100; y++) 
+        for(int x=0; x<100; x++) 
+            fb_ptr[y * fb_width + x] = 0xFFFF00;
+
     uint32_t frames = 0, last_fps_tick = 0, current_fps = 0;
     char fps_str[16], time_str[16];
     static int old_mx = 0, old_my = 0;

@@ -178,8 +178,6 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     }
 
     acpi_init();
-    
-    smp_boot_aps();
 
     vga_init();
     vga_init_graphics();
@@ -189,6 +187,9 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     mouse_init();
     
     ahci_init();
+
+
+
     yulafs_init();
     yulafs_lookup("/"); 
 
@@ -197,15 +198,19 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     proc_init();
     sched_init();
+
+    for (int i = 0; i < MAX_CPUS; i++) {
+        cpus[i].idle_task = proc_create_idle(i);
+    }
     
     window_init_system(); 
 
-    __attribute__((unused)) task_t* idle = proc_spawn_kthread("idle", PRIO_IDLE, idle_task_func, 0);
-    __attribute__((unused)) task_t* sys_reaper = proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
-    __attribute__((unused)) task_t* syncer = proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
+    proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
+    proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
+    proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
 
-    task_t* gui_t = proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
-    
-    __asm__ volatile("sti"); 
-    sched_start(gui_t);
+    smp_boot_aps();
+
+    __asm__ volatile("sti");
+    sched_yield();
 }

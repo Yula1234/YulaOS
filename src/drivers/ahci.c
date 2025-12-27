@@ -382,7 +382,7 @@ static int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_wri
              break;
         }
         
-        sched_yield();
+         __asm__ volatile("pause");
     }
 
     if (use_bounce) {

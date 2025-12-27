@@ -28,8 +28,7 @@ for d in "${DIRS[@]}"; do mkdir -p "$d"; done
 
 gcc tools/yulafs_tool.c -o "$TOOL"
 
-echo "[asm] building smp trampoline..."
-$ASM src/boot/smp_trampoline.asm bin/smp_trampoline.bin
+$ASM src/boot/smp_trampoline.asm bin/smp_trampoline.bin > /dev/null
 
 echo "[asm] assembling kernel..."
 OBJ_FILES=""
@@ -44,7 +43,6 @@ done
 echo "[c] compiling kernel..."
 for FILE in $(find src -name "*.c" | sort); do
     if [[ "$FILE" != *"src/usr"* ]]; then
-        # Transform path: src/kernel/file.c -> kernel_file.o
         OBJ_NAME=$(echo $FILE | sed 's|src/||' | sed 's|/|_|g' | sed 's|\.c|.o|')
         $CC $CFLAGS_KERN -c "$FILE" -o "bin/obj/$OBJ_NAME"
         OBJ_FILES="$OBJ_FILES bin/obj/$OBJ_NAME"
@@ -87,7 +85,7 @@ menuentry "YulaOS" {
 }
 EOF
 
-grub-mkrescue -o bin/yulaos.iso "$ISODIR"
+grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
 
 echo "[run] qemu..."
 

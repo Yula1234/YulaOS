@@ -10,6 +10,7 @@
 
 #include <hal/lock.h>
 #include <hal/io.h>
+#include <hal/simd.h>
 
 
 #include "sched.h"
@@ -25,6 +26,8 @@ static uint32_t total_tasks = 0;
 static uint32_t next_pid = 1;
 static spinlock_t proc_lock;
 
+static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
+
 extern void irq_return(void);
 
 void proc_init(void) {
@@ -33,6 +36,9 @@ void proc_init(void) {
     total_tasks = 0;
     next_pid = 1;
     spinlock_init(&proc_lock);
+
+    __asm__ volatile("fninit");
+    fpu_save(initial_fpu_state);
 }
 
 task_t* proc_current() { 
@@ -78,6 +84,9 @@ static task_t* alloc_task(void) {
     }
     
     memset(t, 0, sizeof(task_t));
+
+    memcpy(t->fpu_state, initial_fpu_state, 512);
+    
     t->pid = next_pid++;
     t->state = TASK_RUNNABLE;
     t->cwd_inode = 1;
@@ -243,6 +252,8 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     t->page_dir = 0;
     t->mem_pages = 4;
     t->priority = prio;
+
+    memcpy(t->fpu_state, initial_fpu_state, 512);
     
     t->kstack_size = KSTACK_SIZE;
     t->kstack = kmalloc_a(t->kstack_size);
@@ -252,12 +263,20 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     }
     memset(t->kstack, 0, t->kstack_size);
     
-    uint32_t* sp = (uint32_t*)((uint32_t)t->kstack + t->kstack_size);
-    *--sp = (uint32_t)kthread_trampoline;
-    *--sp = 0; // EBP
-    *--sp = 0; // EBX
-    *--sp = 0; // ESI
-    *--sp = 0; // EDI
+    uint32_t stack_top = (uint32_t)t->kstack + t->kstack_size;
+    
+    stack_top &= ~0xF; 
+    
+    uint32_t* sp = (uint32_t*)stack_top;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    
+    *--sp = (uint32_t)kthread_trampoline; 
+    *--sp = 0; // EBP                     
+    *--sp = 0; // EBX                     
+    *--sp = 0; // ESI                     
+    *--sp = 0; // EDI                     
     t->esp = sp;
     
     sched_add(t);
@@ -547,29 +566,40 @@ void proc_wake_up_waiters(uint32_t target_pid) {
 void reaper_task_func(void* arg) {
     (void)arg;
     while(1) {
-        int found_zombie = 0;
         uint32_t flags = spinlock_acquire_safe(&proc_lock);
         task_t* curr = tasks_head;
         
         while (curr) {
             if (curr->state == TASK_ZOMBIE) {
+                int still_running = 0;
+                for (int i = 0; i < MAX_CPUS; i++) {
+                    if (cpus[i].current_task == curr) {
+                        still_running = 1;
+                        break;
+                    }
+                }
+                
+                if (still_running) {
+                    curr = curr->next;
+                    continue;
+                }
+
                 curr->state = TASK_UNUSED; 
                 
                 spinlock_release_safe(&proc_lock, flags);
                 
                 proc_free_resources(curr);
                 
-                found_zombie = 1;
-                break; 
+                flags = spinlock_acquire_safe(&proc_lock);
+                curr = tasks_head;
+                continue; 
             }
             curr = curr->next;
         }
         
-        if (!found_zombie) {
-            spinlock_release_safe(&proc_lock, flags);
-        }
+        spinlock_release_safe(&proc_lock, flags);
 
-        __asm__ volatile("int $0x80" : : "a"(7), "b"(80)); 
+        __asm__ volatile("int $0x80" : : "a"(7), "b"(50)); // sleep(50ms)
     }
 }
 
@@ -584,4 +614,44 @@ void proc_wake_up_kbd_waiters() {
         t = t->next;
     }
     spinlock_release_safe(&proc_lock, flags);
+}
+
+task_t* proc_create_idle(int cpu_index) {
+    task_t* t = alloc_task();
+    if (!t) return 0;
+    
+    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    list_remove(t);
+    spinlock_release_safe(&proc_lock, flags);
+
+    strlcpy(t->name, "idle", 32);
+    t->state = TASK_RUNNING;
+    t->pid = 0;             
+    t->assigned_cpu = cpu_index;
+    t->mem_pages = 0;
+    t->page_dir = kernel_page_directory;
+
+    t->kstack_size = KSTACK_SIZE;
+    t->priority = PRIO_IDLE;
+    t->kstack = kmalloc_a(t->kstack_size);
+    memset(t->kstack, 0, t->kstack_size);
+    
+    uint32_t stack_top = (uint32_t)t->kstack + t->kstack_size;
+    stack_top &= ~0xF;
+    uint32_t* sp = (uint32_t*)stack_top;
+    
+    extern void idle_task_func(void*);
+    
+    *--sp = 0; // Padding
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = (uint32_t)idle_task_func; // EIP
+    *--sp = 0; // EBP
+    *--sp = 0; // EBX
+    *--sp = 0; // ESI
+    *--sp = 0; // EDI
+    
+    t->esp = sp;
+    
+    return t;
 }

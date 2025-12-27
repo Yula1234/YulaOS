@@ -271,14 +271,8 @@ void syscall_handler(registers_t* regs) {
 
             int total_w = req_w + 12;
             int total_h = req_h + 44;
-
-            uint32_t* user_pd = paging_get_dir();
-            
-            paging_switch(kernel_page_directory);
             
             window_t* win = window_create(100, 100, total_w, total_h, k_title, 0);
-            
-            paging_switch(user_pd);
 
             if (win) {
                 int id = -1;
@@ -301,7 +295,7 @@ void syscall_handler(registers_t* regs) {
             window_t* win = &window_list[id];
             if (win->owner_pid != (int)curr->pid) { regs->eax = 0; break; }
 
-            uint32_t user_vaddr_start = 0x40000000;
+            uint32_t user_vaddr_start = 0xA0000000;
             
             int canvas_w = win->target_w - 12;
             int canvas_h = win->target_h - 44;
