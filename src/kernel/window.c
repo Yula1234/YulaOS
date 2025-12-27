@@ -206,6 +206,16 @@ void window_draw_all() {
             }
 
             vga_blit_canvas(win->x + 6, win->y + 34, win->canvas, cw, ch);
+
+            int wx = win->x;
+            int wy = win->y;
+            int ww = win->w;
+            int wh = win->h;
+            
+            for(int k=0; k<10; k++) {
+                vga_put_pixel(wx + ww - 4 - k, wy + wh - 4, 0x666666);
+                vga_put_pixel(wx + ww - 4, wy + wh - 4 - k, 0x666666);
+            }
         }
     }
     

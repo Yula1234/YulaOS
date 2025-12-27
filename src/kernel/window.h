@@ -44,6 +44,10 @@ typedef struct window {
     yula_event_t event_queue[MAX_WIN_EVENTS];
     int evt_head;
     int evt_tail;
+
+    int is_resizing;
+    int ghost_w, ghost_h;
+
 } window_t;
 
 #define MAX_WINDOWS 16

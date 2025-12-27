@@ -4,6 +4,7 @@
 #include <shell/shell.h>
 #include <lib/string.h>
 #include <hal/io.h>
+#include <mm/heap.h>
 
 #include "gui_task.h"
 #include "window.h"
@@ -24,6 +25,8 @@ extern int dirty_x1, dirty_y1, dirty_x2, dirty_y2;
 #define C_BTN_MINIMIZED 0x1A1A1A 
 #define C_ACCENT_BLUE   0x007ACC 
 #define C_CLOSE_RED     0x9A1010 
+
+#define max(a,b) ((a) > (b) ? (a) : (b))
 
 static inline void sys_usleep(uint32_t us) {
     __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
@@ -102,6 +105,13 @@ void draw_desktop_icon(desktop_item_t* item) {
     
     int text_x = item->x + (item->w / 2) - (strlen(item->name) * 4);
     vga_print_at(item->name, text_x, item->y + 38, item->is_hovered ? 0xFFFFFF : 0xCCCCCC);
+}
+
+void vga_draw_wireframe(int x, int y, int w, int h, uint32_t color) {
+    vga_draw_rect(x, y, w, 1, color);          
+    vga_draw_rect(x, y + h - 1, w, 1, color);  
+    vga_draw_rect(x, y, 1, h, color);        
+    vga_draw_rect(x + w - 1, y, 1, h, color);  
 }
 
 void gui_task(void* arg) {
@@ -282,7 +292,16 @@ void gui_task(void* arg) {
 
                     if (mouse_x >= win->x && mouse_x <= win->x + win->w && mouse_y >= win->y && mouse_y <= win->y + win->h) {
                         hit = 1;
-                        if (mouse_x >= win->x + win->w - 26 && mouse_y <= win->y + 26) {
+                        if (mouse_x >= win->x + win->w - 20 && mouse_y >= win->y + win->h - 20) {
+                            window_bring_to_front(idx);
+                            dragged_window = win;
+                            
+                            win->is_resizing = 1;
+                            win->ghost_w = win->w;
+                            win->ghost_h = win->h;
+                            
+                        }
+                        else if (mouse_x >= win->x + win->w - 26 && mouse_y <= win->y + 26) {
                             vga_mark_dirty(win->x - 10, win->y - 10, win->w + 25, win->h + 25);
                             proc_kill_by_pid(win->owner_pid);
                         } else if (mouse_x >= win->x + win->w - 50 && mouse_x < win->x + win->w - 26 && mouse_y <= win->y + 26) {
@@ -304,34 +323,76 @@ void gui_task(void* arg) {
         }
 
         if (left_click && dragged_window) {
-            int nx = mouse_x - drag_off_x;
-            int ny = mouse_y - drag_off_y;
+            if (dragged_window->is_resizing) {
+                int new_w = mouse_x - dragged_window->x;
+                int new_h = mouse_y - dragged_window->y;
 
-            if (nx < 0) nx = 0;
-            if (ny < 26) ny = 26;
-            
-            vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, 
-                   dragged_window->w + 25, dragged_window->h + 25);
+                if (new_w < 150) new_w = 150;
+                if (new_h < 100) new_h = 100;
+
+                vga_mark_dirty(dragged_window->x - 5, dragged_window->y - 5, 
+                               max(dragged_window->ghost_w, new_w) + 10, 
+                               max(dragged_window->ghost_h, new_h) + 10);
+
+                dragged_window->ghost_w = new_w;
+                dragged_window->ghost_h = new_h;
+            } else {
+                int nx = mouse_x - drag_off_x;
+                int ny = mouse_y - drag_off_y;
+
+                if (nx < 0) nx = 0;
+                if (ny < 26) ny = 26;
+                
+                vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, 
+                       dragged_window->w + 25, dragged_window->h + 25);
 
 
-            if (nx + dragged_window->w > (int)fb_width) {
-                nx = fb_width - dragged_window->w;
+                if (nx + dragged_window->w > (int)fb_width) {
+                    nx = fb_width - dragged_window->w;
+                }
+                if (ny + dragged_window->h > (int)fb_height) {
+                    ny = fb_height - dragged_window->h;
+                }
+
+                nx &= ~3;
+
+                dragged_window->x = nx;
+                dragged_window->target_x = nx;
+                dragged_window->y = ny;
+                dragged_window->target_y = ny;
+
+                vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, 
+                       dragged_window->w + 25, dragged_window->h + 25);
             }
-            if (ny + dragged_window->h > (int)fb_height) {
-                ny = fb_height - dragged_window->h;
-            }
-
-            nx &= ~3;
-
-            dragged_window->x = nx;
-            dragged_window->target_x = nx;
-            dragged_window->y = ny;
-            dragged_window->target_y = ny;
-
-            vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, 
-                   dragged_window->w + 25, dragged_window->h + 25);
-
         } else {
+            if (dragged_window && dragged_window->is_resizing) {
+                int new_w = dragged_window->ghost_w;
+                int new_h = dragged_window->ghost_h;
+                
+                if (dragged_window->canvas) {
+                    kfree(dragged_window->canvas);
+                }
+
+                int canvas_w = new_w - 12;
+                int canvas_h = new_h - 44;
+
+                dragged_window->canvas = (uint32_t*)kmalloc_a(canvas_w * canvas_h * 4);
+                
+                if (dragged_window->canvas) {
+                    memset(dragged_window->canvas, 0x1E, canvas_w * canvas_h * 4);
+                }
+
+                dragged_window->w = new_w;
+                dragged_window->target_w = new_w;
+                dragged_window->h = new_h;
+                dragged_window->target_h = new_h;
+                
+                dragged_window->is_resizing = 0;
+                dragged_window->is_dirty = 1;
+                
+                vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, new_w + 20, new_h + 20);
+            }
+            
             dragged_window = 0;
         }
         
@@ -413,7 +474,14 @@ void gui_task(void* arg) {
         get_time_string(time_str);
         vga_print_at(time_str, fb_width - 80, 8, 0xD4D4D4);
 
+
         window_draw_all();
+
+        if (dragged_window && dragged_window->is_resizing) {
+            vga_draw_wireframe(dragged_window->x, dragged_window->y, 
+                               dragged_window->ghost_w, dragged_window->ghost_h, 
+                               0xAAAAAA);
+        }
 
         vga_set_target(0, 0, 0);
         extern uint32_t mouse_cursor_classic[144];
