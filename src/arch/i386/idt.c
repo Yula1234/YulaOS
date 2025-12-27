@@ -294,6 +294,10 @@ void isr_handler(registers_t* regs) {
     }
 }
 
+void idt_load(void) {
+    __asm__ volatile ("lidt %0" : : "m"(idtp));
+}
+
 void idt_init(void) {
     idtp.limit = (sizeof(struct idt_entry) * 256) - 1;
     idtp.base  = (uint32_t)&idt;

@@ -488,6 +488,8 @@ void shell_task(void* arg) {
                 char* args[TOK_MAX];
                 int arg_count = parse_args(line, args);
 
+                spinlock_release_safe(&ctx->lock, flags);
+
                 if (arg_count > 0) {
                     int pipe_idx = -1;
                     for(int i=0; i<arg_count; i++) {
@@ -570,6 +572,8 @@ void shell_task(void* arg) {
                         }
                     }
                 }
+
+                flags = spinlock_acquire_safe(&ctx->lock);
 
                 my_term->curr_fg = C_TEXT; 
                 my_term->curr_bg = C_BG;

@@ -7,6 +7,7 @@
 #include <drivers/console.h>
 #include <drivers/mouse.h>
 #include <drivers/ahci.h>
+#include <drivers/acpi.h> 
 #include <drivers/vga.h>
 
 #include <kernel/clipboard.h>
@@ -14,6 +15,7 @@
 #include <kernel/window.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
+#include <kernel/cpu.h>
 
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
@@ -85,6 +87,8 @@ extern uint32_t kernel_end;
 
 extern void put_pixel(int x, int y, uint32_t color);
 
+extern void smp_boot_aps(void);
+
 static inline void sys_usleep(uint32_t us) {
     __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
 }
@@ -111,6 +115,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     if (magic != 0x2BADB002) return;
 
     kernel_init_simd(); 
+
+    cpu_init_system();
 
     fb_ptr = (uint32_t*)(uint32_t)mb_info->framebuffer_addr;
     fb_width = mb_info->framebuffer_width;
@@ -147,12 +153,6 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     if (memory_end_addr == 0) {
         memory_end_addr = 1024 * 1024 * 64; 
     }
-
-    // PIC
-    // Opened:
-    // IRQ 1 (keyboard)
-    // IRQ 2 (cascade for mouse)
-    // IRQ 12 (mouse)
     
     // Master PIC (port 0x21): 
     // Bit 0 - Timer (closed, we had APIC)
@@ -168,13 +168,18 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     
     pmm_init(memory_end_addr, (uint32_t)&kernel_end);
     paging_init(memory_end_addr);
-    heap_init();  
+    heap_init();
+
 
     // mapping video memory
     uint32_t fb_size = fb_width * fb_height * 4;
     for (uint32_t i = 0; i < fb_size; i += 4096) {
         paging_map(kernel_page_directory, (uint32_t)fb_ptr + i, (uint32_t)fb_ptr + i, 3);
     }
+
+    acpi_init();
+    
+    smp_boot_aps();
 
     vga_init();
     vga_init_graphics();

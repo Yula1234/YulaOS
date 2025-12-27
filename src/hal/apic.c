@@ -3,15 +3,6 @@
 #include "apic.h"
 #include "io.h"
 
-static inline void lapic_write(uint32_t reg, uint32_t val) {
-    volatile uint32_t* addr = (volatile uint32_t*)(LAPIC_BASE + reg);
-    *addr = val;
-}
-
-static inline uint32_t lapic_read(uint32_t reg) {
-    return *(volatile uint32_t*)(LAPIC_BASE + reg);
-}
-
 void lapic_eoi() {
     lapic_write(LAPIC_EOI, 0);
 }

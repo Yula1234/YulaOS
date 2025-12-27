@@ -16,5 +16,6 @@ extern volatile uint32_t system_uptime_seconds;
   
 
 void idt_init(void);
+void idt_load(void);
 
 #endif

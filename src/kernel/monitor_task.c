@@ -74,7 +74,7 @@ static void monitor_draw_handler(window_t* self, int x, int y) {
     vga_print_at(itoa(m), x + 150, y, C_TEXT_MAIN); vga_print_at("m", x + 165, y, C_TEXT_DIM);
     vga_print_at(itoa(s), x + 185, y, C_TEXT_MAIN); vga_print_at("s", x + 200, y, C_TEXT_DIM);
 
-    draw_section_frame(x, y + 30, 270, 90, "PHYSICAL RAM");
+    draw_section_frame(x, y + 30, 270, 100, "PHYSICAL RAM");
     
     uint32_t u_blocks = pmm_get_used_blocks();
     uint32_t f_blocks = pmm_get_free_blocks();
@@ -82,44 +82,55 @@ static void monitor_draw_handler(window_t* self, int x, int y) {
     uint32_t used_kb  = u_blocks * 4;
     uint32_t load_pct = (total_kb > 0) ? (used_kb * 100) / total_kb : 0;
 
-    vga_draw_rect(x + 10, y + 42, 106, 45, 0x0F0F0F);
+    vga_draw_rect(x + 10, y + 45, 106, 45, 0x0F0F0F);
     for (int i = 0; i < HISTORY_MAX - 1; i++) {
         int idx = (internal->history_idx + i) % HISTORY_MAX;
         int h_val = (internal->history[idx] * 40) / 100;
         if (h_val > 40) h_val = 40;
-        vga_draw_rect(x + 12 + (i * 2), y + 85 - h_val, 1, h_val, C_GREEN);
+        vga_draw_rect(x + 12 + (i * 2), y + 88 - h_val, 1, h_val, C_GREEN);
     }
-    vga_print_at("Load 5s", x + 10, y + 90, 0x444444);
+    vga_print_at("Load 5s", x + 10, y + 95, 0x444444);
 
     int tx = x + 130;
-    vga_print_at("Load:", tx, y + 42, C_TEXT_DIM);
-    vga_print_at(itoa(load_pct), tx + 50, y + 42, (load_pct > 80) ? C_RED : C_GREEN);
-    vga_print_at("%", tx + 80, y + 42, C_TEXT_DIM);
+    
+    extern volatile int ap_running_count;
+    int total_cpus = ap_running_count + 1;
+    vga_print_at("CPUs:", tx, y + 42, C_TEXT_DIM);
+    vga_print_at(itoa(total_cpus), tx + 50, y + 42, C_GREEN);
 
-    vga_print_at("Used:", tx, y + 58, C_TEXT_DIM);
-    vga_print_at(itoa(used_kb), tx + 50, y + 58, C_TEXT_MAIN);
-    vga_print_at("KB", tx + 105, y + 58, 0x444444);
+    vga_print_at("Load:", tx, y + 55, C_TEXT_DIM);
+    vga_print_at(itoa(load_pct), tx + 50, y + 55, (load_pct > 80) ? C_RED : C_GREEN);
+    vga_print_at("%", tx + 80, y + 55, C_TEXT_DIM);
 
-    vga_print_at("Free:", tx, y + 74, C_TEXT_DIM);
-    vga_print_at(itoa(f_blocks * 4), tx + 50, y + 74, C_TEXT_MAIN);
+    vga_print_at("Used:", tx, y + 68, C_TEXT_DIM);
+    vga_print_at(itoa(used_kb), tx + 50, y + 68, C_TEXT_MAIN);
+    vga_print_at("KB", tx + 105, y + 68, 0x444444);
 
-    draw_section_frame(x, y + 140, 270, 45, "KERNEL VIRTUAL HEAP");
+    vga_print_at("Free:", tx, y + 81, C_TEXT_DIM);
+    vga_print_at(itoa(f_blocks * 4), tx + 50, y + 81, C_TEXT_MAIN);
+
+
+    int heap_y = y + 145;
+    
+    draw_section_frame(x, heap_y, 270, 45, "KERNEL VIRTUAL HEAP");
     uint32_t heap_committed = vmm_get_used_pages() * PAGE_SIZE;
     
-    vga_print_at("Committed:", x + 10, y + 152, C_TEXT_DIM);
-    vga_print_at(itoa(heap_committed / 1024), x + 100, y + 152, C_ORANGE);
-    vga_print_at("KB", x + 160, y + 152, 0x444444);
+    vga_print_at("Committed:", x + 10, heap_y + 12, C_TEXT_DIM);
+    vga_print_at(itoa(heap_committed / 1024), x + 100, heap_y + 12, C_ORANGE);
+    vga_print_at("KB", x + 160, heap_y + 12, 0x444444);
     
-    draw_stat_bar(x + 10, y + 170, 250, 7, heap_committed / 1024, 32768, C_ORANGE);
+    draw_stat_bar(x + 10, heap_y + 30, 250, 7, heap_committed / 1024, 32768, C_ORANGE);
 
-    vga_print_at("ID   TASK NAME         MEM      STATUS", x + 5, y + 200, C_ACCENT);
-    vga_draw_rect(x + 5, y + 210, 305, 1, 0x333333);
+    int proc_y = y + 210;
+    
+    vga_print_at("ID   TASK NAME         MEM      STATUS", x + 5, proc_y, C_ACCENT);
+    vga_draw_rect(x + 5, proc_y + 10, 305, 1, 0x333333);
 
     int row = 0;
     for (uint32_t i = 0; i < proc_task_count(); i++) {
         task_t* t = proc_task_at(i);
         if (t && row < 15) {
-            int ry = y + 220 + (row * 13);
+            int ry = proc_y + 20 + (row * 13);
             vga_print_at(itoa(t->pid), x + 5, ry, C_TEXT_DIM);
             vga_print_at(t->name, x + 40, ry, C_TEXT_MAIN);
             vga_print_at(itoa(t->mem_pages * 4), x + 180, ry, C_GREEN);

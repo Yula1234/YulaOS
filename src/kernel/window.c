@@ -59,8 +59,7 @@ int window_pop_event(window_t* win, yula_event_t* out_ev) {
     return 1;
 }
 
-void window_bring_to_front(int window_index) {
-    uint32_t flags = spinlock_acquire_safe(&window_lock);
+static void window_bring_to_front_nolock(int window_index) {
     int pos = -1;
     for(int i = 0; i < MAX_WINDOWS; i++) {
         if(window_z_order[i] == window_index) {
@@ -68,10 +67,7 @@ void window_bring_to_front(int window_index) {
             break;
         }
     }
-    if(pos == -1) {
-        spinlock_release_safe(&window_lock, flags);
-        return;
-    }
+    if(pos == -1) return;
 
     for(int i = pos; i < MAX_WINDOWS - 1; i++) {
         window_z_order[i] = window_z_order[i+1];
@@ -79,6 +75,11 @@ void window_bring_to_front(int window_index) {
     window_z_order[MAX_WINDOWS - 1] = window_index;
     
     focused_window_pid = window_list[window_index].focused_pid;
+}
+
+void window_bring_to_front(int window_index) {
+    uint32_t flags = spinlock_acquire_safe(&window_lock);
+    window_bring_to_front_nolock(window_index);
     spinlock_release_safe(&window_lock, flags);
 }
 
@@ -132,7 +133,7 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
             for(int j = 0; j < MAX_WINDOWS; j++) {
                 if(window_z_order[j] == -1) {
                     window_z_order[j] = i;
-                    window_bring_to_front(i);
+                    window_bring_to_front_nolock(i);
                     break;
                 }
             }

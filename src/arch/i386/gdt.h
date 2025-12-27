@@ -2,6 +2,9 @@
 #define ARCH_I386_GDT_H
 
 #include <stdint.h>
+#include <kernel/cpu.h>
+
+#define GDT_ENTRIES (5 + MAX_CPUS) 
 
 struct tss_entry_struct {
     uint32_t prev_tss;
@@ -18,7 +21,10 @@ struct tss_entry_struct {
     uint32_t ldt; uint16_t trap; uint16_t iomap_base;
 } __attribute__((packed));
 
+extern struct tss_entry_struct tss_entries[MAX_CPUS];
+
 void gdt_init(void);
-void tss_set_stack(uint32_t kernel_esp);
+void gdt_load(void);
+void tss_set_stack(int cpu_id, uint32_t kernel_esp);
 
 #endif

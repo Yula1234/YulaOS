@@ -15,6 +15,7 @@
 #include "sched.h"
 #include "proc.h"
 #include "elf.h"
+#include "cpu.h"
 
 #define KSTACK_SIZE 16384  
 
@@ -24,8 +25,6 @@ static uint32_t total_tasks = 0;
 static uint32_t next_pid = 1;
 static spinlock_t proc_lock;
 
-task_t* current_task = 0;
-
 extern void irq_return(void);
 
 void proc_init(void) {
@@ -34,6 +33,11 @@ void proc_init(void) {
     total_tasks = 0;
     next_pid = 1;
     spinlock_init(&proc_lock);
+}
+
+task_t* proc_current() { 
+    cpu_t* cpu = cpu_current();
+    return cpu->current_task; 
 }
 
 static void list_append(task_t* t) {
@@ -201,7 +205,7 @@ void proc_kill(task_t* t) {
 }
 
 static void kthread_trampoline(void) {
-    task_t* t = current_task;
+    task_t* t = proc_current();
     __asm__ volatile("sti");
     t->entry(t->arg);       
     
@@ -210,7 +214,6 @@ static void kthread_trampoline(void) {
     for (;;) cpu_hlt();   
 }
 
-task_t* proc_current() { return current_task; }
 task_t* proc_get_list_head() { return tasks_head; }
 uint32_t proc_task_count(void) { return total_tasks; }
 

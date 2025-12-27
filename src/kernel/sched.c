@@ -6,15 +6,13 @@
 #include <hal/io.h>
 
 #include "sched.h"
+#include "cpu.h"
 
 static task_t* runq_head = 0;
 static task_t* runq_tail = 0;
 static uint32_t runq_count = 0;
 
-static task_t* current = 0;
 static spinlock_t sched_lock;
-
-extern task_t* current_task;
 
 static void runq_append(task_t* t) {
     t->sched_next = 0;
@@ -48,7 +46,6 @@ void sched_init(void) {
     runq_head = 0;
     runq_tail = 0;
     runq_count = 0;
-    current = 0;
     spinlock_init(&sched_lock);
 }
 
@@ -95,19 +92,19 @@ static task_t* pick_next_rr(void) {
 }
 
 void sched_set_current(task_t* t) {
-    current = t;
-    current_task = t;
+    cpu_t* cpu = cpu_current();
+    cpu->current_task = t;
     
     uint32_t kstack_top = (uint32_t)t->kstack + t->kstack_size;
     kstack_top &= ~0xF; 
-    tss_set_stack(kstack_top); 
+    
+    tss_set_stack(cpu->index, kstack_top); 
     
     if (t->page_dir) paging_switch(t->page_dir);
     else paging_switch(kernel_page_directory);
 }
 
 void sched_start(task_t* first) {
-    current = first;
     sched_set_current(first);
     first->state = TASK_RUNNING;
     
@@ -117,9 +114,11 @@ void sched_start(task_t* first) {
 
 void sched_yield(void) {
     __asm__ volatile("cli");
-    if (!current) return;
     
-    task_t* prev = current;
+    cpu_t* cpu = cpu_current();
+    task_t* prev = cpu->current_task;
+    if(!prev) return;
+
     if (prev && prev->state == TASK_RUNNING) prev->state = TASK_RUNNABLE;
 
     task_t* next = pick_next_rr();
@@ -135,7 +134,6 @@ void sched_yield(void) {
     }
 
     next->state = TASK_RUNNING;
-    current = next;
     sched_set_current(next);
 
     if (prev == next) return;

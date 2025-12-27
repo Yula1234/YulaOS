@@ -28,11 +28,13 @@ for d in "${DIRS[@]}"; do mkdir -p "$d"; done
 
 gcc tools/yulafs_tool.c -o "$TOOL"
 
+echo "[asm] building smp trampoline..."
+$ASM src/boot/smp_trampoline.asm bin/smp_trampoline.bin
+
 echo "[asm] assembling kernel..."
 OBJ_FILES=""
 for FILE in $(find src -name "*.asm" | sort); do
-    if [[ "$FILE" != *"src/usr"* ]]; then
-        # Transform path: src/arch/file.asm -> arch_file.o
+    if [[ "$FILE" != *"src/usr"* && "$FILE" != *"src/boot/smp_trampoline.asm" ]]; then
         OBJ_NAME=$(echo $FILE | sed 's|src/||' | sed 's|/|_|g' | sed 's|\.asm|.o|')
         $ASM "$FILE" "bin/obj/$OBJ_NAME"
         OBJ_FILES="$OBJ_FILES bin/obj/$OBJ_NAME"
@@ -85,13 +87,13 @@ menuentry "YulaOS" {
 }
 EOF
 
-grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
+grub-mkrescue -o bin/yulaos.iso "$ISODIR"
 
 echo "[run] qemu..."
 
 QEMU_ARGS="-device ahci,id=ahci
 -device ide-hd,drive=disk,bus=ahci.0
 -drive id=disk,file=${DISK_IMG},if=none,format=raw
--enable-kvm -vga std -m 2G"
+-enable-kvm -vga std -m 2G -smp 4"
 
 qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS

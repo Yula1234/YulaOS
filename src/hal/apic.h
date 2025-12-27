@@ -30,6 +30,16 @@ void lapic_init(void);
 void lapic_timer_init(uint32_t hz);
 void lapic_eoi(void);
 
+// Добавляем inline функции для доступа к регистрам
+static inline uint32_t lapic_read(uint32_t reg) {
+    return *(volatile uint32_t*)(LAPIC_BASE + reg);
+}
+
+static inline void lapic_write(uint32_t reg, uint32_t val) {
+    *(volatile uint32_t*)(LAPIC_BASE + reg) = val;
+}
+
+
 #endif
 
   
