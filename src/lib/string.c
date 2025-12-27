@@ -23,19 +23,6 @@ int strncmp(const char* a, const char* b, size_t n) {
     return 0;
 }
 
-void* memset(void* dst, int v, size_t n) {
-    uint8_t* p = (uint8_t*)dst;
-    while (n--) *p++ = (uint8_t)v;
-    return dst;
-}
-
-void* memcpy(void* dst, const void* src, size_t n) {
-    uint8_t* d = (uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    while (n--) *d++ = *s++;
-    return dst;
-}
-
 size_t strlcpy(char* dst, const char* src, size_t dstsz) {
     size_t i = 0;
     if (dstsz) {
@@ -110,4 +97,23 @@ void* memset_sse(void* dest, int val, size_t n) {
 
     while (n--) *d++ = (uint8_t)val;
     return dest;
+}
+
+void* memcpy(void* dst, const void* src, size_t n) {
+    if (n < 64) {
+        uint8_t* d = (uint8_t*)dst;
+        const uint8_t* s = (const uint8_t*)src;
+        while (n--) *d++ = *s++;
+        return dst;
+    }
+    return memcpy_sse(dst, src, n);
+}
+
+void* memset(void* dst, int v, size_t n) {
+    if (n < 64) {
+        uint8_t* p = (uint8_t*)dst;
+        while (n--) *p++ = (uint8_t)v;
+        return dst;
+    }
+    return memset_sse(dst, v, n);
 }
