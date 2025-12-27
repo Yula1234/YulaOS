@@ -151,4 +151,8 @@ static inline int get_fs_info(fs_info_t* buf) {
     return syscall(34, (int)buf, 0, 0);
 }
 
+static inline int rename(const char* old_path, const char* new_path) {
+    return syscall(35, (int)old_path, (int)new_path, 0);
+}
+
 #endif

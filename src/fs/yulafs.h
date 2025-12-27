@@ -77,5 +77,6 @@ int yulafs_stat(yfs_ino_t ino, yfs_inode_t* out);
 void yulafs_resize(yfs_ino_t ino, uint32_t new_size);
 
 void yulafs_get_filesystem_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
+int yulafs_rename(const char* old_path, const char* new_path);
 
 #endif

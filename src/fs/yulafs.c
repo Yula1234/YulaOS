@@ -601,3 +601,53 @@ void yulafs_get_filesystem_info(uint32_t* total_blocks, uint32_t* free_blocks, u
         *block_size = 0;
     }
 }
+
+static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
+    yfs_inode_t dir;
+    sync_inode(dir_ino, &dir, 0);
+
+    yfs_dirent_t entries[YFS_BLOCK_SIZE / sizeof(yfs_dirent_t)];
+    uint32_t count = sizeof(entries) / sizeof(yfs_dirent_t);
+    uint32_t blocks = (dir.size + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
+
+    for (uint32_t i = 0; i < blocks; i++) {
+        yfs_blk_t lba = resolve_block(&dir, i, 0);
+        if (!lba) continue;
+
+        bcache_read(lba, (uint8_t*)entries);
+        for (uint32_t j = 0; j < count; j++) {
+            if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
+                entries[j].inode = 0;
+                memset(entries[j].name, 0, YFS_NAME_MAX);
+                
+                bcache_write(lba, (uint8_t*)entries);
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+int yulafs_rename(const char* old_path, const char* new_path) {
+    char old_name[YFS_NAME_MAX];
+    char new_name[YFS_NAME_MAX];
+
+    yfs_ino_t old_dir_ino = path_to_inode(old_path, old_name);
+    if (!old_dir_ino) return -1;
+
+    yfs_inode_t old_dir_node;
+    sync_inode(old_dir_ino, &old_dir_node, 0);
+    yfs_ino_t target_ino = dir_find(&old_dir_node, old_name);
+    if (!target_ino) return -1;
+
+    yfs_ino_t new_dir_ino = path_to_inode(new_path, new_name);
+    if (!new_dir_ino) return -1;
+
+    if (dir_link(new_dir_ino, target_ino, new_name) != 0) {
+        return -1;
+    }
+
+    dir_unlink_entry_only(old_dir_ino, old_name);
+
+    return 0;
+}

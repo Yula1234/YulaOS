@@ -669,6 +669,19 @@ void syscall_handler(registers_t* regs) {
         }
         break;
 
+        case 35: // rename(old_path, new_path)
+        {
+            char* oldp = (char*)regs->ebx;
+            char* newp = (char*)regs->ecx;
+            
+            if (check_user_buffer(curr, oldp, 1) && check_user_buffer(curr, newp, 1)) {
+                regs->eax = yulafs_rename(oldp, newp);
+            } else {
+                regs->eax = -1;
+            }
+        }
+        break;
+
 
         default:
             vga_print("Unknown syscall\n");
