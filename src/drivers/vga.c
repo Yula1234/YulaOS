@@ -533,14 +533,51 @@ void vga_draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alp
 __attribute__((target("sse2")))
 void vga_draw_gradient_v(int x, int y, int w, int h, uint32_t c1, uint32_t c2) {
     if (!vga_current_target) return;
-    for (int i = 0; i < h; i++) {
-        uint8_t r = (((c1 >> 16) & 0xFF) * (h - i) + ((c2 >> 16) & 0xFF) * i) / h;
-        uint8_t g = (((c1 >> 8) & 0xFF) * (h - i) + ((c2 >> 8) & 0xFF) * i) / h;
-        uint8_t b = ((c1 & 0xFF) * (h - i) + (c2 & 0xFF) * i) / h;
-        uint32_t color = (r << 16) | (g << 8) | b;
+
+    if (x >= (int)vga_target_w || y >= (int)vga_target_h) return;
+    int x1 = (x < 0) ? 0 : x;
+    int y1 = (y < 0) ? 0 : y;
+    int x2 = (x + w > (int)vga_target_w) ? (int)vga_target_w : x + w;
+    int y2 = (y + h > (int)vga_target_h) ? (int)vga_target_h : y + h;
+    int draw_w = x2 - x1;
+
+    if (draw_w <= 0 || y1 >= y2) return;
+
+    for (int cy = y1; cy < y2; cy++) {
+        int rel_y = cy - y; 
         
-        vga_draw_rect(x, y + i, w, 1, color);
+        uint32_t r = (((c1 >> 16) & 0xFF) * (h - rel_y) + ((c2 >> 16) & 0xFF) * rel_y) / h;
+        uint32_t g = (((c1 >> 8) & 0xFF) * (h - rel_y) + ((c2 >> 8) & 0xFF) * rel_y) / h;
+        uint32_t b = ((c1 & 0xFF) * (h - rel_y) + (c2 & 0xFF) * rel_y) / h;
+        uint32_t color = (r << 16) | (g << 8) | b;
+
+        uint32_t* line_ptr = &vga_current_target[cy * vga_target_w + x1];
+        
+        int count = draw_w;
+        
+        __asm__ volatile (
+            "movd %0, %%xmm0\n\t"
+            "pshufd $0, %%xmm0, %%xmm0\n\t"
+            : : "r"(color) : "xmm0"
+        );
+
+        int sse_blocks = count / 4;
+        while (sse_blocks > 0) {
+            __asm__ volatile (
+                "movups %%xmm0, (%0)\n\t"
+                : : "r"(line_ptr) : "memory"
+            );
+            line_ptr += 4;
+            sse_blocks--;
+        }
+        
+        count %= 4;
+        while (count--) {
+            *line_ptr++ = color;
+        }
     }
+    
+    vga_mark_dirty(x, y, w, h);
 }
 
 __attribute__((target("sse2")))
@@ -631,23 +668,65 @@ void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
     vga_mark_dirty(x, y, draw_w, draw_h);
 }
 
+__attribute__((target("sse2")))
 void vga_draw_sprite_scaled_masked(int x, int y, int sw, int sh, int scale, uint32_t* data, uint32_t trans) {
     if (!vga_current_target) return;
 
+    if (x >= (int)vga_target_w || y >= (int)vga_target_h) return;
+    if (x + sw * scale <= 0 || y + sh * scale <= 0) return;
+
     for (int i = 0; i < sh; i++) {
-        int cy = y + i * scale;
-        if (cy >= (int)vga_target_h) break;
-        if (cy + scale <= 0) continue;
+        int screen_y_start = y + i * scale;
+        
+        if (screen_y_start >= (int)vga_target_h) break;
+        if (screen_y_start + scale <= 0) continue;
 
         for (int j = 0; j < sw; j++) {
             uint32_t color = data[i * sw + j];
             if (color == trans) continue;
 
-            int cx = x + j * scale;
-            if (cx >= (int)vga_target_w) break;
-            if (cx + scale <= 0) continue;
+            int screen_x_start = x + j * scale;
+            
+            if (screen_x_start >= (int)vga_target_w) break;
+            if (screen_x_start + scale <= 0) continue;
 
-            vga_draw_rect(cx, cy, scale, scale, color);
+            __asm__ volatile (
+                "movd %0, %%xmm0\n\t"
+                "pshufd $0, %%xmm0, %%xmm0\n\t"
+                : : "r"(color) : "xmm0"
+            );
+
+            for (int sy = 0; sy < scale; sy++) {
+                int py = screen_y_start + sy;
+                if (py < 0 || py >= (int)vga_target_h) continue;
+
+                uint32_t* dst = &vga_current_target[py * vga_target_w + screen_x_start];
+                int width_to_draw = scale;
+                
+                int start_off = 0;
+                if (screen_x_start < 0) {
+                    start_off = -screen_x_start;
+                    width_to_draw -= start_off;
+                    dst += start_off;
+                }
+                if (screen_x_start + scale > (int)vga_target_w) {
+                    width_to_draw = (int)vga_target_w - screen_x_start;
+                }
+
+                if (width_to_draw <= 0) continue;
+
+                int k = 0;
+                while (width_to_draw - k >= 4) {
+                    __asm__ volatile (
+                        "movups %%xmm0, (%0)\n\t"
+                        : : "r"(dst + k) : "memory"
+                    );
+                    k += 4;
+                }
+                while (k < width_to_draw) {
+                    dst[k++] = color;
+                }
+            }
         }
     }
 }
