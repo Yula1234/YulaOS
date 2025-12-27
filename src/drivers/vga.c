@@ -71,29 +71,85 @@ void vga_set_target(uint32_t* target, uint32_t w, uint32_t h) {
     }
 }
 
+typedef union {
+    uint32_t u32[4];
+    uint8_t  bytes[16];
+} __attribute__((aligned(16))) vec128_t;
+
+static const vec128_t font_mask_high = { .u32 = { 0x00000080, 0x00000040, 0x00000020, 0x00000010 } };
+static const vec128_t font_mask_low  = { .u32 = { 0x00000008, 0x00000004, 0x00000002, 0x00000001 } };
+
 __attribute__((target("sse2")))
 void vga_draw_char_sse(int x, int y, char c, uint32_t fg) {
     if ((uint8_t)c > 127 || !vga_current_target) return;
-    
     if (x < 0 || y < 0 || x + 8 > (int)vga_target_w || y + 16 > (int)vga_target_h) return;
 
     const uint8_t* glyph = font8x16_basic[(uint8_t)c];
+    uint32_t* dst_ptr = &vga_current_target[y * vga_target_w + x];
+    int stride_bytes = vga_target_w * 4;
 
-    for (int i = 0; i < 16; i++) {
-        uint8_t row = glyph[i];
-        if (row == 0) continue;
-
-        uint32_t* dst = &vga_current_target[(y + i) * vga_target_w + x];
+    __asm__ volatile (
+        "movd      %[fg], %%xmm0 \n\t"
+        "pshufd    $0x00, %%xmm0, %%xmm0 \n\t"
+        "pxor      %%xmm7, %%xmm7 \n\t"
         
-        if (row & 0x80) dst[0] = fg;
-        if (row & 0x40) dst[1] = fg;
-        if (row & 0x20) dst[2] = fg;
-        if (row & 0x10) dst[3] = fg;
-        if (row & 0x08) dst[4] = fg;
-        if (row & 0x04) dst[5] = fg;
-        if (row & 0x02) dst[6] = fg;
-        if (row & 0x01) dst[7] = fg;
-    }
+        "movdqa    %[m_hi], %%xmm5 \n\t" 
+        "movdqa    %[m_lo], %%xmm6 \n\t"
+        
+        "mov       $16, %%ecx \n\t"
+
+        "1: \n\t"
+        "movzbl    (%[glyph]), %%eax \n\t"
+        "test      %%eax, %%eax \n\t"
+        "jz        2f \n\t"
+
+        "movd      %%eax, %%xmm1 \n\t"
+        "pshufd    $0x00, %%xmm1, %%xmm1 \n\t"
+
+        "movdqa    %%xmm1, %%xmm2 \n\t"
+        "pand      %%xmm5, %%xmm2 \n\t"
+        "pcmpgtd   %%xmm7, %%xmm2 \n\t"
+        
+        "movdqu    (%[dst]), %%xmm3 \n\t"
+        "pandn     %%xmm3, %%xmm2 \n\t"
+        
+        "movdqa    %%xmm1, %%xmm4 \n\t"
+        "pand      %%xmm5, %%xmm4 \n\t"
+        "pcmpgtd   %%xmm7, %%xmm4 \n\t"
+        "pand      %%xmm0, %%xmm4 \n\t"
+        
+        "por       %%xmm4, %%xmm2 \n\t"
+        "movdqu    %%xmm2, (%[dst]) \n\t"
+
+        "movdqa    %%xmm1, %%xmm2 \n\t"
+        "pand      %%xmm6, %%xmm2 \n\t"
+        "pcmpgtd   %%xmm7, %%xmm2 \n\t"
+        
+        "movdqu    16(%[dst]), %%xmm3 \n\t"
+        "pandn     %%xmm3, %%xmm2 \n\t"
+        
+        "movdqa    %%xmm1, %%xmm4 \n\t"
+        "pand      %%xmm6, %%xmm4 \n\t"
+        "pcmpgtd   %%xmm7, %%xmm4 \n\t"
+        "pand      %%xmm0, %%xmm4 \n\t"
+        
+        "por       %%xmm4, %%xmm2 \n\t"
+        "movdqu    %%xmm2, 16(%[dst]) \n\t"
+
+        "2: \n\t"
+        "inc       %[glyph] \n\t"
+        "add       %[stride], %[dst] \n\t"
+        "dec       %%ecx \n\t"
+        "jnz       1b \n\t"
+
+        : [dst]    "+r" (dst_ptr), 
+          [glyph]  "+r" (glyph)
+        : [fg]     "m"  (fg), 
+          [stride] "m"  (stride_bytes),
+          [m_hi]   "m"  (font_mask_high), 
+          [m_lo]   "m"  (font_mask_low)
+        : "memory", "eax", "ecx", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"
+    );
 }
 
 __attribute__((unused)) static void scroll() {
