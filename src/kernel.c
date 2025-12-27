@@ -3,6 +3,7 @@
 #include <fs/yulafs.h>
 #include <fs/bcache.h>
 
+#include <drivers/pc_speaker.h>
 #include <drivers/keyboard.h>
 #include <drivers/console.h>
 #include <drivers/mouse.h>
@@ -198,6 +199,9 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     proc_init();
     sched_init();
+
+    pc_speaker_init();
+    pc_speaker_beep(); 
 
     for (int i = 0; i < MAX_CPUS; i++) {
         cpus[i].idle_task = proc_create_idle(i);

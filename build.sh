@@ -92,6 +92,7 @@ echo "[run] qemu..."
 QEMU_ARGS="-device ahci,id=ahci
 -device ide-hd,drive=disk,bus=ahci.0
 -drive id=disk,file=${DISK_IMG},if=none,format=raw
--accel kvm -vga std -m 2G -smp 4 -cpu host"
+-accel kvm -vga std -m 2G -smp 4 -cpu host
+-audiodev pa,id=snd0 -machine pcspk-audiodev=snd0"
 
 qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS
