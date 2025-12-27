@@ -106,7 +106,7 @@ void idle_task_func(void* arg) {
 void syncer_task(void* arg) {
     (void)arg;
     while(1) {
-        sys_usleep(1000000); 
+        sys_usleep(400000); 
         
         bcache_sync();
     }

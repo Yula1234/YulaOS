@@ -22,6 +22,8 @@ extern uint32_t* paging_get_dir(void);
 
 static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     uint32_t start = (uint32_t)buf;
+    if (start + size < start) return 0; 
+    
     uint32_t end = start + size;
 
     if (end > 0xC0000000) return 0; 
