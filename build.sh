@@ -89,10 +89,14 @@ grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
 
 echo "[run] qemu..."
 
-QEMU_ARGS="-device ahci,id=ahci
+export vblank_mode=0 
+export __GL_SYNC_TO_VBLANK=0
+
+QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
 -device ide-hd,drive=disk,bus=ahci.0
--drive id=disk,file=${DISK_IMG},if=none,format=raw
--accel kvm -vga std -m 2G -smp 4 -cpu host
+-drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe
+-accel kvm -vga virtio -display sdl,gl=on -m 1G -mem-prealloc
+-smp 3 -cpu host,migratable=no,+invtsc,l3-cache=on 
 -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0"
 
 qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS

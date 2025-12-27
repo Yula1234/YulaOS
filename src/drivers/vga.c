@@ -469,6 +469,19 @@ __attribute__((unused)) static uint32_t color_blend(uint32_t c1, uint32_t c2, ui
 __attribute__((target("sse2")))
 void vga_draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
     if (!vga_current_target || alpha == 0) return;
+
+    if (x >= (int)vga_target_w || y >= (int)vga_target_h) return;
+    if (x + w <= 0 || y + h <= 0) return;
+
+    int x1 = (x < 0) ? 0 : x;
+    int y1 = (y < 0) ? 0 : y;
+    int x2 = (x + w > (int)vga_target_w) ? (int)vga_target_w : x + w;
+    int y2 = (y + h > (int)vga_target_h) ? (int)vga_target_h : y + h;
+
+    int draw_w = x2 - x1;
+    int draw_h = y2 - y1;
+
+    if (draw_w <= 0 || draw_h <= 0) return;
     
     uint32_t a = alpha;
     uint32_t inv_a = 255 - a;
@@ -486,27 +499,33 @@ void vga_draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alp
         : : "r"(a), "r"(inv_a), "r"(color) : "xmm4", "xmm5", "xmm6", "xmm7"
     );
 
-    for (int i = 0; i < h; i++) {
-        int cy = y + i;
-        if (cy < 0 || cy >= (int)vga_target_h) continue;
-        uint32_t* dst_ptr = &vga_current_target[cy * vga_target_w + x];
-        int count = w / 2; 
+    for (int cy = y1; cy < y2; cy++) {
+        uint32_t* dst_ptr = &vga_current_target[cy * vga_target_w + x1];
+        
+        int count = draw_w / 2; 
 
         while (count--) {
             __asm__ volatile (
-                "movq (%0), %%xmm1\n\t"        
-                "movaps %%xmm5, %%xmm0\n\t"    
-                "punpcklbw %%xmm4, %%xmm0\n\t" 
+                "movq (%0), %%xmm1\n\t" 
+                "movaps %%xmm5, %%xmm0\n\t" 
+                "punpcklbw %%xmm4, %%xmm0\n\t"
                 "punpcklbw %%xmm4, %%xmm1\n\t" 
-                "pmullw %%xmm6, %%xmm0\n\t"    
+                "pmullw %%xmm6, %%xmm0\n\t" 
                 "pmullw %%xmm7, %%xmm1\n\t"    
-                "paddw %%xmm1, %%xmm0\n\t"     
+                "paddw %%xmm1, %%xmm0\n\t" 
                 "psrlw $8, %%xmm0\n\t"         
-                "packuswb %%xmm0, %%xmm0\n\t"  
-                "movq %%xmm0, (%0)\n\t"        
+                "packuswb %%xmm0, %%xmm0\n\t" 
+                "movq %%xmm0, (%0)\n\t" 
                 : : "r"(dst_ptr) : "memory", "xmm0", "xmm1"
             );
             dst_ptr += 2;
+        }
+        
+        if (draw_w % 2 != 0) {
+            uint32_t bg = *dst_ptr;
+            uint32_t rb = ((color & 0xFF00FF) * a + (bg & 0xFF00FF) * inv_a) >> 8;
+            uint32_t g  = ((color & 0x00FF00) * a + (bg & 0x00FF00) * inv_a) >> 8;
+            *dst_ptr = (rb & 0xFF00FF) | (g & 0x00FF00);
         }
     }
 }
@@ -550,39 +569,66 @@ __attribute__((target("sse2")))
 void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
     if (!canvas) return;
 
-    for (int i = 0; i < h; i++) {
+    if (x >= (int)fb_width || y >= (int)fb_height) return;
+    if (x + w <= 0 || y + h <= 0) return;
+
+    int src_x = 0;
+    int src_y = 0;
+    int draw_w = w;
+    int draw_h = h;
+
+    if (x < 0) {
+        src_x = -x;
+        draw_w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        src_y = -y;
+        draw_h += y;
+        y = 0;
+    }
+    if (x + draw_w > (int)fb_width) {
+        draw_w = (int)fb_width - x;
+    }
+    if (y + draw_h > (int)fb_height) {
+        draw_h = (int)fb_height - y;
+    }
+
+    if (draw_w <= 0 || draw_h <= 0) return;
+
+    for (int i = 0; i < draw_h; i++) {
         int screen_y = y + i;
-        if (screen_y < 0 || screen_y >= (int)fb_height) continue;
+        int canvas_y = src_y + i;
         
         uint32_t* dst = &back_buffer[screen_y * fb_width + x];
-        uint32_t* src = &canvas[i * w];
+        uint32_t* src = &canvas[canvas_y * w + src_x];
         
-        int count = w / 4; 
+        int count = draw_w / 4; 
 
         if (count > 0) {
             __asm__ volatile (
                 "test %2, %2\n\t"
-                "jz .end_blit_sse\n\t"
-                ".loop_blit_sse:\n\t"
+                "jz .end_blit_sse_safe\n\t"
+                ".loop_blit_sse_safe:\n\t"
                 "movups (%0), %%xmm0\n\t" 
                 "movups %%xmm0, (%1)\n\t" 
                 "add $16, %0\n\t"
                 "add $16, %1\n\t"
                 "dec %2\n\t"
-                "jnz .loop_blit_sse\n\t"
-                ".end_blit_sse:\n\t"
+                "jnz .loop_blit_sse_safe\n\t"
+                ".end_blit_sse_safe:\n\t"
                 : "+r"(src), "+r"(dst), "+r"(count)
                 : 
                 : "memory", "xmm0", "cc"
             );
         }
 
-        int remainder = w % 4;
+        int remainder = draw_w % 4;
         for (int j = 0; j < remainder; j++) {
             dst[j] = src[j];
         }
     }
-    vga_mark_dirty(x, y, w, h);
+    vga_mark_dirty(x, y, draw_w, draw_h);
 }
 
 void vga_draw_sprite_scaled_masked(int x, int y, int sw, int sh, int scale, uint32_t* data, uint32_t trans) {

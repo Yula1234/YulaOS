@@ -212,9 +212,23 @@ void window_draw_all() {
             int ww = win->w;
             int wh = win->h;
             
+            extern uint32_t fb_width;
+            extern uint32_t fb_height;
+
             for(int k=0; k<10; k++) {
-                vga_put_pixel(wx + ww - 4 - k, wy + wh - 4, 0x666666);
-                vga_put_pixel(wx + ww - 4, wy + wh - 4 - k, 0x666666);
+                int px1 = wx + ww - 4 - k;
+                int py1 = wy + wh - 4;
+                
+                int px2 = wx + ww - 4;
+                int py2 = wy + wh - 4 - k;
+
+                if (px1 >= 0 && px1 < (int)fb_width && py1 >= 0 && py1 < (int)fb_height) {
+                    vga_put_pixel(px1, py1, 0x666666);
+                }
+                
+                if (px2 >= 0 && px2 < (int)fb_width && py2 >= 0 && py2 < (int)fb_height) {
+                    vga_put_pixel(px2, py2, 0x666666);
+                }
             }
         }
     }
