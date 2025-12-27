@@ -2,10 +2,41 @@
 
 #include "string.h"
 
+__attribute__((target("sse2")))
 size_t strlen(const char* s) {
-    size_t n = 0;
-    while (s[n]) n++;
-    return n;
+    const char* start = s;
+    
+    while (((uint32_t)s & 0xF) != 0) {
+        if (*s == 0) return s - start;
+        s++;
+    }
+    
+    size_t res;
+    
+    __asm__ volatile (
+        "pxor    %%xmm0, %%xmm0 \n\t"
+        
+        "1: \n\t"
+        "movdqa  (%1), %%xmm1 \n\t"
+        "pcmpeqb %%xmm0, %%xmm1 \n\t"
+        "pmovmskb %%xmm1, %%eax \n\t"
+        "test    %%eax, %%eax \n\t"
+        "jnz     2f \n\t"
+        
+        "add     $16, %1 \n\t"
+        "jmp     1b \n\t"
+        
+        "2: \n\t"
+        "bsf     %%eax, %%eax \n\t"
+        "add     %%eax, %1 \n\t"
+        "mov     %1, %0 \n\t"
+        
+        : "=r"(res), "+r"(s)
+        : 
+        : "eax", "xmm0", "xmm1"
+    );
+    
+    return res - (size_t)start;
 }
 
 int strcmp(const char* a, const char* b) {
