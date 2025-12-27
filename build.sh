@@ -10,7 +10,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "explorer" "cp" "mv" "touch")
+USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "explorer" "cp" "mv" "touch" "tree")
 
 CC="gcc -m32"
 LD="ld -m elf_i386"
