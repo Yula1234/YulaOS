@@ -1,7 +1,6 @@
 #include <lib/string.h>
 #include <mm/heap.h>
 
-#include "font8x8.h"
 #include "font8x16.h"
 
 #include "vga.h"
