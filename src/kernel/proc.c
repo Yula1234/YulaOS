@@ -19,7 +19,8 @@
 #include "cpu.h"
 
 #define KSTACK_SIZE 16384  
-#define PID_HASH_SIZE 1024
+#define PID_HASH_SIZE 16384
+#define PID_HASH_LOCKS_COUNT 256
 
 static task_t* tasks_head = 0;
 static task_t* tasks_tail = 0;
@@ -28,6 +29,7 @@ static uint32_t next_pid = 1;
 static spinlock_t proc_lock;
 
 static task_t* pid_hash[PID_HASH_SIZE];
+static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
 
 static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
 
@@ -35,16 +37,26 @@ extern void irq_return(void);
 
 static void pid_hash_insert(task_t* t) {
     uint32_t idx = t->pid % PID_HASH_SIZE;
+    uint32_t lock_idx = t->pid % PID_HASH_LOCKS_COUNT;
+
+    uint32_t flags = spinlock_acquire_safe(&pid_hash_locks[lock_idx]);
+
     t->hash_next = pid_hash[idx];
     t->hash_prev = 0;
     if (pid_hash[idx]) {
         pid_hash[idx]->hash_prev = t;
     }
     pid_hash[idx] = t;
+
+    spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
 }
 
 static void pid_hash_remove(task_t* t) {
     uint32_t idx = t->pid % PID_HASH_SIZE;
+    uint32_t lock_idx = t->pid % PID_HASH_LOCKS_COUNT;
+
+    uint32_t flags = spinlock_acquire_safe(&pid_hash_locks[lock_idx]);
+
     if (t->hash_prev) {
         t->hash_prev->hash_next = t->hash_next;
     } else {
@@ -55,6 +67,8 @@ static void pid_hash_remove(task_t* t) {
     }
     t->hash_next = 0;
     t->hash_prev = 0;
+
+    spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
 }
 
 void proc_init(void) {
@@ -63,6 +77,11 @@ void proc_init(void) {
     total_tasks = 0;
     next_pid = 1;
     spinlock_init(&proc_lock);
+
+    for (int i = 0; i < PID_HASH_LOCKS_COUNT; i++) {
+        spinlock_init(&pid_hash_locks[i]);
+    }
+
     memset(pid_hash, 0, sizeof(pid_hash));
 
     __asm__ volatile("fninit");
@@ -103,19 +122,21 @@ static void list_remove(task_t* t) {
 }
 
 task_t* proc_find_by_pid(uint32_t pid) {
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
     uint32_t idx = pid % PID_HASH_SIZE;
+    uint32_t lock_idx = pid % PID_HASH_LOCKS_COUNT;
+    
+    uint32_t flags = spinlock_acquire_safe(&pid_hash_locks[lock_idx]);
     
     task_t* curr = pid_hash[idx];
     while (curr) {
         if (curr->pid == pid) {
-            spinlock_release_safe(&proc_lock, flags);
+            spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
             return curr;
         }
         curr = curr->hash_next;
     }
     
-    spinlock_release_safe(&proc_lock, flags);
+    spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
     return 0;
 }
 
