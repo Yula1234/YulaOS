@@ -153,6 +153,8 @@ static task_t* alloc_task(void) {
 
     memcpy(t->fpu_state, initial_fpu_state, 512);
     
+    sem_init(&t->exit_sem, 0); 
+
     t->pid = next_pid++;
     t->state = TASK_RUNNABLE;
     t->cwd_inode = 1;
@@ -280,8 +282,8 @@ void proc_kill(task_t* t) {
     window_close_all_by_pid(pid_to_clean);
 
     t->state = TASK_ZOMBIE;
-    
-    proc_wake_up_waiters(pid_to_clean);
+
+    sem_signal(&t->exit_sem);
 }
 
 static void kthread_trampoline(void) {
@@ -561,76 +563,20 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 }
 
 void proc_wait(uint32_t pid) {
-    task_t* curr = proc_current();
-    if (!curr) return;
+    task_t* target = proc_find_by_pid(pid);
+    if (!target) return;
+
+    sem_wait(&target->exit_sem);
     
-    while (1) {
-        int found = 0;
-        int is_zombie = 0;
-        task_t* target = 0;
-        
-        target = proc_find_by_pid(pid);
-        
-        if (target) {
-            if (target->state != TASK_UNUSED) {
-                found = 1;
-                if (target->state == TASK_ZOMBIE) {
-                    is_zombie = 1;
-                    
-                    uint32_t flags = spinlock_acquire_safe(&proc_lock);
-                    if (target->state == TASK_ZOMBIE) {
-                        target->state = TASK_UNUSED;
-                    } else {
-                        is_zombie = 0; 
-                        if (target->state == TASK_UNUSED) found = 0;
-                    }
-                    spinlock_release_safe(&proc_lock, flags);
-                }
-            }
-        }
-        
-        if (found && is_zombie) {
-            proc_free_resources(target); 
-            return; 
-        }
-        
-        if (!found) break; 
+    if (target->state == TASK_ZOMBIE) {
+        uint32_t flags = spinlock_acquire_safe(&proc_lock);
+        target->state = TASK_UNUSED;
+        spinlock_release_safe(&proc_lock, flags);
 
-        if (curr->pending_signals & (1 << 2)) {
-            curr->pending_signals &= ~(1 << 2); 
-            
-            uint32_t flags = spinlock_acquire_safe(&proc_lock);
-            task_t* child = tasks_head;
-            task_t* victim = 0;
-            while(child) {
-                 if (child->pid == pid) { victim = child; break; }
-                 child = child->next;
-            }
-            spinlock_release_safe(&proc_lock, flags);
-            
-            if (victim) proc_kill(victim);
-            continue; 
-        }
-        
-        curr->state = TASK_WAITING;
-        curr->wait_for_pid = pid;
-        sched_yield();
+        proc_free_resources(target);
     }
 }
 
-
-void proc_wake_up_waiters(uint32_t target_pid) {
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
-    task_t* t = tasks_head;
-    while (t) {
-        if (t->state == TASK_WAITING && t->wait_for_pid == target_pid) {
-            t->state = TASK_RUNNABLE;
-            t->wait_for_pid = 0;
-        }
-        t = t->next;
-    }
-    spinlock_release_safe(&proc_lock, flags);
-}
 
 void reaper_task_func(void* arg) {
     (void)arg;
@@ -648,7 +594,9 @@ void reaper_task_func(void* arg) {
                     }
                 }
                 
-                if (still_running) {
+                int has_waiters = (curr->exit_sem.wait_head != 0);
+
+                if (still_running || has_waiters) {
                     curr = curr->next;
                     continue;
                 }

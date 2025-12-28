@@ -3,6 +3,7 @@
 
 #include <arch/i386/idt.h>
 #include <fs/vfs.h>
+#include <hal/lock.h>
 
 #include <stdint.h>
 
@@ -101,7 +102,9 @@ typedef struct task {
 
     uint8_t fpu_state[512] __attribute__((aligned(16)));
 
-    struct task* sem_next; 
+    struct task* sem_next;
+
+    semaphore_t exit_sem; 
   
 } task_t;
 
@@ -113,7 +116,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv);
 
 void proc_kill(task_t* t);
 void proc_wait(uint32_t pid);
-void proc_wake_up_waiters(uint32_t target_pid);
 void reaper_task_func(void* arg);
 
 task_t* proc_get_list_head();

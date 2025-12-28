@@ -73,7 +73,6 @@ void syscall_handler(registers_t* regs) {
 
     switch (sys_num) {
         case 0: // exit()
-            proc_wake_up_waiters(curr->pid);
             proc_kill(curr);
             sched_yield();  
             break;
