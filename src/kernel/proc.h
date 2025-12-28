@@ -54,6 +54,9 @@ typedef struct task {
     
     struct task* sched_next;
     struct task* sched_prev;
+
+    struct task* hash_next;
+    struct task* hash_prev;
     
     int assigned_cpu;
 
@@ -116,5 +119,6 @@ task_t* proc_get_list_head();
 uint32_t proc_task_count(void);
 task_t* proc_task_at(uint32_t idx);
 task_t* proc_create_idle(int cpu_index);
+task_t* proc_find_by_pid(uint32_t pid);
 
 #endif

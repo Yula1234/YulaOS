@@ -498,8 +498,8 @@ void gui_task(void* arg) {
 }
 
 void proc_kill_by_pid(int pid) {
-    for (uint32_t p = 0; p < proc_task_count(); p++) {
-        task_t* t = proc_task_at(p);
-        if (t && (int)t->pid == pid) { proc_kill(t); break; }
+    task_t* t = proc_find_by_pid((uint32_t)pid);
+    if (t) {
+        proc_kill(t);
     }
 }

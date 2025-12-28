@@ -19,6 +19,7 @@
 #include "cpu.h"
 
 #define KSTACK_SIZE 16384  
+#define PID_HASH_SIZE 1024
 
 static task_t* tasks_head = 0;
 static task_t* tasks_tail = 0;
@@ -26,9 +27,35 @@ static uint32_t total_tasks = 0;
 static uint32_t next_pid = 1;
 static spinlock_t proc_lock;
 
+static task_t* pid_hash[PID_HASH_SIZE];
+
 static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
 
 extern void irq_return(void);
+
+static void pid_hash_insert(task_t* t) {
+    uint32_t idx = t->pid % PID_HASH_SIZE;
+    t->hash_next = pid_hash[idx];
+    t->hash_prev = 0;
+    if (pid_hash[idx]) {
+        pid_hash[idx]->hash_prev = t;
+    }
+    pid_hash[idx] = t;
+}
+
+static void pid_hash_remove(task_t* t) {
+    uint32_t idx = t->pid % PID_HASH_SIZE;
+    if (t->hash_prev) {
+        t->hash_prev->hash_next = t->hash_next;
+    } else {
+        pid_hash[idx] = t->hash_next;
+    }
+    if (t->hash_next) {
+        t->hash_next->hash_prev = t->hash_prev;
+    }
+    t->hash_next = 0;
+    t->hash_prev = 0;
+}
 
 void proc_init(void) {
     tasks_head = 0;
@@ -36,6 +63,7 @@ void proc_init(void) {
     total_tasks = 0;
     next_pid = 1;
     spinlock_init(&proc_lock);
+    memset(pid_hash, 0, sizeof(pid_hash));
 
     __asm__ volatile("fninit");
     fpu_save(initial_fpu_state);
@@ -74,6 +102,23 @@ static void list_remove(task_t* t) {
     if (total_tasks > 0) total_tasks--;
 }
 
+task_t* proc_find_by_pid(uint32_t pid) {
+    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    uint32_t idx = pid % PID_HASH_SIZE;
+    
+    task_t* curr = pid_hash[idx];
+    while (curr) {
+        if (curr->pid == pid) {
+            spinlock_release_safe(&proc_lock, flags);
+            return curr;
+        }
+        curr = curr->hash_next;
+    }
+    
+    spinlock_release_safe(&proc_lock, flags);
+    return 0;
+}
+
 static task_t* alloc_task(void) {
     uint32_t flags = spinlock_acquire_safe(&proc_lock);
     
@@ -91,6 +136,8 @@ static task_t* alloc_task(void) {
     t->state = TASK_RUNNABLE;
     t->cwd_inode = 1;
     t->term_mode = 0;
+
+    pid_hash_insert(t);
     
     list_append(t);
     
@@ -169,6 +216,8 @@ void proc_free_resources(task_t* t) {
         t->kstack = 0; 
     }
     
+    pid_hash_remove(t);
+
     t->mem_pages = 0;
     t->pid = 0;
     memset(t->name, 0, sizeof(t->name));
@@ -498,39 +547,37 @@ void proc_wait(uint32_t pid) {
         int is_zombie = 0;
         task_t* target = 0;
         
-        uint32_t flags = spinlock_acquire_safe(&proc_lock);
-        task_t* t = tasks_head;
-        while (t) {
-            if (t->pid == pid) { 
-                if (t->state == TASK_UNUSED) {
-                    found = 0;
-                } else {
-                    found = 1;
-                    target = t;
-                    if (t->state == TASK_ZOMBIE) {
-                        is_zombie = 1;
-                        t->state = TASK_UNUSED;
+        target = proc_find_by_pid(pid);
+        
+        if (target) {
+            if (target->state != TASK_UNUSED) {
+                found = 1;
+                if (target->state == TASK_ZOMBIE) {
+                    is_zombie = 1;
+                    
+                    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+                    if (target->state == TASK_ZOMBIE) {
+                        target->state = TASK_UNUSED;
+                    } else {
+                        is_zombie = 0; 
+                        if (target->state == TASK_UNUSED) found = 0;
                     }
+                    spinlock_release_safe(&proc_lock, flags);
                 }
-                break; 
             }
-            t = t->next;
         }
         
         if (found && is_zombie) {
-            spinlock_release_safe(&proc_lock, flags);
             proc_free_resources(target); 
             return; 
         }
-        
-        spinlock_release_safe(&proc_lock, flags);
         
         if (!found) break; 
 
         if (curr->pending_signals & (1 << 2)) {
             curr->pending_signals &= ~(1 << 2); 
             
-            flags = spinlock_acquire_safe(&proc_lock);
+            uint32_t flags = spinlock_acquire_safe(&proc_lock);
             task_t* child = tasks_head;
             task_t* victim = 0;
             while(child) {
@@ -622,6 +669,7 @@ task_t* proc_create_idle(int cpu_index) {
     
     uint32_t flags = spinlock_acquire_safe(&proc_lock);
     list_remove(t);
+    pid_hash_remove(t);
     spinlock_release_safe(&proc_lock, flags);
 
     strlcpy(t->name, "idle", 32);

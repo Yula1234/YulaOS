@@ -165,17 +165,9 @@ void syscall_handler(registers_t* regs) {
         case 9: // kill(pid)
         {
             uint32_t target_pid = regs->ebx;
-            int found = 0;
-            for (uint32_t i = 0; i < MAX_TASKS; i++) {
-                task_t* t = proc_task_at(i);
-                if (t && t->pid == target_pid) {
-                    proc_kill(t);
-                    found = 1;
-                    break;
-                }
-            }
-
-            if (found) {
+            task_t* t = proc_find_by_pid(target_pid);
+            if (t) {
+                proc_kill(t);
                 if (target_pid == curr->pid) {
                     sched_yield();
                 }
