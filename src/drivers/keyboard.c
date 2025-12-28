@@ -35,13 +35,7 @@ static void send_key_to_focused(char code) {
     task_t* focused_task = 0;
     
     if (focused_window_pid > 0) {
-        for (uint32_t i = 0; i < proc_task_count(); i++) {
-            task_t* t = proc_task_at(i);
-            if (t && (int)t->pid == focused_window_pid) {
-                focused_task = t;
-                break;
-            }
-        }
+        focused_task = proc_find_by_pid(focused_window_pid);
         
         for(int i=0; i<MAX_WINDOWS; i++) {
             if (window_list[i].is_active && window_list[i].owner_pid == focused_window_pid) {
@@ -110,16 +104,7 @@ void keyboard_irq_handler(registers_t* regs) {
 
     // Ctrl+C
     if (ctrl_pressed && scancode == 0x2E) { 
-        task_t* target_task = 0;
-        if (focused_window_pid > 0) {
-            for (uint32_t i = 0; i < proc_task_count(); i++) {
-                task_t* t = proc_task_at(i);
-                if (t && (int)t->pid == focused_window_pid) {
-                    target_task = t;
-                    break;
-                }
-            }
-        }
+        task_t* target_task = proc_find_by_pid(focused_window_pid);
 
         if (target_task) {
             if (target_task->term_mode == 0) {
@@ -130,15 +115,10 @@ void keyboard_irq_handler(registers_t* regs) {
             if (target_task->term_mode == 1) {
                 if (target_task->wait_for_pid > 0) {
                     int child_pid = target_task->wait_for_pid;
-                     for (uint32_t i = 0; i < proc_task_count(); i++) {
-                        task_t* t = proc_task_at(i);
-                        if (t && (int)t->pid == child_pid) {
-                            proc_kill(t);
-                            target_task->state = TASK_RUNNABLE;
-                            target_task->wait_for_pid = 0;
-                            break;
-                        }
-                    }
+                    task_t* t = proc_find_by_pid(child_pid);
+                    proc_kill(t);
+                    target_task->state = TASK_RUNNABLE;
+                    target_task->wait_for_pid = 0;
                 } else {
                     target_task->pending_signals |= (1 << 2);
                     if (target_task->state == TASK_WAITING) target_task->state = TASK_RUNNABLE;
