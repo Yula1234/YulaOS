@@ -116,6 +116,9 @@ void mouse_init() {
     mouse_read();     
 
     irq_install_handler(12, mouse_irq_handler);
+
+    outb(0xA1, inb(0xA1) & ~(1 << 4)); // Slave: IRQ 12
+    outb(0x21, inb(0x21) & ~(1 << 2)); // Master: Cascade
 }
 
 extern void wake_up_gui();

@@ -119,11 +119,15 @@ typedef struct {
     void* fb_virt;          // FIS (Virtual)
     void* ctba_virt[32];    // Command Tables (Virtual), one per slot
     spinlock_t lock;
+
+    semaphore_t sem_complete; 
+    volatile uint32_t last_is;
 } ahci_port_state_t;
 
 void ahci_init(void);
 int ahci_read_sector(uint32_t lba, uint8_t* buf);
 int ahci_write_sector(uint32_t lba, const uint8_t* buf);
 uint32_t ahci_get_capacity(void);
+void ahci_set_async_mode(int enable);
 
 #endif

@@ -315,6 +315,11 @@ void isr_handler(registers_t* regs) {
     }
 }
 
+irq_handler_t irq_get_handler(int irq_no) {
+    if (irq_no >= 0 && irq_no < 16) return irq_handlers[irq_no];
+    return 0;
+}
+
 void idt_init(void) {
     idtp.limit = sizeof(struct idt_entry) * 256 - 1;
     idtp.base = (uint32_t)&idt;

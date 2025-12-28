@@ -222,22 +222,24 @@ int bcache_write(uint32_t lba, const uint8_t* buf) {
 
 void bcache_sync(void) {
     for (int i = 0; i < BCACHE_SIZE; i++) {
-        uint32_t flags = spinlock_acquire_safe(&cache_lock);
         cache_block_t* b = &pool[i];
 
         if (b->valid && b->dirty) {
-            uint8_t temp_buf[BLOCK_SIZE];
-            uint32_t lba = b->lba;
-            memcpy(temp_buf, b->data, BLOCK_SIZE);
-            b->dirty = 0;
+            uint32_t flags = spinlock_acquire_safe(&cache_lock);
+            
+            if (b->valid && b->dirty) {
+                uint8_t temp_buf[BLOCK_SIZE];
+                uint32_t lba = b->lba;
+                memcpy(temp_buf, b->data, BLOCK_SIZE);
+                
+                b->dirty = 0;
 
-            spinlock_release_safe(&cache_lock, flags);
-            ahci_write_sector(lba, temp_buf);
-        } else {
-            spinlock_release_safe(&cache_lock, flags);
+                spinlock_release_safe(&cache_lock, flags);
+                ahci_write_sector(lba, temp_buf);
+            } else {
+                spinlock_release_safe(&cache_lock, flags);
+            }
         }
-        
-        if (i % 16 == 0) sched_yield();
     }
 }
 

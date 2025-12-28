@@ -189,8 +189,6 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     
     ahci_init();
 
-
-
     yulafs_init();
     yulafs_lookup("/"); 
 
@@ -214,6 +212,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     smp_boot_aps();
     
     proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
+
+    ahci_set_async_mode(1);
     proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
 
     __asm__ volatile("sti");

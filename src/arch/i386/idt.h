@@ -2,7 +2,6 @@
 #define ARCH_I386_IDT_H
 
 #include <stdint.h>
-
     
 typedef struct {
     uint32_t gs, fs, es, ds; 

@@ -427,7 +427,7 @@ void gui_task(void* arg) {
 
         if (hover_win) {
             if (mouse_x != old_mx || mouse_y != old_my) {
-                window_push_event(hover_win, YULA_EVENT_MOUSE_MOVE, win_rel_x, win_rel_y, mouse_buttons);
+                if (hover_win != dragged_window) window_push_event(hover_win, YULA_EVENT_MOUSE_MOVE, win_rel_x, win_rel_y, mouse_buttons);
             }
             if (mouse_buttons != last_mouse_buttons) {
                 if ((mouse_buttons & 1) != (last_mouse_buttons & 1)) {
@@ -515,7 +515,11 @@ void gui_task(void* arg) {
         if (dragged_window) any_animations = 1;
 
         if (any_animations) {
-            sys_usleep(250);
+            sys_usleep(500);
+            
+            uint32_t flags = spinlock_acquire_safe(&gui_event_sem.lock);
+            gui_event_sem.count = 0;
+            spinlock_release_safe(&gui_event_sem.lock, flags);
         } else {
             sem_wait(&gui_event_sem);
         }
