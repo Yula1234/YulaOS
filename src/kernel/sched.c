@@ -13,27 +13,20 @@ void sched_init(void) {}
 
 static int get_best_cpu(void) {
     int best_cpu = 0;
-    
-    uint32_t min_load = 101;
-    uint32_t min_count = 0xFFFFFFFF;
+    uint32_t min_score = 0xFFFFFFFF;
 
     int active_cpus = 1 + ap_running_count;
 
     for (int i = 0; i < active_cpus; i++) {
-        uint32_t load = cpus[i].load_percent;
-        uint32_t count = cpus[i].runq_count;
-
-        if (load < min_load) {
-            min_load = load;
-            min_count = count;
-            best_cpu = i;
-        } 
+        cpu_t* c = &cpus[i];
         
-        else if (load == min_load) {
-            if (count < min_count) {
-                min_count = count;
-                best_cpu = i;
-            }
+        uint32_t score = c->load_percent + 
+                         (c->runq_count * 20) + 
+                         (c->total_priority_weight);
+
+        if (score < min_score) {
+            min_score = score;
+            best_cpu = i;
         }
     }
     return best_cpu;
@@ -55,16 +48,21 @@ static void runq_append(cpu_t* cpu, task_t* t) {
 }
 
 void sched_add(task_t* t) {
-    int target_cpu_idx = get_best_cpu();
-     
+    if (t->assigned_cpu == -1) {
+        t->assigned_cpu = get_best_cpu();
+    }
+    
+    int target_cpu_idx = t->assigned_cpu;
     cpu_t* target = &cpus[target_cpu_idx];
 
     t->quantum = (t->priority + 1) * 3;
     t->ticks_left = t->quantum;
-    t->assigned_cpu = target_cpu_idx;
 
     uint32_t flags = spinlock_acquire_safe(&target->lock);
     
+    target->total_priority_weight += t->priority;
+    target->total_task_count++;
+
     runq_append(target, t);
     
     spinlock_release_safe(&target->lock, flags);
@@ -176,6 +174,14 @@ void sched_remove(task_t* t) {
     
     uint32_t flags = spinlock_acquire_safe(&target->lock);
     
+    if (target->total_priority_weight >= (int)t->priority)
+        target->total_priority_weight -= t->priority;
+    else 
+        target->total_priority_weight = 0;
+
+    if (target->total_task_count > 0)
+        target->total_task_count--;
+
     task_t* curr = target->runq_head;
     while (curr) {
         if (curr == t) {

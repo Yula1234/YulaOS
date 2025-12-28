@@ -18,6 +18,9 @@ void cpu_init_system(void) {
         cpus[i].snap_total_ticks = 0;
         cpus[i].snap_idle_ticks = 0;
         cpus[i].load_percent = 0;
+
+        cpus[i].total_priority_weight = 0;
+        cpus[i].total_task_count = 0;
         
         cpus[i].runq_head = 0;
         cpus[i].runq_tail = 0;
