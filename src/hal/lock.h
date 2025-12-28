@@ -45,4 +45,20 @@ static inline void spinlock_release_safe(spinlock_t* lock, uint32_t flags) {
     }
 }
 
+struct task;
+
+typedef struct {
+    volatile int count;
+
+    spinlock_t lock;
+    
+    struct task* wait_head;
+    struct task* wait_tail;
+} semaphore_t;
+
+void sem_init(semaphore_t* sem, int init_count);
+void sem_wait(semaphore_t* sem);
+void sem_signal(semaphore_t* sem);
+
+
 #endif

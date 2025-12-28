@@ -195,3 +195,55 @@ void sched_remove(task_t* t) {
     
     spinlock_release_safe(&target->lock, flags);
 }
+
+void sem_init(semaphore_t* sem, int init_count) {
+    sem->count = init_count;
+    spinlock_init(&sem->lock);
+    sem->wait_head = 0;
+    sem->wait_tail = 0;
+}
+
+void sem_wait(semaphore_t* sem) {
+    while (1) {
+        uint32_t flags = spinlock_acquire_safe(&sem->lock);
+        
+        if (sem->count > 0) {
+            sem->count--;
+            spinlock_release_safe(&sem->lock, flags);
+            return;
+        }
+        
+        task_t* curr = proc_current();
+        
+        curr->sem_next = 0;
+        if (sem->wait_tail) {
+            sem->wait_tail->sem_next = curr;
+            sem->wait_tail = curr;
+        } else {
+            sem->wait_head = curr;
+            sem->wait_tail = curr;
+        }
+        
+        curr->state = TASK_WAITING;
+        
+        spinlock_release_safe(&sem->lock, flags);
+        
+        sched_yield();
+    }
+}
+
+void sem_signal(semaphore_t* sem) {
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    
+    sem->count++;
+    
+    if (sem->wait_head) {
+        task_t* t = sem->wait_head;
+        sem->wait_head = t->sem_next;
+        if (!sem->wait_head) sem->wait_tail = 0;
+        
+        t->state = TASK_RUNNABLE;
+    }
+    
+    spinlock_release_safe(&sem->lock, flags);
+}

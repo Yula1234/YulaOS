@@ -100,6 +100,8 @@ typedef struct task {
     uint32_t mmap_top;
 
     uint8_t fpu_state[512] __attribute__((aligned(16)));
+
+    struct task* sem_next; 
   
 } task_t;
 
