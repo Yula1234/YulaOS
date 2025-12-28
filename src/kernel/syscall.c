@@ -281,6 +281,7 @@ void syscall_handler(registers_t* regs) {
                 for(int i=0; i<MAX_WINDOWS; i++) {
                     if (&window_list[i] == win) { id = i; break; }
                 }
+                curr->term_mode = 0; 
                 regs->eax = id;
             } else {
                 regs->eax = -1;

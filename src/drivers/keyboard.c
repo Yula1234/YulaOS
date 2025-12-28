@@ -7,6 +7,7 @@
 
 #include <hal/io.h>
 #include <hal/irq.h>
+#include <hal/lock.h>
 
 
 #include "keyboard.h"
@@ -22,12 +23,14 @@ static const char map_shift[] = { 0,27,'!','@','#','$','%','^','&','*','(',')','
 static char kbd_buffer[KBD_BUF_SIZE];
 static uint32_t kbd_head = 0, kbd_tail = 0;
 
+static semaphore_t kbd_sem;
+
 static void kbd_put_char(char c) {
     uint32_t next = (kbd_head + 1) % KBD_BUF_SIZE;
     if (next != kbd_tail) {
         kbd_buffer[kbd_head] = c;
         kbd_head = next;
-        proc_wake_up_kbd_waiters();
+        sem_signal(&kbd_sem); 
     }
 }
 
@@ -59,6 +62,8 @@ static void send_key_to_focused(char code) {
 
     if (should_write_to_buffer) {
         kbd_put_char(code);
+    } else {
+        sem_signal(&kbd_sem); 
     }
     wake_up_gui();
 }
@@ -126,7 +131,6 @@ void keyboard_irq_handler(registers_t* regs) {
                     target_task->pending_signals |= (1 << 2);
                     if (target_task->state == TASK_WAITING) target_task->state = TASK_RUNNABLE;
                 }
-                proc_wake_up_kbd_waiters();
                 send_key_to_focused(0x03); 
             } 
         }
@@ -167,30 +171,29 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     task_t* curr = proc_current();
 
     while (1) {
-        if (curr->pending_signals & (1 << 2)) {
+        if (curr->pending_signals & (1 << 2)) { // SIGINT
             curr->pending_signals &= ~(1 << 2);
-            curr->is_blocked_on_kbd = 0;
-            return -2;
+            return -2; // EINTR
         }
 
-        if (focused_window_pid == (int)curr->pid) {
-            char c;
-            if (kbd_try_read_char(&c)) {
-                b[0] = c;
-                curr->is_blocked_on_kbd = 0; 
-                return 1;
-            }
-        }
-        if (curr->state == TASK_ZOMBIE) return 0;
+        sem_wait(&kbd_sem);
 
-        curr->is_blocked_on_kbd = 1;
-        curr->state = TASK_WAITING;
-        sched_yield(); 
+        char c;
+        if (kbd_try_read_char(&c)) {
+            b[0] = c;
+            return 1;
+        }
     }
 }
 
 static vfs_ops_t kbd_ops = { .read = kbd_vfs_read };
 static vfs_node_t kbd_node = { .name = "kbd", .ops = &kbd_ops };
 
-void kbd_vfs_init() { devfs_register(&kbd_node); }
-void kbd_init(void) { irq_install_handler(1, keyboard_irq_handler); }
+void kbd_vfs_init() {
+    devfs_register(&kbd_node);
+}
+
+void kbd_init(void) {
+    sem_init(&kbd_sem, 0);
+    irq_install_handler(1, keyboard_irq_handler);
+}

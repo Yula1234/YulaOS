@@ -672,19 +672,6 @@ void reaper_task_func(void* arg) {
     }
 }
 
-void proc_wake_up_kbd_waiters() {
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
-    task_t* t = tasks_head;
-    while (t) {
-        if (t->state == TASK_WAITING && t->is_blocked_on_kbd) {
-            t->state = TASK_RUNNABLE;
-            t->is_blocked_on_kbd = 0;
-        }
-        t = t->next;
-    }
-    spinlock_release_safe(&proc_lock, flags);
-}
-
 task_t* proc_create_idle(int cpu_index) {
     task_t* t = alloc_task();
     if (!t) return 0;
