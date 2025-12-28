@@ -31,6 +31,8 @@ static void kbd_put_char(char c) {
     }
 }
 
+extern void wake_up_gui();
+
 static void send_key_to_focused(char code) {
     task_t* focused_task = 0;
     
@@ -58,6 +60,7 @@ static void send_key_to_focused(char code) {
     if (should_write_to_buffer) {
         kbd_put_char(code);
     }
+    wake_up_gui();
 }
 
 void keyboard_irq_handler(registers_t* regs) {

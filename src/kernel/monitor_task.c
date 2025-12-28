@@ -207,6 +207,8 @@ static void monitor_draw(window_t* win, int x, int y) {
     vga_draw_rect(right_x - 10, y + 10, 1, h - 20, C_BORDER);
 }
 
+extern void wake_up_gui();
+
 void monitor_task(void* arg) {
     (void)arg;
 
@@ -227,7 +229,8 @@ void monitor_task(void* arg) {
         st->head_idx = (st->head_idx + 1) % HISTORY_MAX;
         
         win->is_dirty = 1;
+        wake_up_gui();
         
-        __asm__ volatile("int $0x80" : : "a"(11), "b"(100000));
+        __asm__ volatile("int $0x80" : : "a"(11), "b"(40000));
     }
 }

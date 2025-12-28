@@ -58,6 +58,8 @@ typedef struct {
     uint32_t block_size;
 } __attribute__((packed)) user_fs_info_t;
 
+extern void wake_up_gui();
+
 void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti"); 
     uint32_t sys_num = regs->eax;
@@ -317,6 +319,7 @@ void syscall_handler(registers_t* regs) {
             int id = regs->ebx;
             if (id >= 0 && id < MAX_WINDOWS) {
                 window_list[id].is_dirty = 1; 
+                wake_up_gui();
             }
         }
         break;

@@ -118,6 +118,8 @@ void mouse_init() {
     irq_install_handler(12, mouse_irq_handler);
 }
 
+extern void wake_up_gui();
+
 void mouse_process_byte(uint8_t data) {
     if (mouse_cycle == 0 && !(data & 0x08)) return;
 
@@ -140,5 +142,6 @@ void mouse_process_byte(uint8_t data) {
         if (mouse_y < 0) mouse_y = 0;
         if (mouse_x >= (int)fb_width)  mouse_x = fb_width - 1;
         if (mouse_y >= (int)fb_height) mouse_y = fb_height - 1;
+        wake_up_gui();
     }
 }

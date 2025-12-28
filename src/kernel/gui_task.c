@@ -5,6 +5,8 @@
 #include <lib/string.h>
 #include <hal/io.h>
 #include <mm/heap.h>
+#include <hal/lock.h> 
+#include <kernel/sched.h> // для sem_wait / sem_init
 
 #include "gui_task.h"
 #include "window.h"
@@ -114,6 +116,12 @@ void vga_draw_wireframe(int x, int y, int w, int h, uint32_t color) {
     vga_draw_rect(x + w - 1, y, 1, h, color);  
 }
 
+semaphore_t gui_event_sem;
+
+void wake_up_gui() {
+    sem_signal(&gui_event_sem);
+}
+
 void gui_task(void* arg) {
     (void)arg;
 
@@ -125,6 +133,7 @@ void gui_task(void* arg) {
     static uint32_t last_tick_count = 0;
 
     int first_frame = 1;
+    sem_init(&gui_event_sem, 0);
 
     vga_reset_dirty();
 
@@ -493,7 +502,23 @@ void gui_task(void* arg) {
 
         vga_reset_dirty(); 
 
-        sys_usleep(400); 
+        int any_animations = 0;
+        
+        for(int i = 0; i < MAX_WINDOWS; i++) {
+            if (window_list[i].is_active && window_list[i].is_animating) {
+                any_animations = 1;
+                break;
+            }
+        }
+        
+        extern window_t* dragged_window;
+        if (dragged_window) any_animations = 1;
+
+        if (any_animations) {
+            sys_usleep(250);
+        } else {
+            sem_wait(&gui_event_sem);
+        }
     }
 }
 

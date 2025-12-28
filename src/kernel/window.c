@@ -83,6 +83,8 @@ void window_bring_to_front(int window_index) {
     spinlock_release_safe(&window_lock, flags);
 }
 
+extern void wake_up_gui();
+
 window_t* window_create(int x, int y, int w, int h, const char* title, window_draw_handler_t handler) {
     uint32_t flags = spinlock_acquire_safe(&window_lock);
     for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -141,6 +143,9 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
                 }
             }
             spinlock_release_safe(&window_lock, flags);
+            
+            wake_up_gui();
+            
             return &window_list[i];
         }
     }
@@ -148,14 +153,21 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
     return 0;
 }
 
+
 void window_mark_dirty_by_pid(int pid) {
     uint32_t flags = spinlock_acquire_safe(&window_lock);
+    int found = 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (window_list[i].is_active && window_list[i].owner_pid == pid) {
             window_list[i].is_dirty = 1;
+            found = 1;
         }
     }
     spinlock_release_safe(&window_lock, flags);
+    
+    if (found) {
+        wake_up_gui();
+    }
 }
 
 void window_draw_all() {
@@ -285,6 +297,8 @@ void window_close_all_by_pid(int pid) {
             }
         }
     }
+
+    wake_up_gui();
 
     spinlock_release_safe(&window_lock, flags);
 }

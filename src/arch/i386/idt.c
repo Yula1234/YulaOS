@@ -77,6 +77,7 @@ static inline uint32_t get_cr3() {
     return val;
 }
 
+extern void wake_up_gui();
 
 void isr_handler(registers_t* regs) {
     if (regs->int_no == 0xFF) {
@@ -95,6 +96,11 @@ void isr_handler(registers_t* regs) {
         if (regs->int_no == 32) {
             if (cpu->index == 0) {
                 timer_ticks++;
+
+                if (timer_ticks % 100 == 0) {
+                    wake_up_gui();
+                }
+
                 for (uint32_t i = 0; i < proc_task_count(); i++) {
                     task_t* t = proc_task_at(i);
                     if (t && t->state == TASK_WAITING && t->wake_tick > 0) {
