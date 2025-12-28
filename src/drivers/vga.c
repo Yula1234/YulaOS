@@ -424,52 +424,104 @@ void vga_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 __attribute__((target("sse2")))
 void vga_draw_sprite_masked(int x, int y, int w, int h, uint32_t* data, uint32_t trans_color) {
     if (!vga_current_target) return;
-    if (x >= (int)vga_target_w || y >= (int)vga_target_h) return;
+    
+    if (x >= (int)vga_target_w || y >= (int)vga_target_h || x + w <= 0 || y + h <= 0) return;
+
+    if (y < 0) {
+        int skip_y = -y;
+        if (skip_y >= h) return; 
+        h -= skip_y;
+        data += skip_y * w;
+        y = 0;
+    }
+
+    if (y + h > (int)vga_target_h) {
+        h = (int)vga_target_h - y;
+        if (h <= 0) return;
+    }
+
+    int skip_x = 0;
+    if (x < 0) {
+        skip_x = -x;
+        x = 0;
+    }
+
+    int draw_w = w - skip_x;
+    if (x + draw_w > (int)vga_target_w) {
+        draw_w = (int)vga_target_w - x;
+    }
+    if (draw_w <= 0) return;
+
+    uint32_t* src_ptr = data + skip_x;
+    uint32_t* dst_ptr = &vga_current_target[y * vga_target_w + x];
+
+    int screen_stride = vga_target_w * 4;
+    int sprite_stride = w * 4;
+    int draw_bytes = draw_w * 4;
 
     __asm__ volatile (
-        "movd %0, %%xmm7\n\t"
-        "pshufd $0, %%xmm7, %%xmm7\n\t" 
-        : : "r"(trans_color) : "xmm7"
+        "movd      %[trans], %%xmm7 \n\t"
+        "pshufd    $0x00, %%xmm7, %%xmm7 \n\t"
+
+        "1: \n\t"
+        "push      %[w_bytes] \n\t"  
+        "push      %[src] \n\t"      
+        "push      %[dst] \n\t"      
+
+        "2: \n\t"
+        "cmp       $16, %[w_bytes] \n\t"
+        "jl        3f \n\t"
+
+        "movdqu    (%[src]), %%xmm0 \n\t"  
+        "movdqu    (%[dst]), %%xmm1 \n\t"  
+        
+        "movdqa    %%xmm0, %%xmm2 \n\t"
+        "pcmpeqd   %%xmm7, %%xmm2 \n\t"  
+        
+        "pand      %%xmm2, %%xmm1 \n\t"  
+        "pandn     %%xmm0, %%xmm2 \n\t"  
+        "por       %%xmm2, %%xmm1 \n\t"  
+        
+        "movdqu    %%xmm1, (%[dst]) \n\t"
+
+        "add       $16, %[src] \n\t"
+        "add       $16, %[dst] \n\t"
+        "sub       $16, %[w_bytes] \n\t"
+        "jmp       2b \n\t"
+
+        "3: \n\t"
+        "cmp       $0, %[w_bytes] \n\t"
+        "jle       4f \n\t"
+        
+        "mov       (%[src]), %%eax \n\t"
+        "cmp       %[trans], %%eax \n\t"
+        "je        5f \n\t"
+        "mov       %%eax, (%[dst]) \n\t"
+        "5: \n\t"
+        "add       $4, %[src] \n\t"
+        "add       $4, %[dst] \n\t"
+        "sub       $4, %[w_bytes] \n\t"
+        "jmp       3b \n\t"
+
+        "4: \n\t"
+        "pop       %[dst] \n\t"       
+        "pop       %[src] \n\t"       
+        "pop       %[w_bytes] \n\t"
+        
+        "add       %[s_stride], %[src] \n\t" 
+        "add       %[d_stride], %[dst] \n\t" 
+        "dec       %[h] \n\t"
+        "jnz       1b \n\t"
+
+        : [src]      "+r" (src_ptr),
+          [dst]      "+r" (dst_ptr),
+          [h]        "+r" (h),
+          [w_bytes]  "+r" (draw_bytes)
+        : [trans]    "r"  (trans_color),
+          [s_stride] "m"  (sprite_stride),
+          [d_stride] "m"  (screen_stride)
+        : "memory", "eax", "xmm0", "xmm1", "xmm2", "xmm7"
     );
-
-    for (int i = 0; i < h; i++) {
-        int cy = y + i;
-        if (cy < 0 || cy >= (int)vga_target_h) continue;
-
-        int current_draw_w = w;
-        if (x + current_draw_w > (int)vga_target_w) {
-            current_draw_w = (int)vga_target_w - x;
-        }
-        if (current_draw_w <= 0) continue;
-
-        uint32_t* dst = &vga_current_target[cy * vga_target_w + x];
-        uint32_t* src = &data[i * w];
-
-        if (x + 4 > (int)vga_target_w || current_draw_w < 4) {
-            for (int j = 0; j < current_draw_w; j++) {
-                if (src[j] != trans_color) dst[j] = src[j];
-            }
-        } else {
-            int sse_count = current_draw_w / 4;
-            for (int j = 0; j < sse_count; j++) {
-                __asm__ volatile (
-                    "movups (%0), %%xmm0\n\t"
-                    "movups (%1), %%xmm1\n\t"
-                    "movaps %%xmm0, %%xmm2\n\t"
-                    "pcmpeqd %%xmm7, %%xmm2\n\t"
-                    "pand %%xmm2, %%xmm1\n\t"
-                    "pandn %%xmm0, %%xmm2\n\t"
-                    "por %%xmm2, %%xmm1\n\t"
-                    "movups %%xmm1, (%1)\n\t"
-                    : : "r"(src), "r"(dst) : "memory", "xmm0", "xmm1", "xmm2"
-                );
-                src += 4; dst += 4;
-            }
-            for (int j = 0; j < (current_draw_w % 4); j++) {
-                if (src[j] != trans_color) dst[j] = src[j];
-            }
-        }
-    }
 }
 
 void vga_print_at(const char* s, int x, int y, uint32_t fg) {
