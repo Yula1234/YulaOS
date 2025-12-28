@@ -269,10 +269,17 @@ void isr_handler(registers_t* regs) {
             }
 
             if (!handled) {
-                if (regs->cs != 0x1B) {
+                int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
+
+                if (regs->cs != 0x1B && !is_kernel_access_to_user) {
                     kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
                 } else {
-                    if (curr) curr->pending_signals |= (1 << 11); // SIGSEGV
+                    if (curr) {
+                        proc_kill(curr);
+                        sched_yield();
+                    } else {
+                        kernel_panic("Page Fault in Kernel", "idt.c", regs->int_no, regs);
+                    }
                 }
             }
         } 
