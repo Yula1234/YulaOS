@@ -128,24 +128,20 @@ void gui_task(void* arg) {
     (void)arg;
 
     uint32_t frames = 0, last_fps_tick = 0, current_fps = 0;
-
     char fps_str[16], time_str[16];
     static int old_mx = 0, old_my = 0;
-
     static uint32_t ticks_per_100ms = 1500;
     static uint32_t last_tick_count = 0;
-
     int first_frame = 1;
+    
     sem_init(&gui_event_sem, 0);
-
     vga_reset_dirty();
 
     while (1) {
         frames++;
-
         update_system_uptime();
 
-        uint32_t flags = spinlock_acquire_safe(&window_lock);
+        sem_wait(&window_list_lock);
 
         vga_mark_dirty(old_mx, old_my, 16, 16);
         vga_mark_dirty(mouse_x, mouse_y, 16, 16);
@@ -167,18 +163,13 @@ void gui_task(void* arg) {
             frames = 0;
             last_fps_tick = timer_ticks;
         }
-
+        
         if (!is_rtc_updating()) {
             uint8_t s = get_rtc_register(0x00);
             static uint8_t last_s = 0xFF;
-
             if (s != last_s) {
                 uint32_t ticks_passed = timer_ticks - last_tick_count;
-                
-                if (ticks_passed > 0) {
-                    ticks_per_100ms = ticks_passed / 10;
-                }
-
+                if (ticks_passed > 0) ticks_per_100ms = ticks_passed / 10;
                 last_tick_count = timer_ticks;
                 last_s = s;
             }
@@ -202,7 +193,6 @@ void gui_task(void* arg) {
 
         for (int i = 0; i < ICON_COUNT; i++) {
             desktop_item_t* item = &desktop_icons[i];
-            
             int currently_hovered = (mouse_x >= item->x && mouse_x <= item->x + item->w &&
                                      mouse_y >= item->y && mouse_y <= item->y + item->h);
             
@@ -210,14 +200,10 @@ void gui_task(void* arg) {
                 item->is_hovered = currently_hovered;
                 vga_mark_dirty(item->x - 10, item->y - 10, item->w + 20, item->h + 50);
             }
-
-            if (item->is_hovered) {
-                vga_mark_dirty(item->x - 5, item->y - 5, item->w + 10, item->h + 45);
-            }
+            if (item->is_hovered) vga_mark_dirty(item->x - 5, item->y - 5, item->w + 10, item->h + 45);
 
             if (currently_hovered && left_click && !last_left_click) {
                 uint32_t current_tick = timer_ticks;
-                
                 if (current_tick - item->last_click_tick < 7500) {
                     proc_spawn_kthread(item->name, PRIO_USER, item->launch_func, 0);
                     item->last_click_tick = 0;
@@ -231,6 +217,8 @@ void gui_task(void* arg) {
         for(int i = 0; i < MAX_WINDOWS; i++) {
             window_t* win = &window_list[i];
             if (win->is_active && win->is_animating) {
+                sem_wait(&win->lock); 
+                
                 if (win->anim_mode == 0) { 
                     int dx = win->target_x - win->x;
                     int dy = win->target_y - win->y;
@@ -244,11 +232,7 @@ void gui_task(void* arg) {
                         int step_y = dy / 4; if (step_y == 0 && dy != 0) step_y = (dy > 0) ? 1 : -1;
                         int step_w = dw / 4; if (step_w == 0 && dw != 0) step_w = (dw > 0) ? 1 : -1;
                         int step_h = dh / 4; if (step_h == 0 && dh != 0) step_h = (dh > 0) ? 1 : -1;
-
-                        win->x += step_x;
-                        win->y += step_y;
-                        win->w += step_w;
-                        win->h += step_h;
+                        win->x += step_x; win->y += step_y; win->w += step_w; win->h += step_h;
                     }
                 } else {
                     int dh = win->h - 20;
@@ -261,12 +245,12 @@ void gui_task(void* arg) {
                         win->y -= (win->y - 0) / 4 + 1;
                     }
                 }
+                sem_signal(&win->lock);
             }
         }
         
         if (just_pressed) {
             int hit = 0;
-
             if (mouse_y <= 26 && mouse_x >= tb_start_x && mouse_x < tb_start_x + (active_wins * (btn_w + 2))) {
                 int clicked_btn_idx = (mouse_x - tb_start_x) / (btn_w + 2);
                 int offset_in_btn = (mouse_x - tb_start_x) % (btn_w + 2);
@@ -275,10 +259,11 @@ void gui_task(void* arg) {
                     if (window_list[i].is_active) {
                         if (current_btn == clicked_btn_idx) {
                             if (offset_in_btn > btn_w - 20) {
-                                spinlock_release_safe(&window_lock, flags);
+                                sem_signal(&window_list_lock);
                                 proc_kill_by_pid(window_list[i].owner_pid);
-                                flags = spinlock_acquire_safe(&window_lock);
+                                sem_wait(&window_list_lock);
                             } else {
+                                sem_wait(&window_list[i].lock);
                                 if (window_list[i].is_minimized) {
                                     window_list[i].is_minimized = 0;
                                     window_list[i].is_animating = 1;
@@ -291,6 +276,7 @@ void gui_task(void* arg) {
                                     window_list[i].is_animating = 1;
                                     window_list[i].anim_mode = 1;
                                 }
+                                sem_signal(&window_list[i].lock);
                             }
                             hit = 1; break;
                         }
@@ -304,30 +290,37 @@ void gui_task(void* arg) {
                     int idx = window_z_order[i];
                     if (idx == -1) continue;
                     window_t* win = &window_list[idx];
+                    
                     if (!win->is_active || win->is_minimized) continue;
 
                     if (mouse_x >= win->x && mouse_x <= win->x + win->w && mouse_y >= win->y && mouse_y <= win->y + win->h) {
                         hit = 1;
                         if (mouse_x >= win->x + win->w - 20 && mouse_y >= win->y + win->h - 20) {
-                            window_bring_to_front(idx);
+                            window_bring_to_front_nolock(idx);
                             dragged_window = win;
                             
+                            sem_wait(&win->lock);
                             win->is_resizing = 1;
                             win->ghost_w = win->w;
                             win->ghost_h = win->h;
+                            sem_signal(&win->lock);
                             
                         }
                         else if (mouse_x >= win->x + win->w - 26 && mouse_y <= win->y + 26) {
                             vga_mark_dirty(win->x - 10, win->y - 10, win->w + 25, win->h + 25);
-                            spinlock_release_safe(&window_lock, flags);
+                            
+                            sem_signal(&window_list_lock);
                             proc_kill_by_pid(win->owner_pid);
-                            flags = spinlock_acquire_safe(&window_lock);
+                            sem_wait(&window_list_lock);
+                            
                         } else if (mouse_x >= win->x + win->w - 50 && mouse_x < win->x + win->w - 26 && mouse_y <= win->y + 26) {
+                            sem_wait(&win->lock);
                             win->target_x = win->x;
                             win->target_y = win->y;
                             win->is_animating = 1;
                             win->anim_mode = 1;
                             win->is_minimized = 1;
+                            sem_signal(&win->lock);
                         } else {
                             window_bring_to_front_nolock(idx);
                             if (mouse_y <= win->y + 30) {
@@ -341,10 +334,10 @@ void gui_task(void* arg) {
         }
 
         if (left_click && dragged_window) {
+            sem_wait(&dragged_window->lock);
             if (dragged_window->is_resizing) {
                 int new_w = mouse_x - dragged_window->x;
                 int new_h = mouse_y - dragged_window->y;
-
                 if (new_w < 150) new_w = 150;
                 if (new_h < 100) new_h = 100;
 
@@ -357,21 +350,14 @@ void gui_task(void* arg) {
             } else {
                 int nx = mouse_x - drag_off_x;
                 int ny = mouse_y - drag_off_y;
-
                 if (nx < 0) nx = 0;
                 if (ny < 26) ny = 26;
                 
                 vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, 
                        dragged_window->w + 25, dragged_window->h + 25);
 
-
-                if (nx + dragged_window->w > (int)fb_width) {
-                    nx = fb_width - dragged_window->w;
-                }
-                if (ny + dragged_window->h > (int)fb_height) {
-                    ny = fb_height - dragged_window->h;
-                }
-
+                if (nx + dragged_window->w > (int)fb_width) nx = fb_width - dragged_window->w;
+                if (ny + dragged_window->h > (int)fb_height) ny = fb_height - dragged_window->h;
                 nx &= ~3;
 
                 dragged_window->x = nx;
@@ -382,41 +368,34 @@ void gui_task(void* arg) {
                 vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, 
                        dragged_window->w + 25, dragged_window->h + 25);
             }
+            sem_signal(&dragged_window->lock);
         } else {
-            if (dragged_window && dragged_window->is_resizing) {
-                int new_w = dragged_window->ghost_w;
-                int new_h = dragged_window->ghost_h;
-                
-                if (dragged_window->canvas) {
-                    kfree(dragged_window->canvas);
+            if (dragged_window) {
+                sem_wait(&dragged_window->lock);
+                if (dragged_window->is_resizing) {
+                    int new_w = dragged_window->ghost_w;
+                    int new_h = dragged_window->ghost_h;
+                    
+                    if (dragged_window->canvas) kfree(dragged_window->canvas);
+
+                    int canvas_w = new_w - 12;
+                    int canvas_h = new_h - 44;
+                    dragged_window->canvas = (uint32_t*)kmalloc_a(canvas_w * canvas_h * 4);
+                    if (dragged_window->canvas) memset(dragged_window->canvas, 0x1E, canvas_w * canvas_h * 4);
+
+                    dragged_window->w = new_w; dragged_window->target_w = new_w;
+                    dragged_window->h = new_h; dragged_window->target_h = new_h;
+                    dragged_window->is_resizing = 0;
+                    dragged_window->is_dirty = 1;
+                    vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, new_w + 20, new_h + 20);
                 }
-
-                int canvas_w = new_w - 12;
-                int canvas_h = new_h - 44;
-
-                dragged_window->canvas = (uint32_t*)kmalloc_a(canvas_w * canvas_h * 4);
-                
-                if (dragged_window->canvas) {
-                    memset(dragged_window->canvas, 0x1E, canvas_w * canvas_h * 4);
-                }
-
-                dragged_window->w = new_w;
-                dragged_window->target_w = new_w;
-                dragged_window->h = new_h;
-                dragged_window->target_h = new_h;
-                
-                dragged_window->is_resizing = 0;
-                dragged_window->is_dirty = 1;
-                
-                vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, new_w + 20, new_h + 20);
+                sem_signal(&dragged_window->lock);
+                dragged_window = 0;
             }
-            
-            dragged_window = 0;
         }
         
         window_t* hover_win = 0;
-        int win_rel_x = 0;
-        int win_rel_y = 0;
+        int win_rel_x = 0, win_rel_y = 0;
 
         for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
             int idx = window_z_order[i];
@@ -445,9 +424,7 @@ void gui_task(void* arg) {
                 }
             }
         }
-
         last_mouse_buttons = mouse_buttons;
-
 
         if (dirty_x2 >= dirty_x1) {
             vga_set_target(0, 0, 0);
@@ -456,9 +433,7 @@ void gui_task(void* arg) {
             vga_draw_rect(dirty_x1, dirty_y1, dw, dh, 0x1A1A1B);
         }
 
-        for (int i = 0; i < ICON_COUNT; i++) {
-            draw_desktop_icon(&desktop_icons[i]);
-        }
+        for (int i = 0; i < ICON_COUNT; i++) draw_desktop_icon(&desktop_icons[i]);
 
         vga_draw_rect(0, 0, fb_width, 26, C_TASKBAR_BG);
         vga_print_at("yulaOS", 12, 8, C_ACCENT_BLUE);
@@ -466,22 +441,16 @@ void gui_task(void* arg) {
         int cur_x = tb_start_x;
         for (int i = 0; i < MAX_WINDOWS; i++) {
             if (window_list[i].is_active) {
-                __attribute__((unused)) int is_focused = (focused_window_pid == window_list[i].owner_pid && !window_list[i].is_minimized);
                 uint32_t bg = window_list[i].is_minimized ? C_BTN_MINIMIZED : C_BTN_ACTIVE;
-                
                 vga_draw_rect(cur_x, 1, btn_w, 24, bg);
-
+                
                 uint32_t* icon = icon_terminal;
-                if (strcmp(window_list[i].title, "System Architecture Monitor") == 0) {
-                    icon = icon_monitor;
-                }
-
+                if (strcmp(window_list[i].title, "System Architecture Monitor") == 0) icon = icon_monitor;
                 vga_draw_sprite_masked(cur_x + 6, 5, 16, 16, icon, 0xFF00FF);
 
                 char title_short[16];
                 strlcpy(title_short, window_list[i].title, 12);
                 vga_print_at(title_short, cur_x + 26, 8, 0xCCCCCC);
-
                 cur_x += btn_w + 2;
             }
         }
@@ -492,7 +461,7 @@ void gui_task(void* arg) {
         get_time_string(time_str);
         vga_print_at(time_str, fb_width - 80, 8, 0xD4D4D4);
 
-        spinlock_release_safe(&window_lock, flags);
+        sem_signal(&window_list_lock);
 
         window_draw_all();
 
@@ -509,24 +478,23 @@ void gui_task(void* arg) {
         old_mx = mouse_x; old_my = mouse_y;
 
         vga_flip_dirty();
-
         vga_reset_dirty(); 
 
         int any_animations = 0;
-        
+
+        sem_wait(&window_list_lock);
         for(int i = 0; i < MAX_WINDOWS; i++) {
             if (window_list[i].is_active && window_list[i].is_animating) {
                 any_animations = 1;
                 break;
             }
         }
+        sem_signal(&window_list_lock);
         
-        extern window_t* dragged_window;
         if (dragged_window) any_animations = 1;
 
         if (any_animations) {
             sys_usleep(500);
-            
             uint32_t flags = spinlock_acquire_safe(&gui_event_sem.lock);
             gui_event_sem.count = 0;
             spinlock_release_safe(&gui_event_sem.lock, flags);

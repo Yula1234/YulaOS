@@ -1,6 +1,8 @@
 #ifndef KERNEL_WINDOW_H
 #define KERNEL_WINDOW_H
 
+#include <hal/lock.h>
+
 #include <stdint.h>
 
 #define YULA_EVENT_NONE       0
@@ -48,6 +50,8 @@ typedef struct window {
     int is_resizing;
     int ghost_w, ghost_h;
 
+    semaphore_t lock;
+
 } window_t;
 
 #define MAX_WINDOWS 16
@@ -55,6 +59,8 @@ typedef struct window {
 extern window_t window_list[MAX_WINDOWS];
 extern int window_z_order[MAX_WINDOWS]; 
 extern int focused_window_pid;
+
+extern semaphore_t window_list_lock;
 
 void window_init_system();
 window_t* window_create(int x, int y, int w, int h, const char* title, window_draw_handler_t handler);

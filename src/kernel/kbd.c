@@ -99,7 +99,8 @@ extern spinlock_t window_lock;
 void kdb_restart_gui() {
     kdb_print("\n[KDB] Resetting window system...\n");
     
-    window_lock.locked = 0;
+    window_list_lock.count = 1;
+    window_list_lock.lock.locked = 0;
     kdb_print("[KDB] window_lock forced to UNLOCKED.\n");
 
     window_init_system();

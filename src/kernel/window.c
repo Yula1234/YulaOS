@@ -12,7 +12,8 @@ int focused_window_pid = 0;
 
 static uint32_t active_gradient[28];
 static uint32_t inactive_gradient[28];
-spinlock_t window_lock;
+
+semaphore_t window_list_lock;
 
 
 void window_precompute_gradients() {
@@ -36,11 +37,12 @@ void window_precompute_gradients() {
 void window_init_system() {
     memset(window_list, 0, sizeof(window_list));
     for(int i = 0; i < MAX_WINDOWS; i++) window_z_order[i] = -1;
-    spinlock_init(&window_lock);
+    sem_init(&window_list_lock, 1);
     window_precompute_gradients();
 }
 
 void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
+    sem_wait(&win->lock);
     int next = (win->evt_head + 1) % MAX_WIN_EVENTS;
     if (next != win->evt_tail) {
         win->event_queue[win->evt_head].type = type;
@@ -49,13 +51,18 @@ void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
         win->event_queue[win->evt_head].arg3 = a3;
         win->evt_head = next;
     }
+    sem_signal(&win->lock);
 }
 
 int window_pop_event(window_t* win, yula_event_t* out_ev) {
-    if (win->evt_head == win->evt_tail) return 0;
-    
+    sem_wait(&win->lock);
+    if (win->evt_head == win->evt_tail) {
+        sem_signal(&win->lock);
+        return 0;
+    }
     *out_ev = win->event_queue[win->evt_tail];
     win->evt_tail = (win->evt_tail + 1) % MAX_WIN_EVENTS;
+    sem_signal(&win->lock);
     return 1;
 }
 
@@ -78,23 +85,28 @@ void window_bring_to_front_nolock(int window_index) {
 }
 
 void window_bring_to_front(int window_index) {
-    uint32_t flags = spinlock_acquire_safe(&window_lock);
+    sem_wait(&window_list_lock);
     window_bring_to_front_nolock(window_index);
-    spinlock_release_safe(&window_lock, flags);
+    sem_signal(&window_list_lock);
 }
 
 extern void wake_up_gui();
 
 window_t* window_create(int x, int y, int w, int h, const char* title, window_draw_handler_t handler) {
-    uint32_t flags = spinlock_acquire_safe(&window_lock);
+    sem_wait(&window_list_lock);
+    
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!window_list[i].is_active) {
             
+            sem_init(&window_list[i].lock, 1);
+            sem_wait(&window_list[i].lock);
+
             int canvas_w = w - 12; 
             int canvas_h = h - 44;
             
             if (canvas_w <= 0 || canvas_h <= 0) {
-                spinlock_release_safe(&window_lock, flags);
+                sem_signal(&window_list[i].lock);
+                sem_signal(&window_list_lock);
                 return 0;
             }
 
@@ -142,20 +154,22 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
                     break;
                 }
             }
-            spinlock_release_safe(&window_lock, flags);
+            
+            sem_signal(&window_list[i].lock);
+            sem_signal(&window_list_lock);
             
             wake_up_gui();
             
             return &window_list[i];
         }
     }
-    spinlock_release_safe(&window_lock, flags);
+    sem_signal(&window_list_lock);
     return 0;
 }
 
 
 void window_mark_dirty_by_pid(int pid) {
-    uint32_t flags = spinlock_acquire_safe(&window_lock);
+    sem_wait(&window_list_lock);
     int found = 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (window_list[i].is_active && window_list[i].owner_pid == pid) {
@@ -163,7 +177,7 @@ void window_mark_dirty_by_pid(int pid) {
             found = 1;
         }
     }
-    spinlock_release_safe(&window_lock, flags);
+    sem_signal(&window_list_lock);
     
     if (found) {
         wake_up_gui();
@@ -171,14 +185,26 @@ void window_mark_dirty_by_pid(int pid) {
 }
 
 void window_draw_all() {
-     uint32_t flags = spinlock_acquire_safe(&window_lock); 
+    sem_wait(&window_list_lock);
+    
+    int temp_z_order[MAX_WINDOWS];
+    memcpy(temp_z_order, window_z_order, sizeof(window_z_order));
+    
+
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        int idx = window_z_order[i];
+        int idx = temp_z_order[i];
         if (idx == -1) continue;
+        
         window_t* win = &window_list[idx];
 
+        sem_wait(&win->lock);
+
         int showing_anim = (win->is_animating && win->anim_mode == 1);
-        if (!win->is_active || (win->is_minimized && !showing_anim)) continue;
+        
+        if (!win->is_active || (win->is_minimized && !showing_anim)) {
+            sem_signal(&win->lock);
+            continue;
+        }
 
         vga_set_target(0, 0, 0);
 
@@ -199,9 +225,7 @@ void window_draw_all() {
 
             if (win->w > 60) {
                 vga_print_at(win->title, win->x + 10, win->y + 9, 0xD4D4D4);
-                
                 vga_print_at("_", win->x + win->w - 42, win->y + 5, 0xAAAAAA);
-                
                 vga_print_at("x", win->x + win->w - 20, win->y + 9, 0xAAAAAA);
             }
         }
@@ -211,10 +235,12 @@ void window_draw_all() {
             int ch = win->target_h - 44;
 
             if (win->is_dirty && win->on_draw) {
-                vga_set_target(win->canvas, cw, ch);
-                vga_clear(0x1E1E1E);
-                win->on_draw(win, 0, 0);
-                vga_set_target(0, 0, 0);
+                if (win->canvas) {
+                    vga_set_target(win->canvas, cw, ch);
+                    vga_clear(0x1E1E1E);
+                    win->on_draw(win, 0, 0);
+                    vga_set_target(0, 0, 0);
+                }
                 win->is_dirty = 0;
             }
 
@@ -231,31 +257,33 @@ void window_draw_all() {
             for(int k=0; k<10; k++) {
                 int px1 = wx + ww - 4 - k;
                 int py1 = wy + wh - 4;
-                
                 int px2 = wx + ww - 4;
                 int py2 = wy + wh - 4 - k;
 
                 if (px1 >= 0 && px1 < (int)fb_width && py1 >= 0 && py1 < (int)fb_height) {
                     vga_put_pixel(px1, py1, 0x666666);
                 }
-                
                 if (px2 >= 0 && px2 < (int)fb_width && py2 >= 0 && py2 < (int)fb_height) {
                     vga_put_pixel(px2, py2, 0x666666);
                 }
             }
         }
+        
+        sem_signal(&win->lock);
     }
     
     vga_set_target(0, 0, 0);
-    spinlock_release_safe(&window_lock, flags);
+    sem_signal(&window_list_lock);
 }
 
 void window_close_all_by_pid(int pid) {
-    uint32_t flags = spinlock_acquire_safe(&window_lock);
+    sem_wait(&window_list_lock);
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (window_list[i].is_active && window_list[i].owner_pid == pid) {
             
+            sem_wait(&window_list[i].lock);
+
             if (window_list[i].canvas) {
                 kfree(window_list[i].canvas);
                 window_list[i].canvas = 0;
@@ -272,6 +300,8 @@ void window_close_all_by_pid(int pid) {
             vga_mark_dirty(window_list[i].x - 10, window_list[i].y - 10, 
                            window_list[i].w + 25, window_list[i].h + 25);
             
+            sem_signal(&window_list[i].lock);
+
             int z_idx = -1;
             for (int j = 0; j < MAX_WINDOWS; j++) {
                 if (window_z_order[j] == i) {
@@ -302,5 +332,5 @@ void window_close_all_by_pid(int pid) {
 
     wake_up_gui();
 
-    spinlock_release_safe(&window_lock, flags);
+    sem_signal(&window_list_lock);
 }
