@@ -120,10 +120,7 @@ typedef struct {
     void* ctba_virt[32];    // Command Tables (Virtual), one per slot
     spinlock_t lock;
 
-    semaphore_t sem_complete; 
-    volatile uint32_t last_is;
-    
-    semaphore_t port_mutex; 
+    semaphore_t slot_sem[32]; 
 } ahci_port_state_t;
 
 void ahci_init(void);
