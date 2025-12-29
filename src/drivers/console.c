@@ -3,6 +3,7 @@
 #include <hal/irq.h>
 #include <fs/vfs.h>
 #include <kernel/proc.h>
+#include <hal/lock.h>
 
 #include "console.h"
 #include "vga.h"
@@ -15,10 +16,17 @@ static int console_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, c
     task_t* curr = proc_current();
     if (!curr->terminal) return -1;
 
+    term_instance_t* term = (term_instance_t*)curr->terminal;
+
     const char* char_buf = (const char*)buffer;
+    
+    uint32_t flags = spinlock_acquire_safe(&term->lock);
+    
     for (uint32_t i = 0; i < size; i++) {
-        term_putc((term_instance_t*)curr->terminal, char_buf[i]);
+        term_putc(term, char_buf[i]);
     }
+    
+    spinlock_release_safe(&term->lock, flags);
 
     extern void window_mark_dirty_by_pid(int pid);
     

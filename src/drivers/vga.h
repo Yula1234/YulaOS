@@ -1,6 +1,8 @@
 #ifndef DRIVERS_VGA_H
 #define DRIVERS_VGA_H
 
+#include <hal/lock.h>
+
 #include <stdint.h>
 
 enum VgaColor {
@@ -32,6 +34,8 @@ typedef struct {
     int row;
     int view_row;
     int max_row;
+
+    spinlock_t lock;
 } term_instance_t;
 
 void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y);

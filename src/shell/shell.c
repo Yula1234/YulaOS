@@ -164,7 +164,7 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
     term_instance_t* term = ctx->term;
     if(!term) return;
 
-    uint32_t flags = spinlock_acquire_safe(&ctx->lock);
+    uint32_t flags = spinlock_acquire_safe(&term->lock);
     
     int canvas_w = self->target_w - 12;
     int canvas_h = self->target_h - 44; 
@@ -217,7 +217,7 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
         }
     }
 
-    spinlock_release_safe(&ctx->lock, flags);
+    spinlock_release_safe(&term->lock, flags);
 }
 
 static void print_padded(term_instance_t* term, const char* text, int width, uint32_t color) {
@@ -432,6 +432,7 @@ void shell_task(void* arg) {
         return;
     }
 
+    spinlock_init(&my_term->lock);
     spinlock_init(&ctx->lock);
 
     ctx->term = my_term; ctx->hist = my_hist;
