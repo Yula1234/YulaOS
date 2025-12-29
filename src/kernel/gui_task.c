@@ -6,7 +6,7 @@
 #include <hal/io.h>
 #include <mm/heap.h>
 #include <hal/lock.h> 
-#include <kernel/sched.h> // для sem_wait / sem_init
+#include <kernel/sched.h>
 
 #include "gui_task.h"
 #include "window.h"
@@ -122,10 +122,13 @@ void wake_up_gui() {
     sem_signal(&gui_event_sem);
 }
 
+extern spinlock_t window_lock;
+
 void gui_task(void* arg) {
     (void)arg;
 
     uint32_t frames = 0, last_fps_tick = 0, current_fps = 0;
+
     char fps_str[16], time_str[16];
     static int old_mx = 0, old_my = 0;
 
@@ -141,6 +144,8 @@ void gui_task(void* arg) {
         frames++;
 
         update_system_uptime();
+
+        uint32_t flags = spinlock_acquire_safe(&window_lock);
 
         vga_mark_dirty(old_mx, old_my, 16, 16);
         vga_mark_dirty(mouse_x, mouse_y, 16, 16);
@@ -270,14 +275,16 @@ void gui_task(void* arg) {
                     if (window_list[i].is_active) {
                         if (current_btn == clicked_btn_idx) {
                             if (offset_in_btn > btn_w - 20) {
+                                spinlock_release_safe(&window_lock, flags);
                                 proc_kill_by_pid(window_list[i].owner_pid);
+                                flags = spinlock_acquire_safe(&window_lock);
                             } else {
                                 if (window_list[i].is_minimized) {
                                     window_list[i].is_minimized = 0;
                                     window_list[i].is_animating = 1;
                                     window_list[i].anim_mode = 0;
                                     window_list[i].y = 0; 
-                                    window_bring_to_front(i);
+                                    window_bring_to_front_nolock(i);
                                 } else {
                                     window_list[i].target_x = window_list[i].x;
                                     window_list[i].target_y = window_list[i].y;
@@ -312,7 +319,9 @@ void gui_task(void* arg) {
                         }
                         else if (mouse_x >= win->x + win->w - 26 && mouse_y <= win->y + 26) {
                             vga_mark_dirty(win->x - 10, win->y - 10, win->w + 25, win->h + 25);
+                            spinlock_release_safe(&window_lock, flags);
                             proc_kill_by_pid(win->owner_pid);
+                            flags = spinlock_acquire_safe(&window_lock);
                         } else if (mouse_x >= win->x + win->w - 50 && mouse_x < win->x + win->w - 26 && mouse_y <= win->y + 26) {
                             win->target_x = win->x;
                             win->target_y = win->y;
@@ -320,7 +329,7 @@ void gui_task(void* arg) {
                             win->anim_mode = 1;
                             win->is_minimized = 1;
                         } else {
-                            window_bring_to_front(idx);
+                            window_bring_to_front_nolock(idx);
                             if (mouse_y <= win->y + 30) {
                                 dragged_window = win; drag_off_x = mouse_x - win->x; drag_off_y = mouse_y - win->y;
                             }
@@ -483,6 +492,7 @@ void gui_task(void* arg) {
         get_time_string(time_str);
         vga_print_at(time_str, fb_width - 80, 8, 0xD4D4D4);
 
+        spinlock_release_safe(&window_lock, flags);
 
         window_draw_all();
 

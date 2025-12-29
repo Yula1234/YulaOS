@@ -107,6 +107,7 @@ void isr_handler(registers_t* regs) {
                         if (timer_ticks >= t->wake_tick) {
                             t->wake_tick = 0;
                             t->state = TASK_RUNNABLE;
+                            sched_add(t);
                         }
                     }
                 }
@@ -117,7 +118,7 @@ void isr_handler(registers_t* regs) {
                 cpu->stat_idle_ticks++;
             }
 
-            if ((cpu->stat_total_ticks % 100) == 0) {
+            if (((uint32_t)cpu->stat_total_ticks % 100) == 0) {
                 uint64_t delta_total = cpu->stat_total_ticks - cpu->snap_total_ticks;
                 uint64_t delta_idle  = cpu->stat_idle_ticks  - cpu->snap_idle_ticks;
                 

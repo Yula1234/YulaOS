@@ -143,7 +143,7 @@ task_t* proc_find_by_pid(uint32_t pid) {
 static task_t* alloc_task(void) {
     uint32_t flags = spinlock_acquire_safe(&proc_lock);
     
-    task_t* t = (task_t*)kmalloc(sizeof(task_t));
+    task_t* t = (task_t*)kmalloc_a(sizeof(task_t));
     if (!t) {
         spinlock_release_safe(&proc_lock, flags);
         return 0;
@@ -155,6 +155,8 @@ static task_t* alloc_task(void) {
     
     sem_init(&t->exit_sem, 0); 
 
+    t->blocked_on_sem = 0;
+    t->is_queued = 0;
     t->pid = next_pid++;
     t->state = TASK_RUNNABLE;
     t->cwd_inode = 1;
@@ -275,6 +277,8 @@ void proc_kill(task_t* t) {
             break;
         }
     }
+
+    sem_remove_task(t);
 
     sched_remove(t);
     
@@ -638,6 +642,7 @@ task_t* proc_create_idle(int cpu_index) {
 
     t->kstack_size = KSTACK_SIZE;
     t->priority = PRIO_IDLE;
+    
     t->kstack = kmalloc_a(t->kstack_size);
     memset(t->kstack, 0, t->kstack_size);
     
@@ -647,10 +652,9 @@ task_t* proc_create_idle(int cpu_index) {
     
     extern void idle_task_func(void*);
     
-    *--sp = 0; // Padding
     *--sp = 0;
-    *--sp = 0;
-    *--sp = (uint32_t)idle_task_func; // EIP
+    *--sp = 0; // Fake Return Address
+    *--sp = (uint32_t)idle_task_func;
     *--sp = 0; // EBP
     *--sp = 0; // EBX
     *--sp = 0; // ESI

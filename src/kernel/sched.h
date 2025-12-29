@@ -10,5 +10,6 @@ void sched_yield(void);
 void sched_remove(task_t* t);
 
 void sched_set_current(task_t* t);
+void sem_remove_task(task_t* t);
 
 #endif

@@ -12,7 +12,7 @@ int focused_window_pid = 0;
 
 static uint32_t active_gradient[28];
 static uint32_t inactive_gradient[28];
-static spinlock_t window_lock;
+spinlock_t window_lock;
 
 
 void window_precompute_gradients() {
@@ -59,7 +59,7 @@ int window_pop_event(window_t* win, yula_event_t* out_ev) {
     return 1;
 }
 
-static void window_bring_to_front_nolock(int window_index) {
+void window_bring_to_front_nolock(int window_index) {
     int pos = -1;
     for(int i = 0; i < MAX_WINDOWS; i++) {
         if(window_z_order[i] == window_index) {
@@ -171,6 +171,7 @@ void window_mark_dirty_by_pid(int pid) {
 }
 
 void window_draw_all() {
+     uint32_t flags = spinlock_acquire_safe(&window_lock); 
     for (int i = 0; i < MAX_WINDOWS; i++) {
         int idx = window_z_order[i];
         if (idx == -1) continue;
@@ -246,6 +247,7 @@ void window_draw_all() {
     }
     
     vga_set_target(0, 0, 0);
+    spinlock_release_safe(&window_lock, flags);
 }
 
 void window_close_all_by_pid(int pid) {

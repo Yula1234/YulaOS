@@ -47,6 +47,7 @@ typedef enum {
 
 typedef struct task {
     uint32_t pid;
+    int is_queued;
     task_state_t state;
     char name[32];
 
@@ -103,6 +104,7 @@ typedef struct task {
     uint8_t fpu_state[512] __attribute__((aligned(16)));
 
     struct task* sem_next;
+    void* blocked_on_sem;
 
     semaphore_t exit_sem; 
   

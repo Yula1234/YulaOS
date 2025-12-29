@@ -55,10 +55,17 @@ void sched_add(task_t* t) {
     int target_cpu_idx = t->assigned_cpu;
     cpu_t* target = &cpus[target_cpu_idx];
 
+    uint32_t flags = spinlock_acquire_safe(&target->lock);
+
+    if (t->is_queued) {
+        spinlock_release_safe(&target->lock, flags);
+        return; 
+    }
+
+    t->is_queued = 1;
+
     t->quantum = (t->priority + 1) * 3;
     t->ticks_left = t->quantum;
-
-    uint32_t flags = spinlock_acquire_safe(&target->lock);
     
     target->total_priority_weight += t->priority;
     target->total_task_count++;
@@ -71,10 +78,10 @@ void sched_add(task_t* t) {
 static task_t* pick_next_rr(cpu_t* cpu) {
     if (!cpu->runq_head) return 0;
     
-    uint32_t inspected = 0;
     uint32_t count = cpu->runq_count;
+    uint32_t inspected = 0;
     
-    while (inspected < count) {
+    while (inspected < count && cpu->runq_head) {
         task_t* t = cpu->runq_head;
         
         cpu->runq_head = t->sched_next;
@@ -82,17 +89,22 @@ static task_t* pick_next_rr(cpu_t* cpu) {
         else cpu->runq_tail = 0;
         
         t->sched_next = 0;
-        if (cpu->runq_tail) {
-            cpu->runq_tail->sched_next = t;
-            t->sched_prev = cpu->runq_tail;
-            cpu->runq_tail = t;
-        } else {
-            cpu->runq_head = t;
-            cpu->runq_tail = t;
-        }
+        t->sched_prev = 0;
+        t->is_queued = 0;
         
-        if (t->state == TASK_RUNNABLE) {
+        if (t->state == TASK_RUNNABLE || t->state == TASK_RUNNING) {
+            if (cpu->runq_tail) {
+                cpu->runq_tail->sched_next = t;
+                t->sched_prev = cpu->runq_tail;
+                cpu->runq_tail = t;
+            } else {
+                cpu->runq_head = t;
+                cpu->runq_tail = t;
+            }
+            t->is_queued = 1;
             return t;
+        } else {
+            cpu->runq_count--;
         }
         
         inspected++;
@@ -143,7 +155,9 @@ void sched_yield(void) {
 
         if (next) {
             if (next == prev) {
-                __asm__ volatile("sti; hlt; cli");
+                if (next->pid == 0) {
+                    __asm__ volatile("sti; hlt; cli");
+                }
                 return;
             }
             
@@ -193,6 +207,7 @@ void sched_remove(task_t* t) {
 
             t->sched_next = 0;
             t->sched_prev = 0;
+            t->is_queued = 0;
             if (target->runq_count > 0) target->runq_count--;
             break;
         }
@@ -215,11 +230,15 @@ void sem_wait(semaphore_t* sem) {
         
         if (sem->count > 0) {
             sem->count--;
+            task_t* curr = proc_current();
+            curr->blocked_on_sem = 0;
             spinlock_release_safe(&sem->lock, flags);
             return;
         }
         
         task_t* curr = proc_current();
+        
+        curr->blocked_on_sem = (void*)sem;
         
         curr->sem_next = 0;
         if (sem->wait_tail) {
@@ -249,7 +268,44 @@ void sem_signal(semaphore_t* sem) {
         if (!sem->wait_head) sem->wait_tail = 0;
         
         t->state = TASK_RUNNABLE;
+
+        if (t->state != TASK_ZOMBIE) {
+            t->state = TASK_RUNNABLE;
+            sched_add(t); 
+        }
     }
+    
+    spinlock_release_safe(&sem->lock, flags);
+}
+
+void sem_remove_task(task_t* t) {
+    if (!t->blocked_on_sem) return;
+    
+    semaphore_t* sem = (semaphore_t*)t->blocked_on_sem;
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    
+    if (t->blocked_on_sem != sem) {
+        spinlock_release_safe(&sem->lock, flags);
+        return;
+    }
+
+    if (sem->wait_head == t) {
+        sem->wait_head = t->sem_next;
+        if (!sem->wait_head) sem->wait_tail = 0;
+    } else {
+        task_t* curr = sem->wait_head;
+        while (curr) {
+            if (curr->sem_next == t) {
+                curr->sem_next = t->sem_next;
+                if (curr->sem_next == 0) sem->wait_tail = curr;
+                break;
+            }
+            curr = curr->sem_next;
+        }
+    }
+    
+    t->blocked_on_sem = 0;
+    t->sem_next = 0;
     
     spinlock_release_safe(&sem->lock, flags);
 }
