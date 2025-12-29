@@ -79,6 +79,7 @@ static inline uint32_t get_cr3() {
 }
 
 extern void wake_up_gui();
+extern void proc_check_sleepers(uint32_t current_tick);
 
 void isr_handler(registers_t* regs) {
     if (regs->int_no == 0xFF) {
@@ -102,16 +103,7 @@ void isr_handler(registers_t* regs) {
                     wake_up_gui();
                 }
 
-                for (uint32_t i = 0; i < proc_task_count(); i++) {
-                    task_t* t = proc_task_at(i);
-                    if (t && t->state == TASK_WAITING && t->wake_tick > 0) {
-                        if (timer_ticks >= t->wake_tick) {
-                            t->wake_tick = 0;
-                            t->state = TASK_RUNNABLE;
-                            sched_add(t);
-                        }
-                    }
-                }
+                proc_check_sleepers(timer_ticks);
             }
 
             cpu->stat_total_ticks++;

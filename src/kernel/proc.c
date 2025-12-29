@@ -1,5 +1,6 @@
 #include <drivers/vga.h>
 #include <lib/string.h>
+#include <lib/dlist.h>
 #include <fs/yulafs.h>
 
 #include <arch/i386/paging.h>
@@ -24,9 +25,14 @@
 
 static task_t* tasks_head = 0;
 static task_t* tasks_tail = 0;
+
 static uint32_t total_tasks = 0;
 static uint32_t next_pid = 1;
+
 static spinlock_t proc_lock;
+
+static dlist_head_t sleeping_list; 
+static spinlock_t sleep_lock;
 
 static task_t* pid_hash[PID_HASH_SIZE];
 static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
@@ -76,7 +82,9 @@ void proc_init(void) {
     tasks_tail = 0;
     total_tasks = 0;
     next_pid = 1;
+    dlist_init(&sleeping_list);
     spinlock_init(&proc_lock);
+    spinlock_init(&sleep_lock);
 
     for (int i = 0; i < PID_HASH_LOCKS_COUNT; i++) {
         spinlock_init(&pid_hash_locks[i]);
@@ -197,13 +205,14 @@ void proc_free_resources(task_t* t) {
     while (m) {
         mmap_area_t* next = m->next;
         if (m->file && m->file->refs > 0) {
-             /* Atomic decrement for mmap files too */
              __sync_sub_and_fetch(&m->file->refs, 1);
         }
         kfree(m);
         m = next;
     }
     t->mmap_list = 0;
+
+    proc_sleep_remove(t);
     
     if (t->page_dir && t->page_dir != kernel_page_directory) {
         for (int i = 0; i < 1024; i++) {
@@ -280,6 +289,8 @@ void proc_kill(task_t* t) {
     }
 
     sem_remove_task(t);
+
+    proc_sleep_remove(t);
 
     sched_remove(t);
     
@@ -664,4 +675,65 @@ task_t* proc_create_idle(int cpu_index) {
     t->esp = sp;
     
     return t;
+}
+
+void proc_sleep_add(task_t* t, uint32_t wake_tick) {
+    uint32_t flags = spinlock_acquire_safe(&sleep_lock);
+    
+    t->wake_tick = wake_tick;
+    t->state = TASK_WAITING;
+    
+    task_t *curr;
+    int inserted = 0;
+
+    dlist_for_each_entry(curr, &sleeping_list, sleep_node) {
+        if (curr->wake_tick > wake_tick) {
+            dlist_add_tail(&t->sleep_node, &curr->sleep_node);
+            inserted = 1;
+            break;
+        }
+    }
+
+    if (!inserted) {
+        dlist_add_tail(&t->sleep_node, &sleeping_list);
+    }
+    
+    spinlock_release_safe(&sleep_lock, flags);
+    sched_yield();
+}
+
+void proc_check_sleepers(uint32_t current_tick) {
+    if (dlist_empty(&sleeping_list)) return;
+
+    task_t *first = container_of(sleeping_list.next, task_t, sleep_node);
+
+    if (first->wake_tick > current_tick) return;
+
+    if (spinlock_try_acquire(&sleep_lock)) {
+        task_t *pos, *n;
+        dlist_for_each_entry_safe(pos, n, &sleeping_list, sleep_node) {
+            if (pos->wake_tick <= current_tick) {
+                dlist_del(&pos->sleep_node);
+                
+                pos->wake_tick = 0;
+                pos->state = TASK_RUNNABLE;
+                sched_add(pos);
+            } else {
+                break;
+            }
+        }
+        spinlock_release(&sleep_lock);
+    }
+}
+
+void proc_sleep_remove(task_t* t) {
+    uint32_t flags = spinlock_acquire_safe(&sleep_lock);
+    
+    if (t->sleep_node.next != 0 && t->sleep_node.prev != 0) {
+        dlist_del(&t->sleep_node);
+        t->sleep_node.next = 0;
+        t->sleep_node.prev = 0;
+    }
+    
+    spinlock_release_safe(&sleep_lock, flags);
 }

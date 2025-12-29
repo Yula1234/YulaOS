@@ -1,0 +1,29 @@
+#include "dlist.h"
+
+static inline void __dlist_add(dlist_head_t *new,
+                               dlist_head_t *prev,
+                               dlist_head_t *next) {
+    next->prev = new;
+    new->next = next;
+    new->prev = prev;
+    prev->next = new;
+}
+
+void dlist_add(dlist_head_t *new, dlist_head_t *head) {
+    __dlist_add(new, head, head->next);
+}
+
+void dlist_add_tail(dlist_head_t *new, dlist_head_t *head) {
+    __dlist_add(new, head->prev, head);
+}
+
+static inline void __dlist_del(dlist_head_t *prev, dlist_head_t *next) {
+    next->prev = prev;
+    prev->next = next;
+}
+
+void dlist_del(dlist_head_t *entry) {
+    __dlist_del(entry->prev, entry->next);
+    entry->next = 0;
+    entry->prev = 0;
+}

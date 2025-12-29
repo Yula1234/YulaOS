@@ -4,6 +4,7 @@
 #include <arch/i386/idt.h>
 #include <fs/vfs.h>
 #include <hal/lock.h>
+#include <lib/dlist.h>
 
 #include <stdint.h>
 
@@ -65,6 +66,7 @@ typedef struct task {
     uint32_t mem_pages;
     uint32_t wait_for_pid;
     uint32_t wake_tick;
+    dlist_head_t sleep_node; 
     int is_blocked_on_kbd;
 
     uint32_t prog_break;
@@ -125,5 +127,8 @@ uint32_t proc_task_count(void);
 task_t* proc_task_at(uint32_t idx);
 task_t* proc_create_idle(int cpu_index);
 task_t* proc_find_by_pid(uint32_t pid);
+void proc_sleep_remove(task_t* t);
+void proc_check_sleepers(uint32_t current_tick);
+void proc_sleep_add(task_t* t, uint32_t wake_tick);
 
 #endif

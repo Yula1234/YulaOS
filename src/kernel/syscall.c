@@ -128,9 +128,10 @@ void syscall_handler(registers_t* regs) {
         case 7: // sleep(ms)
         {
             uint32_t ms = regs->ebx;
-            curr->wake_tick = timer_ticks + (ms * 15); 
-            curr->state = TASK_WAITING;
-            sched_yield();
+            uint32_t target = timer_ticks + (ms * 15);
+            
+            extern void proc_sleep_add(task_t* t, uint32_t tick);
+            proc_sleep_add(curr, target);
         }
         break;
 
@@ -191,9 +192,10 @@ void syscall_handler(registers_t* regs) {
             uint32_t ticks = (us * 15) / 1000;
             if (ticks == 0) ticks = 1;
 
-            curr->wake_tick = timer_ticks + ticks;
-            curr->state = TASK_WAITING;
-            sched_yield();
+            uint32_t target = timer_ticks + ticks;
+            
+            extern void proc_sleep_add(task_t* t, uint32_t tick);
+            proc_sleep_add(curr, target);
         }
         break;
 
