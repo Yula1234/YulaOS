@@ -309,3 +309,35 @@ void sem_remove_task(task_t* t) {
     
     spinlock_release_safe(&sem->lock, flags);
 }
+
+void rwlock_init(rwlock_t* rw) {
+    sem_init(&rw->lock, 1);
+    sem_init(&rw->write_sem, 1);
+    rw->readers = 0;
+}
+
+void rwlock_acquire_read(rwlock_t* rw) {
+    sem_wait(&rw->lock);
+    rw->readers++;
+    if (rw->readers == 1) {
+        sem_wait(&rw->write_sem);
+    }
+    sem_signal(&rw->lock);
+}
+
+void rwlock_release_read(rwlock_t* rw) {
+    sem_wait(&rw->lock);
+    rw->readers--;
+    if (rw->readers == 0) {
+        sem_signal(&rw->write_sem);
+    }
+    sem_signal(&rw->lock);
+}
+
+void rwlock_acquire_write(rwlock_t* rw) {
+    sem_wait(&rw->write_sem);
+}
+
+void rwlock_release_write(rwlock_t* rw) {
+    sem_signal(&rw->write_sem);
+}

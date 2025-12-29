@@ -60,5 +60,17 @@ void sem_init(semaphore_t* sem, int init_count);
 void sem_wait(semaphore_t* sem);
 void sem_signal(semaphore_t* sem);
 
+typedef struct {
+    semaphore_t lock;
+    semaphore_t write_sem;
+    int readers;
+} rwlock_t;
+
+void rwlock_init(rwlock_t* rw);
+void rwlock_acquire_read(rwlock_t* rw);
+void rwlock_release_read(rwlock_t* rw);
+void rwlock_acquire_write(rwlock_t* rw);
+void rwlock_release_write(rwlock_t* rw);
+
 
 #endif
