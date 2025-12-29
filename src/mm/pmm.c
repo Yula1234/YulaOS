@@ -61,19 +61,40 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
     uint32_t phys_alloc_start = align_up(mem_map_phys + mem_map_size);
     uint32_t first_free_idx = phys_alloc_start / PAGE_SIZE;
 
-    for (uint32_t i = 0; i < total_pages; i++) {
+    used_pages_count = total_pages;
+
+    for (uint32_t i = 0; i < first_free_idx; i++) {
         mem_map[i].flags = PMM_FLAG_USED | PMM_FLAG_KERNEL;
         mem_map[i].ref_count = 1;
         mem_map[i].order = 0;
     }
-    
-    used_pages_count = total_pages;
 
-    for (uint32_t i = first_free_idx; i < total_pages; i++) {
-        mem_map[i].flags = PMM_FLAG_USED; 
-        mem_map[i].ref_count = 1;
-        
+    uint32_t i = first_free_idx;
+    uint32_t max_block_size = (1 << PMM_MAX_ORDER);
+
+    while (i < total_pages && (i & (max_block_size - 1)) != 0) {
         pmm_free_pages((void*)(i * PAGE_SIZE), 0);
+        i++;
+    }
+
+    while (i + max_block_size <= total_pages) {
+        page_t* page = &mem_map[i];
+        
+        page->flags = PMM_FLAG_FREE;
+        page->order = PMM_MAX_ORDER;
+        page->ref_count = 0;
+        
+        list_add(&free_areas[PMM_MAX_ORDER].head, page);
+        free_areas[PMM_MAX_ORDER].count++;
+        
+        used_pages_count -= max_block_size;
+        
+        i += max_block_size;
+    }
+
+    while (i < total_pages) {
+        pmm_free_pages((void*)(i * PAGE_SIZE), 0);
+        i++;
     }
 }
 
