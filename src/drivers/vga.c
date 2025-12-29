@@ -692,24 +692,46 @@ void vga_draw_gradient_v(int x, int y, int w, int h, uint32_t c1, uint32_t c2) {
 
 __attribute__((target("sse2")))
 void vga_blur_rect(int x, int y, int w, int h) {
-    for (int i = 1; i < h - 1; i++) {
-        uint32_t* row = &vga_current_target[(y + i) * vga_target_w + x];
-        uint32_t* up  = &vga_current_target[(y + i - 1) * vga_target_w + x];
-        uint32_t* down = &vga_current_target[(y + i + 1) * vga_target_w + x];
+    if (!vga_current_target) return;
+    if (x < 1) x = 1;
+    if (y < 1) y = 1;
+    if (x + w >= (int)vga_target_w) w = vga_target_w - x - 1;
+    if (y + h >= (int)vga_target_h) h = vga_target_h - y - 1;
+    if (w <= 0 || h <= 0) return;
 
-        for (int j = 0; j < w / 4; j++) {
+    for (int i = 0; i < h; i++) {
+        int cy = y + i;
+        uint32_t* center_ptr = &vga_current_target[cy * vga_target_w + x];
+        uint32_t* up_ptr     = &vga_current_target[(cy - 1) * vga_target_w + x];
+        uint32_t* down_ptr   = &vga_current_target[(cy + 1) * vga_target_w + x];
+        
+        int j = 0;
+        
+        for (; j <= w - 4; j += 4) {
             __asm__ volatile (
-                "movups (%1), %%xmm0\n" 
-                "movups (%2), %%xmm1\n" 
-                "movups (%3), %%xmm2\n" 
-                "pavgb %%xmm1, %%xmm0\n"
-                "pavgb %%xmm2, %%xmm0\n"
-                "movups %%xmm0, (%0)\n"
-                : : "r"(row), "r"(row), "r"(up), "r"(row) : "memory", "xmm0", "xmm1", "xmm2"
+                "movdqu (%1), %%xmm0 \n\t"
+                "movdqu (%2), %%xmm1 \n\t"
+                "pavgb %%xmm1, %%xmm0 \n\t"
+                
+                "movdqu -4(%0), %%xmm2 \n\t"
+                "movdqu 4(%0), %%xmm3 \n\t"
+                "pavgb %%xmm3, %%xmm2 \n\t"
+                
+                "pavgb %%xmm2, %%xmm0 \n\t"
+                
+                "movdqu %%xmm0, (%0) \n\t"
+                : 
+                : "r"(center_ptr), "r"(up_ptr), "r"(down_ptr)
+                : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
             );
-            row += 4; up += 4; down += 4;
+            
+            center_ptr += 4;
+            up_ptr += 4;
+            down_ptr += 4;
         }
     }
+    
+    vga_mark_dirty(x, y, w, h);
 }
 
 __attribute__((target("sse2")))
