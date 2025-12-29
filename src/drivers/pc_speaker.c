@@ -35,6 +35,14 @@ void pc_speaker_beep(void) {
     pc_speaker_stop();
 }
 
+void pc_speaker_error(void) {
+    for (int freq = 2000; freq > 300; freq -= 15) {
+        pc_speaker_play(freq);
+        simple_wait(15); 
+    }
+    pc_speaker_stop();
+}
+
 void pc_speaker_init(void) {
     pc_speaker_stop();
 }

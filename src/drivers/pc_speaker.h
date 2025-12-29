@@ -4,11 +4,10 @@
 #include <stdint.h>
 
 void pc_speaker_init(void);
-
 void pc_speaker_play(uint32_t frequency);
-
 void pc_speaker_stop(void);
 
 void pc_speaker_beep(void);
+void pc_speaker_error(void);
 
 #endif

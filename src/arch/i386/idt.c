@@ -9,6 +9,7 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
+#include <kernel/kdb.h>
 
 #include <hal/io.h>
 #include <hal/apic.h>
@@ -270,6 +271,15 @@ void isr_handler(registers_t* regs) {
             }
 
             if (!handled) {
+
+                if (curr && strcmp(curr->name, "gui") == 0) {
+                    kdb_enter("GUI Thread Crashed", curr);
+                    
+                    proc_kill(curr);
+                    sched_yield();
+                    return;
+                }
+
                 int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
                 if (regs->cs != 0x1B && !is_kernel_access_to_user) {
