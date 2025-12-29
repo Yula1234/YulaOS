@@ -39,11 +39,17 @@ void ahci_set_async_mode(int enable) {
 
 static int find_cmdslot(volatile HBA_PORT *port, int port_no) {
     uint32_t slots = (port->sact | port->ci | port_active_slots[port_no]);
-    for (int i = 0; i < 32; i++) {
-        if ((slots & 1) == 0) return i;
-        slots >>= 1;
+
+    if (slots == 0xFFFFFFFF) {
+        return -1;
     }
-    return -1;
+
+    uint32_t free_mask = ~slots;
+    uint32_t first_free_bit;
+
+    __asm__ volatile("bsf %1, %0" : "=r"(first_free_bit) : "r"(free_mask));
+
+    return (int)first_free_bit;
 }
 
 
