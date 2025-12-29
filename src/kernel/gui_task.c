@@ -128,7 +128,11 @@ void gui_task(void* arg) {
     (void)arg;
 
     uint32_t frames = 0, last_fps_tick = 0, current_fps = 0;
-    char fps_str[16], time_str[16];
+    char fps_str[16], time_str[16] = {0};
+
+    while(is_rtc_updating());
+    get_time_string(time_str);
+
     static int old_mx = 0, old_my = 0;
     static uint32_t ticks_per_100ms = 1500;
     static uint32_t last_tick_count = 0;

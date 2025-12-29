@@ -231,6 +231,6 @@ void monitor_task(void* arg) {
         win->is_dirty = 1;
         wake_up_gui();
         
-        __asm__ volatile("int $0x80" : : "a"(11), "b"(20000));
+        __asm__ volatile("int $0x80" : : "a"(11), "b"(10000));
     }
 }

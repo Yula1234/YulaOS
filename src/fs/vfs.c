@@ -13,7 +13,7 @@ void devfs_register(vfs_node_t* node) {
 
 vfs_node_t* devfs_fetch(const char* name) {
     for (int i = 0; i < dev_count; i++) {
-        if (strcmp(dev_nodes[i]->name, name) == 0) return dev_nodes[i];
+        if (name[0] == dev_nodes[i]->name[0] && strcmp(dev_nodes[i]->name, name) == 0) return dev_nodes[i];
     }
     return 0;
 }
