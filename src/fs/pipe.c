@@ -28,36 +28,20 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
     uint32_t read_count = 0;
 
     while (read_count < size) {
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        uint32_t available = p->write_ptr - p->read_ptr;
-        int active_writers = p->writers;
-        
-        if (available == 0) {
-            if (active_writers == 0) {
-                spinlock_release_safe(&p->lock, flags);
-                return (int)read_count;
-            }
-            
-            if (read_count > 0) {
-                spinlock_release_safe(&p->lock, flags);
-                return (int)read_count;
-            }
-        }
-        spinlock_release_safe(&p->lock, flags);
-
         sem_wait(&p->sem_read);
 
-        flags = spinlock_acquire_safe(&p->lock);
+        uint32_t flags = spinlock_acquire_safe(&p->lock);
         
-        available = p->write_ptr - p->read_ptr;
+        uint32_t available = p->write_ptr - p->read_ptr;
         
         if (available == 0) {
             if (p->writers == 0) {
+                sem_signal(&p->sem_read); 
                 spinlock_release_safe(&p->lock, flags);
                 return (int)read_count;
             }
-            spinlock_release_safe(&p->lock, flags);
-            continue; 
+             spinlock_release_safe(&p->lock, flags);
+             continue;
         }
 
         buf[read_count] = p->buffer[p->read_ptr % PIPE_SIZE];
@@ -110,9 +94,9 @@ static int pipe_close(vfs_node_t* node) {
     spinlock_release_safe(&p->lock, flags);
 
     if (node->flags == 1) { 
-        sem_signal(&p->sem_write); 
+        sem_signal(&p->sem_write); // Wake up writers so they see Broken Pipe
     } else {
-        sem_signal(&p->sem_read);
+        sem_signal(&p->sem_read);  // Wake up readers so they see EOF
     }
 
     if (readers == 0 && writers == 0) {

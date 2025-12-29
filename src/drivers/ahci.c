@@ -115,6 +115,8 @@ static void port_init(int port_no) {
     }
 
     sem_init(&state->sem_complete, 0);
+    sem_init(&state->port_mutex, 1); 
+
     spinlock_init(&state->lock);
     state->last_is = 0;
 
@@ -279,13 +281,31 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write) {
 }
 
 int ahci_read_sector(uint32_t lba, uint8_t* buf) {
-    if (primary_port_idx != -1) return ahci_send_command(primary_port_idx, lba, buf, 0);
-    return 0;
+    if (primary_port_idx == -1) return 0;
+    
+    ahci_port_state_t* state = &ports[primary_port_idx];
+    
+    sem_wait(&state->port_mutex);
+    
+    int res = ahci_send_command(primary_port_idx, lba, buf, 0);
+    
+    sem_signal(&state->port_mutex);
+    
+    return res;
 }
 
 int ahci_write_sector(uint32_t lba, const uint8_t* buf) {
-    if (primary_port_idx != -1) return ahci_send_command(primary_port_idx, lba, (uint8_t*)buf, 1);
-    return 0;
+    if (primary_port_idx == -1) return 0;
+    
+    ahci_port_state_t* state = &ports[primary_port_idx];
+    
+    sem_wait(&state->port_mutex);
+    
+    int res = ahci_send_command(primary_port_idx, lba, (uint8_t*)buf, 1);
+    
+    sem_signal(&state->port_mutex);
+    
+    return res;
 }
 
 uint32_t ahci_get_capacity(void) { return primary_disk_sectors; }

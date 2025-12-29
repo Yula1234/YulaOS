@@ -122,6 +122,8 @@ typedef struct {
 
     semaphore_t sem_complete; 
     volatile uint32_t last_is;
+    
+    semaphore_t port_mutex; 
 } ahci_port_state_t;
 
 void ahci_init(void);

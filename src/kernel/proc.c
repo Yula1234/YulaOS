@@ -180,9 +180,7 @@ void proc_free_resources(task_t* t) {
             vfs_node_t* node = f->node;
             
             if (node) {
-                if (node->refs > 0) node->refs--;
-                
-                if (node->refs == 0) {
+                if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
                     if (node->ops && node->ops->close) {
                         node->ops->close(node);
                     } else {
@@ -198,7 +196,10 @@ void proc_free_resources(task_t* t) {
     mmap_area_t* m = t->mmap_list;
     while (m) {
         mmap_area_t* next = m->next;
-        if (m->file && m->file->refs > 0) m->file->refs--; 
+        if (m->file && m->file->refs > 0) {
+             /* Atomic decrement for mmap files too */
+             __sync_sub_and_fetch(&m->file->refs, 1);
+        }
         kfree(m);
         m = next;
     }
@@ -379,7 +380,7 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     area->file_size   = file_size;
     area->file        = node;
     
-    node->refs++;
+    __sync_fetch_and_add(&node->refs, 1);
 
     area->next = t->mmap_list;
     t->mmap_list = area;
@@ -434,7 +435,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
             if (parent->fds[i].used) {
                 t->fds[i] = parent->fds[i];
                 if (t->fds[i].node) {
-                    t->fds[i].node->refs++;
+                    __sync_fetch_and_add(&t->fds[i].node->refs, 1);
                 }
             }
         }

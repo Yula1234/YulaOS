@@ -137,11 +137,7 @@ int vfs_close(int fd) {
     vfs_node_t* node = f->node;
 
     if (node) {
-        if (node->refs > 0) {
-            node->refs--;
-        }
-
-        if (node->refs == 0) {
+        if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
             if (node->ops && node->ops->close) {
                 node->ops->close(node);
             } 

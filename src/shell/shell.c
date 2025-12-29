@@ -80,7 +80,7 @@ static int shell_dup(int oldfd) {
     if (newfd == -1) return -1;
     
     curr->fds[newfd] = curr->fds[oldfd];
-    if (curr->fds[newfd].node) curr->fds[newfd].node->refs++;
+    if (curr->fds[newfd].node) __sync_fetch_and_add(&curr->fds[newfd].node->refs, 1);
     return newfd;
 }
 
@@ -90,7 +90,7 @@ static int shell_dup2(int oldfd, int newfd) {
         vfs_close(newfd);
     }
     curr->fds[newfd] = curr->fds[oldfd];
-    if (curr->fds[newfd].node) curr->fds[newfd].node->refs++;
+    if (curr->fds[newfd].node) __sync_fetch_and_add(&curr->fds[newfd].node->refs, 1);
     return newfd;
 }
 
@@ -508,7 +508,7 @@ void shell_task(void* arg) {
                             task_t* left_task = spawn_command(args[0], pipe_idx, args);
                             
                             shell_dup2(saved_stdout, 1);
-                            vfs_close(pfds[1]);
+                            vfs_close(pfds[1]); 
 
                             shell_dup2(pfds[0], 0);
                             task_t* right_task = spawn_command(args[pipe_idx+1], arg_count - pipe_idx - 1, &args[pipe_idx+1]);
@@ -519,16 +519,12 @@ void shell_task(void* arg) {
                             vfs_close(saved_stdout);
                             vfs_close(saved_stdin);
 
-                            if (left_task) {
-                                proc_wait(left_task->pid);
-                            }
+                            if (left_task) proc_wait(left_task->pid);
                             if (right_task) {
                                 win->focused_pid = right_task->pid;
                                 focused_window_pid = right_task->pid;
                                 proc_wait(right_task->pid);
                                 win->focused_pid = win->owner_pid;
-                            } else {
-                                term_print(my_term, "Pipe failed (right cmd not found)\n");
                             }
                         } else {
                             term_print(my_term, "Pipe creation failed\n");
