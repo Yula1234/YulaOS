@@ -377,8 +377,10 @@ void vga_draw_rect(int x, int y, int w, int h, uint32_t color) {
         : : "r"(color) : "xmm0"
     );
 
+    uint32_t* dest_row = &vga_current_target[y1 * vga_target_w + x1];
+
     for (int cy = y1; cy < y2; cy++) {
-        uint32_t* dest = &vga_current_target[cy * vga_target_w + x1];
+        uint32_t* dest = dest_row;
         
         if (sse_width > 0) {
             uint32_t tmp_count = sse_width;
@@ -393,12 +395,13 @@ void vga_draw_rect(int x, int y, int w, int h, uint32_t color) {
                 :
                 : "memory"
             );
-            dest = tmp_dest;
         }
         
         for (uint32_t j = 0; j < remainder; j++) {
             dest[j] = color;
         }
+        
+        dest_row += vga_target_w;
     }
     vga_mark_dirty(x, y, w, h);
 }

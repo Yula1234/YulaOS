@@ -27,18 +27,31 @@ static size_t vmm_used_pages_count = 0;
 
 extern uint32_t* kernel_page_directory;
 
+static int last_idx_allocated = 0;
+
 static vm_free_block_t* alloc_node(void) {
-    for (int i = 0; i < MAX_VMM_NODES; i++) {
+    for (int i = last_idx_allocated; i < MAX_VMM_NODES; i++) {
         if (!node_pool[i].is_active) {
+            last_idx_allocated = i + 1;
             node_pool[i].is_active = 1;
             node_pool[i].left = node_pool[i].right = node_pool[i].parent = 0;
             node_pool[i].color = RED;
             return &node_pool[i];
         }
     }
-    return 0; 
-}
 
+    for (int i = 0; i < last_idx_allocated; i++) {
+        if (!node_pool[i].is_active) {
+            last_idx_allocated = i + 1;
+            node_pool[i].is_active = 1;
+            node_pool[i].left = node_pool[i].right = node_pool[i].parent = 0;
+            node_pool[i].color = RED;
+            return &node_pool[i];
+        }
+    }
+
+    return 0;
+}
 static void free_node(vm_free_block_t* node) {
     node->is_active = 0;
 }

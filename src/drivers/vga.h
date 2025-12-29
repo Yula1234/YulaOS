@@ -67,5 +67,6 @@ void vga_draw_sprite_masked(int x, int y, int w, int h, uint32_t* data, uint32_t
 void vga_draw_sprite_scaled_masked(int x, int y, int sw, int sh, int scale, uint32_t* data, uint32_t trans);
 void vga_mark_dirty(int x, int y, int w, int h);
 void vga_draw_char_sse(int x, int y, char c, uint32_t fg);
+int vga_is_rect_dirty(int x, int y, int w, int h);
 
 #endif

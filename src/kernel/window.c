@@ -199,6 +199,11 @@ void window_draw_all() {
 
         sem_wait(&win->lock);
 
+        if (!vga_is_rect_dirty(win->x - 20, win->y - 20, win->w + 40, win->h + 40)) {
+            sem_signal(&win->lock);
+            continue;
+        }
+
         int showing_anim = (win->is_animating && win->anim_mode == 1);
         
         if (!win->is_active || (win->is_minimized && !showing_anim)) {
