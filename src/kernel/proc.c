@@ -610,7 +610,7 @@ void reaper_task_func(void* arg) {
                     }
                 }
                 
-                int has_waiters = (curr->exit_sem.wait_head != 0);
+                int has_waiters = !dlist_empty(&curr->exit_sem.wait_list);
 
                 if (still_running || has_waiters) {
                     curr = curr->next;

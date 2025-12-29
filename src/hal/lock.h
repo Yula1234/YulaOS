@@ -1,6 +1,8 @@
 #ifndef HAL_LOCK_H
 #define HAL_LOCK_H
 
+#include <lib/dlist.h>
+
 #include <stdint.h>
 
 typedef struct {
@@ -60,8 +62,7 @@ typedef struct {
 
     spinlock_t lock;
     
-    struct task* wait_head;
-    struct task* wait_tail;
+    dlist_head_t wait_list;
 } semaphore_t;
 
 void sem_init(semaphore_t* sem, int init_count);

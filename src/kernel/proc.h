@@ -105,7 +105,7 @@ typedef struct task {
 
     uint8_t fpu_state[512] __attribute__((aligned(16)));
 
-    struct task* sem_next;
+    dlist_head_t sem_node;
     void* blocked_on_sem;
 
     semaphore_t exit_sem; 

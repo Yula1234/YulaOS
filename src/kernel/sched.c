@@ -220,8 +220,7 @@ void sched_remove(task_t* t) {
 void sem_init(semaphore_t* sem, int init_count) {
     sem->count = init_count;
     spinlock_init(&sem->lock);
-    sem->wait_head = 0;
-    sem->wait_tail = 0;
+    dlist_init(&sem->wait_list);
 }
 
 void sem_wait(semaphore_t* sem) {
@@ -240,14 +239,7 @@ void sem_wait(semaphore_t* sem) {
         
         curr->blocked_on_sem = (void*)sem;
         
-        curr->sem_next = 0;
-        if (sem->wait_tail) {
-            sem->wait_tail->sem_next = curr;
-            sem->wait_tail = curr;
-        } else {
-            sem->wait_head = curr;
-            sem->wait_tail = curr;
-        }
+        dlist_add_tail(&curr->sem_node, &sem->wait_list);
         
         curr->state = TASK_WAITING;
         
@@ -262,16 +254,18 @@ void sem_signal(semaphore_t* sem) {
     
     sem->count++;
     
-    if (sem->wait_head) {
-        task_t* t = sem->wait_head;
-        sem->wait_head = t->sem_next;
-        if (!sem->wait_head) sem->wait_tail = 0;
+    if (!dlist_empty(&sem->wait_list)) {
+        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
         
-        t->state = TASK_RUNNABLE;
-
+        dlist_del(&t->sem_node);
+        
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
+        t->blocked_on_sem = 0;
+        
         if (t->state != TASK_ZOMBIE) {
             t->state = TASK_RUNNABLE;
-            sched_add(t); 
+            sched_add(t);
         }
     }
     
@@ -289,23 +283,13 @@ void sem_remove_task(task_t* t) {
         return;
     }
 
-    if (sem->wait_head == t) {
-        sem->wait_head = t->sem_next;
-        if (!sem->wait_head) sem->wait_tail = 0;
-    } else {
-        task_t* curr = sem->wait_head;
-        while (curr) {
-            if (curr->sem_next == t) {
-                curr->sem_next = t->sem_next;
-                if (curr->sem_next == 0) sem->wait_tail = curr;
-                break;
-            }
-            curr = curr->sem_next;
-        }
+    if (t->sem_node.next && t->sem_node.prev) {
+        dlist_del(&t->sem_node);
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
     }
     
     t->blocked_on_sem = 0;
-    t->sem_next = 0;
     
     spinlock_release_safe(&sem->lock, flags);
 }
