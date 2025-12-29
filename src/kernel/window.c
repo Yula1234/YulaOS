@@ -242,7 +242,6 @@ void window_draw_all() {
             if (win->is_dirty && win->on_draw) {
                 if (win->canvas) {
                     vga_set_target(win->canvas, cw, ch);
-                    vga_clear(0x1E1E1E);
                     win->on_draw(win, 0, 0);
                     vga_set_target(0, 0, 0);
                 }
