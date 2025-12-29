@@ -73,6 +73,7 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
     uint32_t max_block_size = (1 << PMM_MAX_ORDER);
 
     while (i < total_pages && (i & (max_block_size - 1)) != 0) {
+        mem_map[i].flags = PMM_FLAG_USED; 
         pmm_free_pages((void*)(i * PAGE_SIZE), 0);
         i++;
     }
@@ -93,6 +94,7 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
     }
 
     while (i < total_pages) {
+        mem_map[i].flags = PMM_FLAG_USED;
         pmm_free_pages((void*)(i * PAGE_SIZE), 0);
         i++;
     }
