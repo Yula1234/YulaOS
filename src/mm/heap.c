@@ -158,10 +158,12 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
 
 static inline int get_cache_index(size_t size) {
     if (size <= 8) return 0;
-    int idx = 0;
-    size_t s = 8;
-    while (s < size) { s <<= 1; idx++; }
-    return idx;
+
+    volatile uint32_t msb_index;
+
+    __asm__ volatile("bsr %1, %0" : "=r"(msb_index) : "r"(size - 1));
+
+    return (int)(msb_index - 2);
 }
 
 void heap_init(void) {
