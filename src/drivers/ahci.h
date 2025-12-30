@@ -16,9 +16,9 @@ typedef enum {
 } FIS_TYPE;
 
 typedef struct {
-    uint32_t clb;       // Command List Base Address (Phys)
+    uint32_t clb;
     uint32_t clbu;
-    uint32_t fb;        // FIS Base Address (Phys)
+    uint32_t fb;
     uint32_t fbu;
     uint32_t is;
     uint32_t ie;
@@ -66,7 +66,7 @@ typedef struct {
     uint8_t  pmp:4;
     uint16_t prdtl;
     volatile uint32_t prdbc;
-    uint32_t ctba;      // Phys Addr of Command Table
+    uint32_t ctba;
     uint32_t ctbau;
     uint32_t rsv1[4];
 } __attribute__((packed)) HBA_CMD_HEADER;
@@ -84,7 +84,7 @@ typedef struct {
     uint8_t  cfis[64];
     uint8_t  acmd[16];
     uint8_t  rsv[48];
-    HBA_PRDT_ENTRY prdt_entry[1]; // We support 1 PRDT entry for simplicity (up to 4MB)
+    HBA_PRDT_ENTRY prdt_entry[1]; 
 } __attribute__((packed)) HBA_CMD_TBL;
 
 typedef struct {
@@ -111,21 +111,26 @@ typedef struct {
 
 typedef struct {
     int active;
-    HBA_PORT* port_mmio; // Pointer to MMIO (mapped virtual address)
-    
-    // Virtual pointers to memory structures we allocated
-    // We need these because 'port_mmio' only stores physical addresses
-    void* clb_virt;         // Command List (Virtual)
-    void* fb_virt;          // FIS (Virtual)
-    void* ctba_virt[32];    // Command Tables (Virtual), one per slot
+    HBA_PORT* port_mmio;
+    void* clb_virt;
+    void* fb_virt;
+    void* ctba_virt[32];
     spinlock_t lock;
-
     semaphore_t slot_sem[32]; 
 } ahci_port_state_t;
 
 void ahci_init(void);
-int ahci_read_sector(uint32_t lba, uint8_t* buf);
-int ahci_write_sector(uint32_t lba, const uint8_t* buf);
+
+int ahci_read_sectors(uint32_t lba, uint32_t count, uint8_t* buf);
+int ahci_write_sectors(uint32_t lba, uint32_t count, const uint8_t* buf);
+
+static inline int ahci_read_sector(uint32_t lba, uint8_t* buf) {
+    return ahci_read_sectors(lba, 1, buf);
+}
+static inline int ahci_write_sector(uint32_t lba, const uint8_t* buf) {
+    return ahci_write_sectors(lba, 1, buf);
+}
+
 uint32_t ahci_get_capacity(void);
 void ahci_set_async_mode(int enable);
 

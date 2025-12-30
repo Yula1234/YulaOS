@@ -44,7 +44,7 @@ start:
 
 section '.bss' writeable align 16
 stack_bottom:
-    rb 16384
+    rb 65536
 stack_top:
 
 section '.note.GNU-stack'

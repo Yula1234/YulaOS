@@ -4,9 +4,11 @@
 #include <stdint.h>
 
 void bcache_init(void);
-int bcache_read(uint32_t lba, uint8_t* buf);
-int bcache_write(uint32_t lba, const uint8_t* buf);
+
+int bcache_read(uint32_t block_idx, uint8_t* buf);
+int bcache_write(uint32_t block_idx, const uint8_t* buf);
+
 void bcache_sync(void);
-void bcache_flush_block(uint32_t lba);
+void bcache_flush_block(uint32_t block_idx);
 
 #endif

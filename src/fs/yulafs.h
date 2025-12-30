@@ -5,7 +5,7 @@
 
 #define YFS_MAGIC       0x59554C41  // 'YULA'
 #define YFS_VERSION     2
-#define YFS_BLOCK_SIZE  512
+#define YFS_BLOCK_SIZE  4096    
 #define YFS_NAME_MAX    60
 
 #define YFS_DIRECT_PTRS     12
@@ -36,27 +36,26 @@ typedef struct {
     yfs_blk_t inode_table_start;
     yfs_blk_t data_start;
 
-    uint8_t  padding[468];
+    uint8_t  padding[4052];
 } __attribute__((packed)) yfs_superblock_t;
 
 typedef struct {
-    yfs_ino_t id;
-    uint32_t  type;
-    uint32_t  size;
-    uint32_t  flags;
-    uint32_t  created_at;
-    uint32_t  modified_at;
+    yfs_ino_t id;          
+    uint32_t  type;        
+    uint32_t  size;        
+    uint32_t  flags;       
+    uint32_t  created_at;  
+    uint32_t  modified_at; 
 
-    yfs_blk_t direct[YFS_DIRECT_PTRS]; 
-    yfs_blk_t indirect;                
-    yfs_blk_t doubly_indirect;         
-    yfs_blk_t triply_indirect;         
-
-    uint8_t   padding[48];
+    yfs_blk_t direct[YFS_DIRECT_PTRS];
+    yfs_blk_t indirect;               
+    yfs_blk_t doubly_indirect;        
+    yfs_blk_t triply_indirect;        
+    uint8_t   padding[44];
 } __attribute__((packed)) yfs_inode_t;
 
 typedef struct {
-    yfs_ino_t inode;
+    yfs_ino_t inode; 
     char      name[YFS_NAME_MAX];
 } __attribute__((packed)) yfs_dirent_t;
 

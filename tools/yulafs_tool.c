@@ -5,14 +5,13 @@
 #include <time.h>
 #include <stdarg.h>
 
-/* --- FS DEFINITIONS (Must match kernel yulafs.h) --- */
-
 #define YFS_MAGIC       0x59554C41
 #define YFS_VERSION     2
-#define BLOCK_SIZE      512
+#define BLOCK_SIZE      4096    
 #define NAME_MAX        60
+
 #define DIRECT_PTRS     12
-#define PTRS_PER_BLOCK  (BLOCK_SIZE / 4) // 128 pointers per block
+#define PTRS_PER_BLOCK  (BLOCK_SIZE / 4)
 
 typedef struct {
     uint32_t magic;
@@ -29,7 +28,7 @@ typedef struct {
     uint32_t inode_table_start;
     uint32_t data_start;
     
-    uint8_t  padding[468];
+    uint8_t  padding[4052];
 } __attribute__((packed)) yfs_superblock_t;
 
 typedef struct {
@@ -41,11 +40,11 @@ typedef struct {
     uint32_t modified;
     
     uint32_t direct[DIRECT_PTRS];
-    uint32_t indirect;
-    uint32_t doubly_indirect;
-    uint32_t triply_indirect;
+    uint32_t indirect;           
+    uint32_t doubly_indirect;    
+    uint32_t triply_indirect;    
     
-    uint8_t  padding[48];
+    uint8_t  padding[44];
 } __attribute__((packed)) yfs_inode_t;
 
 typedef struct {
@@ -53,15 +52,12 @@ typedef struct {
     char     name[NAME_MAX];
 } __attribute__((packed)) yfs_dirent_t;
 
-/* --- TOOL CONTEXT --- */
 
 typedef struct {
     FILE* fp;
     yfs_superblock_t sb;
     char* img_path;
 } YulaCtx;
-
-/* --- HELPERS --- */
 
 static void panic(YulaCtx* ctx, const char* fmt, ...) {
     va_list args;
@@ -83,27 +79,27 @@ static void log_info(const char* fmt, ...) {
     va_end(args);
 }
 
-static void disk_read(YulaCtx* ctx, uint32_t lba, void* buf) {
-    if (fseek(ctx->fp, (long)lba * BLOCK_SIZE, SEEK_SET) != 0)
-        panic(ctx, "Seek error at LBA %u", lba);
+static void disk_read(YulaCtx* ctx, uint32_t block_idx, void* buf) {
+    if (fseek(ctx->fp, (long)block_idx * BLOCK_SIZE, SEEK_SET) != 0)
+        panic(ctx, "Seek error at Block %u", block_idx);
     if (fread(buf, 1, BLOCK_SIZE, ctx->fp) != BLOCK_SIZE)
-        panic(ctx, "Read error at LBA %u", lba);
+        panic(ctx, "Read error at Block %u", block_idx);
 }
 
-static void disk_write(YulaCtx* ctx, uint32_t lba, const void* buf) {
-    if (fseek(ctx->fp, (long)lba * BLOCK_SIZE, SEEK_SET) != 0)
-        panic(ctx, "Seek error at LBA %u", lba);
+static void disk_write(YulaCtx* ctx, uint32_t block_idx, const void* buf) {
+    if (fseek(ctx->fp, (long)block_idx * BLOCK_SIZE, SEEK_SET) != 0)
+        panic(ctx, "Seek error at Block %u", block_idx);
     if (fwrite(buf, 1, BLOCK_SIZE, ctx->fp) != BLOCK_SIZE)
-        panic(ctx, "Write error at LBA %u", lba);
+        panic(ctx, "Write error at Block %u", block_idx);
 }
 
-static void disk_zero_block(YulaCtx* ctx, uint32_t lba) {
+static void disk_zero_block(YulaCtx* ctx, uint32_t block_idx) {
     uint8_t zero[BLOCK_SIZE] = {0};
-    disk_write(ctx, lba, zero);
+    disk_write(ctx, block_idx, zero);
 }
 
 static void sb_sync(YulaCtx* ctx) {
-    disk_write(ctx, 10, &ctx->sb);
+    disk_write(ctx, 1, &ctx->sb);
 }
 
 static int bitmap_get(const uint8_t* map, int i) {
@@ -114,19 +110,13 @@ static void bitmap_set(uint8_t* map, int i) {
     map[i / 8] |= (1 << (i % 8));
 }
 
-static void bitmap_clr(uint8_t* map, int i) {
-    map[i / 8] &= ~(1 << (i % 8));
-}
-
-/* --- ALLOCATORS --- */
-
 static uint32_t alloc_block(YulaCtx* ctx) {
     if (ctx->sb.free_blocks == 0) panic(ctx, "No free blocks");
 
     uint8_t buf[BLOCK_SIZE];
-    uint32_t sectors = (ctx->sb.total_blocks + 4095) / 4096;
+    uint32_t map_blocks = (ctx->sb.total_blocks + (BLOCK_SIZE*8) - 1) / (BLOCK_SIZE*8);
 
-    for (uint32_t i = 0; i < sectors; i++) {
+    for (uint32_t i = 0; i < map_blocks; i++) {
         uint32_t map_lba = ctx->sb.map_block_start + i;
         disk_read(ctx, map_lba, buf);
 
@@ -144,7 +134,7 @@ static uint32_t alloc_block(YulaCtx* ctx) {
             }
         }
     }
-    panic(ctx, "Bitmap inconsistency (free blocks > 0 but none found)");
+    panic(ctx, "Bitmap inconsistency");
     return 0;
 }
 
@@ -152,23 +142,30 @@ static uint32_t alloc_inode(YulaCtx* ctx) {
     if (ctx->sb.free_inodes == 0) panic(ctx, "No free inodes");
 
     uint8_t buf[BLOCK_SIZE];
-    disk_read(ctx, ctx->sb.map_inode_start, buf);
+    uint32_t map_blocks = (ctx->sb.total_inodes + (BLOCK_SIZE*8) - 1) / (BLOCK_SIZE*8);
 
-    for (uint32_t i = 1; i < ctx->sb.total_inodes; i++) {
-        if (!bitmap_get(buf, i)) {
-            bitmap_set(buf, i);
-            disk_write(ctx, ctx->sb.map_inode_start, buf);
+    for (uint32_t i = 0; i < map_blocks; i++) {
+        uint32_t map_lba = ctx->sb.map_inode_start + i;
+        disk_read(ctx, map_lba, buf);
 
-            ctx->sb.free_inodes--;
-            sb_sync(ctx);
-            return i;
+        for (int j = 0; j < BLOCK_SIZE * 8; j++) {
+            uint32_t ino = (i * BLOCK_SIZE * 8) + j;
+            if (ino == 0) continue; 
+            if (ino >= ctx->sb.total_inodes) break;
+
+            if (!bitmap_get(buf, j)) {
+                bitmap_set(buf, j);
+                disk_write(ctx, map_lba, buf);
+
+                ctx->sb.free_inodes--;
+                sb_sync(ctx);
+                return ino;
+            }
         }
     }
-    panic(ctx, "Bitmap inconsistency (free inodes > 0 but none found)");
+    panic(ctx, "Bitmap inconsistency");
     return 0;
 }
-
-/* --- INODE OPS --- */
 
 static void inode_read(YulaCtx* ctx, uint32_t id, yfs_inode_t* out) {
     uint32_t per_block = BLOCK_SIZE / sizeof(yfs_inode_t);
@@ -192,7 +189,6 @@ static void inode_write(YulaCtx* ctx, uint32_t id, const yfs_inode_t* in) {
 }
 
 static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t block_idx, int alloc) {
-    // 1. Direct
     if (block_idx < DIRECT_PTRS) {
         if (node->direct[block_idx] == 0) {
             if (!alloc) return 0;
@@ -202,7 +198,6 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
     }
     block_idx -= DIRECT_PTRS;
 
-    // 2. Indirect
     if (block_idx < PTRS_PER_BLOCK) {
         if (node->indirect == 0) {
             if (!alloc) return 0;
@@ -219,7 +214,6 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
     }
     block_idx -= PTRS_PER_BLOCK;
 
-    // 3. Doubly Indirect
     if (block_idx < PTRS_PER_BLOCK * PTRS_PER_BLOCK) {
         if (node->doubly_indirect == 0) {
             if (!alloc) return 0;
@@ -248,7 +242,6 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
     }
     block_idx -= PTRS_PER_BLOCK * PTRS_PER_BLOCK;
 
-    // 4. Triply Indirect (NEW!)
     if (block_idx < PTRS_PER_BLOCK * PTRS_PER_BLOCK * PTRS_PER_BLOCK) {
         if (node->triply_indirect == 0) {
             if (!alloc) return 0;
@@ -288,11 +281,9 @@ static uint32_t inode_resolve_block(YulaCtx* ctx, yfs_inode_t* node, uint32_t bl
         return l3[i3];
     }
 
-    panic(ctx, "File too large (exceeds triply indirect limit)");
+    panic(ctx, "File too large");
     return 0;
 }
-
-/* --- DIRECTORY OPS --- */
 
 static uint32_t dir_find(YulaCtx* ctx, uint32_t dir_ino, const char* name) {
     yfs_inode_t dir;
@@ -393,35 +384,27 @@ static uint32_t dir_ensure(YulaCtx* ctx, uint32_t parent_ino, const char* name) 
     return new_ino;
 }
 
-/* --- MAIN COMMANDS --- */
-
 static void op_format(YulaCtx* ctx) {
     fseek(ctx->fp, 0, SEEK_END);
     long size_bytes = ftell(ctx->fp);
-    if (size_bytes < 1024 * 1024) panic(ctx, "Image too small (<1MB)");
+    if (size_bytes < 4 * 1024 * 1024) panic(ctx, "Image too small (<4MB)");
     
-    uint32_t total_sectors = size_bytes / BLOCK_SIZE;
+    uint32_t total_blocks = size_bytes / BLOCK_SIZE;
 
     memset(&ctx->sb, 0, sizeof(ctx->sb));
     ctx->sb.magic = YFS_MAGIC;
     ctx->sb.version = YFS_VERSION;
     ctx->sb.block_size = BLOCK_SIZE;
-    ctx->sb.total_blocks = total_sectors;
+    ctx->sb.total_blocks = total_blocks;
     
-    // Dynamic Inodes: 1 inode per 16KB
-    ctx->sb.total_inodes = total_sectors / 32;
-    
-    uint32_t inodes_per_block = BLOCK_SIZE / sizeof(yfs_inode_t);
-    if (ctx->sb.total_inodes % inodes_per_block != 0) {
-        ctx->sb.total_inodes += inodes_per_block - (ctx->sb.total_inodes % inodes_per_block);
-    }
+    ctx->sb.total_inodes = total_blocks / 8;
     if (ctx->sb.total_inodes < 128) ctx->sb.total_inodes = 128;
 
-    uint32_t imap_sz = (ctx->sb.total_inodes + 4095) / 4096;
-    uint32_t bmap_sz = (ctx->sb.total_blocks + 4095) / 4096;
-    uint32_t itbl_sz = (ctx->sb.total_inodes * sizeof(yfs_inode_t) + 511) / 512;
+    uint32_t imap_sz = (ctx->sb.total_inodes + (BLOCK_SIZE*8) - 1) / (BLOCK_SIZE*8);
+    uint32_t bmap_sz = (ctx->sb.total_blocks + (BLOCK_SIZE*8) - 1) / (BLOCK_SIZE*8);
+    uint32_t itbl_sz = (ctx->sb.total_inodes * sizeof(yfs_inode_t) + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    ctx->sb.map_inode_start = 11;
+    ctx->sb.map_inode_start = 2;
     ctx->sb.map_block_start = ctx->sb.map_inode_start + imap_sz;
     ctx->sb.inode_table_start = ctx->sb.map_block_start + bmap_sz;
     ctx->sb.data_start = ctx->sb.inode_table_start + itbl_sz;
@@ -429,14 +412,13 @@ static void op_format(YulaCtx* ctx) {
     ctx->sb.free_inodes = ctx->sb.total_inodes;
     ctx->sb.free_blocks = ctx->sb.total_blocks - ctx->sb.data_start;
 
-    // Zero out sensitive areas
     uint8_t zero[BLOCK_SIZE] = {0};
-    for (uint32_t i = 10; i < ctx->sb.data_start + 100; i++) {
+    for (uint32_t i = 2; i < ctx->sb.data_start; i++) {
         disk_write(ctx, i, zero);
     }
 
     uint8_t imap[BLOCK_SIZE] = {0};
-    imap[0] |= 3; // Inode 0 and 1 taken
+    imap[0] |= 3; 
     disk_write(ctx, ctx->sb.map_inode_start, imap);
     ctx->sb.free_inodes -= 2;
 
@@ -450,7 +432,7 @@ static void op_format(YulaCtx* ctx) {
 
     sb_sync(ctx);
     
-    log_info("Formatted. %u blocks, %u inodes (Dynamic).", ctx->sb.total_blocks, ctx->sb.total_inodes);
+    log_info("Formatted. %u blocks (4KB), %u inodes.", ctx->sb.total_blocks, ctx->sb.total_inodes);
     
     dir_ensure(ctx, 1, "bin");
     dir_ensure(ctx, 1, "home");
@@ -472,7 +454,6 @@ static void op_import(YulaCtx* ctx, const char* host_path, const char* os_path) 
     char fname[NAME_MAX];
     uint32_t parent = 1;
 
-    // Simple path parsing for standard directories
     if (strncmp(os_path, "/bin/", 5) == 0) {
         parent = dir_find(ctx, 1, "bin");
         strncpy(fname, os_path + 5, NAME_MAX);
@@ -559,7 +540,7 @@ int main(int argc, char** argv) {
     else if (strcmp(cmd, "import") == 0) {
         if (argc < 5) panic(&ctx, "Missing args for import: <host_path> <os_path>");
         
-        disk_read(&ctx, 10, &ctx.sb);
+        disk_read(&ctx, 1, &ctx.sb);
         if (ctx.sb.magic != YFS_MAGIC) panic(&ctx, "Invalid YulaFS signature");
         
         op_import(&ctx, argv[3], argv[4]);
