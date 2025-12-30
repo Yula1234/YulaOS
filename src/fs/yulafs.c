@@ -606,7 +606,9 @@ void yulafs_format(uint32_t disk_blocks_4k) {
     yfs_dirent_t* dots = kmalloc(YFS_BLOCK_SIZE);
     
     if (!zero || !map || !dots) {
-        if(zero) kfree(zero); if(map) kfree(map); if(dots) kfree(dots);
+        if(zero) kfree(zero);
+        if(map) kfree(map);
+        if(dots) kfree(dots);
         return; 
     }
     

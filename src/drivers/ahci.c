@@ -37,23 +37,30 @@ static ahci_port_extended_t ports_ex[32];
 
 static int primary_port_idx = -1;
 static int g_ahci_async_mode = 0;
+
 static volatile uint32_t port_active_slots[32] = {0};
 
 void ahci_set_async_mode(int enable) { g_ahci_async_mode = enable; }
 
 static int find_cmdslot(volatile HBA_PORT *port, int port_no) {
     uint32_t slots = (port->sact | port->ci | port_active_slots[port_no]);
+
     if (slots == 0xFFFFFFFF) return -1;
+
     uint32_t free_mask = ~slots;
     uint32_t first_free_bit;
+
     __asm__ volatile("bsf %1, %0" : "=r"(first_free_bit) : "r"(free_mask));
+
     return (int)first_free_bit;
 }
 
 static void stop_cmd(volatile HBA_PORT *port) {
     port->cmd &= ~HBA_PxCMD_ST;
     port->cmd &= ~HBA_PxCMD_FRE;
+
     int timeout = 1000000;
+
     while (timeout--) {
         if (port->cmd & HBA_PxCMD_FR) continue;
         if (port->cmd & HBA_PxCMD_CR) continue;
@@ -63,24 +70,32 @@ static void stop_cmd(volatile HBA_PORT *port) {
 
 static void start_cmd(volatile HBA_PORT *port) {
     while (port->cmd & HBA_PxCMD_CR);
+
     port->cmd |= HBA_PxCMD_FRE;
     port->cmd |= HBA_PxCMD_ST;
 }
 
 void ahci_irq_handler(registers_t* regs) {
     (void)regs;
+
     if (!ahci_base_virt) return;
+
     volatile HBA_MEM* mmio = ahci_base_virt;
     uint32_t is_glob = mmio->is;
+
     if (is_glob == 0) return;
+
     for (int i = 0; i < 32; i++) {
         if (is_glob & (1 << i)) {
             volatile HBA_PORT* port = &mmio->ports[i];
+
             ahci_port_state_t* state = (ahci_port_state_t*)&ports_ex[i];
             port->is = port->is;
+
             if (state->active && g_ahci_async_mode) {
                 uint32_t active = port_active_slots[i];
                 uint32_t finished = active & ~port->ci;
+
                 if (finished) { 
                     for (int s = 0; s < 32; s++) {
                         if (finished & (1 << s)) sem_signal(&state->slot_sem[s]);
@@ -95,41 +110,52 @@ void ahci_irq_handler(registers_t* regs) {
 static void port_init(int port_no) {
     ahci_port_extended_t* ex = &ports_ex[port_no];
     ahci_port_state_t* state = (ahci_port_state_t*)ex;
+
     volatile HBA_PORT* port = &ahci_base_virt->ports[port_no];
 
     stop_cmd(port);
 
     state->clb_virt = kmalloc_a(1024);
     memset(state->clb_virt, 0, 1024);
+
     port->clb = paging_get_phys(kernel_page_directory, (uint32_t)state->clb_virt);
     port->clbu = 0; 
 
     state->fb_virt = kmalloc_a(256);
     memset(state->fb_virt, 0, 256);
+
     port->fb = paging_get_phys(kernel_page_directory, (uint32_t)state->fb_virt);
     port->fbu = 0;
 
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)state->clb_virt;
     for (int i = 0; i < 32; i++) {
         cmdheader[i].prdtl = 8;
+
         void* ctba_virt = kmalloc_a(256);
         memset(ctba_virt, 0, 256);
+
         state->ctba_virt[i] = ctba_virt;
+
         cmdheader[i].ctba = paging_get_phys(kernel_page_directory, (uint32_t)ctba_virt);
         cmdheader[i].ctbau = 0;
+
         sem_init(&state->slot_sem[i], 0);
 
         ex->dma_buf_virt[i] = kmalloc_a(AHCI_DMA_BUF_SIZE);
         memset(ex->dma_buf_virt[i], 0, AHCI_DMA_BUF_SIZE);
+
         ex->dma_buf_phys[i] = paging_get_phys(kernel_page_directory, (uint32_t)ex->dma_buf_virt[i]);
     }
 
     spinlock_init(&state->lock);
     port_active_slots[port_no] = 0;
+
     port->serr = 0xFFFFFFFF;
     port->is = 0xFFFFFFFF;
     port->ie = 0x7800002F; 
+
     start_cmd(port);
+
     state->port_mmio = (HBA_PORT*)port;
     state->active = 1;
 }
@@ -140,10 +166,12 @@ static int ahci_identify_device(int port_no) {
     volatile HBA_PORT* port = state->port_mmio;
 
     port->is = 0xFFFFFFFF;
+
     int slot = find_cmdslot(port, port_no);
     if(slot == -1) return 0;
     
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
+
     cmdheader += slot;
     cmdheader->cfl = sizeof(FIS_REG_H2D)/4;
     cmdheader->w   = 0; 
@@ -165,7 +193,8 @@ static int ahci_identify_device(int port_no) {
 
     int spin = 0;
     while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 1000000) {
-        spin++; __asm__ volatile("pause");
+        spin++;
+        __asm__ volatile("pause");
     }
     port->ci = 1 << slot;
     while (1) {
@@ -175,6 +204,7 @@ static int ahci_identify_device(int port_no) {
     
     uint16_t* identify_buf = (uint16_t*)ex->dma_buf_virt[slot];
     uint32_t sectors = (uint32_t)identify_buf[60] | ((uint32_t)identify_buf[61] << 16);
+
     return sectors;
 }
 
@@ -282,8 +312,10 @@ uint32_t ahci_get_capacity(void) {
 
 static int check_type(volatile HBA_PORT *port) {
     uint32_t ssts = port->ssts;
+
     uint8_t ipm = (ssts >> 8) & 0x0F;
     uint8_t det = ssts & 0x0F;
+
     if (det != 3 || ipm != 1) return 0;
     if (port->sig == 0xEB140101) return 2; 
     if (port->sig == 0xC33C0101 || port->sig == 0x96690101) return 0; 
@@ -293,7 +325,9 @@ static int check_type(volatile HBA_PORT *port) {
 static void ahci_reset_controller(volatile HBA_MEM* abar) {
     abar->ghc |= HBA_GHC_AE;
     abar->ghc |= 1; 
+
     while (abar->ghc & 1);
+
     abar->ghc |= HBA_GHC_AE;
     abar->ghc |= HBA_GHC_IE; 
 }
@@ -311,6 +345,7 @@ void ahci_init(void) {
 
     uint32_t pci_irq_info = pci_read(bus, slot, func, 0x3C);
     uint8_t irq_line = pci_irq_info & 0xFF;
+
     irq_install_handler(irq_line, ahci_irq_handler);
     
     if (irq_line < 8) outb(0x21, inb(0x21) & ~(1 << irq_line));
@@ -320,6 +355,7 @@ void ahci_init(void) {
     }
 
     uint32_t bar5 = pci_get_bar5(bus, slot, func);
+    
     paging_map(kernel_page_directory, bar5, bar5, 0x13);
     paging_map(kernel_page_directory, bar5 + 4096, bar5 + 4096, 0x13);
     
