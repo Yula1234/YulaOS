@@ -21,7 +21,8 @@ ASM="fasm"
 
 CFLAGS_BASE="-ffreestanding -fno-pie -fno-stack-protector -fno-builtin -pipe -march=i686"
 
-CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O3 -Wall -Wextra -I src -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fomit-frame-pointer"
+CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O3 -Wall -Wextra -I src -mno-mmx -mno-sse
+-mno-sse2 -mno-80387 -fomit-frame-pointer -fgraphite-identity -floop-nest-optimize"
 
 CFLAGS_USER="$CFLAGS_BASE -I usr"
 
