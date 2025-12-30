@@ -1,14 +1,14 @@
+#include <kernel/proc.h>
+#include <lib/string.h>
+#include <hal/lock.h>
+#include <mm/heap.h>
+
 #include "yulafs.h"
 #include "bcache.h" 
-#include "../lib/string.h"
-#include "../mm/heap.h"
-#include "../kernel/proc.h"
-#include "../drivers/vga.h"
-#include <hal/lock.h>
 
 #define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4)
 #define INODE_LOCK_BUCKETS  128
-#define DCACHE_SIZE         16 
+#define DCACHE_SIZE         16  
 
 static yfs_superblock_t sb;
 static int fs_mounted = 0;
@@ -29,6 +29,10 @@ static dcache_entry_t dcache[DCACHE_SIZE];
 static int dcache_ptr = 0;
 static spinlock_t dcache_lock;
 
+static uint8_t  bmap_cache_data[YFS_BLOCK_SIZE];
+static uint32_t bmap_cache_lba = 0;
+static int      bmap_cache_dirty = 0;
+
 extern uint32_t ahci_get_capacity(void);
 
 static inline rwlock_t* get_inode_lock(yfs_ino_t ino) {
@@ -39,32 +43,25 @@ static inline void set_bit(uint8_t* map, int i) { map[i/8] |= (1 << (i%8)); }
 static inline void clr_bit(uint8_t* map, int i) { map[i/8] &= ~(1 << (i%8)); }
 static inline int  chk_bit(uint8_t* map, int i) { return (map[i/8] & (1 << (i%8))); }
 
-static inline uint32_t min_u32(uint32_t a, uint32_t b) { return (a < b) ? a : b; }
-
 static void dcache_put(yfs_ino_t parent, const char* name, yfs_ino_t target) {
     uint32_t flags = spinlock_acquire_safe(&dcache_lock);
-    
     dcache[dcache_ptr].parent = parent;
     strlcpy(dcache[dcache_ptr].name, name, YFS_NAME_MAX);
     dcache[dcache_ptr].target = target;
     dcache[dcache_ptr].valid = 1;
-    
     dcache_ptr = (dcache_ptr + 1) % DCACHE_SIZE;
-    
     spinlock_release_safe(&dcache_lock, flags);
 }
 
 static yfs_ino_t dcache_get(yfs_ino_t parent, const char* name) {
     uint32_t flags = spinlock_acquire_safe(&dcache_lock);
     yfs_ino_t res = 0;
-    
     for (int i = 0; i < DCACHE_SIZE; i++) {
         if (dcache[i].valid && dcache[i].parent == parent && strcmp(dcache[i].name, name) == 0) {
             res = dcache[i].target;
             break;
         }
     }
-    
     spinlock_release_safe(&dcache_lock, flags);
     return res;
 }
@@ -84,6 +81,23 @@ static void flush_sb(void) {
     bcache_flush_block(10);
 }
 
+static void flush_bitmap_cache(void) {
+    if (bmap_cache_lba != 0 && bmap_cache_dirty) {
+        bcache_write(bmap_cache_lba, bmap_cache_data);
+        bmap_cache_dirty = 0;
+    }
+}
+
+static void load_bitmap_block(uint32_t lba) {
+    if (bmap_cache_lba == lba) return;
+
+    flush_bitmap_cache();
+
+    bcache_read(lba, bmap_cache_data);
+    bmap_cache_lba = lba;
+    bmap_cache_dirty = 0;
+}
+
 static void zero_block(yfs_blk_t lba) {
     uint8_t zeroes[YFS_BLOCK_SIZE];
     memset(zeroes, 0, YFS_BLOCK_SIZE);
@@ -93,7 +107,6 @@ static void zero_block(yfs_blk_t lba) {
 static yfs_blk_t alloc_block(void) {
     if (sb.free_blocks == 0) return 0;
 
-    uint8_t buf[YFS_BLOCK_SIZE];
     uint32_t total_map_sectors = (sb.total_blocks + 4095) / 4096;
     
     uint32_t start_sector = last_free_blk_hint / (YFS_BLOCK_SIZE * 8);
@@ -101,18 +114,18 @@ static yfs_blk_t alloc_block(void) {
     
     for (uint32_t i = 0; i < total_map_sectors; i++) {
         uint32_t sector_idx = (start_sector + i) % total_map_sectors;
+        uint32_t map_lba = sb.map_block_start + sector_idx;
         
-        bcache_read(sb.map_block_start + sector_idx, buf);
+        load_bitmap_block(map_lba);
         
         int bit_start = (i == 0) ? start_bit : 0;
         
         for (int j = bit_start; j < YFS_BLOCK_SIZE * 8; j++) {
-            if (!chk_bit(buf, j)) {
-                set_bit(buf, j);
-                bcache_write(sb.map_block_start + sector_idx, buf);
+            if (!chk_bit(bmap_cache_data, j)) {
+                set_bit(bmap_cache_data, j);
+                bmap_cache_dirty = 1;
                 
                 sb.free_blocks--;
-                flush_sb();
 
                 uint32_t relative_idx = (sector_idx * YFS_BLOCK_SIZE * 8) + j;
                 last_free_blk_hint = relative_idx + 1;
@@ -132,15 +145,15 @@ static void free_block(yfs_blk_t lba) {
     uint32_t idx = lba - sb.data_start;
     uint32_t sector = idx / (YFS_BLOCK_SIZE * 8);
     uint32_t bit    = idx % (YFS_BLOCK_SIZE * 8);
+    uint32_t map_lba = sb.map_block_start + sector;
 
-    uint8_t buf[YFS_BLOCK_SIZE];
-    bcache_read(sb.map_block_start + sector, buf);
+    load_bitmap_block(map_lba);
     
-    if (chk_bit(buf, bit)) {
-        clr_bit(buf, bit);
-        bcache_write(sb.map_block_start + sector, buf);
+    if (chk_bit(bmap_cache_data, bit)) {
+        clr_bit(bmap_cache_data, bit);
+        bmap_cache_dirty = 1;
+        
         sb.free_blocks++;
-        flush_sb();
         
         if (idx < last_free_blk_hint) {
             last_free_blk_hint = idx;
@@ -166,7 +179,7 @@ static yfs_ino_t alloc_inode(void) {
         
         for (int j = bit_start; j < YFS_BLOCK_SIZE * 8; j++) {
             uint32_t ino = (sector_idx * YFS_BLOCK_SIZE * 8) + j;
-            if (ino == 0) continue;
+            if (ino == 0) continue; 
             if (ino >= sb.total_inodes) break;
 
             if (!chk_bit(buf, j)) {
@@ -174,7 +187,6 @@ static yfs_ino_t alloc_inode(void) {
                 bcache_write(sb.map_inode_start + sector_idx, buf);
                 
                 sb.free_inodes--;
-                flush_sb();
                 
                 last_free_ino_hint = ino + 1;
                 return (yfs_ino_t)ino;
@@ -197,7 +209,6 @@ static void free_inode(yfs_ino_t ino) {
         clr_bit(buf, bit);
         bcache_write(sb.map_inode_start + sector, buf);
         sb.free_inodes++;
-        flush_sb();
         
         if (ino < last_free_ino_hint) {
             last_free_ino_hint = ino;
@@ -459,6 +470,10 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
 
                 entries[j].inode = 0;
                 bcache_write(lba, (uint8_t*)entries);
+                
+                flush_bitmap_cache();
+                flush_sb();
+                
                 rwlock_release_write(lock);
                 return 0;
             }
@@ -581,6 +596,7 @@ void yulafs_format(uint32_t disk_sectors) {
 
     sync_inode(1, &root, 1);
     flush_sb();
+    flush_bitmap_cache();
     
     bcache_sync();
     
@@ -599,6 +615,9 @@ void yulafs_init(void) {
     bcache_init();
     spinlock_init(&dcache_lock);
     
+    bmap_cache_lba = 0;
+    bmap_cache_dirty = 0;
+    
     uint8_t buf[YFS_BLOCK_SIZE];
     if (!bcache_read(10, buf)) {
     } else {
@@ -611,7 +630,7 @@ void yulafs_init(void) {
 
     if (sb.magic != YFS_MAGIC) {
         uint32_t capacity = ahci_get_capacity();
-        if (capacity == 0) capacity = 131072; // 64 MB
+        if (capacity == 0) capacity = 131072; 
         yulafs_format(capacity); 
     } else {
         fs_mounted = 1;
@@ -678,6 +697,7 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
     uint32_t written = 0;
     uint8_t scratch[YFS_BLOCK_SIZE];
     int dirty = 0;
+    int blocks_allocated = 0;
 
     while (written < size) {
         uint32_t log_blk = (offset + written) / YFS_BLOCK_SIZE;
@@ -686,6 +706,8 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
         yfs_blk_t phys_blk = resolve_block(&node, log_blk, 1);
         if (!phys_blk) break; 
         
+        blocks_allocated = 1;
+
         uint32_t copy_len = YFS_BLOCK_SIZE - blk_off;
         if (copy_len > size - written) copy_len = size - written;
 
@@ -706,6 +728,11 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
     }
 
     if (dirty) sync_inode(ino, &node, 1);
+    
+    if (blocks_allocated) {
+        flush_bitmap_cache();
+        flush_sb();
+    }
     
     rwlock_release_write(lock);
     return written;
@@ -741,6 +768,10 @@ int yulafs_create_obj(const char* path, int type) {
 
     sync_inode(new_ino, &obj, 1);
     dir_link(dir_ino, new_ino, name);
+    
+    flush_bitmap_cache();
+    flush_sb();
+    
     return new_ino;
 }
 
@@ -780,7 +811,11 @@ void yulafs_resize(yfs_ino_t ino, uint32_t new_size) {
     sync_inode(ino, &node, 0);
     
     if (new_size < node.size) {
-        if (new_size == 0) truncate_inode(&node);
+        if (new_size == 0) {
+            truncate_inode(&node);
+            flush_bitmap_cache();
+            flush_sb();
+        }
     }
     
     node.size = new_size;
@@ -821,6 +856,9 @@ int yulafs_rename(const char* old_path, const char* new_path) {
     }
 
     dir_unlink_entry_only(old_dir_ino, old_name);
+    
+    flush_bitmap_cache();
+    flush_sb();
 
     return 0;
 }
