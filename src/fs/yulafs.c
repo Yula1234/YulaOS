@@ -6,14 +6,32 @@
 #include "../drivers/vga.h"
 #include <hal/lock.h>
 
+#define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4)
+#define INODE_LOCK_BUCKETS  128
+#define DCACHE_SIZE         16 
+
 static yfs_superblock_t sb;
 static int fs_mounted = 0;
 
-#define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4) // 128
-#define INODE_LOCK_BUCKETS 128
+static uint32_t last_free_blk_hint = 0;
+static uint32_t last_free_ino_hint = 1;
+
 static rwlock_t inode_locks[INODE_LOCK_BUCKETS];
 
-static rwlock_t* get_inode_lock(yfs_ino_t ino) {
+typedef struct {
+    yfs_ino_t parent;
+    char name[YFS_NAME_MAX];
+    yfs_ino_t target;
+    int valid;
+} dcache_entry_t;
+
+static dcache_entry_t dcache[DCACHE_SIZE];
+static int dcache_ptr = 0;
+static spinlock_t dcache_lock;
+
+extern uint32_t ahci_get_capacity(void);
+
+static inline rwlock_t* get_inode_lock(yfs_ino_t ino) {
     return &inode_locks[ino % INODE_LOCK_BUCKETS];
 }
 
@@ -21,7 +39,45 @@ static inline void set_bit(uint8_t* map, int i) { map[i/8] |= (1 << (i%8)); }
 static inline void clr_bit(uint8_t* map, int i) { map[i/8] &= ~(1 << (i%8)); }
 static inline int  chk_bit(uint8_t* map, int i) { return (map[i/8] & (1 << (i%8))); }
 
-extern uint32_t ahci_get_capacity(void);
+static inline uint32_t min_u32(uint32_t a, uint32_t b) { return (a < b) ? a : b; }
+
+static void dcache_put(yfs_ino_t parent, const char* name, yfs_ino_t target) {
+    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    
+    dcache[dcache_ptr].parent = parent;
+    strlcpy(dcache[dcache_ptr].name, name, YFS_NAME_MAX);
+    dcache[dcache_ptr].target = target;
+    dcache[dcache_ptr].valid = 1;
+    
+    dcache_ptr = (dcache_ptr + 1) % DCACHE_SIZE;
+    
+    spinlock_release_safe(&dcache_lock, flags);
+}
+
+static yfs_ino_t dcache_get(yfs_ino_t parent, const char* name) {
+    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    yfs_ino_t res = 0;
+    
+    for (int i = 0; i < DCACHE_SIZE; i++) {
+        if (dcache[i].valid && dcache[i].parent == parent && strcmp(dcache[i].name, name) == 0) {
+            res = dcache[i].target;
+            break;
+        }
+    }
+    
+    spinlock_release_safe(&dcache_lock, flags);
+    return res;
+}
+
+static void dcache_invalidate(yfs_ino_t parent) {
+    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    for (int i = 0; i < DCACHE_SIZE; i++) {
+        if (dcache[i].valid && dcache[i].parent == parent) {
+            dcache[i].valid = 0;
+        }
+    }
+    spinlock_release_safe(&dcache_lock, flags);
+}
 
 static void flush_sb(void) {
     bcache_write(10, (uint8_t*)&sb);
@@ -38,19 +94,30 @@ static yfs_blk_t alloc_block(void) {
     if (sb.free_blocks == 0) return 0;
 
     uint8_t buf[YFS_BLOCK_SIZE];
-    uint32_t sectors = (sb.total_blocks + 4095) / 4096;
-
-    for (uint32_t i = 0; i < sectors; i++) {
-        bcache_read(sb.map_block_start + i, buf);
-        for (int j = 0; j < YFS_BLOCK_SIZE * 8; j++) {
+    uint32_t total_map_sectors = (sb.total_blocks + 4095) / 4096;
+    
+    uint32_t start_sector = last_free_blk_hint / (YFS_BLOCK_SIZE * 8);
+    uint32_t start_bit    = last_free_blk_hint % (YFS_BLOCK_SIZE * 8);
+    
+    for (uint32_t i = 0; i < total_map_sectors; i++) {
+        uint32_t sector_idx = (start_sector + i) % total_map_sectors;
+        
+        bcache_read(sb.map_block_start + sector_idx, buf);
+        
+        int bit_start = (i == 0) ? start_bit : 0;
+        
+        for (int j = bit_start; j < YFS_BLOCK_SIZE * 8; j++) {
             if (!chk_bit(buf, j)) {
                 set_bit(buf, j);
-                bcache_write(sb.map_block_start + i, buf);
+                bcache_write(sb.map_block_start + sector_idx, buf);
                 
                 sb.free_blocks--;
                 flush_sb();
 
-                yfs_blk_t lba = sb.data_start + (i * YFS_BLOCK_SIZE * 8) + j;
+                uint32_t relative_idx = (sector_idx * YFS_BLOCK_SIZE * 8) + j;
+                last_free_blk_hint = relative_idx + 1;
+                
+                yfs_blk_t lba = sb.data_start + relative_idx;
                 zero_block(lba);
                 return lba;
             }
@@ -74,6 +141,10 @@ static void free_block(yfs_blk_t lba) {
         bcache_write(sb.map_block_start + sector, buf);
         sb.free_blocks++;
         flush_sb();
+        
+        if (idx < last_free_blk_hint) {
+            last_free_blk_hint = idx;
+        }
     }
 }
 
@@ -81,30 +152,62 @@ static yfs_ino_t alloc_inode(void) {
     if (sb.free_inodes == 0) return 0;
 
     uint8_t buf[YFS_BLOCK_SIZE];
-    bcache_read(sb.map_inode_start, buf);
+    uint32_t total_map_sectors = (sb.total_inodes + 4095) / 4096;
+    
+    uint32_t start_sector = last_free_ino_hint / (YFS_BLOCK_SIZE * 8);
+    uint32_t start_bit    = last_free_ino_hint % (YFS_BLOCK_SIZE * 8);
 
-    for (yfs_ino_t i = 1; i < sb.total_inodes; i++) {
-        if (!chk_bit(buf, i)) {
-            set_bit(buf, i);
-            bcache_write(sb.map_inode_start, buf);
-            sb.free_inodes--;
-            flush_sb();
-            return i;
+    for (uint32_t i = 0; i < total_map_sectors; i++) {
+        uint32_t sector_idx = (start_sector + i) % total_map_sectors;
+        
+        bcache_read(sb.map_inode_start + sector_idx, buf);
+        
+        int bit_start = (i == 0) ? start_bit : 0;
+        
+        for (int j = bit_start; j < YFS_BLOCK_SIZE * 8; j++) {
+            uint32_t ino = (sector_idx * YFS_BLOCK_SIZE * 8) + j;
+            if (ino == 0) continue;
+            if (ino >= sb.total_inodes) break;
+
+            if (!chk_bit(buf, j)) {
+                set_bit(buf, j);
+                bcache_write(sb.map_inode_start + sector_idx, buf);
+                
+                sb.free_inodes--;
+                flush_sb();
+                
+                last_free_ino_hint = ino + 1;
+                return (yfs_ino_t)ino;
+            }
         }
     }
     return 0;
 }
 
 static void free_inode(yfs_ino_t ino) {
+    if (ino == 0 || ino >= sb.total_inodes) return;
+
+    uint32_t sector = ino / (YFS_BLOCK_SIZE * 8);
+    uint32_t bit    = ino % (YFS_BLOCK_SIZE * 8);
+
     uint8_t buf[YFS_BLOCK_SIZE];
-    bcache_read(sb.map_inode_start, buf);
-    clr_bit(buf, ino);
-    bcache_write(sb.map_inode_start, buf);
-    sb.free_inodes++;
-    flush_sb();
+    bcache_read(sb.map_inode_start + sector, buf);
+    
+    if (chk_bit(buf, bit)) {
+        clr_bit(buf, bit);
+        bcache_write(sb.map_inode_start + sector, buf);
+        sb.free_inodes++;
+        flush_sb();
+        
+        if (ino < last_free_ino_hint) {
+            last_free_ino_hint = ino;
+        }
+    }
 }
 
 static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
+    if (ino >= sb.total_inodes) return 0;
+
     uint32_t per_block = YFS_BLOCK_SIZE / sizeof(yfs_inode_t);
     uint32_t block_idx = ino / per_block;
     uint32_t offset    = ino % per_block;
@@ -112,7 +215,8 @@ static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     yfs_blk_t lba = sb.inode_table_start + block_idx;
     uint8_t buf[YFS_BLOCK_SIZE];
     
-    if(!bcache_read(lba, buf)) return 0;
+    if (!bcache_read(lba, buf)) return 0;
+    
     yfs_inode_t* table = (yfs_inode_t*)buf;
     
     if (write) {
@@ -139,6 +243,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
             if (!alloc) return 0;
             node->indirect = alloc_block();
         }
+        
         yfs_blk_t table[PTRS_PER_BLOCK];
         bcache_read(node->indirect, (uint8_t*)table);
         
@@ -157,11 +262,11 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
             node->doubly_indirect = alloc_block();
         }
 
-        yfs_blk_t l1[PTRS_PER_BLOCK];
-        bcache_read(node->doubly_indirect, (uint8_t*)l1);
-
         uint32_t l1_idx = file_block / PTRS_PER_BLOCK;
         uint32_t l2_idx = file_block % PTRS_PER_BLOCK;
+
+        yfs_blk_t l1[PTRS_PER_BLOCK];
+        bcache_read(node->doubly_indirect, (uint8_t*)l1);
 
         if (l1[l1_idx] == 0) {
             if (!alloc) return 0;
@@ -187,14 +292,14 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
             node->triply_indirect = alloc_block();
         }
 
-        yfs_blk_t l1[PTRS_PER_BLOCK];
-        bcache_read(node->triply_indirect, (uint8_t*)l1);
-
         uint32_t ptrs_sq = PTRS_PER_BLOCK * PTRS_PER_BLOCK;
         uint32_t i1 = file_block / ptrs_sq;
         uint32_t rem = file_block % ptrs_sq;
         uint32_t i2 = rem / PTRS_PER_BLOCK;
         uint32_t i3 = rem % PTRS_PER_BLOCK;
+
+        yfs_blk_t l1[PTRS_PER_BLOCK];
+        bcache_read(node->triply_indirect, (uint8_t*)l1);
 
         if (l1[i1] == 0) {
             if (!alloc) return 0;
@@ -204,6 +309,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
 
         yfs_blk_t l2[PTRS_PER_BLOCK];
         bcache_read(l1[i1], (uint8_t*)l2);
+        
         if (l2[i2] == 0) {
             if (!alloc) return 0;
             l2[i2] = alloc_block();
@@ -212,6 +318,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
 
         yfs_blk_t l3[PTRS_PER_BLOCK];
         bcache_read(l2[i2], (uint8_t*)l3);
+        
         if (l3[i3] == 0) {
             if (!alloc) return 0;
             l3[i3] = alloc_block();
@@ -257,8 +364,10 @@ static void truncate_inode(yfs_inode_t* node) {
     node->size = 0;
 }
 
-
 static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
+    yfs_ino_t cached = dcache_get(dir->id, name);
+    if (cached) return cached;
+
     yfs_dirent_t entries[YFS_BLOCK_SIZE / sizeof(yfs_dirent_t)];
     uint32_t count = sizeof(entries) / sizeof(yfs_dirent_t);
     uint32_t blocks = (dir->size + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
@@ -270,6 +379,7 @@ static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
         bcache_read(lba, (uint8_t*)entries);
         for (uint32_t j = 0; j < count; j++) {
             if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
+                dcache_put(dir->id, name, entries[j].inode);
                 return entries[j].inode;
             }
         }
@@ -283,6 +393,8 @@ static int dir_link(yfs_ino_t dir_ino, yfs_ino_t child_ino, const char* name) {
 
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
+
+    dcache_invalidate(dir_ino);
 
     yfs_dirent_t entries[YFS_BLOCK_SIZE / sizeof(yfs_dirent_t)];
     uint32_t count = sizeof(entries) / sizeof(yfs_dirent_t);
@@ -324,6 +436,8 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
 
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
+    
+    dcache_invalidate(dir_ino);
 
     yfs_dirent_t entries[YFS_BLOCK_SIZE / sizeof(yfs_dirent_t)];
     uint32_t count = sizeof(entries) / sizeof(yfs_dirent_t);
@@ -352,6 +466,32 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
     }
 
     rwlock_release_write(lock);
+    return -1;
+}
+
+static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
+    yfs_inode_t dir;
+    sync_inode(dir_ino, &dir, 0);
+    dcache_invalidate(dir_ino);
+
+    yfs_dirent_t entries[YFS_BLOCK_SIZE / sizeof(yfs_dirent_t)];
+    uint32_t count = sizeof(entries) / sizeof(yfs_dirent_t);
+    uint32_t blocks = (dir.size + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
+
+    for (uint32_t i = 0; i < blocks; i++) {
+        yfs_blk_t lba = resolve_block(&dir, i, 0);
+        if (!lba) continue;
+
+        bcache_read(lba, (uint8_t*)entries);
+        for (uint32_t j = 0; j < count; j++) {
+            if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
+                entries[j].inode = 0;
+                memset(entries[j].name, 0, YFS_NAME_MAX);
+                bcache_write(lba, (uint8_t*)entries);
+                return 0;
+            }
+        }
+    }
     return -1;
 }
 
@@ -390,7 +530,6 @@ static yfs_ino_t path_to_inode(const char* path, char* last_element) {
     }
     return curr;
 }
-
 
 void yulafs_format(uint32_t disk_sectors) {
     memset(&sb, 0, sizeof(sb));
@@ -446,6 +585,8 @@ void yulafs_format(uint32_t disk_sectors) {
     bcache_sync();
     
     fs_mounted = 1;
+    last_free_blk_hint = 0;
+    last_free_ino_hint = 2;
 
     yulafs_mkdir("/bin");
     yulafs_mkdir("/home");
@@ -456,6 +597,7 @@ void yulafs_format(uint32_t disk_sectors) {
 
 void yulafs_init(void) {
     bcache_init();
+    spinlock_init(&dcache_lock);
     
     uint8_t buf[YFS_BLOCK_SIZE];
     if (!bcache_read(10, buf)) {
@@ -469,14 +611,12 @@ void yulafs_init(void) {
 
     if (sb.magic != YFS_MAGIC) {
         uint32_t capacity = ahci_get_capacity();
-        
-        if (capacity == 0) {
-            capacity = 131072; // 64 MB
-        }
-        
+        if (capacity == 0) capacity = 131072; // 64 MB
         yulafs_format(capacity); 
     } else {
         fs_mounted = 1;
+        last_free_blk_hint = 0;
+        last_free_ino_hint = 1;
     }
 }
 
@@ -498,31 +638,32 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     }
     if (offset + size > node.size) size = node.size - offset;
 
-    uint32_t read = 0;
+    uint32_t read_count = 0;
     uint8_t scratch[YFS_BLOCK_SIZE];
 
-    while (read < size) {
-        uint32_t log_blk = (offset + read) / YFS_BLOCK_SIZE;
-        uint32_t blk_off = (offset + read) % YFS_BLOCK_SIZE;
+    while (read_count < size) {
+        uint32_t log_blk = (offset + read_count) / YFS_BLOCK_SIZE;
+        uint32_t blk_off = (offset + read_count) % YFS_BLOCK_SIZE;
         uint32_t phys_blk = resolve_block(&node, log_blk, 0);
+
+        uint32_t copy_len = YFS_BLOCK_SIZE - blk_off;
+        if (copy_len > size - read_count) copy_len = size - read_count;
 
         if (phys_blk) {
             if(!bcache_read(phys_blk, scratch)) {
                 rwlock_release_read(lock);
                 return -1;
             }
+            memcpy((uint8_t*)buf + read_count, scratch + blk_off, copy_len);
+        } else {
+            memset((uint8_t*)buf + read_count, 0, copy_len);
         }
-        else memset(scratch, 0, YFS_BLOCK_SIZE);
 
-        uint32_t copy = YFS_BLOCK_SIZE - blk_off;
-        if (copy > size - read) copy = size - read;
-
-        memcpy((uint8_t*)buf + read, scratch + blk_off, copy);
-        read += copy;
+        read_count += copy_len;
     }
     
     rwlock_release_read(lock);
-    return read;
+    return read_count;
 }
 
 int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size) {
@@ -545,17 +686,17 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
         yfs_blk_t phys_blk = resolve_block(&node, log_blk, 1);
         if (!phys_blk) break; 
         
-        if (blk_off > 0 || (size - written) < YFS_BLOCK_SIZE) {
+        uint32_t copy_len = YFS_BLOCK_SIZE - blk_off;
+        if (copy_len > size - written) copy_len = size - written;
+
+        if (copy_len < YFS_BLOCK_SIZE) {
             bcache_read(phys_blk, scratch);
         }
 
-        uint32_t copy = YFS_BLOCK_SIZE - blk_off;
-        if (copy > size - written) copy = size - written;
-
-        memcpy(scratch + blk_off, (uint8_t*)buf + written, copy);
+        memcpy(scratch + blk_off, (uint8_t*)buf + written, copy_len);
         bcache_write(phys_blk, scratch);
         
-        written += copy;
+        written += copy_len;
         dirty = 1;
     }
 
@@ -638,6 +779,10 @@ void yulafs_resize(yfs_ino_t ino, uint32_t new_size) {
     yfs_inode_t node; 
     sync_inode(ino, &node, 0);
     
+    if (new_size < node.size) {
+        if (new_size == 0) truncate_inode(&node);
+    }
+    
     node.size = new_size;
     sync_inode(ino, &node, 1);
     
@@ -654,32 +799,6 @@ void yulafs_get_filesystem_info(uint32_t* total_blocks, uint32_t* free_blocks, u
         *free_blocks = 0;
         *block_size = 0;
     }
-}
-
-static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
-    yfs_inode_t dir;
-    sync_inode(dir_ino, &dir, 0);
-
-    yfs_dirent_t entries[YFS_BLOCK_SIZE / sizeof(yfs_dirent_t)];
-    uint32_t count = sizeof(entries) / sizeof(yfs_dirent_t);
-    uint32_t blocks = (dir.size + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
-
-    for (uint32_t i = 0; i < blocks; i++) {
-        yfs_blk_t lba = resolve_block(&dir, i, 0);
-        if (!lba) continue;
-
-        bcache_read(lba, (uint8_t*)entries);
-        for (uint32_t j = 0; j < count; j++) {
-            if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
-                entries[j].inode = 0;
-                memset(entries[j].name, 0, YFS_NAME_MAX);
-                
-                bcache_write(lba, (uint8_t*)entries);
-                return 0;
-            }
-        }
-    }
-    return -1;
 }
 
 int yulafs_rename(const char* old_path, const char* new_path) {
