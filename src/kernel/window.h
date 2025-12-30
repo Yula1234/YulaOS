@@ -51,6 +51,7 @@ typedef struct window {
     int ghost_w, ghost_h;
 
     semaphore_t lock;
+    spinlock_t event_lock; 
 
 } window_t;
 

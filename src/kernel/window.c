@@ -42,7 +42,8 @@ void window_init_system() {
 }
 
 void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
-    sem_wait(&win->lock);
+    uint32_t flags = spinlock_acquire_safe(&win->event_lock);
+    
     int next = (win->evt_head + 1) % MAX_WIN_EVENTS;
     if (next != win->evt_tail) {
         win->event_queue[win->evt_head].type = type;
@@ -51,18 +52,22 @@ void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
         win->event_queue[win->evt_head].arg3 = a3;
         win->evt_head = next;
     }
-    sem_signal(&win->lock);
+    
+    spinlock_release_safe(&win->event_lock, flags);
 }
 
 int window_pop_event(window_t* win, yula_event_t* out_ev) {
-    sem_wait(&win->lock);
+    uint32_t flags = spinlock_acquire_safe(&win->event_lock);
+    
     if (win->evt_head == win->evt_tail) {
-        sem_signal(&win->lock);
+        spinlock_release_safe(&win->event_lock, flags);
         return 0;
     }
+    
     *out_ev = win->event_queue[win->evt_tail];
     win->evt_tail = (win->evt_tail + 1) % MAX_WIN_EVENTS;
-    sem_signal(&win->lock);
+    
+    spinlock_release_safe(&win->event_lock, flags);
     return 1;
 }
 
@@ -99,6 +104,8 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
         if (!window_list[i].is_active) {
             
             sem_init(&window_list[i].lock, 1);
+            spinlock_init(&window_list[i].event_lock);
+
             sem_wait(&window_list[i].lock);
 
             int canvas_w = w - 12; 
@@ -199,7 +206,7 @@ void window_draw_all() {
 
         sem_wait(&win->lock);
 
-        if (!vga_is_rect_dirty(win->x - 20, win->y - 20, win->w + 40, win->h + 40)) {
+        if (!vga_is_rect_dirty(win->x - 20, win->y - 20, win->w + 40, win->h + 40 && !win->is_dirty)) {
             sem_signal(&win->lock);
             continue;
         }

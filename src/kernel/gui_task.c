@@ -152,7 +152,7 @@ void gui_task(void* arg) {
 
         for (int i = 0; i < MAX_WINDOWS; i++) {
             window_t* win = &window_list[i];
-            if (win->is_active && (win->is_animating || dragged_window == win)) {
+            if (win->is_active && (win->is_animating || dragged_window == win || win->is_dirty)) {
                 vga_mark_dirty(win->x - 8, win->y - 8, win->w + 18, win->h + 18);
             }
         }

@@ -8,7 +8,6 @@
 
 #define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4) 
 #define INODE_LOCK_BUCKETS  128
-#define DCACHE_SIZE         32  
 
 static yfs_superblock_t sb;
 static int fs_mounted = 0;
@@ -18,22 +17,28 @@ static uint32_t last_free_ino_hint = 1;
 
 static rwlock_t inode_locks[INODE_LOCK_BUCKETS];
 
-typedef struct {
-    yfs_ino_t parent;
-    char name[YFS_NAME_MAX];
-    yfs_ino_t target;
-    int valid;
-} dcache_entry_t;
-
-static dcache_entry_t dcache[DCACHE_SIZE];
-static int dcache_ptr = 0;
-static spinlock_t dcache_lock;
-
 static uint8_t  bmap_cache_data[YFS_BLOCK_SIZE];
 static uint32_t bmap_cache_lba = 0; 
 static int      bmap_cache_dirty = 0;
 
 extern uint32_t ahci_get_capacity(void);
+
+typedef enum { RB_RED, RB_BLACK } rb_color_t;
+
+typedef struct rb_node {
+    struct rb_node *left;
+    struct rb_node *right;
+    struct rb_node *parent;
+    rb_color_t color;
+
+    yfs_ino_t parent_ino;
+    char name[YFS_NAME_MAX];
+    
+    yfs_ino_t target_ino;
+} rb_node_t;
+
+static rb_node_t* dcache_root = 0;
+static spinlock_t dcache_lock;
 
 static inline rwlock_t* get_inode_lock(yfs_ino_t ino) {
     return &inode_locks[ino % INODE_LOCK_BUCKETS];
@@ -43,36 +48,164 @@ static inline void set_bit(uint8_t* map, int i) { map[i/8] |= (1 << (i%8)); }
 static inline void clr_bit(uint8_t* map, int i) { map[i/8] &= ~(1 << (i%8)); }
 static inline int  chk_bit(uint8_t* map, int i) { return (map[i/8] & (1 << (i%8))); }
 
-static void dcache_put(yfs_ino_t parent, const char* name, yfs_ino_t target) {
+static int rb_compare(yfs_ino_t p1, const char* n1, yfs_ino_t p2, const char* n2) {
+    if (p1 < p2) return -1;
+    if (p1 > p2) return 1;
+    return strcmp(n1, n2);
+}
+
+static void rb_rotate_left(rb_node_t* x) {
+    rb_node_t* y = x->right;
+    x->right = y->left;
+    
+    if (y->left) y->left->parent = x;
+    y->parent = x->parent;
+    
+    if (!x->parent) dcache_root = y;
+    else if (x == x->parent->left) x->parent->left = y;
+    else x->parent->right = y;
+    
+    y->left = x;
+    x->parent = y;
+}
+
+static void rb_rotate_right(rb_node_t* x) {
+    rb_node_t* y = x->left;
+    x->left = y->right;
+    
+    if (y->right) y->right->parent = x;
+    y->parent = x->parent;
+    
+    if (!x->parent) dcache_root = y;
+    else if (x == x->parent->right) x->parent->right = y;
+    else x->parent->left = y;
+    
+    y->right = x;
+    x->parent = y;
+}
+
+static void rb_insert_fixup(rb_node_t* z) {
+    while (z->parent && z->parent->color == RB_RED) {
+        if (z->parent == z->parent->parent->left) {
+            rb_node_t* y = z->parent->parent->right;
+            if (y && y->color == RB_RED) {
+                z->parent->color = RB_BLACK;
+                y->color = RB_BLACK;
+                z->parent->parent->color = RB_RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->right) {
+                    z = z->parent;
+                    rb_rotate_left(z);
+                }
+                z->parent->color = RB_BLACK;
+                z->parent->parent->color = RB_RED;
+                rb_rotate_right(z->parent->parent);
+            }
+        } else {
+            rb_node_t* y = z->parent->parent->left;
+            if (y && y->color == RB_RED) {
+                z->parent->color = RB_BLACK;
+                y->color = RB_BLACK;
+                z->parent->parent->color = RB_RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->left) {
+                    z = z->parent;
+                    rb_rotate_right(z);
+                }
+                z->parent->color = RB_BLACK;
+                z->parent->parent->color = RB_RED;
+                rb_rotate_left(z->parent->parent);
+            }
+        }
+    }
+    dcache_root->color = RB_BLACK;
+}
+
+static void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
     uint32_t flags = spinlock_acquire_safe(&dcache_lock);
-    dcache[dcache_ptr].parent = parent;
-    strlcpy(dcache[dcache_ptr].name, name, YFS_NAME_MAX);
-    dcache[dcache_ptr].target = target;
-    dcache[dcache_ptr].valid = 1;
-    dcache_ptr = (dcache_ptr + 1) % DCACHE_SIZE;
+
+    rb_node_t* z = (rb_node_t*)kmalloc(sizeof(rb_node_t));
+    if (!z) {
+        spinlock_release_safe(&dcache_lock, flags);
+        return;
+    }
+    
+    z->parent_ino = parent;
+    strlcpy(z->name, name, YFS_NAME_MAX);
+    z->target_ino = target;
+    z->left = z->right = z->parent = 0;
+    z->color = RB_RED;
+
+    rb_node_t* y = 0;
+    rb_node_t* x = dcache_root;
+    
+    while (x) {
+        y = x;
+        int cmp = rb_compare(z->parent_ino, z->name, x->parent_ino, x->name);
+        if (cmp == 0) {
+            x->target_ino = target;
+            kfree(z);
+            spinlock_release_safe(&dcache_lock, flags);
+            return;
+        }
+        if (cmp < 0) x = x->left;
+        else x = x->right;
+    }
+    
+    z->parent = y;
+    if (!y) dcache_root = z;
+    else {
+        int cmp = rb_compare(z->parent_ino, z->name, y->parent_ino, y->name);
+        if (cmp < 0) y->left = z;
+        else y->right = z;
+    }
+    
+    rb_insert_fixup(z);
     spinlock_release_safe(&dcache_lock, flags);
 }
 
-static yfs_ino_t dcache_get(yfs_ino_t parent, const char* name) {
+static yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name) {
     uint32_t flags = spinlock_acquire_safe(&dcache_lock);
-    yfs_ino_t res = 0;
-    for (int i = 0; i < DCACHE_SIZE; i++) {
-        if (dcache[i].valid && dcache[i].parent == parent && strcmp(dcache[i].name, name) == 0) {
-            res = dcache[i].target;
+    
+    rb_node_t* x = dcache_root;
+    while (x) {
+        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+        if (cmp == 0) {
+            yfs_ino_t res = x->target_ino;
+            spinlock_release_safe(&dcache_lock, flags);
+            return res;
+        }
+        if (cmp < 0) x = x->left;
+        else x = x->right;
+    }
+    
+    spinlock_release_safe(&dcache_lock, flags);
+    return 0;
+}
+
+static void rb_free_tree(rb_node_t* node) {
+    if (!node) return;
+    rb_free_tree(node->left);
+    rb_free_tree(node->right);
+    kfree(node);
+}
+
+static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
+    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    
+    rb_node_t* x = dcache_root;
+    while (x) {
+        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+        if (cmp == 0) {
+            x->target_ino = 0;
             break;
         }
+        if (cmp < 0) x = x->left;
+        else x = x->right;
     }
-    spinlock_release_safe(&dcache_lock, flags);
-    return res;
-}
-
-static void dcache_invalidate(yfs_ino_t parent) {
-    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
-    for (int i = 0; i < DCACHE_SIZE; i++) {
-        if (dcache[i].valid && dcache[i].parent == parent) {
-            dcache[i].valid = 0;
-        }
-    }
+    
     spinlock_release_safe(&dcache_lock, flags);
 }
 
@@ -99,10 +232,8 @@ static void load_bitmap_block(uint32_t lba) {
 static void zero_block(yfs_blk_t lba) {
     uint8_t* zeroes = kmalloc(YFS_BLOCK_SIZE);
     if (!zeroes) return;
-    
     memset(zeroes, 0, YFS_BLOCK_SIZE);
     bcache_write(lba, zeroes);
-    
     kfree(zeroes);
 }
 
@@ -418,8 +549,9 @@ static void truncate_inode(yfs_inode_t* node) {
     node->size = 0;
 }
 
+
 static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
-    yfs_ino_t cached = dcache_get(dir->id, name);
+    yfs_ino_t cached = dcache_lookup(dir->id, name);
     if (cached) return cached;
 
     uint32_t entries_per_block = YFS_BLOCK_SIZE / sizeof(yfs_dirent_t);
@@ -435,7 +567,7 @@ static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
         bcache_read(lba, (uint8_t*)entries);
         for (uint32_t j = 0; j < entries_per_block; j++) {
             if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
-                dcache_put(dir->id, name, entries[j].inode);
+                dcache_insert(dir->id, name, entries[j].inode);
                 yfs_ino_t res = entries[j].inode;
                 kfree(entries);
                 return res;
@@ -452,7 +584,8 @@ static int dir_link(yfs_ino_t dir_ino, yfs_ino_t child_ino, const char* name) {
 
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
-    dcache_invalidate(dir_ino);
+
+    dcache_insert(dir_ino, name, child_ino);
 
     uint32_t entries_per_block = YFS_BLOCK_SIZE / sizeof(yfs_dirent_t);
     yfs_dirent_t* entries = kmalloc(YFS_BLOCK_SIZE);
@@ -495,7 +628,8 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
 
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
-    dcache_invalidate(dir_ino);
+    
+    dcache_invalidate_entry(dir_ino, name);
 
     uint32_t entries_per_block = YFS_BLOCK_SIZE / sizeof(yfs_dirent_t);
     yfs_dirent_t* entries = kmalloc(YFS_BLOCK_SIZE);
@@ -537,7 +671,8 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
 static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
-    dcache_invalidate(dir_ino);
+    
+    dcache_invalidate_entry(dir_ino, name);
 
     uint32_t entries_per_block = YFS_BLOCK_SIZE / sizeof(yfs_dirent_t);
     yfs_dirent_t* entries = kmalloc(YFS_BLOCK_SIZE);
@@ -609,7 +744,7 @@ void yulafs_format(uint32_t disk_blocks_4k) {
         if(zero) kfree(zero);
         if(map) kfree(map);
         if(dots) kfree(dots);
-        return; 
+        return;
     }
     
     memset(zero, 0, YFS_BLOCK_SIZE);
@@ -665,6 +800,9 @@ void yulafs_format(uint32_t disk_blocks_4k) {
     last_free_blk_hint = 0;
     last_free_ino_hint = 2;
 
+    spinlock_init(&dcache_lock);
+    if (dcache_root) { rb_free_tree(dcache_root); dcache_root = 0; }
+
     yulafs_mkdir("/bin");
     yulafs_mkdir("/home");
     yulafs_mkdir("/dev");
@@ -678,6 +816,7 @@ void yulafs_init(void) {
     spinlock_init(&dcache_lock);
     bmap_cache_lba = 0;
     bmap_cache_dirty = 0;
+    dcache_root = 0;
     
     uint8_t* buf = kmalloc(YFS_BLOCK_SIZE);
     if (!buf) return;
@@ -713,7 +852,6 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     if (offset + size > node.size) size = node.size - offset;
 
     uint32_t read_count = 0;
-    
     uint8_t* scratch = kmalloc(YFS_BLOCK_SIZE);
     if (!scratch) { rwlock_release_read(lock); return -1; }
 

@@ -54,6 +54,8 @@ typedef struct {
     spinlock_t lock;
 } shell_context_t;
 
+extern void wake_up_gui();
+
 static char* itoa(uint32_t n) {
     static char buf[12];
     int i = 10; buf[11] = '\0';
@@ -627,6 +629,7 @@ void shell_task(void* arg) {
             }
             spinlock_release_safe(&ctx->lock, flags);
             win->is_dirty = 1;
+            wake_up_gui();
         }
     }
 
