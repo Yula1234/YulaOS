@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2025 Yula1234
+
 #include <yula.h>
 
 #define MAX_FILE_SIZE   65536

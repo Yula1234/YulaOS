@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2025 Yula1234
+
 #include <arch/i386/context.h>
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>

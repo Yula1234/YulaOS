@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2025 Yula1234
+
 #ifndef ARCH_I386_IDT_H
 #define ARCH_I386_IDT_H
 

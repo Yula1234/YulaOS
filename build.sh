@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025 Yula1234
+
 set -e
 
 DIRS=("bin/obj" "bin/usr" "bin/tools" "bin/isodir/boot/grub")
