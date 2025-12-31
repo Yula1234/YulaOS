@@ -118,11 +118,6 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
         if (tmp->is_active) count++;
     }
     
-    if (count >= MAX_WINDOWS) {
-        sem_signal(&window_list_lock);
-        return 0;
-    }
-    
     window_t* win = (window_t*)kmalloc(sizeof(window_t));
     if (!win) {
         sem_signal(&window_list_lock);
