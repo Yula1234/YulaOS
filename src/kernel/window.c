@@ -9,9 +9,9 @@
 
 #include "window.h"
 
-window_t window_list[MAX_WINDOWS];
-int window_z_order[MAX_WINDOWS];
+dlist_head_t window_list;
 int focused_window_pid = 0;
+int next_window_id = 1;
 
 static uint32_t active_gradient[28];
 static uint32_t inactive_gradient[28];
@@ -38,10 +38,10 @@ void window_precompute_gradients() {
 
 
 void window_init_system() {
-    memset(window_list, 0, sizeof(window_list));
-    for(int i = 0; i < MAX_WINDOWS; i++) window_z_order[i] = -1;
+    dlist_init(&window_list);
     sem_init(&window_list_lock, 1);
     window_precompute_gradients();
+    next_window_id = 1;
 }
 
 void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
@@ -74,27 +74,36 @@ int window_pop_event(window_t* win, yula_event_t* out_ev) {
     return 1;
 }
 
-void window_bring_to_front_nolock(int window_index) {
-    int pos = -1;
-    for(int i = 0; i < MAX_WINDOWS; i++) {
-        if(window_z_order[i] == window_index) {
-            pos = i;
-            break;
+window_t* window_find_by_id(int window_id) {
+    window_t* win;
+    dlist_for_each_entry(win, &window_list, list) {
+        if (win->window_id == window_id && win->is_active) {
+            return win;
         }
     }
-    if(pos == -1) return;
-
-    for(int i = pos; i < MAX_WINDOWS - 1; i++) {
-        window_z_order[i] = window_z_order[i+1];
-    }
-    window_z_order[MAX_WINDOWS - 1] = window_index;
-    
-    focused_window_pid = window_list[window_index].focused_pid;
+    return 0;
 }
 
-void window_bring_to_front(int window_index) {
+window_t* window_find_by_pid(int pid) {
+    window_t* win;
+    dlist_for_each_entry(win, &window_list, list) {
+        if (win->owner_pid == pid && win->is_active) {
+            return win;
+        }
+    }
+    return 0;
+}
+
+void window_bring_to_front_nolock(window_t* win) {
+    if (!win || !win->is_active) return;
+    dlist_del(&win->list);
+    dlist_add_tail(&win->list, &window_list);
+    focused_window_pid = win->focused_pid;
+}
+
+void window_bring_to_front(window_t* win) {
     sem_wait(&window_list_lock);
-    window_bring_to_front_nolock(window_index);
+    window_bring_to_front_nolock(win);
     sem_signal(&window_list_lock);
 }
 
@@ -103,87 +112,100 @@ extern void wake_up_gui();
 window_t* window_create(int x, int y, int w, int h, const char* title, window_draw_handler_t handler) {
     sem_wait(&window_list_lock);
     
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (!window_list[i].is_active) {
-            
-            sem_init(&window_list[i].lock, 1);
-            spinlock_init(&window_list[i].event_lock);
+    int count = 0;
+    window_t* tmp;
+    dlist_for_each_entry(tmp, &window_list, list) {
+        if (tmp->is_active) count++;
+    }
+    
+    if (count >= MAX_WINDOWS) {
+        sem_signal(&window_list_lock);
+        return 0;
+    }
+    
+    window_t* win = (window_t*)kmalloc(sizeof(window_t));
+    if (!win) {
+        sem_signal(&window_list_lock);
+        return 0;
+    }
+    
+    memset(win, 0, sizeof(window_t));
+    
+    sem_init(&win->lock, 1);
+    spinlock_init(&win->event_lock);
+    dlist_init(&win->list);
+    
+    sem_wait(&win->lock);
 
-            sem_wait(&window_list[i].lock);
+    int canvas_w = w - 12; 
+    int canvas_h = h - 44;
+    
+    if (canvas_w <= 0 || canvas_h <= 0) {
+        sem_signal(&win->lock);
+        sem_signal(&window_list_lock);
+        kfree(win);
+        return 0;
+    }
 
-            int canvas_w = w - 12; 
-            int canvas_h = h - 44;
-            
-            if (canvas_w <= 0 || canvas_h <= 0) {
-                sem_signal(&window_list[i].lock);
-                sem_signal(&window_list_lock);
-                return 0;
-            }
-
-            window_list[i].canvas = (uint32_t*)kmalloc_a(canvas_w * canvas_h * sizeof(uint32_t));
-            if (window_list[i].canvas) memset(window_list[i].canvas, 0xFF, canvas_w * canvas_h * 4);
-            
-            if (window_list[i].canvas) {
-                int limit = canvas_w * canvas_h;
-                for(int j = 0; j < limit; j++) {
-                    window_list[i].canvas[j] = 0x1E1E1E;
-                }
-            }
-            window_list[i].is_dirty = 1;
-            
-            window_list[i].target_x = x;
-            window_list[i].target_y = y;
-            window_list[i].target_w = w;
-            window_list[i].target_h = h;
-
-            window_list[i].w = 30; 
-            window_list[i].h = 30;
-            window_list[i].x = x + (w / 2) - 15;
-            window_list[i].y = y + (h / 2) - 15;
-
-            window_list[i].is_animating = 1;
-            window_list[i].anim_mode = 0;
-
-            window_list[i].on_draw = handler;
-            window_list[i].is_active = 1;
-            window_list[i].is_minimized = 0;
-
-            window_list[i].evt_head = 0;
-            window_list[i].evt_tail = 0;
-
-            strlcpy(window_list[i].title, title, 32);
-            
-            task_t* curr = proc_current();
-            window_list[i].owner_pid = curr ? curr->pid : 0;
-            window_list[i].focused_pid = window_list[i].owner_pid;
-
-            for(int j = 0; j < MAX_WINDOWS; j++) {
-                if(window_z_order[j] == -1) {
-                    window_z_order[j] = i;
-                    window_bring_to_front_nolock(i);
-                    break;
-                }
-            }
-            
-            sem_signal(&window_list[i].lock);
-            sem_signal(&window_list_lock);
-            
-            wake_up_gui();
-            
-            return &window_list[i];
+    win->canvas = (uint32_t*)kmalloc_a(canvas_w * canvas_h * sizeof(uint32_t));
+    if (win->canvas) memset(win->canvas, 0xFF, canvas_w * canvas_h * 4);
+    
+    if (win->canvas) {
+        int limit = canvas_w * canvas_h;
+        for(int j = 0; j < limit; j++) {
+            win->canvas[j] = 0x1E1E1E;
         }
     }
+    win->is_dirty = 1;
+    
+    win->target_x = x;
+    win->target_y = y;
+    win->target_w = w;
+    win->target_h = h;
+
+    win->w = 30; 
+    win->h = 30;
+    win->x = x + (w / 2) - 15;
+    win->y = y + (h / 2) - 15;
+
+    win->is_animating = 1;
+    win->anim_mode = 0;
+
+    win->on_draw = handler;
+    win->is_active = 1;
+    win->is_minimized = 0;
+
+    win->evt_head = 0;
+    win->evt_tail = 0;
+
+    strlcpy(win->title, title, 32);
+    
+    task_t* curr = proc_current();
+    win->owner_pid = curr ? curr->pid : 0;
+    win->focused_pid = win->owner_pid;
+    
+    win->window_id = next_window_id++;
+    if (next_window_id <= 0) next_window_id = 1;
+
+    dlist_add_tail(&win->list, &window_list);
+    window_bring_to_front_nolock(win);
+    
+    sem_signal(&win->lock);
     sem_signal(&window_list_lock);
-    return 0;
+    
+    wake_up_gui();
+    
+    return win;
 }
 
 
 void window_mark_dirty_by_pid(int pid) {
     sem_wait(&window_list_lock);
     int found = 0;
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (window_list[i].is_active && window_list[i].owner_pid == pid) {
-            window_list[i].is_dirty = 1;
+    window_t* win;
+    dlist_for_each_entry(win, &window_list, list) {
+        if (win->is_active && win->owner_pid == pid) {
+            win->is_dirty = 1;
             found = 1;
         }
     }
@@ -197,15 +219,8 @@ void window_mark_dirty_by_pid(int pid) {
 void window_draw_all() {
     sem_wait(&window_list_lock);
     
-    int temp_z_order[MAX_WINDOWS];
-    memcpy(temp_z_order, window_z_order, sizeof(window_z_order));
-    
-
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        int idx = temp_z_order[i];
-        if (idx == -1) continue;
-        
-        window_t* win = &window_list[idx];
+    window_t* win;
+    dlist_for_each_entry(win, &window_list, list) {
 
         sem_wait(&win->lock);
 
@@ -293,54 +308,45 @@ void window_draw_all() {
 void window_close_all_by_pid(int pid) {
     sem_wait(&window_list_lock);
 
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (window_list[i].is_active && window_list[i].owner_pid == pid) {
+    window_t* win, *n;
+    dlist_for_each_entry_safe(win, n, &window_list, list) {
+        if (win->is_active && win->owner_pid == pid) {
             
-            sem_wait(&window_list[i].lock);
+            sem_wait(&win->lock);
 
-            if (window_list[i].canvas) {
-                kfree(window_list[i].canvas);
-                window_list[i].canvas = 0;
+            if (win->canvas) {
+                kfree(win->canvas);
+                win->canvas = 0;
             }
 
-            if (window_list[i].on_close) {
-                window_list[i].on_close(&window_list[i]);
+            if (win->on_close) {
+                win->on_close(win);
             }
 
-            window_list[i].is_active = 0;
-            window_list[i].on_draw = 0;
-            window_list[i].user_data = 0; 
-
-            vga_mark_dirty(window_list[i].x - 10, window_list[i].y - 10, 
-                           window_list[i].w + 25, window_list[i].h + 25);
+            vga_mark_dirty(win->x - 10, win->y - 10, 
+                           win->w + 25, win->h + 25);
             
-            sem_signal(&window_list[i].lock);
-
-            int z_idx = -1;
-            for (int j = 0; j < MAX_WINDOWS; j++) {
-                if (window_z_order[j] == i) {
-                    z_idx = j;
-                    break;
-                }
-            }
-
-            if (z_idx != -1) {
-                for (int j = z_idx; j < MAX_WINDOWS - 1; j++) {
-                    window_z_order[j] = window_z_order[j + 1];
-                }
-                window_z_order[MAX_WINDOWS - 1] = -1;
-            }
+            sem_signal(&win->lock);
+            
+            dlist_del(&win->list);
+            
+            win->is_active = 0;
+            win->on_draw = 0;
+            win->user_data = 0;
+            kfree(win);
         }
     }
 
     if (focused_window_pid == pid) {
         focused_window_pid = 0;
-        for (int i = MAX_WINDOWS - 1; i >= 0; i--) {
-            int idx = window_z_order[i];
-            if (idx != -1 && window_list[idx].is_active) {
-                focused_window_pid = window_list[idx].owner_pid;
-                break;
+        window_t* last_win = 0;
+        dlist_for_each_entry(win, &window_list, list) {
+            if (win->is_active) {
+                last_win = win;
             }
+        }
+        if (last_win) {
+            focused_window_pid = last_win->owner_pid;
         }
     }
 

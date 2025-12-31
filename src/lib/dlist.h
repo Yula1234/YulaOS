@@ -46,4 +46,9 @@ static inline int dlist_empty(const dlist_head_t *head) {
          &pos->member != (head); \
          pos = n, n = container_of(n->member.next, typeof(*n), member))
 
+#define dlist_for_each_entry_reverse(pos, head, member) \
+    for (pos = container_of((head)->prev, typeof(*pos), member); \
+         &pos->member != (head); \
+         pos = container_of(pos->member.prev, typeof(*pos), member))
+
 #endif

@@ -281,12 +281,8 @@ void syscall_handler(registers_t* regs) {
             window_t* win = window_create(100, 100, total_w, total_h, k_title, 0);
 
             if (win) {
-                int id = -1;
-                for(int i=0; i<MAX_WINDOWS; i++) {
-                    if (&window_list[i] == win) { id = i; break; }
-                }
                 curr->term_mode = 0; 
-                regs->eax = id;
+                regs->eax = win->window_id;
             } else {
                 regs->eax = -1;
             }
@@ -296,10 +292,10 @@ void syscall_handler(registers_t* regs) {
         case 21: // map_window(win_id)
         {
             int id = regs->ebx;
-            if (id < 0 || id >= MAX_WINDOWS || !window_list[id].is_active) {
+            window_t* win = window_find_by_id(id);
+            if (!win || !win->is_active) {
                 regs->eax = 0; break;
             }
-            window_t* win = &window_list[id];
             if (win->owner_pid != (int)curr->pid) { regs->eax = 0; break; }
 
             uint32_t user_vaddr_start = 0xA0000000;
@@ -328,8 +324,9 @@ void syscall_handler(registers_t* regs) {
         case 22: // update_window(win_id)
         {
             int id = regs->ebx;
-            if (id >= 0 && id < MAX_WINDOWS) {
-                window_list[id].is_dirty = 1; 
+            window_t* win = window_find_by_id(id);
+            if (win && win->is_active) {
+                win->is_dirty = 1; 
                 wake_up_gui();
             }
         }
@@ -340,10 +337,11 @@ void syscall_handler(registers_t* regs) {
             int id = regs->ebx;
             yula_event_t* user_ev = (yula_event_t*)regs->ecx;
             
-            if (id >= 0 && id < MAX_WINDOWS && window_list[id].is_active) {
-                if (window_list[id].owner_pid == (int)curr->pid) {
+            window_t* win = window_find_by_id(id);
+            if (win && win->is_active) {
+                if (win->owner_pid == (int)curr->pid) {
                     yula_event_t k_ev;
-                    if (window_pop_event(&window_list[id], &k_ev)) {
+                    if (window_pop_event(win, &k_ev)) {
                         *user_ev = k_ev;
                         regs->eax = 1;
                     } else {

@@ -45,9 +45,10 @@ static void send_key_to_focused(char code) {
     if (focused_window_pid > 0) {
         focused_task = proc_find_by_pid(focused_window_pid);
         
-        for(int i=0; i<MAX_WINDOWS; i++) {
-            if (window_list[i].is_active && window_list[i].owner_pid == focused_window_pid) {
-                window_push_event(&window_list[i], YULA_EVENT_KEY_DOWN, code, 0, 0);
+        window_t* win;
+        dlist_for_each_entry(win, &window_list, list) {
+            if (win->is_active && win->owner_pid == focused_window_pid) {
+                window_push_event(win, YULA_EVENT_KEY_DOWN, code, 0, 0);
                 break; 
             }
         }

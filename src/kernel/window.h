@@ -5,6 +5,7 @@
 #define KERNEL_WINDOW_H
 
 #include <hal/lock.h>
+#include <lib/dlist.h>
 
 #include <stdint.h>
 
@@ -28,6 +29,10 @@ typedef void (*window_draw_handler_t)(struct window* self, int rel_x, int rel_y)
 typedef void (*window_close_handler_t)(struct window* self);
 
 typedef struct window {
+    dlist_head_t list;
+    
+    int window_id;
+    
     int x, y, w, h;
     char title[32];
     int is_active;
@@ -60,21 +65,24 @@ typedef struct window {
 
 #define MAX_WINDOWS 16
 
-extern window_t window_list[MAX_WINDOWS];
-extern int window_z_order[MAX_WINDOWS]; 
+extern dlist_head_t window_list;
 extern int focused_window_pid;
+extern int next_window_id;
 
 extern semaphore_t window_list_lock;
+
+window_t* window_find_by_id(int window_id);
+window_t* window_find_by_pid(int pid);
 
 void window_init_system();
 window_t* window_create(int x, int y, int w, int h, const char* title, window_draw_handler_t handler);
 void window_draw_all();
-void window_bring_to_front(int window_index);
+void window_bring_to_front(window_t* win);
 void window_close_all_by_pid(int pid);
 void window_mark_dirty_by_pid(int pid);
 
 void window_push_event(window_t* win, int type, int a1, int a2, int a3);
 int window_pop_event(window_t* win, yula_event_t* out_ev);
-void window_bring_to_front_nolock(int window_index);
+void window_bring_to_front_nolock(window_t* win);
 
 #endif
