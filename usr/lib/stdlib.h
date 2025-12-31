@@ -18,6 +18,9 @@ int   atoi(const char* str);
 long  atol(const char* str);
 char* itoa(int value, char* str, int base);
 
+long strtol(const char* nptr, char** endptr, int base);
+unsigned long strtoul(const char* nptr, char** endptr, int base);
+
 int  abs(int j);
 int  rand(void);
 void srand(unsigned int seed);
