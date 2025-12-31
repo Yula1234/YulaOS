@@ -6,7 +6,6 @@
 #define MAX_LINE_LEN    256
 #define MAX_TOKEN_LEN   64
 #define MAX_SYMBOLS     2048
-#define INITIAL_CAP     4096
 
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
@@ -77,6 +76,7 @@ typedef struct {
 #define STT_FUNC 2
 #define STT_SECTION 3
 #define SHN_UNDEF 0
+#define SHN_ABS 0xFFF1
 #define R_386_32 1
 #define R_386_PC32 2
 #define ELF32_ST_INFO(b,t) (((b)<<4)+((t)&0xf))
@@ -88,7 +88,7 @@ typedef struct {
     uint32_t capacity;
 } Buffer;
 
-typedef enum { SEC_NULL=0, SEC_TEXT, SEC_DATA, SEC_BSS } SectionID;
+typedef enum { SEC_NULL=0, SEC_TEXT, SEC_DATA, SEC_BSS, SEC_ABS } SectionID;
 typedef enum { SYM_UNDEF, SYM_LOCAL, SYM_GLOBAL, SYM_EXTERN } SymBind;
 
 typedef struct {
@@ -165,10 +165,18 @@ uint32_t buf_add_string(Buffer* b, const char* str) {
     return offset;
 }
 
-int parse_number(const char* s) {
+Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
+    for (int i = 0; i < ctx->sym_count; i++) {
+        if (strcmp(ctx->symbols[i].name, name) == 0) return &ctx->symbols[i];
+    }
+    return 0;
+}
+
+int eval_number(AssemblerCtx* ctx, const char* s) {
     if (!s) return 0;
     int sign = 1;
     if (*s == '-') { sign = -1; s++; }
+    
     if (s[0] == '0' && s[1] == 'x') {
         s += 2;
         uint32_t val = 0;
@@ -182,18 +190,21 @@ int parse_number(const char* s) {
         }
         return (int)val * sign;
     }
-    int val = 0;
-    while (*s >= '0' && *s <= '9') {
-        val = val * 10 + (*s - '0');
-        s++;
+    
+    if (*s >= '0' && *s <= '9') {
+        int val = 0;
+        while (*s >= '0' && *s <= '9') {
+            val = val * 10 + (*s - '0');
+            s++;
+        }
+        return val * sign;
     }
-    return val * sign;
-}
 
-Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
-    for (int i = 0; i < ctx->sym_count; i++) {
-        if (strcmp(ctx->symbols[i].name, name) == 0) return &ctx->symbols[i];
+    Symbol* sym = sym_find(ctx, s);
+    if (sym && sym->section == SEC_ABS) {
+        return sym->value * sign;
     }
+
     return 0;
 }
 
@@ -230,18 +241,20 @@ typedef enum { OP_NONE, OP_REG, OP_MEM, OP_IMM } OpType;
 typedef struct {
     OpType type;
     int reg;
-    int size; // 1 = byte, 4 = dword, 0 = unknown
+    int size; // 1, 2, 4
     int32_t disp;
     char label[64];
     int has_label;
 } Operand;
 
 const char* reg_names32[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
-const char* reg_names8[]  = { "al",  "cl",  "dl",  "bl",  "ah",  "ch",  "dh",  "bh" };
+const char* reg_names16[] = { "ax",  "cx",  "dx",  "bx",  "sp",  "bp",  "si",  "di"  };
+const char* reg_names8[]  = { "al",  "cl",  "dl",  "bl",  "ah",  "ch",  "dh",  "bh"  };
 
 int get_reg_info(const char* s, int* size) {
     for(int i=0; i<8; i++) {
         if(strcmp(s, reg_names32[i])==0) { *size = 4; return i; }
+        if(strcmp(s, reg_names16[i])==0) { *size = 2; return i; }
         if(strcmp(s, reg_names8[i])==0)  { *size = 1; return i; }
     }
     return -1;
@@ -249,7 +262,7 @@ int get_reg_info(const char* s, int* size) {
 
 typedef enum {
     ENC_NONE, ENC_R, ENC_I, ENC_M, ENC_MR, ENC_RM, ENC_MI, ENC_OI, ENC_J, ENC_SHIFT,
-    ENC_0F
+    ENC_0F, ENC_0F_MR
 } EncMode;
 
 typedef struct {
@@ -257,11 +270,10 @@ typedef struct {
     uint8_t op_base;
     uint8_t op_ext;
     EncMode mode;
-    int size; // 0 = any, 1 = byte, 4 = dword
+    int size; // 0=any, 1=byte, 2=word, 4=dword
 } InstrDef;
 
 InstrDef isa[] = {
-    // Control / Misc (Size 0 = Ignore)
     { "ret",   0xC3, 0, ENC_NONE, 0 }, { "nop",   0x90, 0, ENC_NONE, 0 },
     { "hlt",   0xF4, 0, ENC_NONE, 0 }, { "cli",   0xFA, 0, ENC_NONE, 0 },
     { "sti",   0xFB, 0, ENC_NONE, 0 }, { "pusha", 0x60, 0, ENC_NONE, 0 },
@@ -269,29 +281,24 @@ InstrDef isa[] = {
     { "cld",   0xFC, 0, ENC_NONE, 0 }, { "std",   0xFD, 0, ENC_NONE, 0 },
     { "int3",  0xCC, 0, ENC_NONE, 0 },
     
-    // 0F prefixed
     { "ud2",   0x0B, 0, ENC_0F, 0 },   { "rdtsc", 0x31, 0, ENC_0F, 0 },
 
-    // Push/Pop (32-bit only usually)
     { "push",  0x50, 0, ENC_R, 4 },    { "pop",   0x58, 0, ENC_R, 4 },
     { "push",  0x68, 0, ENC_I, 4 },    { "int",   0xCD, 0, ENC_I, 0 }, 
+    { "push",  0x6A, 0, ENC_I, 1 },    
 
-    // Inc/Dec 
     { "inc",   0x40, 0, ENC_R, 4 },    { "dec",   0x48, 0, ENC_R, 4 },
-    { "inc",   0xFE, 0, ENC_M, 1 },    { "dec",   0xFE, 1, ENC_M, 1 }, // 8-bit inc/dec memory
-    { "inc",   0xFF, 0, ENC_M, 4 },    { "dec",   0xFF, 1, ENC_M, 4 }, // 32-bit inc/dec memory
+    { "inc",   0xFE, 0, ENC_M, 1 },    { "dec",   0xFE, 1, ENC_M, 1 },
+    { "inc",   0xFF, 0, ENC_M, 4 },    { "dec",   0xFF, 1, ENC_M, 4 },
 
-    // Mul/Div/Neg/Not (Group 3)
-    // 8-bit
     { "mul",   0xF6, 4, ENC_M, 1 },    { "imul",  0xF6, 5, ENC_M, 1 },
     { "div",   0xF6, 6, ENC_M, 1 },    { "idiv",  0xF6, 7, ENC_M, 1 },
     { "neg",   0xF6, 3, ENC_M, 1 },    { "not",   0xF6, 2, ENC_M, 1 },
-    // 32-bit
+    
     { "mul",   0xF7, 4, ENC_M, 4 },    { "imul",  0xF7, 5, ENC_M, 4 },
     { "div",   0xF7, 6, ENC_M, 4 },    { "idiv",  0xF7, 7, ENC_M, 4 },
     { "neg",   0xF7, 3, ENC_M, 4 },    { "not",   0xF7, 2, ENC_M, 4 },
 
-    // Jumps (Size 0 implies label distance check)
     { "call",  0xE8, 0, ENC_J, 0 },    { "jmp",   0xE9, 0, ENC_J, 0 },
     { "call",  0xFF, 2, ENC_M, 4 }, 
     { "je",    0x84, 0, ENC_J, 0 },    { "jz",    0x84, 0, ENC_J, 0 },
@@ -302,48 +309,46 @@ InstrDef isa[] = {
     { "jb",    0x82, 0, ENC_J, 0 },    { "jbe",   0x86, 0, ENC_J, 0 },
     { "loop",  0xE2, 0, ENC_J, 0 }, 
 
-    // Mov
-    // 8-bit
-    { "mov",   0x88, 0, ENC_MR, 1 },   // mov r/m8, r8
-    { "mov",   0x8A, 0, ENC_RM, 1 },   // mov r8, r/m8
-    { "mov",   0xB0, 0, ENC_OI, 1 },   // mov r8, imm8
-    { "mov",   0xC6, 0, ENC_MI, 1 },   // mov r/m8, imm8
+    { "mov",   0x88, 0, ENC_MR, 1 },   { "mov",   0x8A, 0, ENC_RM, 1 },
+    { "mov",   0xB0, 0, ENC_OI, 1 },   { "mov",   0xC6, 0, ENC_MI, 1 },
     
-    // 32-bit
-    { "mov",   0x89, 0, ENC_MR, 4 },   // mov r/m32, r32
-    { "mov",   0x8B, 0, ENC_RM, 4 },   // mov r32, r/m32
-    { "mov",   0xB8, 0, ENC_OI, 4 },   // mov r32, imm32
-    { "mov",   0xC7, 0, ENC_MI, 4 },   // mov r/m32, imm32
-    { "lea",   0x8D, 0, ENC_RM, 4 },   { "xchg",  0x87, 0, ENC_MR, 4 },
+    { "mov",   0x89, 0, ENC_MR, 4 },   { "mov",   0x8B, 0, ENC_RM, 4 },
+    { "mov",   0xB8, 0, ENC_OI, 4 },   { "mov",   0xC7, 0, ENC_MI, 4 },
+    { "lea",   0x8D, 0, ENC_RM, 4 },   
 
-    // Explicit movb alias
-    { "movb",  0xC6, 0, ENC_MI, 1 },   
-    { "movb",  0x88, 0, ENC_MR, 1 },   
-    { "movb",  0x8A, 0, ENC_RM, 1 },   
+    { "xchg",  0x86, 0, ENC_MR, 1 },   { "xchg",  0x87, 0, ENC_MR, 4 },
+    { "xchg",  0x90, 0, ENC_R,  4 }, 
 
-    // ALU (Add, Sub, And, Or, Xor, Cmp)
-    // 8-bit
+    { "movzx", 0xB6, 0, ENC_0F_MR, 1 }, { "movzx", 0xB7, 0, ENC_0F_MR, 4 }, 
+    { "movsx", 0xBE, 0, ENC_0F_MR, 1 }, { "movsx", 0xBF, 0, ENC_0F_MR, 4 },
+
+    { "movb",  0xC6, 0, ENC_MI, 1 },   { "movb",  0x88, 0, ENC_MR, 1 },   { "movb",  0x8A, 0, ENC_RM, 1 },   
+
     { "add",   0x00, 0, ENC_MR, 1 }, { "add",   0x02, 0, ENC_RM, 1 }, { "add",   0x80, 0, ENC_MI, 1 },
     { "or",    0x08, 0, ENC_MR, 1 }, { "or",    0x0A, 0, ENC_RM, 1 }, { "or",    0x80, 1, ENC_MI, 1 },
+    { "adc",   0x10, 0, ENC_MR, 1 }, { "adc",   0x12, 0, ENC_RM, 1 }, { "adc",   0x80, 2, ENC_MI, 1 },
+    { "sbb",   0x18, 0, ENC_MR, 1 }, { "sbb",   0x1A, 0, ENC_RM, 1 }, { "sbb",   0x80, 3, ENC_MI, 1 },
     { "and",   0x20, 0, ENC_MR, 1 }, { "and",   0x22, 0, ENC_RM, 1 }, { "and",   0x80, 4, ENC_MI, 1 },
     { "sub",   0x28, 0, ENC_MR, 1 }, { "sub",   0x2A, 0, ENC_RM, 1 }, { "sub",   0x80, 5, ENC_MI, 1 },
     { "xor",   0x30, 0, ENC_MR, 1 }, { "xor",   0x32, 0, ENC_RM, 1 }, { "xor",   0x80, 6, ENC_MI, 1 },
     { "cmp",   0x38, 0, ENC_MR, 1 }, { "cmp",   0x3A, 0, ENC_RM, 1 }, { "cmp",   0x80, 7, ENC_MI, 1 },
     { "test",  0x84, 0, ENC_MR, 1 }, { "test",  0xF6, 0, ENC_MI, 1 }, 
 
-    // 32-bit
-    { "add",   0x01, 0, ENC_MR, 4 }, { "add",   0x03, 0, ENC_RM, 4 }, { "add",   0x81, 0, ENC_MI, 4 }, { "add", 0x83, 0, ENC_MI, 4 }, // 83 = byte imm sign ext
+    { "add",   0x01, 0, ENC_MR, 4 }, { "add",   0x03, 0, ENC_RM, 4 }, { "add",   0x81, 0, ENC_MI, 4 }, { "add", 0x83, 0, ENC_MI, 4 },
     { "or",    0x09, 0, ENC_MR, 4 }, { "or",    0x0B, 0, ENC_RM, 4 }, { "or",    0x81, 1, ENC_MI, 4 }, { "or",  0x83, 1, ENC_MI, 4 },
+    { "adc",   0x11, 0, ENC_MR, 4 }, { "adc",   0x13, 0, ENC_RM, 4 }, { "adc",   0x81, 2, ENC_MI, 4 }, { "adc", 0x83, 2, ENC_MI, 4 },
+    { "sbb",   0x19, 0, ENC_MR, 4 }, { "sbb",   0x1B, 0, ENC_RM, 4 }, { "sbb",   0x81, 3, ENC_MI, 4 }, { "sbb", 0x83, 3, ENC_MI, 4 },
     { "and",   0x21, 0, ENC_MR, 4 }, { "and",   0x23, 0, ENC_RM, 4 }, { "and",   0x81, 4, ENC_MI, 4 }, { "and", 0x83, 4, ENC_MI, 4 },
     { "sub",   0x29, 0, ENC_MR, 4 }, { "sub",   0x2B, 0, ENC_RM, 4 }, { "sub",   0x81, 5, ENC_MI, 4 }, { "sub", 0x83, 5, ENC_MI, 4 },
     { "xor",   0x31, 0, ENC_MR, 4 }, { "xor",   0x33, 0, ENC_RM, 4 }, { "xor",   0x81, 6, ENC_MI, 4 }, { "xor", 0x83, 6, ENC_MI, 4 },
     { "cmp",   0x39, 0, ENC_MR, 4 }, { "cmp",   0x3B, 0, ENC_RM, 4 }, { "cmp",   0x81, 7, ENC_MI, 4 }, { "cmp", 0x83, 7, ENC_MI, 4 },
     { "test",  0x85, 0, ENC_MR, 4 }, { "test",  0xF7, 0, ENC_MI, 4 }, 
 
-    // Shift
     { "shl",   0xC1, 4, ENC_SHIFT, 4 }, { "shr",   0xC1, 5, ENC_SHIFT, 4 },
+    { "sal",   0xC1, 4, ENC_SHIFT, 4 }, { "sar",   0xC1, 7, ENC_SHIFT, 4 },
     { "rol",   0xC1, 0, ENC_SHIFT, 4 }, { "ror",   0xC1, 1, ENC_SHIFT, 4 },
-    { "shl",   0xD1, 4, ENC_SHIFT, 4 }, { "shr",   0xD1, 5, ENC_SHIFT, 4 }, // shift by 1
+    { "shl",   0xD1, 4, ENC_SHIFT, 4 }, { "shr",   0xD1, 5, ENC_SHIFT, 4 },
+    { "sal",   0xD1, 4, ENC_SHIFT, 4 }, { "sar",   0xD1, 7, ENC_SHIFT, 4 },
 
     { 0,0,0,0,0 }
 };
@@ -351,7 +356,7 @@ InstrDef isa[] = {
 void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
     memset(op, 0, sizeof(Operand));
     op->reg = -1;
-    op->size = 0; // Unknown size initially
+    op->size = 0; 
     if (!text || !*text) { op->type = OP_NONE; return; }
 
     if (text[0] == '[') {
@@ -383,13 +388,13 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
             op->reg = r;
         } else {
             if ((base_part[0] >= '0' && base_part[0] <= '9') || base_part[0] == '-') 
-                op->disp = parse_number(base_part);
+                op->disp = eval_number(ctx, base_part);
             else { strcpy(op->label, base_part); op->has_label = 1; }
         }
 
         if (disp_part) {
             while (*disp_part == ' ') disp_part++;
-            op->disp += (sign * parse_number(disp_part));
+            op->disp += (sign * eval_number(ctx, disp_part));
         }
         return;
     }
@@ -412,24 +417,46 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
     }
 
     if ((text[0] >= '0' && text[0] <= '9') || text[0] == '-') {
-        op->disp = parse_number(text);
+        op->disp = eval_number(ctx, text);
         if (op->disp >= -128 && op->disp <= 255) op->size = 1; 
         else op->size = 4;
     } else {
-        strcpy(op->label, text);
-        op->has_label = 1;
-        op->size = 4; 
+        Symbol* s = sym_find(ctx, text);
+        if (s && s->section == SEC_ABS) {
+            op->disp = s->value;
+            if (op->disp >= -128 && op->disp <= 255) op->size = 1;
+            else op->size = 4;
+        } else {
+            strcpy(op->label, text);
+            op->has_label = 1;
+            op->size = 4; 
+        }
     }
 }
 
+Buffer* get_cur_buffer(AssemblerCtx* ctx) {
+    if (ctx->cur_sec == SEC_DATA) return &ctx->data;
+    if (ctx->cur_sec == SEC_BSS) return &ctx->bss;
+    return &ctx->text;
+}
+
 void emit_byte(AssemblerCtx* ctx, uint8_t b) {
-    if (ctx->pass == 1) { ctx->text.size++; return; }
-    buf_push(&ctx->text, b);
+    Buffer* buf = get_cur_buffer(ctx);
+    if (ctx->pass == 1) { buf->size++; return; }
+    buf_push(buf, b);
+}
+
+void emit_word(AssemblerCtx* ctx, uint16_t w) {
+    Buffer* buf = get_cur_buffer(ctx);
+    if (ctx->pass == 1) { buf->size += 2; return; }
+    buf_push(buf, w & 0xFF);
+    buf_push(buf, (w >> 8) & 0xFF);
 }
 
 void emit_dword(AssemblerCtx* ctx, uint32_t d) {
-    if (ctx->pass == 1) { ctx->text.size += 4; return; }
-    buf_push_u32(&ctx->text, d);
+    Buffer* buf = get_cur_buffer(ctx);
+    if (ctx->pass == 1) { buf->size += 4; return; }
+    buf_push_u32(buf, d);
 }
 
 void emit_reloc(AssemblerCtx* ctx, int type, char* label, uint32_t offset) {
@@ -448,13 +475,15 @@ void emit_reloc(AssemblerCtx* ctx, int type, char* label, uint32_t offset) {
 void emit_modrm(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
     if (ctx->pass != 2) return;
     
+    Buffer* buf = get_cur_buffer(ctx);
+    
     if (rm->type == OP_REG) {
         emit_byte(ctx, 0xC0 | ((reg_opcode & 7) << 3) | (rm->reg & 7));
     } else {
         if (rm->reg == -1) {
             emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | 5);
             uint32_t val = rm->disp;
-            if (rm->has_label) { emit_reloc(ctx, R_386_32, rm->label, ctx->text.size); val = 0; }
+            if (rm->has_label) { emit_reloc(ctx, R_386_32, rm->label, buf->size); val = 0; }
             emit_dword(ctx, val);
         } else {
             if (rm->disp == 0 && rm->reg != 5) {
@@ -483,11 +512,16 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
     }
     if (size == 0) size = 4;
 
+    if (size == 2) emit_byte(ctx, 0x66);
+
     for (int i = 0; isa[i].mnem; i++) {
         InstrDef* d = &isa[i];
         if (strcmp(d->mnem, name) != 0) continue;
         
-        if (d->size != 0 && d->size != size) continue;
+        int match_size = d->size;
+        if (match_size == 4 && size == 2) match_size = 2; 
+
+        if (d->size != 0 && match_size != size) continue;
 
         if (d->mode == ENC_NONE) {
             if (o1->type != OP_NONE) continue;
@@ -498,6 +532,13 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             if (o1->type != OP_NONE) continue;
             emit_byte(ctx, 0x0F);
             emit_byte(ctx, d->op_base);
+            return;
+        }
+        if (d->mode == ENC_0F_MR) {
+            if (o2->type != OP_REG || o1->type == OP_IMM) continue;
+            emit_byte(ctx, 0x0F);
+            emit_byte(ctx, d->op_base); 
+            emit_modrm(ctx, o2->reg, o1);
             return;
         }
         if (d->mode == ENC_R) {
@@ -511,19 +552,24 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             else {
                 emit_byte(ctx, d->op_base);
                 uint32_t val = o1->disp;
-                if (o1->has_label) { emit_reloc(ctx, R_386_32, o1->label, ctx->text.size); val = 0; }
-                emit_dword(ctx, val);
+                Buffer* buf = get_cur_buffer(ctx);
+                if (o1->has_label) { emit_reloc(ctx, R_386_32, o1->label, buf->size); val = 0; }
+                
+                if (size == 2) emit_word(ctx, (uint16_t)val);
+                else emit_dword(ctx, val);
             }
             return;
         }
         if (d->mode == ENC_J) {
             if (o1->type != OP_IMM) continue;
+            Buffer* buf = get_cur_buffer(ctx);
+            
             if (d->op_base == 0xE2) { 
                  emit_byte(ctx, d->op_base);
                  int32_t delta = -2;
                  if (ctx->pass == 2 && o1->has_label) {
                      Symbol* s = sym_find(ctx, o1->label);
-                     if (s && s->section == ctx->cur_sec) delta = s->value - (ctx->text.size + 1);
+                     if (s && s->section == ctx->cur_sec) delta = s->value - (buf->size + 1);
                  }
                  emit_byte(ctx, (int8_t)delta);
                  return;
@@ -535,7 +581,7 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             uint32_t val = 0;
             if (ctx->pass == 2) {
                 if (o1->has_label) {
-                    emit_reloc(ctx, R_386_PC32, o1->label, ctx->text.size);
+                    emit_reloc(ctx, R_386_PC32, o1->label, buf->size);
                     val = -4; 
                 } else {
                     val = o1->disp;
@@ -548,8 +594,12 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             if (o1->type != OP_REG || o2->type != OP_IMM) continue;
             emit_byte(ctx, d->op_base + o1->reg);
             uint32_t val = o2->disp;
-            if (o2->has_label && ctx->pass == 2) { emit_reloc(ctx, R_386_32, o2->label, ctx->text.size); val = 0; }
-            if (size == 1) emit_byte(ctx, (uint8_t)val); else emit_dword(ctx, val);
+            Buffer* buf = get_cur_buffer(ctx);
+            if (o2->has_label && ctx->pass == 2) { emit_reloc(ctx, R_386_32, o2->label, buf->size); val = 0; }
+            
+            if (size == 1) emit_byte(ctx, (uint8_t)val);
+            else if (size == 2) emit_word(ctx, (uint16_t)val);
+            else emit_dword(ctx, val);
             return;
         }
         if (d->mode == ENC_MR) {
@@ -573,7 +623,8 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             if (size == 1 || d->op_base == 0x83) {
                 emit_byte(ctx, (uint8_t)o2->disp);
             } else {
-                emit_dword(ctx, o2->disp);
+                if (size == 2) emit_word(ctx, (uint16_t)o2->disp);
+                else emit_dword(ctx, o2->disp);
             }
             return;
         }
@@ -626,8 +677,19 @@ void process_line(AssemblerCtx* ctx, char* line) {
     char* clean_tokens[3];
     int c_idx = 0;
     
+    if (count >= 3 && strcmp(tokens[1], "equ") == 0) {
+        if (ctx->pass == 1) {
+            Symbol* s = sym_add(ctx, tokens[0]);
+            s->value = eval_number(ctx, tokens[2]);
+            s->section = SEC_ABS;
+            s->bind = SYM_LOCAL;
+        }
+        return;
+    }
+
     for (int i=1; i<count && c_idx < 2; i++) {
         if (strcmp(tokens[i], "byte") == 0) { force_size = 1; continue; }
+        if (strcmp(tokens[i], "word") == 0) { force_size = 2; continue; }
         if (strcmp(tokens[i], "dword") == 0) { force_size = 4; continue; }
         if (strcmp(tokens[i], "ptr") == 0) { continue; }
         clean_tokens[c_idx++] = tokens[i];
@@ -650,7 +712,7 @@ void process_line(AssemblerCtx* ctx, char* line) {
         return;
     }
     if(strcmp(cmd_name, "db") == 0) {
-        Buffer* b = (ctx->cur_sec == SEC_TEXT) ? &ctx->text : &ctx->data;
+        Buffer* b = get_cur_buffer(ctx);
         for(int k=1; k<count; k++) {
             if(tokens[k][0] == '"') {
                 char* s = tokens[k]+1;
@@ -659,27 +721,41 @@ void process_line(AssemblerCtx* ctx, char* line) {
                     s++;
                 }
             } else {
-                if(ctx->pass == 2) buf_push(b, parse_number(tokens[k])); else b->size++;
+                if(ctx->pass == 2) buf_push(b, eval_number(ctx, tokens[k])); else b->size++;
             }
         }
         return;
     }
+    if(strcmp(cmd_name, "dw") == 0) {
+        Buffer* b = get_cur_buffer(ctx);
+        if(ctx->pass == 2) {
+            int val = eval_number(ctx, tokens[1]);
+            buf_push(b, val & 0xFF);
+            buf_push(b, (val >> 8) & 0xFF);
+        } else b->size += 2;
+        return;
+    }
     if(strcmp(cmd_name, "dd") == 0) {
-        Buffer* b = (ctx->cur_sec == SEC_TEXT) ? &ctx->text : &ctx->data;
+        Buffer* b = get_cur_buffer(ctx);
         if(ctx->pass == 2) {
             if ((tokens[1][0] >= '0' && tokens[1][0] <= '9') || tokens[1][0] == '-') 
-                buf_push_u32(b, parse_number(tokens[1]));
+                buf_push_u32(b, eval_number(ctx, tokens[1]));
             else {
                 Symbol* s = sym_find(ctx, tokens[1]);
-                if (s) { emit_reloc(ctx, R_386_32, tokens[1], b->size); buf_push_u32(b, 0); }
-                else buf_push_u32(b, 0);
+                if (s && s->section == SEC_ABS) {
+                    buf_push_u32(b, s->value);
+                } else if (s) { 
+                    emit_reloc(ctx, R_386_32, tokens[1], b->size); buf_push_u32(b, 0); 
+                } else {
+                    buf_push_u32(b, eval_number(ctx, tokens[1]));
+                }
             }
         } else b->size += 4;
         return;
     }
     if(strcmp(cmd_name, "resb") == 0 || strcmp(cmd_name, "rb") == 0) {
         if(ctx->cur_sec != SEC_BSS) panic(ctx, "resb only in .bss");
-        ctx->bss.size += parse_number(tokens[1]);
+        ctx->bss.size += eval_number(ctx, tokens[1]);
         return;
     }
 
@@ -696,6 +772,8 @@ void write_elf(AssemblerCtx* ctx, const char* filename) {
 
     for(int i=0; i<ctx->sym_count; i++) {
         Symbol* s = &ctx->symbols[i];
+        if (s->section == SEC_ABS) continue; 
+
         Elf32_Sym es;
         es.st_name = buf_add_string(&strtab, s->name);
         es.st_value = s->value;
@@ -710,7 +788,6 @@ void write_elf(AssemblerCtx* ctx, const char* filename) {
         else if (s->section == SEC_BSS) es.st_shndx = 3;
         else es.st_shndx = SHN_UNDEF;
         buf_write(&symtab, &es, sizeof(es));
-        s->elf_idx = i + 1;
     }
 
     Buffer shstr; buf_init(&shstr, 256); buf_push(&shstr, 0);
@@ -770,7 +847,7 @@ void write_elf(AssemblerCtx* ctx, const char* filename) {
 }
 
 int main(int argc, char** argv) {
-    if(argc < 3) { printf("ASMC\nUsage: asmc in.asm out.o\n"); return 1; }
+    if(argc < 3) { printf("ASMC v2.2.1\nUsage: asmc in.asm out.o\n"); return 1; }
 
     int fd = open(argv[1], 0);
     if(fd < 0) { printf("Cannot open input file\n"); return 1; }
@@ -802,7 +879,14 @@ int main(int argc, char** argv) {
         process_line(ctx, line);
     }
 
-    for(int k=0; k<ctx->sym_count; k++) ctx->symbols[k].elf_idx = k+1;
+    int elf_idx = 1;
+    for(int k=0; k<ctx->sym_count; k++) {
+        if (ctx->symbols[k].section != SEC_ABS) {
+            ctx->symbols[k].elf_idx = elf_idx++;
+        } else {
+            ctx->symbols[k].elf_idx = 0;
+        }
+    }
 
     ctx->pass = 2; ctx->line_num = 0; i=0;
     ctx->text.size = 0; ctx->data.size = 0; ctx->bss.size = 0;
