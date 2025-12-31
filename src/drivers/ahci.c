@@ -212,11 +212,23 @@ static int ahci_identify_device(int port_no) {
 }
 
 int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uint32_t count) {
+    if (port_no < 0 || port_no >= 32) return 0;
+    if (!buf && is_write) return 0;
+    if (count == 0 || count > 8) return 0;
+    
     if (count > 8) count = 8;
+    
     uint32_t byte_count = count * 512;
+    
+    if (byte_count > AHCI_DMA_BUF_SIZE) {
+        byte_count = AHCI_DMA_BUF_SIZE;
+        count = byte_count / 512;
+    }
 
     ahci_port_extended_t* ex = &ports_ex[port_no];
     ahci_port_state_t* state = (ahci_port_state_t*)ex;
+    
+    if (!state->active || !ex->dma_buf_virt[0]) return 0;
     
     uint32_t flags = spinlock_acquire_safe(&state->lock);
     volatile HBA_PORT* port = (volatile HBA_PORT*)state->port_mmio;
@@ -227,15 +239,28 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
     }
 
     int slot = find_cmdslot(port, port_no);
-    if (slot == -1) {
+    if (slot == -1 || slot < 0 || slot >= 32) {
         spinlock_release_safe(&state->lock, flags);
         return 0;
     }
 
     uint8_t* dma_virt = (uint8_t*)ex->dma_buf_virt[slot];
     
-    if (is_write) memcpy(dma_virt, buf, byte_count);
-    else memset(dma_virt, 0, byte_count);
+    if (!dma_virt) {
+        spinlock_release_safe(&state->lock, flags);
+        return 0;
+    }
+    
+    if (is_write) {
+        if (byte_count <= AHCI_DMA_BUF_SIZE) {
+            memcpy(dma_virt, buf, byte_count);
+        } else {
+            spinlock_release_safe(&state->lock, flags);
+            return 0;
+        }
+    } else {
+        memset(dma_virt, 0, byte_count);
+    }
 
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
     cmdheader += slot;
@@ -293,19 +318,41 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
     }
 
     if (success && !is_write) {
-        memcpy(buf, dma_virt, byte_count);
+        if (buf && dma_virt && byte_count <= AHCI_DMA_BUF_SIZE) {
+            memcpy(buf, dma_virt, byte_count);
+        } else {
+            success = 0;
+        }
     }
     
     return success;
 }
 
 int ahci_read_sectors(uint32_t lba, uint32_t count, uint8_t* buf) {
-    if (primary_port_idx == -1) return 0;
+    if (primary_port_idx == -1 || !buf || count == 0) return 0;
+    
+    if (count > 8) count = 8;
+    uint64_t total_lba = (uint64_t)lba + (uint64_t)count;
+    if (total_lba > primary_disk_sectors) {
+        if (lba >= primary_disk_sectors) return 0;
+        count = primary_disk_sectors - lba;
+        if (count > 8) count = 8;
+    }
+    
     return ahci_send_command(primary_port_idx, lba, buf, 0, count);
 }
 
 int ahci_write_sectors(uint32_t lba, uint32_t count, const uint8_t* buf) {
-    if (primary_port_idx == -1) return 0;
+    if (primary_port_idx == -1 || !buf || count == 0) return 0;
+    
+    if (count > 8) count = 8;
+    uint64_t total_lba = (uint64_t)lba + (uint64_t)count;
+    if (total_lba > primary_disk_sectors) {
+        if (lba >= primary_disk_sectors) return 0;
+        count = primary_disk_sectors - lba;
+        if (count > 8) count = 8;
+    }
+    
     return ahci_send_command(primary_port_idx, lba, (uint8_t*)buf, 1, count);
 }
 

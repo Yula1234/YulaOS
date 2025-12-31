@@ -366,11 +366,19 @@ static void free_inode(yfs_ino_t ino) {
 }
 
 static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
-    if (ino >= sb.total_inodes) return 0;
+    if (!data || ino == 0 || ino >= sb.total_inodes) return 0;
+    
+    if (sb.inode_table_start == 0) return 0;
 
     uint32_t per_block = YFS_BLOCK_SIZE / sizeof(yfs_inode_t);
+    if (per_block == 0) return 0;
+    
     uint32_t block_idx = ino / per_block;
     uint32_t offset    = ino % per_block;
+    
+    if (offset >= per_block) return 0;
+    
+    if (block_idx > 0xFFFFFFFF - sb.inode_table_start) return 0;
     
     yfs_blk_t lba = sb.inode_table_start + block_idx;
     
@@ -383,6 +391,11 @@ static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     }
     
     yfs_inode_t* table = (yfs_inode_t*)buf;
+    
+    if (offset * sizeof(yfs_inode_t) + sizeof(yfs_inode_t) > YFS_BLOCK_SIZE) {
+        kfree(buf);
+        return 0;
+    }
     
     if (write) {
         memcpy(&table[offset], data, sizeof(yfs_inode_t));
@@ -844,15 +857,25 @@ void yulafs_init(void) {
 }
 
 int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
-    if (!fs_mounted) return -1;
+    if (!fs_mounted || !buf) return -1;
+    
+    if (size == 0) return 0;
+    if (offset > 0xFFFFFFFF - size) return -1;
+    
     rwlock_t* lock = get_inode_lock(ino);
     rwlock_acquire_read(lock);
 
     yfs_inode_t node;
     if(!sync_inode(ino, &node, 0)) { rwlock_release_read(lock); return -1; }
 
+    if (node.size > 0xFFFFFFFF) { rwlock_release_read(lock); return -1; }
+    
     if (offset >= node.size) { rwlock_release_read(lock); return 0; }
-    if (offset + size > node.size) size = node.size - offset;
+    
+    uint64_t total = (uint64_t)offset + (uint64_t)size;
+    if (total > node.size) {
+        size = node.size - offset;
+    }
 
     uint32_t read_count = 0;
     uint8_t* scratch = kmalloc(YFS_BLOCK_SIZE);
@@ -867,6 +890,12 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
 
         uint32_t copy_len = YFS_BLOCK_SIZE - blk_off;
         if (copy_len > size - read_count) copy_len = size - read_count;
+        
+        if (copy_len > YFS_BLOCK_SIZE || copy_len > size - read_count) {
+            kfree(scratch);
+            rwlock_release_read(lock);
+            return -1;
+        }
 
         if (phys_blk) {
             if(!bcache_read(phys_blk, scratch)) { 
@@ -874,6 +903,14 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
                 rwlock_release_read(lock); 
                 return -1; 
             }
+            
+            if (read_count + copy_len > size || 
+                blk_off + copy_len > YFS_BLOCK_SIZE) {
+                kfree(scratch);
+                rwlock_release_read(lock);
+                return -1;
+            }
+            
             memcpy((uint8_t*)buf + read_count, scratch + blk_off, copy_len);
             
             if (log_blk != last_prefetched_log_blk) {
@@ -899,12 +936,19 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
 }
 
 int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size) {
-    if (!fs_mounted) return -1;
+    if (!fs_mounted || !buf) return -1;
+    
+    if (size == 0) return 0;
+    if (offset > 0xFFFFFFFF - size) return -1;
+    
     rwlock_t* lock = get_inode_lock(ino);
     rwlock_acquire_write(lock);
 
     yfs_inode_t node; 
-    sync_inode(ino, &node, 0);
+    if (!sync_inode(ino, &node, 0)) {
+        rwlock_release_write(lock);
+        return -1;
+    }
 
     uint32_t written = 0;
     int dirty = 0;
@@ -923,10 +967,28 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
 
         uint32_t copy_len = YFS_BLOCK_SIZE - blk_off;
         if (copy_len > size - written) copy_len = size - written;
+        
+        if (copy_len > YFS_BLOCK_SIZE || copy_len > size - written) {
+            kfree(scratch);
+            rwlock_release_write(lock);
+            return written > 0 ? (int)written : -1;
+        }
 
         if (copy_len < YFS_BLOCK_SIZE) {
-            bcache_read(phys_blk, scratch);
+            if (!bcache_read(phys_blk, scratch)) {
+                kfree(scratch);
+                rwlock_release_write(lock);
+                return written > 0 ? (int)written : -1;
+            }
         }
+        
+        if (written + copy_len > size ||
+            blk_off + copy_len > YFS_BLOCK_SIZE) {
+            kfree(scratch);
+            rwlock_release_write(lock);
+            return written > 0 ? (int)written : -1;
+        }
+        
         memcpy(scratch + blk_off, (uint8_t*)buf + written, copy_len);
         bcache_write(phys_blk, scratch);
         

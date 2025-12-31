@@ -16,6 +16,11 @@ extern volatile uint32_t timer_ticks;
 
 #define NICE_0_LOAD 1024
 #define MIN_GRANULARITY 1
+#define CPU_CACHE_INVALIDATE_TICKS 100 
+
+static int cached_best_cpu = -1;
+static uint32_t cache_tick = 0;
+static spinlock_t cpu_cache_lock;
 
 uint32_t calc_weight(task_prio_t prio) {
     int nice = (int)prio - 10;
@@ -41,26 +46,52 @@ uint64_t calc_delta_vruntime(uint64_t delta_exec, uint32_t weight) {
     return (delta_exec * NICE_0_LOAD) / weight;
 }
 
-void sched_init(void) {}
+void sched_init(void) {
+    cached_best_cpu = -1;
+    cache_tick = 0;
+    spinlock_init(&cpu_cache_lock);
+}
 
 static int get_best_cpu(void) {
+    uint32_t flags = spinlock_acquire_safe(&cpu_cache_lock);
+    
+    uint32_t current_tick = timer_ticks;
+    int cache_valid = (cached_best_cpu >= 0 && 
+                       cache_tick != 0 &&
+                       current_tick - cache_tick < CPU_CACHE_INVALIDATE_TICKS);
+    
+    if (cache_valid) {
+        int result = cached_best_cpu;
+        spinlock_release_safe(&cpu_cache_lock, flags);
+        return result;
+    }
+    
+    spinlock_release_safe(&cpu_cache_lock, flags);
+    
     int best_cpu = 0;
     uint32_t min_score = 0xFFFFFFFF;
-
     int active_cpus = 1 + ap_running_count;
 
     for (int i = 0; i < active_cpus; i++) {
         cpu_t* c = &cpus[i];
         
-        uint32_t score = c->load_percent + 
-                         (c->runq_count * 20) + 
-                         (c->total_priority_weight);
+        uint32_t load = c->load_percent;
+        uint32_t runq = c->runq_count;
+        int weight = c->total_priority_weight;
+        
+        uint32_t score = load + (runq * 20) + (weight > 0 ? weight : 0);
 
         if (score < min_score) {
             min_score = score;
             best_cpu = i;
         }
     }
+    
+    flags = spinlock_acquire_safe(&cpu_cache_lock);
+    cached_best_cpu = best_cpu;
+    cache_tick = current_tick;
+    spinlock_release_safe(&cpu_cache_lock, flags);
+    
     return best_cpu;
 }
 
@@ -125,6 +156,12 @@ void sched_add(task_t* t) {
     target->total_task_count++;
 
     runq_append(target, t);
+    
+    uint32_t cache_flags = spinlock_acquire_safe(&cpu_cache_lock);
+    if (cached_best_cpu == target_cpu_idx) {
+        cache_tick = 0;
+    }
+    spinlock_release_safe(&cpu_cache_lock, cache_flags);
     
     spinlock_release_safe(&target->lock, flags);
 }
@@ -269,6 +306,12 @@ void sched_remove(task_t* t) {
 
     if (target->total_task_count > 0)
         target->total_task_count--;
+
+    uint32_t cache_flags = spinlock_acquire_safe(&cpu_cache_lock);
+    if (cached_best_cpu == cpu_idx) {
+        cache_tick = 0;
+    }
+    spinlock_release_safe(&cpu_cache_lock, cache_flags);
 
     task_t* curr = target->runq_head;
     while (curr) {
