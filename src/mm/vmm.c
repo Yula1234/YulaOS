@@ -14,6 +14,7 @@ typedef enum { RED, BLACK } rb_color_t;
 typedef struct vm_free_block {
     uint32_t start;     
     uint32_t size;      
+    uint32_t max_size;
     
     rb_color_t color;
     struct vm_free_block *left, *right, *parent;
@@ -39,6 +40,7 @@ static vm_free_block_t* alloc_node(void) {
             node_pool[i].is_active = 1;
             node_pool[i].left = node_pool[i].right = node_pool[i].parent = 0;
             node_pool[i].color = RED;
+            node_pool[i].max_size = 0;
             return &node_pool[i];
         }
     }
@@ -49,6 +51,7 @@ static vm_free_block_t* alloc_node(void) {
             node_pool[i].is_active = 1;
             node_pool[i].left = node_pool[i].right = node_pool[i].parent = 0;
             node_pool[i].color = RED;
+            node_pool[i].max_size = 0;
             return &node_pool[i];
         }
     }
@@ -57,6 +60,28 @@ static vm_free_block_t* alloc_node(void) {
 }
 static void free_node(vm_free_block_t* node) {
     node->is_active = 0;
+}
+
+static inline uint32_t get_max_size(vm_free_block_t* node) {
+    if (!node) return 0;
+    return node->max_size;
+}
+
+static void update_max_size(vm_free_block_t* node) {
+    if (!node) return;
+    uint32_t left_max = get_max_size(node->left);
+    uint32_t right_max = get_max_size(node->right);
+    uint32_t max = node->size;
+    if (left_max > max) max = left_max;
+    if (right_max > max) max = right_max;
+    node->max_size = max;
+}
+
+static void update_max_size_upward(vm_free_block_t* node) {
+    while (node) {
+        update_max_size(node);
+        node = node->parent;
+    }
 }
 
 static void rotate_left(vm_free_block_t* x) {
@@ -69,6 +94,9 @@ static void rotate_left(vm_free_block_t* x) {
     else x->parent->right = y;
     y->left = x;
     x->parent = y;
+    
+    update_max_size(x);
+    update_max_size(y);
 }
 
 static void rotate_right(vm_free_block_t* x) {
@@ -81,6 +109,9 @@ static void rotate_right(vm_free_block_t* x) {
     else x->parent->left = y;
     y->right = x;
     x->parent = y;
+    
+    update_max_size(x);
+    update_max_size(y);
 }
 
 static void insert_fixup(vm_free_block_t* z) {
@@ -137,6 +168,8 @@ static void rb_insert(vm_free_block_t* z) {
     
     z->left = z->right = 0;
     z->color = RED;
+    z->max_size = z->size;
+    update_max_size_upward(z);
     insert_fixup(z);
 }
 
@@ -153,17 +186,21 @@ static vm_free_block_t* tree_minimum(vm_free_block_t* x) {
 }
 
 static void delete_fixup(vm_free_block_t* x) {
-    while (x != root && x->color == BLACK) {
+    while (x != root && (!x || x->color == BLACK)) {
+        if (!x || !x->parent) break;
         if (x == x->parent->left) {
             vm_free_block_t* w = x->parent->right;
+            if (!w) break;
             if (w->color == RED) {
                 w->color = BLACK;
                 x->parent->color = RED;
                 rotate_left(x->parent);
                 w = x->parent->right;
+                if (!w) break;
             }
             if ((!w->left || w->left->color == BLACK) && (!w->right || w->right->color == BLACK)) {
                 w->color = RED;
+                update_max_size(x->parent);
                 x = x->parent;
             } else {
                 if (!w->right || w->right->color == BLACK) {
@@ -171,6 +208,7 @@ static void delete_fixup(vm_free_block_t* x) {
                     w->color = RED;
                     rotate_right(w);
                     w = x->parent->right;
+                    if (!w) break;
                 }
                 w->color = x->parent->color;
                 x->parent->color = BLACK;
@@ -180,14 +218,17 @@ static void delete_fixup(vm_free_block_t* x) {
             }
         } else {
             vm_free_block_t* w = x->parent->left;
+            if (!w) break;
             if (w->color == RED) {
                 w->color = BLACK;
                 x->parent->color = RED;
                 rotate_right(x->parent);
                 w = x->parent->left;
+                if (!w) break;
             }
             if ((!w->right || w->right->color == BLACK) && (!w->left || w->left->color == BLACK)) {
                 w->color = RED;
+                update_max_size(x->parent);
                 x = x->parent;
             } else {
                 if (!w->left || w->left->color == BLACK) {
@@ -195,6 +236,7 @@ static void delete_fixup(vm_free_block_t* x) {
                     w->color = RED;
                     rotate_left(w);
                     w = x->parent->left;
+                    if (!w) break;
                 }
                 w->color = x->parent->color;
                 x->parent->color = BLACK;
@@ -204,26 +246,34 @@ static void delete_fixup(vm_free_block_t* x) {
             }
         }
     }
-    x->color = BLACK;
+    if (x) {
+        x->color = BLACK;
+        update_max_size(x);
+    }
 }
 
 static void rb_delete(vm_free_block_t* z) {
     vm_free_block_t* y = z;
     vm_free_block_t* x;
+    vm_free_block_t* fixup_start = 0;
     rb_color_t y_original_color = y->color;
 
     if (!z->left) {
         x = z->right;
+        fixup_start = z->parent;
         rb_transplant(z, z->right);
     } else if (!z->right) {
         x = z->left;
+        fixup_start = z->parent;
         rb_transplant(z, z->left);
     } else {
         y = tree_minimum(z->right);
         y_original_color = y->color;
         x = y->right;
+        fixup_start = y->parent;
         if (y->parent == z) {
             if (x) x->parent = y;
+            fixup_start = y;
         } else {
             rb_transplant(y, y->right);
             y->right = z->right;
@@ -233,8 +283,10 @@ static void rb_delete(vm_free_block_t* z) {
         y->left = z->left;
         y->left->parent = y;
         y->color = z->color;
+        y->max_size = z->max_size;
     }
     if (y_original_color == BLACK && x) delete_fixup(x);
+    if (fixup_start) update_max_size_upward(fixup_start);
     free_node(z);
 }
 
@@ -247,26 +299,44 @@ void vmm_init(void) {
     vm_free_block_t* initial_block = alloc_node();
     initial_block->start = KERNEL_HEAP_START;
     initial_block->size = KERNEL_HEAP_SIZE / PAGE_SIZE;
+    initial_block->max_size = initial_block->size;
     
     rb_insert(initial_block);
 }
 
-static vm_free_block_t* find_fit(vm_free_block_t* node, size_t pages) {
+static vm_free_block_t* find_fit_optimized(vm_free_block_t* node, size_t pages) {
     if (!node) return 0;
     
-    if (node->size >= pages) return node;
+    if (node->max_size < pages) return 0;
     
-    vm_free_block_t* l = find_fit(node->left, pages);
-    if (l) return l;
+    vm_free_block_t* best = 0;
     
-    return find_fit(node->right, pages);
+    if (node->left && get_max_size(node->left) >= pages) {
+        best = find_fit_optimized(node->left, pages);
+        if (best) return best;
+    }
+    
+    if (node->size >= pages) {
+        if (!best || node->size < best->size) {
+            best = node;
+        }
+    }
+    
+    if (node->right && get_max_size(node->right) >= pages) {
+        vm_free_block_t* right_best = find_fit_optimized(node->right, pages);
+        if (right_best && (!best || right_best->size < best->size)) {
+            best = right_best;
+        }
+    }
+    
+    return best;
 }
 
 void* vmm_alloc_pages(size_t pages) {
     if (pages == 0) return 0;
     uint32_t flags = spinlock_acquire_safe(&vmm_lock);
 
-    vm_free_block_t* node = find_fit(root, pages);
+    vm_free_block_t* node = find_fit_optimized(root, pages);
     if (!node) {
         spinlock_release_safe(&vmm_lock, flags);
         return 0; // OOM
@@ -274,6 +344,7 @@ void* vmm_alloc_pages(size_t pages) {
     
     uint32_t alloc_virt_addr = node->start + (node->size - pages) * PAGE_SIZE;
     node->size -= pages;
+    update_max_size_upward(node);
 
     if (node->size == 0) {
         rb_delete(node);
@@ -349,12 +420,14 @@ void vmm_free_pages(void* virt, size_t pages) {
         vaddr = prev->start;
         pages = prev->size;
         merged_prev = 1;
+        update_max_size_upward(prev);
     }
 
     if (next && (vaddr + pages * PAGE_SIZE == next->start)) {
         if (merged_prev) {
             prev->size += next->size;
             rb_delete(next);
+            update_max_size_upward(prev);
         } else {
             size_t new_size = pages + next->size;
             rb_delete(next);
@@ -362,6 +435,7 @@ void vmm_free_pages(void* virt, size_t pages) {
             vm_free_block_t* new_node = alloc_node();
             new_node->start = vaddr;
             new_node->size = new_size;
+            new_node->max_size = new_size;
             rb_insert(new_node);
         }
         merged_next = 1;
@@ -371,6 +445,7 @@ void vmm_free_pages(void* virt, size_t pages) {
         vm_free_block_t* new_node = alloc_node();
         new_node->start = vaddr;
         new_node->size = pages;
+        new_node->max_size = pages;
         rb_insert(new_node);
     }
 

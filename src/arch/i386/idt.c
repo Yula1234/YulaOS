@@ -132,7 +132,17 @@ void isr_handler(registers_t* regs) {
                 }
             }
 
-            if (curr && curr->state == TASK_RUNNING) {
+            if (curr && curr->state == TASK_RUNNING && curr->pid != 0) {
+                if (curr->exec_start > 0) {
+                    uint64_t delta_exec = timer_ticks - curr->exec_start;
+                    if (delta_exec >= 1) {
+                        uint32_t weight = calc_weight(curr->priority);
+                        uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, weight);
+                        curr->vruntime += delta_vruntime;
+                        curr->exec_start = timer_ticks;
+                    }
+                }
+                
                 if (curr->ticks_left > 0) curr->ticks_left--;
                 if (curr->ticks_left == 0) {
                     curr->ticks_left = curr->quantum; 

@@ -173,6 +173,8 @@ static task_t* alloc_task(void) {
     t->cwd_inode = 1;
     t->term_mode = 0;
     t->assigned_cpu = -1;
+    t->vruntime = 0;
+    t->exec_start = 0;
 
     pid_hash_insert(t);
     

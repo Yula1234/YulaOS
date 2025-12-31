@@ -6,6 +6,7 @@
 #include "../lib/string.h"
 #include "../hal/lock.h"
 #include "../kernel/sched.h"
+#include "../mm/heap.h"
 
 #define BCACHE_SIZE     128 
 #define HASH_BUCKETS    64 
@@ -221,4 +222,71 @@ void bcache_flush_block(uint32_t block_idx) {
         b->dirty = 0;
     }
     spinlock_release_safe(&cache_lock, flags);
+}
+
+void bcache_readahead(uint32_t start_block, uint32_t count) {
+    if (count == 0) return;
+    
+    uint32_t max_prefetch = 8;
+    if (count > max_prefetch) count = max_prefetch;
+    
+    for (uint32_t i = 1; i <= count; i++) {
+        uint32_t block_idx = start_block + i;
+        
+        uint32_t flags = spinlock_acquire_safe(&cache_lock);
+        cache_block_t* b = cache_lookup(block_idx);
+        if (b) {
+            lru_touch(b);
+            spinlock_release_safe(&cache_lock, flags);
+            continue;
+        }
+        
+        b = lru_tail;
+        if (!b) {
+            spinlock_release_safe(&cache_lock, flags);
+            continue;
+        }
+        
+        if (b->valid && b->dirty) {
+            uint32_t old_idx = b->block_idx;
+            disk_write_4k(old_idx, b->data);
+            b->dirty = 0;
+        }
+        hash_remove(b);
+        spinlock_release_safe(&cache_lock, flags);
+        
+        uint8_t* scratch = (uint8_t*)kmalloc(BLOCK_SIZE);
+        if (!scratch) continue;
+        
+        disk_read_4k(block_idx, scratch);
+        
+        flags = spinlock_acquire_safe(&cache_lock);
+        
+        cache_block_t* race_check = cache_lookup(block_idx);
+        if (race_check) {
+            lru_touch(race_check);
+            kfree(scratch);
+            spinlock_release_safe(&cache_lock, flags);
+            continue;
+        }
+        
+        b = lru_tail;
+        if (b && b->valid && b->dirty) {
+            disk_write_4k(b->block_idx, b->data);
+            b->dirty = 0;
+        }
+        
+        if (b) {
+            hash_remove(b);
+            b->block_idx = block_idx;
+            b->valid = 1;
+            b->dirty = 0;
+            memcpy(b->data, scratch, BLOCK_SIZE);
+            hash_insert(b);
+            lru_touch(b);
+        }
+        
+        kfree(scratch);
+        spinlock_release_safe(&cache_lock, flags);
+    }
 }

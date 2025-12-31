@@ -12,6 +12,35 @@
 #include "sched.h"
 #include "cpu.h"
 
+extern volatile uint32_t timer_ticks;
+
+#define NICE_0_LOAD 1024
+#define MIN_GRANULARITY 1
+
+uint32_t calc_weight(task_prio_t prio) {
+    int nice = (int)prio - 10;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
+    
+    static const uint32_t prio_to_weight[40] = {
+        88761, 71755, 56483, 46273, 36291,
+        29154, 23254, 18705, 14949, 11916,
+        9548, 7620, 6100, 4904, 3906,
+        3121, 2501, 1991, 1586, 1277,
+        1024, 820, 655, 526, 423,
+        335, 272, 215, 172, 137,
+        110, 87, 70, 56, 45,
+        36, 29, 23, 18, 15
+    };
+    
+    return prio_to_weight[nice + 20];
+}
+
+uint64_t calc_delta_vruntime(uint64_t delta_exec, uint32_t weight) {
+    if (weight == 0) return delta_exec;
+    return (delta_exec * NICE_0_LOAD) / weight;
+}
+
 void sched_init(void) {}
 
 static int get_best_cpu(void) {
@@ -70,6 +99,28 @@ void sched_add(task_t* t) {
     t->quantum = (t->priority + 1) * 3;
     t->ticks_left = t->quantum;
     
+    if (t->vruntime == 0) {
+        task_t* min_task = 0;
+        uint64_t min_vruntime = 0xFFFFFFFFFFFFFFFFULL;
+        
+        task_t* curr = target->runq_head;
+        while (curr) {
+            if (curr->state == TASK_RUNNABLE && curr->vruntime < min_vruntime) {
+                min_vruntime = curr->vruntime;
+                min_task = curr;
+            }
+            curr = curr->sched_next;
+        }
+        
+        if (min_task) {
+            t->vruntime = min_task->vruntime;
+        } else {
+            t->vruntime = timer_ticks * NICE_0_LOAD;
+        }
+    }
+    
+    t->exec_start = timer_ticks;
+    
     target->total_priority_weight += t->priority;
     target->total_task_count++;
 
@@ -78,41 +129,49 @@ void sched_add(task_t* t) {
     spinlock_release_safe(&target->lock, flags);
 }
 
-static task_t* pick_next_rr(cpu_t* cpu) {
+static task_t* pick_next_cfs(cpu_t* cpu) {
     if (!cpu->runq_head) return 0;
     
-    uint32_t count = cpu->runq_count;
-    uint32_t inspected = 0;
+    task_t* best = 0;
+    uint64_t min_vruntime = 0xFFFFFFFFFFFFFFFFULL;
     
-    while (inspected < count && cpu->runq_head) {
-        task_t* t = cpu->runq_head;
-        
-        cpu->runq_head = t->sched_next;
+    task_t* curr = cpu->runq_head;
+    while (curr) {
+        if ((curr->state == TASK_RUNNABLE || curr->state == TASK_RUNNING) && 
+            curr->vruntime < min_vruntime) {
+            min_vruntime = curr->vruntime;
+            best = curr;
+        }
+        curr = curr->sched_next;
+    }
+    
+    if (!best) return 0;
+    
+    if (cpu->runq_head == best) {
+        cpu->runq_head = best->sched_next;
         if (cpu->runq_head) cpu->runq_head->sched_prev = 0;
         else cpu->runq_tail = 0;
-        
-        t->sched_next = 0;
-        t->sched_prev = 0;
-        t->is_queued = 0;
-        
-        if (t->state == TASK_RUNNABLE || t->state == TASK_RUNNING) {
-            if (cpu->runq_tail) {
-                cpu->runq_tail->sched_next = t;
-                t->sched_prev = cpu->runq_tail;
-                cpu->runq_tail = t;
-            } else {
-                cpu->runq_head = t;
-                cpu->runq_tail = t;
-            }
-            t->is_queued = 1;
-            return t;
-        } else {
-            cpu->runq_count--;
-        }
-        
-        inspected++;
+    } else {
+        if (best->sched_prev) best->sched_prev->sched_next = best->sched_next;
+        if (best->sched_next) best->sched_next->sched_prev = best->sched_prev;
+        else cpu->runq_tail = best->sched_prev;
     }
-    return 0;
+    
+    best->sched_next = 0;
+    best->sched_prev = 0;
+    best->is_queued = 0;
+    
+    if (cpu->runq_tail) {
+        cpu->runq_tail->sched_next = best;
+        best->sched_prev = cpu->runq_tail;
+        cpu->runq_tail = best;
+    } else {
+        cpu->runq_head = best;
+        cpu->runq_tail = best;
+    }
+    best->is_queued = 1;
+    
+    return best;
 }
 
 void sched_set_current(task_t* t) {
@@ -145,11 +204,21 @@ void sched_yield(void) {
     if (prev && prev->state == TASK_RUNNING) {
         prev->state = TASK_RUNNABLE;
         fpu_save(prev->fpu_state);
+        
+        if (prev->exec_start > 0 && prev->pid != 0) {
+            uint64_t delta_exec = timer_ticks - prev->exec_start;
+            if (delta_exec > 0) {
+                uint32_t weight = calc_weight(prev->priority);
+                uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, weight);
+                prev->vruntime += delta_vruntime;
+            }
+        }
+        prev->exec_start = 0;
     }
 
     while (1) {
         uint32_t flags = spinlock_acquire_safe(&me->lock);
-        task_t* next = pick_next_rr(me);
+        task_t* next = pick_next_cfs(me);
         spinlock_release_safe(&me->lock, flags);
 
         if (!next) {
@@ -163,6 +232,8 @@ void sched_yield(void) {
                 }
                 return;
             }
+            
+            next->exec_start = timer_ticks;
             
             me->current_task = next;
             sched_set_current(next);

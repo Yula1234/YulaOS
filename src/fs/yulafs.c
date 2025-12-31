@@ -858,6 +858,8 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     uint8_t* scratch = kmalloc(YFS_BLOCK_SIZE);
     if (!scratch) { rwlock_release_read(lock); return -1; }
 
+    uint32_t last_prefetched_log_blk = 0xFFFFFFFF;
+    
     while (read_count < size) {
         uint32_t log_blk = (offset + read_count) / YFS_BLOCK_SIZE;
         uint32_t blk_off = (offset + read_count) % YFS_BLOCK_SIZE;
@@ -873,6 +875,18 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
                 return -1; 
             }
             memcpy((uint8_t*)buf + read_count, scratch + blk_off, copy_len);
+            
+            if (log_blk != last_prefetched_log_blk) {
+                uint32_t next_log_blk = log_blk + 1;
+                uint32_t next_phys_blk = resolve_block(&node, next_log_blk, 0);
+                if (next_phys_blk) {
+                    uint32_t blocks_remaining = ((node.size - (offset + read_count)) + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
+                    if (blocks_remaining > 0) {
+                        bcache_readahead(phys_blk, blocks_remaining > 8 ? 8 : blocks_remaining);
+                    }
+                }
+                last_prefetched_log_blk = log_blk;
+            }
         } else {
             memset((uint8_t*)buf + read_count, 0, copy_len);
         }

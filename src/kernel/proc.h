@@ -100,6 +100,9 @@ typedef struct task {
     task_prio_t priority;
     uint32_t    quantum;
     uint32_t    ticks_left;
+    
+    uint64_t    vruntime;      // Virtual runtime for CFS scheduling
+    uint64_t    exec_start;    // When task started executing (tick count)
 
     uint8_t term_mode;
 
