@@ -71,6 +71,51 @@ char* strcat(char* dest, const char* src) {
     return dest;
 }
 
+static char* number(char* str, long num, int base, int size, int precision, int type) {
+    char c, sign, tmp[66];
+    const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    int i;
+
+    if (type & 16) digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (type & 4) size--;
+    if (type & 2) {
+        if (base == 16 && (type & 8)) size -= 2;
+    }
+    
+    i = 0;
+    if (num == 0) tmp[i++] = '0';
+    else {
+        if (base == 10 && num < 0) { sign = '-'; num = -num; } else sign = 0;
+        // Handle unsigned for hex
+        unsigned long unum = (unsigned long)num;
+        if (base == 10 && sign) unum = (unsigned long)num;
+
+        while (unum != 0) {
+            tmp[i++] = digits[unum % base];
+            unum /= base;
+        }
+        if (sign) tmp[i++] = sign;
+    }
+
+    if (i > precision) precision = i;
+    size -= precision;
+    
+    if (!(type & (2 + 4))) while (size-- > 0) *str++ = ' ';
+    if (sign) *str++ = sign;
+    
+    if (type & 2) { // Pad zeros
+        while (size-- > 0) *str++ = '0';
+    }
+    
+    while (i < precision--) *str++ = '0';
+    while (i-- > 0) *str++ = tmp[i];
+    while (size-- > 0) *str++ = ' '; 
+
+    return str;
+}
+
+
+
 void print(const char* s) {
     write(1, s, strlen(s));
 }
@@ -155,11 +200,75 @@ void vprintf(const char* fmt, va_list args) {
     }
 }
 
-void printf(const char* fmt, ...) {
+
+int vsprintf(char* buf, const char* fmt, va_list args) {
+    char* str = buf;
+    const char* s;
+    
+    for (; *fmt; ++fmt) {
+        if (*fmt != '%') { *str++ = *fmt; continue; }
+        
+        int flags = 0;
+        fmt++;
+        while(1) {
+            if (*fmt == '-') flags |= 4;
+            else if (*fmt == '+') flags |= 1;
+            else if (*fmt == ' ') flags |= 32;
+            else if (*fmt == '0') flags |= 2;
+            else break;
+            fmt++;
+        }
+        
+        int field_width = -1;
+        if (*fmt >= '0' && *fmt <= '9') {
+            field_width = 0;
+            while (*fmt >= '0' && *fmt <= '9') {
+                field_width = field_width * 10 + (*fmt - '0');
+                fmt++;
+            }
+        }
+        
+        if (*fmt == 's') {
+            s = va_arg(args, char*);
+            if (!s) s = "<NULL>";
+            int len = strlen(s);
+            if (!(flags & 4)) while (len < field_width--) *str++ = ' ';
+            while (*s) *str++ = *s++;
+            while (len < field_width--) *str++ = ' ';
+        } else if (*fmt == 'd' || *fmt == 'i') {
+            str = number(str, va_arg(args, int), 10, field_width, 0, flags);
+        } else if (*fmt == 'x') {
+            str = number(str, va_arg(args, unsigned int), 16, field_width, 0, flags);
+        } else if (*fmt == 'X') {
+            str = number(str, va_arg(args, unsigned int), 16, field_width, 0, flags | 16);
+        } else if (*fmt == 'c') {
+            *str++ = (unsigned char)va_arg(args, int);
+        } else if (*fmt == '%') {
+            *str++ = '%';
+        } else {
+            *str++ = '%';
+            if (*fmt) *str++ = *fmt;
+        }
+    }
+    *str = '\0';
+    return str - buf;
+}
+
+int sprintf(char* str, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    vprintf(fmt, args);
+    int i = vsprintf(str, fmt, args);
     va_end(args);
+    return i;
+}
+
+void printf(const char* fmt, ...) {
+    char buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsprintf(buf, fmt, args);
+    va_end(args);
+    print(buf);
 }
 
 void* memset(void* dst, int v, uint32_t n) {

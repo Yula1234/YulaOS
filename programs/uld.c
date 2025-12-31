@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
+// ULD - Micro Linker
 
 #include <yula.h>
 
@@ -147,7 +148,6 @@ const char* get_str(ObjectFile* obj, uint32_t offset) {
     return (const char*)(obj->raw_data + obj->sh_strtab->sh_offset + offset);
 }
 
-
 ObjectFile* load_object(const char* filename) {
     int fd = open(filename, 0);
     if (fd < 0) fatal("Cannot open file: %s", filename);
@@ -199,7 +199,6 @@ void calculate_layout(LinkerCtx* ctx) {
     }
     ctx->total_text_size = (text_off + (SECT_ALIGN-1)) & ~(SECT_ALIGN-1);
 
-    // 2. Data Section
     for (int i = 0; i < ctx->obj_count; i++) {
         ObjectFile* obj = ctx->objects[i];
         if (obj->sh_data) {
@@ -210,7 +209,6 @@ void calculate_layout(LinkerCtx* ctx) {
     }
     ctx->total_data_size = (data_off + (SECT_ALIGN-1)) & ~(SECT_ALIGN-1);
 
-    // 3. BSS Section
     for (int i = 0; i < ctx->obj_count; i++) {
         ObjectFile* obj = ctx->objects[i];
         if (obj->sh_bss) {
@@ -248,10 +246,7 @@ void collect_symbols(LinkerCtx* ctx) {
             if (bind == 1 && s->st_shndx != SHN_UNDEF) { 
                 const char* name = get_str(obj, s->st_name);
                 
-                if (find_global(ctx, name)) {
-                    printf("Warning: Duplicate symbol '%s' in %s (ignored)\n", name, obj->name);
-                    continue;
-                }
+                if (find_global(ctx, name)) continue;
                 
                 GlobalSymbol* gs = &ctx->symbols[ctx->sym_count++];
                 strcpy(gs->name, name);
@@ -311,9 +306,9 @@ void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel, int 
         }
         
         uint32_t* patch_loc = (uint32_t*)(buffer_ptr + r->r_offset);
-        uint32_t P = section_base_addr + r->r_offset; // PC
+        uint32_t P = section_base_addr + r->r_offset; 
         uint32_t S = sym_val;
-        uint32_t A = *patch_loc; // Addend
+        uint32_t A = *patch_loc;
         
         if (type == R_386_32) {
             *patch_loc = S + A;
@@ -327,10 +322,17 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
     uint32_t headers_sz = sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr);
     uint32_t file_sz = headers_sz + ctx->total_text_size + ctx->total_data_size;
     
+    char shstrtab[128];
+    memset(shstrtab, 0, 128);
+    int shstr_sz = 1;
+    int n_txt = shstr_sz; strcpy(shstrtab + shstr_sz, ".text"); shstr_sz += 6;
+    int n_dat = shstr_sz; strcpy(shstrtab + shstr_sz, ".data"); shstr_sz += 6;
+    int n_bss = shstr_sz; strcpy(shstrtab + shstr_sz, ".bss"); shstr_sz += 5;
+    int n_shstr = shstr_sz; strcpy(shstrtab + shstr_sz, ".shstrtab"); shstr_sz += 10;
+
     ctx->out_buffer = safe_malloc(file_sz);
     ctx->out_size = file_sz;
     
-    // ELF Header
     Elf32_Ehdr* eh = (Elf32_Ehdr*)ctx->out_buffer;
     eh->e_ident[0]=0x7F; eh->e_ident[1]='E'; eh->e_ident[2]='L'; eh->e_ident[3]='F';
     eh->e_ident[4]=1; eh->e_ident[5]=1; eh->e_ident[6]=1;
@@ -338,14 +340,16 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
     eh->e_entry = ctx->entry_addr;
     eh->e_phoff = sizeof(Elf32_Ehdr); eh->e_ehsize = sizeof(Elf32_Ehdr);
     eh->e_phentsize = sizeof(Elf32_Phdr); eh->e_phnum = 1;
+    eh->e_shentsize = sizeof(Elf32_Shdr); eh->e_shnum = 5;
+    eh->e_shstrndx = 4;
+    eh->e_shoff = file_sz;
     
-    // Program Header (1 segment LOAD)
     Elf32_Phdr* ph = (Elf32_Phdr*)(ctx->out_buffer + sizeof(Elf32_Ehdr));
     ph->p_type = 1; ph->p_offset = 0;
     ph->p_vaddr = BASE_ADDR; ph->p_paddr = BASE_ADDR;
     ph->p_filesz = file_sz; 
-    ph->p_memsz = file_sz + ctx->total_bss_size; // BSS
-    ph->p_flags = 7; // RWX
+    ph->p_memsz = file_sz + ctx->total_bss_size;
+    ph->p_flags = 7;
     ph->p_align = PAGE_ALIGN;
     
     uint8_t* ptr_text = ctx->out_buffer + headers_sz;
@@ -362,12 +366,25 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
         apply_relocations(ctx, ctx->objects[i], ctx->objects[i]->sh_rel_data, 0);
     }
     
+    Elf32_Shdr sh[5] = {0};
+    sh[1].sh_name = n_txt; sh[1].sh_type = 1; sh[1].sh_flags = 6;
+    sh[1].sh_addr = BASE_ADDR + headers_sz; sh[1].sh_offset = headers_sz; sh[1].sh_size = ctx->total_text_size;
+    sh[2].sh_name = n_dat; sh[2].sh_type = 1; sh[2].sh_flags = 3;
+    sh[2].sh_addr = BASE_ADDR + headers_sz + ctx->total_text_size; sh[2].sh_offset = headers_sz + ctx->total_text_size; sh[2].sh_size = ctx->total_data_size;
+    sh[3].sh_name = n_bss; sh[3].sh_type = 8; sh[3].sh_flags = 3;
+    sh[3].sh_addr = sh[2].sh_addr + sh[2].sh_size; sh[3].sh_offset = sh[2].sh_offset + sh[2].sh_size; sh[3].sh_size = ctx->total_bss_size;
+    sh[4].sh_name = n_shstr; sh[4].sh_type = 3; sh[4].sh_flags = 0;
+    sh[4].sh_addr = 0; sh[4].sh_offset = file_sz + sizeof(sh); sh[4].sh_size = shstr_sz;
+
     int fd = open(outfile, 1);
     if (fd < 0) fatal("Cannot write output: %s", outfile);
-    write(fd, ctx->out_buffer, ctx->out_size);
+    
+    write(fd, ctx->out_buffer, ctx->out_size); 
+    write(fd, sh, sizeof(sh));                 
+    write(fd, shstrtab, shstr_sz);             
+    
     close(fd);
     
-    // Flush trick
     int check_fd = open(outfile, 0);
     if (check_fd >= 0) { char tmp; read(check_fd, &tmp, 1); close(check_fd); }
 }
@@ -397,15 +414,13 @@ int main(int argc, char** argv) {
     if (inputs == 0) fatal("No input files");
 
     calculate_layout(&ctx);
-    printf("Layout: Text=%d bytes, Data=%d bytes, BSS=%d bytes\n", ctx.total_text_size, ctx.total_data_size, ctx.total_bss_size);
-
     collect_symbols(&ctx);
     if (ctx.entry_addr == 0) printf("Warning: _start symbol not found.\n");
 
     build_image(&ctx, outfile);
     
     set_console_color(0x00FF00, 0x141414);
-    printf("Success: Linked %s (%d bytes)\n", outfile, ctx.out_size);
+    printf("Success: Linked %s\n", outfile);
     set_console_color(0xD4D4D4, 0x141414);
 
     return 0;

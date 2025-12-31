@@ -1,378 +1,497 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
+// DASM v2.2 - Smart ELF Disassembler
 
 #include <yula.h>
 
-#define MAX_FILE_SIZE   65536
-#define MAX_INSTR_LEN   15
+#define MAX_FILE_SIZE   (1024 * 1024) 
+#define MAX_SYMBOLS     4096
 
-#define C_BG_DEFAULT    0x141414
-#define C_ADDR          0x606060
-#define C_BYTES         0x808080
-#define C_MNEM          0x569CD6
-#define C_REG           0xD4D4D4
+#define C_RESET         0xD4D4D4
+#define C_ADDR          0x569CD6
+#define C_BYTES         0x606060
+#define C_MNEM          0xC586C0
+#define C_REG           0x9CDCFE
 #define C_NUM           0xB5CEA8
-#define C_LABEL         0xC586C0
-#define C_JUMP          0xDCDCAA
-#define C_DATA_HDR      0x4EC9B0
-#define C_DATA_TXT      0xCE9178
-#define C_DEFAULT       0xD4D4D4
+#define C_SYM           0xCE9178
+#define C_SECTION       0x4EC9B0
+#define C_BG            0x1E1E1E
+
+typedef uint32_t Elf32_Addr;
+typedef uint16_t Elf32_Half;
+typedef uint32_t Elf32_Off;
+typedef int32_t  Elf32_Sword;
+typedef uint32_t Elf32_Word;
+
+#define EI_NIDENT 16
 
 typedef struct {
-    uint8_t  e_ident[16];
-    uint16_t e_type;
-    uint16_t e_machine;
-    uint32_t e_version;
-    uint32_t e_entry;
-    uint32_t e_phoff;
-    uint32_t e_shoff;
-    uint32_t e_flags;
-    uint16_t e_ehsize;
-    uint16_t e_phentsize;
-    uint16_t e_phnum;
-    uint16_t e_shentsize;
-    uint16_t e_shnum;
-    uint16_t e_shstrndx;
-} __attribute__((packed)) ElfHeader;
+    unsigned char e_ident[EI_NIDENT];
+    Elf32_Half    e_type;
+    Elf32_Half    e_machine;
+    Elf32_Word    e_version;
+    Elf32_Addr    e_entry;
+    Elf32_Off     e_phoff;
+    Elf32_Off     e_shoff;
+    Elf32_Word    e_flags;
+    Elf32_Half    e_ehsize;
+    Elf32_Half    e_phentsize;
+    Elf32_Half    e_phnum;
+    Elf32_Half    e_shentsize;
+    Elf32_Half    e_shnum;
+    Elf32_Half    e_shstrndx;
+} __attribute__((packed)) Elf32_Ehdr;
 
 typedef struct {
-    uint32_t p_type;
-    uint32_t p_offset;
-    uint32_t p_vaddr;
-    uint32_t p_paddr;
-    uint32_t p_filesz;
-    uint32_t p_memsz;
-    uint32_t p_flags;
-    uint32_t p_align;
-} __attribute__((packed)) ProgHeader;
-
-typedef enum {
-    FMT_NONE, FMT_IMM8, FMT_IMM32, FMT_REG_OP, FMT_MOV_IMM, 
-    FMT_MODRM, FMT_REL8, FMT_REL32, FMT_ALU_IMM, FMT_SHIFT, 
-    FMT_GRP3, FMT_GRP5
-} InstrFormat;
+    Elf32_Word    sh_name;
+    Elf32_Word    sh_type;
+    Elf32_Word    sh_flags;
+    Elf32_Addr    sh_addr;
+    Elf32_Off     sh_offset;
+    Elf32_Word    sh_size;
+    Elf32_Word    sh_link;
+    Elf32_Word    sh_info;
+    Elf32_Word    sh_addralign;
+    Elf32_Word    sh_entsize;
+} __attribute__((packed)) Elf32_Shdr;
 
 typedef struct {
-    uint8_t     opcode;
-    uint8_t     mask;
-    const char* mnem;
-    InstrFormat fmt;
-} InstrDef;
+    Elf32_Word    st_name;
+    Elf32_Addr    st_value;
+    Elf32_Word    st_size;
+    unsigned char st_info;
+    unsigned char st_other;
+    Elf32_Half    st_shndx;
+} __attribute__((packed)) Elf32_Sym;
+
+#define SHT_PROGBITS 1
+#define SHT_SYMTAB   2
+#define SHT_STRTAB   3
+#define SHT_NOBITS   8
+#define SHF_WRITE    1
+#define SHF_ALLOC    2
+#define SHF_EXECINSTR 4
+
+uint8_t* file_buf;
+uint32_t file_size;
+Elf32_Ehdr* ehdr;
+Elf32_Shdr* shdrs;
+char* shstrtab;
 
 typedef struct {
-    uint32_t addr;
-    int      length;
-    uint8_t  bytes[MAX_INSTR_LEN];
-    char     mnem[16];
-    char     op1[64];
-    char     op2[64];
-    uint32_t ref_addr;
-    int      is_jump;
-} DecodedInstr;
+    char name[64];
+    uint32_t value;
+    uint32_t size;
+    int type;
+} Symbol;
 
-const char* regs32[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
-const char* jcc_names[] = { "jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns", "jp", "jnp", "jl", "jge", "jle", "jg" };
-const char* alu_names[] = { "add", "or", "adc", "sbb", "and", "sub", "xor", "cmp" };
-const char* grp3_names[] = { "test", "_unk_", "not", "neg", "mul", "imul", "div", "idiv" };
-const char* shift_names[] = { "rol", "ror", "rcl", "rcr", "shl", "shr", "sal", "sar" };
-const char* grp5_names[] = { "inc", "dec", "call", "call", "jmp", "jmp", "push", "_unk_" };
+Symbol symbols[MAX_SYMBOLS];
+int sym_count = 0;
 
-static const InstrDef instr_table[] = {
-    { 0x90, 0xFF, "nop",   FMT_NONE }, { 0xC3, 0xFF, "ret",   FMT_NONE },
-    { 0xF4, 0xFF, "hlt",   FMT_NONE }, { 0xFA, 0xFF, "cli",   FMT_NONE },
-    { 0xFB, 0xFF, "sti",   FMT_NONE }, { 0xCC, 0xFF, "int3",  FMT_NONE },
-    { 0xCD, 0xFF, "int",   FMT_IMM8 }, { 0x60, 0xFF, "pusha", FMT_NONE },
-    { 0x61, 0xFF, "popa",  FMT_NONE }, { 0xFC, 0xFF, "cld",   FMT_NONE },
-    { 0xFD, 0xFF, "std",   FMT_NONE }, { 0xA4, 0xFF, "movsb", FMT_NONE },
-    { 0xAA, 0xFF, "stosb", FMT_NONE }, { 0xAC, 0xFF, "lodsb", FMT_NONE },
-    { 0xF3, 0xFF, "rep",   FMT_NONE }, { 0xE8, 0xFF, "call",  FMT_REL32 },
-    { 0xE9, 0xFF, "jmp",   FMT_REL32 }, { 0xEB, 0xFF, "jmp",   FMT_REL8 },
-    { 0x70, 0xF0, "jcc",   FMT_REL8 }, { 0x40, 0xF8, "inc",   FMT_REG_OP },
-    { 0x48, 0xF8, "dec",   FMT_REG_OP }, { 0x50, 0xF8, "push",  FMT_REG_OP },
-    { 0x58, 0xF8, "pop",   FMT_REG_OP }, { 0x68, 0xFF, "push",  FMT_IMM32 },
-    { 0x6A, 0xFF, "push",  FMT_IMM8 }, { 0xB8, 0xF8, "mov",   FMT_MOV_IMM },
-    { 0x88, 0xFC, "mov",   FMT_MODRM }, { 0x8A, 0xFC, "mov",   FMT_MODRM },
-    { 0x87, 0xFF, "xchg",  FMT_MODRM }, { 0x00, 0xF8, "add",   FMT_MODRM },
-    { 0x08, 0xF8, "or",    FMT_MODRM }, { 0x20, 0xF8, "and",   FMT_MODRM },
-    { 0x28, 0xF8, "sub",   FMT_MODRM }, { 0x30, 0xF8, "xor",   FMT_MODRM },
-    { 0x38, 0xF8, "cmp",   FMT_MODRM }, { 0x85, 0xFF, "test",  FMT_MODRM },
-    { 0x81, 0xFF, "alu",   FMT_ALU_IMM }, { 0x83, 0xFF, "alu",   FMT_ALU_IMM },
-    { 0xF7, 0xFF, "grp3",  FMT_GRP3 }, { 0xFF, 0xFF, "grp5",  FMT_GRP5 },
-    { 0xC1, 0xFF, "shift", FMT_SHIFT }, { 0xD1, 0xFF, "shift", FMT_SHIFT },
-    { 0xD3, 0xFF, "shift", FMT_SHIFT }, { 0x00, 0x00, NULL,    FMT_NONE }
-};
-
-static uint32_t peek32(uint8_t* buf) { return buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24); }
-
-void fmt_hex(char* buf, uint32_t val, int pad_zeros) {
-    const char* h = "0123456789ABCDEF";
-    *buf++ = '0'; *buf++ = 'x';
-    char tmp[16]; int i = 0;
-    if (val == 0) {
-        if (pad_zeros) { for (int k = 0; k < pad_zeros; k++) *buf++ = '0'; } 
-        else { *buf++ = '0'; }
-        *buf = 0; return;
-    }
-    while (val > 0 || (pad_zeros > 0 && i < pad_zeros)) {
-        tmp[i++] = h[val % 16]; val /= 16;
-    }
-    while (i > 0) *buf++ = tmp[--i];
-    *buf = 0;
+void panic(const char* msg) {
+    set_console_color(0xF44747, C_BG);
+    printf("Error: %s\n", msg);
+    set_console_color(C_RESET, C_BG);
+    exit(1);
 }
 
-int is_printable(char c) { return (c >= 32 && c <= 126); }
+const char* get_reg_name(int reg, int size) {
+    static const char* r8[]  = {"al","cl","dl","bl","ah","ch","dh","bh"};
+    static const char* r16[] = {"ax","cx","dx","bx","sp","bp","si","di"};
+    static const char* r32[] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi"};
+    if (size == 1) return r8[reg & 7];
+    if (size == 2) return r16[reg & 7];
+    return r32[reg & 7];
+}
 
-int decode_modrm(uint8_t* buf, char* out_op, int* out_reg, uint32_t* ref_out) {
-    uint8_t modrm = buf[0];
+void load_symbols() {
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        if (shdrs[i].sh_type == SHT_SYMTAB) {
+            Elf32_Sym* sym_data = (Elf32_Sym*)(file_buf + shdrs[i].sh_offset);
+            int count = shdrs[i].sh_size / sizeof(Elf32_Sym);
+            char* strtab = (char*)(file_buf + shdrs[shdrs[i].sh_link].sh_offset);
+            
+            for (int j = 0; j < count; j++) {
+                if (sym_data[j].st_name != 0 && sym_data[j].st_value != 0) {
+                    if (sym_count < MAX_SYMBOLS) {
+                        Symbol* s = &symbols[sym_count++];
+                        strncpy(s->name, strtab + sym_data[j].st_name, 63);
+                        s->value = sym_data[j].st_value;
+                        s->size = sym_data[j].st_size;
+                        s->type = sym_data[j].st_info & 0xF;
+                    }
+                }
+            }
+        }
+    }
+}
+
+const char* find_symbol(uint32_t addr) {
+    for (int i = 0; i < sym_count; i++) {
+        if (symbols[i].value == addr) return symbols[i].name;
+    }
+    return 0;
+}
+
+typedef struct {
+    char mnem[16];
+    char op1[64];
+    char op2[64];
+    int len;
+    uint8_t bytes[16];
+} Instr;
+
+int decode_modrm(uint8_t* p, int size, char* out, int* reg_out) {
+    uint8_t modrm = *p;
     int mod = (modrm >> 6) & 3;
     int reg = (modrm >> 3) & 7;
     int rm  = modrm & 7;
     int len = 1;
-
-    if (out_reg) *out_reg = reg;
-
+    
+    if (reg_out) *reg_out = reg;
+    
     if (mod == 3) {
-        strcpy(out_op, regs32[rm]);
+        strcpy(out, get_reg_name(rm, size));
         return len;
     }
-
-    char disp_s[32] = {0};
+    
     int32_t disp = 0;
-
-    if (rm == 4) len++; 
-
-    if (mod == 1) { 
-        disp = (int8_t)buf[len]; len += 1;
-    } else if (mod == 2 || (mod == 0 && rm == 5)) {
-        disp = (int32_t)peek32(buf + len); len += 4;
+    int has_disp = 0;
+    
+    if (rm == 4) {
+        uint8_t sib = p[1];
+        int scale = (sib >> 6) & 3;
+        int index = (sib >> 3) & 7;
+        int base  = sib & 7;
+        len++;
+        
+        if (base == 5 && mod == 0) {
+            disp = *(int32_t*)(p + len);
+            len += 4;
+            sprintf(out, "[0x%x", disp);
+        } else {
+            sprintf(out, "[%s", get_reg_name(base, 4));
+        }
+        
+        if (index != 4) {
+            char tmp[16];
+            sprintf(tmp, "+%s*%d", get_reg_name(index, 4), 1 << scale);
+            strcat(out, tmp);
+        }
+    } else {
         if (mod == 0 && rm == 5) {
-            if (ref_out) *ref_out = disp;
-            fmt_hex(disp_s, disp, 0);
-            strcpy(out_op, "["); strcat(out_op, disp_s); strcat(out_op, "]");
+            disp = *(int32_t*)(p + len);
+            len += 4;
+            sprintf(out, "[0x%x", disp);
+            strcat(out, "]");
             return len;
+        } else {
+            sprintf(out, "[%s", get_reg_name(rm, 4));
         }
     }
-
-    strcpy(out_op, "["); strcat(out_op, regs32[rm]);
-    if (disp) {
-        if (disp > 0) { strcat(out_op, "+"); fmt_hex(out_op + strlen(out_op), disp, 0); }
-        else { strcat(out_op, "-"); fmt_hex(out_op + strlen(out_op), -disp, 0); }
+    
+    if (mod == 1) {
+        disp = (int8_t)p[len];
+        len += 1;
+        has_disp = 1;
+    } else if (mod == 2) {
+        disp = *(int32_t*)(p + len);
+        len += 4;
+        has_disp = 1;
     }
-    strcat(out_op, "]");
+    
+    if (has_disp) {
+        char tmp[16];
+        if (disp < 0) sprintf(tmp, "-0x%x", -disp);
+        else sprintf(tmp, "+0x%x", disp);
+        strcat(out, tmp);
+    }
+    
+    strcat(out, "]");
     return len;
 }
 
-int decode_instr(uint8_t* data, uint32_t vaddr, DecodedInstr* out) {
-    memset(out, 0, sizeof(DecodedInstr)); out->addr = vaddr;
-    uint8_t op = data[0];
-    const InstrDef* def = NULL;
+void disasm_one(uint8_t* data, uint32_t vaddr, Instr* ins) {
+    memset(ins, 0, sizeof(Instr));
+    int i = 0;
+    int size = 4;
+    
+    if (data[i] == 0x66) { size = 2; i++; }
+    if (data[i] == 0xF3) { strcpy(ins->mnem, "rep "); i++; }
+    if (data[i] == 0xF2) { strcpy(ins->mnem, "repne "); i++; }
 
-    for (int i = 0; instr_table[i].mnem; i++) {
-        if ((op & instr_table[i].mask) == instr_table[i].opcode) { def = &instr_table[i]; break; }
+    uint8_t op = data[i++];
+    uint32_t val32;
+    uint8_t val8;
+    int32_t rel32;
+    int8_t rel8;
+
+    switch (op) {
+        case 0x90: strcpy(ins->mnem, "nop"); break;
+        case 0xC3: strcpy(ins->mnem, "ret"); break;
+        case 0xC9: strcpy(ins->mnem, "leave"); break;
+        case 0xF4: strcpy(ins->mnem, "hlt"); break;
+        case 0xFA: strcpy(ins->mnem, "cli"); break;
+        case 0xFB: strcpy(ins->mnem, "sti"); break;
+        case 0x60: strcpy(ins->mnem, "pusha"); break;
+        case 0x61: strcpy(ins->mnem, "popa"); break;
+        
+        case 0xCD:
+            strcpy(ins->mnem, "int");
+            val8 = data[i++];
+            sprintf(ins->op1, "0x%x", val8);
+            break;
+
+        case 0x68: 
+            strcpy(ins->mnem, "push"); 
+            val32 = *(uint32_t*)(data + i); i+=4;
+            sprintf(ins->op1, "0x%x", val32); 
+            break;
+        case 0x6A: 
+            strcpy(ins->mnem, "push"); 
+            val8 = data[i++];
+            sprintf(ins->op1, "0x%x", val8); 
+            break;
+        case 0x50 ... 0x57: strcpy(ins->mnem, "push"); strcpy(ins->op1, get_reg_name(op-0x50, 4)); break;
+        case 0x58 ... 0x5F: strcpy(ins->mnem, "pop"); strcpy(ins->op1, get_reg_name(op-0x58, 4)); break;
+
+        case 0x40 ... 0x47: strcpy(ins->mnem, "inc"); strcpy(ins->op1, get_reg_name(op-0x40, 4)); break;
+        case 0x48 ... 0x4F: strcpy(ins->mnem, "dec"); strcpy(ins->op1, get_reg_name(op-0x48, 4)); break;
+
+        case 0xB0 ... 0xB7: 
+            strcpy(ins->mnem, "mov"); 
+            strcpy(ins->op1, get_reg_name(op-0xB0, 1)); 
+            val8 = data[i++];
+            sprintf(ins->op2, "0x%x", val8); 
+            break;
+        case 0xB8 ... 0xBF: 
+            strcpy(ins->mnem, "mov"); 
+            strcpy(ins->op1, get_reg_name(op-0xB8, 4)); 
+            val32 = *(uint32_t*)(data + i); i+=4;
+            sprintf(ins->op2, "0x%x", val32); 
+            break;
+        case 0x88: strcpy(ins->mnem, "mov"); i += decode_modrm(data+i, 1, ins->op1, NULL); break; 
+        case 0x89: strcpy(ins->mnem, "mov"); i += decode_modrm(data+i, 4, ins->op1, NULL); break; 
+        case 0x8A: strcpy(ins->mnem, "mov"); { int r; int l=decode_modrm(data+i, 1, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 1)); i+=l; } break;
+        case 0x8B: strcpy(ins->mnem, "mov"); { int r; int l=decode_modrm(data+i, 4, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 4)); i+=l; } break;
+        case 0xC6: 
+            strcpy(ins->mnem, "mov"); 
+            i += decode_modrm(data+i, 1, ins->op1, NULL); 
+            val8 = data[i++];
+            sprintf(ins->op2, "0x%x", val8); 
+            break;
+        case 0xC7: 
+            strcpy(ins->mnem, "mov"); 
+            i += decode_modrm(data+i, 4, ins->op1, NULL); 
+            val32 = *(uint32_t*)(data + i); i+=4;
+            sprintf(ins->op2, "0x%x", val32); 
+            break;
+        
+        case 0x00: strcpy(ins->mnem, "add"); i += decode_modrm(data+i, 1, ins->op1, NULL); break;
+        case 0x01: strcpy(ins->mnem, "add"); i += decode_modrm(data+i, 4, ins->op1, NULL); break;
+        case 0x02: strcpy(ins->mnem, "add"); { int r; int l=decode_modrm(data+i, 1, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 1)); i+=l; } break;
+        case 0x03: strcpy(ins->mnem, "add"); { int r; int l=decode_modrm(data+i, 4, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 4)); i+=l; } break;
+
+        case 0x29: strcpy(ins->mnem, "sub"); i += decode_modrm(data+i, 4, ins->op1, NULL); break;
+        case 0x31: strcpy(ins->mnem, "xor"); i += decode_modrm(data+i, 4, ins->op1, NULL); break;
+        
+        case 0x38: strcpy(ins->mnem, "cmp"); i += decode_modrm(data+i, 1, ins->op1, NULL); break;
+        case 0x39: strcpy(ins->mnem, "cmp"); i += decode_modrm(data+i, 4, ins->op1, NULL); break;
+        case 0x3A: strcpy(ins->mnem, "cmp"); { int r; int l=decode_modrm(data+i, 1, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 1)); i+=l; } break;
+        case 0x3B: strcpy(ins->mnem, "cmp"); { int r; int l=decode_modrm(data+i, 4, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 4)); i+=l; } break;
+
+        case 0x84: strcpy(ins->mnem, "test"); i += decode_modrm(data+i, 1, ins->op1, NULL); break;
+        case 0x85: strcpy(ins->mnem, "test"); i += decode_modrm(data+i, 4, ins->op1, NULL); break;
+
+        case 0x83: 
+        case 0x81: {
+            int r; 
+            int l = decode_modrm(data+i, 4, ins->op1, &r);
+            i += l;
+            static const char* grp1[] = {"add","or","adc","sbb","and","sub","xor","cmp"};
+            strcpy(ins->mnem, grp1[r]);
+            uint32_t imm;
+            if (op == 0x83) { imm = (int8_t)data[i++]; } 
+            else { imm = *(uint32_t*)(data + i); i+=4; }
+            sprintf(ins->op2, "0x%x", imm);
+            break;
+        }
+
+        case 0xE9: {
+            strcpy(ins->mnem, "jmp"); 
+            rel32 = *(int32_t*)(data + i); i+=4;
+            uint32_t target = vaddr + i + rel32;
+            const char* sym = find_symbol(target);
+            if (sym) sprintf(ins->op1, "<%s>", sym);
+            else sprintf(ins->op1, "0x%x", target);
+            break;
+        }
+        case 0xEB: {
+            strcpy(ins->mnem, "jmp");
+            rel8 = (int8_t)data[i++];
+            sprintf(ins->op1, "0x%x", vaddr + i + rel8);
+            break;
+        }
+        case 0xE8: {
+            strcpy(ins->mnem, "call");
+            rel32 = *(int32_t*)(data + i); i+=4;
+            uint32_t target = vaddr + i + rel32;
+            const char* sym = find_symbol(target);
+            if (sym) sprintf(ins->op1, "<%s>", sym);
+            else sprintf(ins->op1, "0x%x", target);
+            break;
+        }
+        
+        case 0x0F: {
+            uint8_t sub = data[i++];
+            if (sub >= 0x80 && sub <= 0x8F) { 
+                static const char* jcc[] = {"jo","jno","jb","jae","je","jne","jbe","ja","js","jns","jp","jnp","jl","jge","jle","jg"};
+                strcpy(ins->mnem, jcc[sub - 0x80]);
+                rel32 = *(int32_t*)(data + i); i+=4;
+                sprintf(ins->op1, "0x%x", vaddr + i + rel32);
+            } 
+            else if (sub == 0xB6 || sub == 0xB7) {
+                strcpy(ins->mnem, "movzx");
+                int r;
+                int l = decode_modrm(data+i, (sub==0xB6)?1:2, ins->op2, &r);
+                strcpy(ins->op1, get_reg_name(r, 4));
+                i += l;
+            }
+            else if (sub == 0xBE || sub == 0xBF) {
+                strcpy(ins->mnem, "movsx");
+                int r;
+                int l = decode_modrm(data+i, (sub==0xBE)?1:2, ins->op2, &r);
+                strcpy(ins->op1, get_reg_name(r, 4));
+                i += l;
+            }
+            else {
+                sprintf(ins->mnem, "db 0x0F, 0x%02X", sub);
+            }
+            break;
+        }
+        
+        case 0x8D:
+            strcpy(ins->mnem, "lea");
+            { int r; int l=decode_modrm(data+i, 4, ins->op2, &r); strcpy(ins->op1, get_reg_name(r, 4)); i+=l; }
+            break;
+
+        default:
+            sprintf(ins->mnem, "db 0x%02X", op);
+            break;
     }
     
-    if (op == 0x0F) {
-        uint8_t sub = data[1];
-        if (sub >= 0x80 && sub <= 0x8F) {
-            strcpy(out->mnem, jcc_names[sub - 0x80]);
-            int32_t rel = (int32_t)peek32(data + 2);
-            fmt_hex(out->op1, vaddr + 6 + rel, 8);
-            out->length = 6; out->is_jump = 1;
-            return 6;
-        }
-    }
-
-    if (!def) {
-        strcpy(out->mnem, "db"); fmt_hex(out->op1, op, 2);
-        out->length = 1; return 1;
-    }
-
-    strcpy(out->mnem, def->mnem); out->length = 1;
-
-    switch (def->fmt) {
-        case FMT_NONE: break;
-        case FMT_IMM8: fmt_hex(out->op1, data[1], 2); out->length += 1; break;
-        case FMT_IMM32: fmt_hex(out->op1, peek32(data + 1), 8); out->length += 4; out->ref_addr = peek32(data + 1); break;
-        case FMT_REG_OP: strcpy(out->op1, regs32[op & 7]); break;
-        case FMT_MOV_IMM: strcpy(out->op1, regs32[op & 7]); fmt_hex(out->op2, peek32(data + 1), 8); out->length += 4; out->ref_addr = peek32(data + 1); break;
-        case FMT_REL8: { int8_t r = (int8_t)data[1]; if (op >= 0x70) strcpy(out->mnem, jcc_names[op - 0x70]); fmt_hex(out->op1, vaddr + 2 + r, 0); out->length += 1; out->is_jump = 1; break; }
-        case FMT_REL32: { int32_t r = (int32_t)peek32(data + 1); fmt_hex(out->op1, vaddr + 5 + r, 8); out->length += 4; out->is_jump = 1; break; }
-        case FMT_MODRM: {
-            int r; int l = decode_modrm(data + 1, out->op2, &r, &out->ref_addr);
-            strcpy(out->op1, regs32[r]);
-            if ((op & 2) == 0) { char t[64]; strcpy(t, out->op1); strcpy(out->op1, out->op2); strcpy(out->op2, t); }
-            out->length += l; break;
-        }
-        case FMT_ALU_IMM: {
-            int rx; int l = decode_modrm(data + 1, out->op1, &rx, &out->ref_addr);
-            strcpy(out->mnem, alu_names[rx]);
-            uint32_t imm = (op == 0x81) ? peek32(data + 1 + l) : data[1 + l];
-            fmt_hex(out->op2, imm, (op == 0x81) ? 8 : 2);
-            out->length += l + ((op == 0x81) ? 4 : 1); break;
-        }
-        case FMT_GRP5: {
-            int rx; int l = decode_modrm(data + 1, out->op1, &rx, &out->ref_addr);
-            strcpy(out->mnem, grp5_names[rx]); out->length += l;
-            if (rx == 2 || rx == 4) out->is_jump = 1; break;
-        }
-        case FMT_GRP3: {
-            int rx; int l = decode_modrm(data + 1, out->op1, &rx, &out->ref_addr);
-            strcpy(out->mnem, grp3_names[rx]);
-            if (rx == 0) { fmt_hex(out->op2, peek32(data + 1 + l), 8); out->length += l + 4; }
-            else out->length += l; break;
-        }
-        case FMT_SHIFT: {
-            int rx; int l = decode_modrm(data + 1, out->op1, &rx, NULL);
-            strcpy(out->mnem, shift_names[rx]);
-            if (op == 0xD1) strcpy(out->op2, "1");
-            else if (op == 0xD3) strcpy(out->op2, "cl");
-            else { fmt_hex(out->op2, data[1 + l], 2); out->length += 1; }
-            out->length += l; break;
-        }
-    }
-
-    for (int k = 0; k < out->length; k++) out->bytes[k] = data[k];
-    return out->length;
+    ins->len = i;
+    memcpy(ins->bytes, data, i);
 }
 
-void print_colored(DecodedInstr* in) {
-    set_console_color(C_ADDR, C_BG_DEFAULT);
-    printf("0x%x:  ", in->addr);
-    
-    set_console_color(C_BYTES, C_BG_DEFAULT);
-    for (int i = 0; i < 6; i++) {
-        if (i < in->length) {
-            if (in->bytes[i] < 16) print("0");
-            printf("%x ", in->bytes[i]);
-        } else print("   ");
-    }
-    
-    uint32_t mc = C_MNEM;
-    if (in->is_jump) mc = C_JUMP;
-    if (strcmp(in->mnem, "int") == 0) mc = C_NUM;
-    if (strcmp(in->mnem, "ret") == 0) mc = C_JUMP;
-    
-    set_console_color(mc, C_BG_DEFAULT);
-    printf("  %s", in->mnem);
-    
-    int p = strlen(in->mnem); while (p++ < 7) print(" ");
-
-    if (in->op1[0]) {
-        if (in->op1[0] == '0' && in->op1[1] == 'x') set_console_color(C_NUM, C_BG_DEFAULT);
-        else if (in->op1[0] == '[') set_console_color(C_LABEL, C_BG_DEFAULT);
-        else set_console_color(C_REG, C_BG_DEFAULT);
-        printf("%s", in->op1);
-    }
-    
-    if (in->op2[0]) {
-        set_console_color(C_BYTES, C_BG_DEFAULT); print(", ");
-        if (in->op2[0] == '0' && in->op2[1] == 'x') set_console_color(C_NUM, C_BG_DEFAULT);
-        else if (in->op2[0] == '[') set_console_color(C_LABEL, C_BG_DEFAULT);
-        else set_console_color(C_REG, C_BG_DEFAULT);
-        printf("%s", in->op2);
-    }
-    
-    print("\n");
-    
-    if (in->length > 6) {
-        set_console_color(C_BYTES, C_BG_DEFAULT);
-        print("           ");
-        for (int i = 6; i < in->length; i++) {
-            if (in->bytes[i] < 16) print("0"); printf("%x ", in->bytes[i]);
+void print_hexdump(uint8_t* data, uint32_t size, uint32_t base_addr) {
+    for (uint32_t i = 0; i < size; i += 16) {
+        set_console_color(C_ADDR, C_BG);
+        printf("%08x: ", base_addr + i);
+        
+        set_console_color(C_BYTES, C_BG);
+        for (int j = 0; j < 16; j++) {
+            if (i + j < size) printf("%02x ", data[i+j]);
+            else print("   ");
         }
-        print("\n");
+        
+        set_console_color(C_NUM, C_BG);
+        print("|");
+        for (int j = 0; j < 16; j++) {
+            if (i + j < size) {
+                char c = data[i+j];
+                if (c < 32 || c > 126) c = '.';
+                char s[2] = {c, 0};
+                print(s);
+            }
+        }
+        print("|\n");
+    }
+}
+
+void print_section(Elf32_Shdr* sh) {
+    uint8_t* sec_data = file_buf + sh->sh_offset;
+    const char* name = shstrtab + sh->sh_name;
+    
+    set_console_color(C_SECTION, C_BG);
+    printf("\nSection %s (Addr: %08x, Size: %d)\n", name, sh->sh_addr, sh->sh_size);
+    
+    if (sh->sh_flags & SHF_EXECINSTR) {
+        uint32_t offset = 0;
+        Instr ins;
+        while (offset < sh->sh_size) {
+            uint32_t vaddr = sh->sh_addr + offset;
+            
+            const char* sym = find_symbol(vaddr);
+            if (sym) {
+                set_console_color(C_SYM, C_BG);
+                printf("\n<%s>:\n", sym);
+            }
+            
+            disasm_one(sec_data + offset, vaddr, &ins);
+            
+            set_console_color(C_ADDR, C_BG);
+            printf("  %08x: ", vaddr);
+            
+            set_console_color(C_BYTES, C_BG);
+            for (int k=0; k<6; k++) {
+                if (k < ins.len) printf("%02x ", ins.bytes[k]);
+                else print("   ");
+            }
+            
+            set_console_color(C_MNEM, C_BG);
+            printf(" %-6s ", ins.mnem);
+            
+            set_console_color(C_REG, C_BG);
+            if (ins.op1[0]) printf("%s", ins.op1);
+            if (ins.op2[0]) printf(", %s", ins.op2);
+            
+            print("\n");
+            offset += ins.len;
+        }
+    } else if (sh->sh_type == SHT_PROGBITS && (sh->sh_flags & SHF_ALLOC)) {
+        print_hexdump(sec_data, sh->sh_size, sh->sh_addr);
+    } else {
+        set_console_color(C_BYTES, C_BG);
+        print("  [No data to display]\n");
     }
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { print("Usage: dasm <file>\n"); return 1; }
+    if (argc < 2) {
+        printf("Usage: dasm <file.o/exe>\n");
+        return 1;
+    }
 
     int fd = open(argv[1], 0);
-    if (fd < 0) { print("Error: Could not open file.\n"); return 1; }
-
-    uint8_t* buf = malloc(MAX_FILE_SIZE);
-    int size = read(fd, buf, MAX_FILE_SIZE);
+    if (fd < 0) panic("Cannot open file");
+    
+    file_buf = malloc(MAX_FILE_SIZE);
+    if (!file_buf) panic("OOM");
+    
+    int n = read(fd, file_buf, MAX_FILE_SIZE);
     close(fd);
-
-    ElfHeader* eh = (ElfHeader*)buf;
-    if (size < sizeof(ElfHeader) || eh->e_ident[0] != 0x7F) {
-        print("Error: Not a valid ELF file.\n"); free(buf); return 1;
-    }
-
-    ProgHeader* ph = (ProgHeader*)(buf + eh->e_phoff);
-    uint32_t code_off = ph->p_offset + (eh->e_entry - ph->p_vaddr);
-    uint32_t vaddr = eh->e_entry;
     
-    uint32_t data_start_vaddr = vaddr + size;
-
-    int cur = code_off;
-    uint32_t sim_vaddr = vaddr;
-    DecodedInstr tmp;
+    if (n < sizeof(Elf32_Ehdr)) panic("File too small");
     
-    print("Analyzing binary structure...\n");
-    while (cur < size) {
-        if (cur > code_off + 32000) break; 
-        int len = decode_instr(buf + cur, sim_vaddr, &tmp);
-        if (tmp.ref_addr >= vaddr && tmp.ref_addr < vaddr + size) {
-            if (tmp.ref_addr > sim_vaddr) {
-                if (tmp.ref_addr < data_start_vaddr) data_start_vaddr = tmp.ref_addr;
-            }
-        }
-        cur += len; sim_vaddr += len;
-        if (sim_vaddr >= data_start_vaddr) break;
-    }
+    ehdr = (Elf32_Ehdr*)file_buf;
+    if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E') panic("Not an ELF file");
     
-    uint32_t data_offset = code_off + (data_start_vaddr - vaddr);
+    shdrs = (Elf32_Shdr*)(file_buf + ehdr->e_shoff);
+    shstrtab = (char*)(file_buf + shdrs[ehdr->e_shstrndx].sh_offset);
     
-    set_console_color(C_DEFAULT, C_BG_DEFAULT);
-    char cls = 0x0C; write(1, &cls, 1); 
+    load_symbols();
     
-    printf("Disassembly: %s\n", argv[1]);
-    printf("Code Range:  0x%x - 0x%x\n", vaddr, data_start_vaddr);
-    printf("Data Start:  0x%x\n", data_start_vaddr);
-    printf("--------------------------------------------------\n");
-
-    cur = code_off;
-    sim_vaddr = vaddr;
+    printf("DASM v2.2 - Disassembling %s\n", argv[1]);
+    printf("Entry point: 0x%x\n", ehdr->e_entry);
     
-    while (cur < data_offset && cur < size) {
-        int len = decode_instr(buf + cur, sim_vaddr, &tmp);
-        print_colored(&tmp);
-        cur += len; sim_vaddr += len;
-    }
-    
-    if (cur < size) {
-        set_console_color(C_DATA_HDR, C_BG_DEFAULT);
-        printf("\n--- Data Section (0x%x) ---\n", sim_vaddr);
-        
-        while (cur < size) {
-            set_console_color(C_ADDR, C_BG_DEFAULT);
-            printf("0x%x:  ", sim_vaddr);
-            
-            set_console_color(C_BYTES, C_BG_DEFAULT);
-            int chunk = (size - cur) > 16 ? 16 : (size - cur);
-            
-            for (int i = 0; i < 16; i++) {
-                if (i < chunk) { 
-                    if (buf[cur + i] < 16) print("0"); 
-                    printf("%x ", buf[cur + i]); 
-                } else print("   ");
-            }
-            
-            set_console_color(C_DATA_TXT, C_BG_DEFAULT);
-            print(" |");
-            for (int i = 0; i < chunk; i++) {
-                char c = buf[cur + i];
-                char s[2] = { is_printable(c) ? c : '.', 0 };
-                print(s);
-            }
-            print("|\n");
-            
-            cur += 16; sim_vaddr += 16;
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        if (shdrs[i].sh_flags & SHF_ALLOC) {
+            print_section(&shdrs[i]);
         }
     }
-
-    set_console_color(C_DEFAULT, C_BG_DEFAULT); 
-    free(buf);
+    
+    free(file_buf);
+    set_console_color(C_RESET, C_BG);
     return 0;
 }

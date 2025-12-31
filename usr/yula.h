@@ -70,6 +70,8 @@ void print(const char* s);
 void print_hex(uint32_t n);
 void printf(const char* fmt, ...);
 void vprintf(const char* fmt, va_list args);
+int sprintf(char* str, const char* fmt, ...);
+int vsprintf(char* str, const char* fmt, va_list args);
 
 
 static inline void usleep(uint32_t us) {
