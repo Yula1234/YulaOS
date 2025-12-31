@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
-// ULD - Micro Linker
+// ULD - Micro Linker 
 
 #include <yula.h>
 
@@ -306,7 +306,7 @@ void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel, int 
         }
         
         uint32_t* patch_loc = (uint32_t*)(buffer_ptr + r->r_offset);
-        uint32_t P = section_base_addr + r->r_offset; 
+        uint32_t P = section_base_addr + r->r_offset;
         uint32_t S = sym_val;
         uint32_t A = *patch_loc;
         
@@ -369,19 +369,22 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
     Elf32_Shdr sh[5] = {0};
     sh[1].sh_name = n_txt; sh[1].sh_type = 1; sh[1].sh_flags = 6;
     sh[1].sh_addr = BASE_ADDR + headers_sz; sh[1].sh_offset = headers_sz; sh[1].sh_size = ctx->total_text_size;
+    
     sh[2].sh_name = n_dat; sh[2].sh_type = 1; sh[2].sh_flags = 3;
     sh[2].sh_addr = BASE_ADDR + headers_sz + ctx->total_text_size; sh[2].sh_offset = headers_sz + ctx->total_text_size; sh[2].sh_size = ctx->total_data_size;
+    
     sh[3].sh_name = n_bss; sh[3].sh_type = 8; sh[3].sh_flags = 3;
     sh[3].sh_addr = sh[2].sh_addr + sh[2].sh_size; sh[3].sh_offset = sh[2].sh_offset + sh[2].sh_size; sh[3].sh_size = ctx->total_bss_size;
+    
     sh[4].sh_name = n_shstr; sh[4].sh_type = 3; sh[4].sh_flags = 0;
     sh[4].sh_addr = 0; sh[4].sh_offset = file_sz + sizeof(sh); sh[4].sh_size = shstr_sz;
 
     int fd = open(outfile, 1);
     if (fd < 0) fatal("Cannot write output: %s", outfile);
     
-    write(fd, ctx->out_buffer, ctx->out_size); 
-    write(fd, sh, sizeof(sh));                 
-    write(fd, shstrtab, shstr_sz);             
+    write(fd, ctx->out_buffer, ctx->out_size);
+    write(fd, sh, sizeof(sh));
+    write(fd, shstrtab, shstr_sz);
     
     close(fd);
     
@@ -395,8 +398,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    static LinkerCtx ctx; 
-    memset(&ctx, 0, sizeof(LinkerCtx));
+    LinkerCtx* ctx = safe_malloc(sizeof(LinkerCtx));
     
     const char* outfile = "a.out";
     int inputs = 0;
@@ -405,23 +407,24 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 < argc) outfile = argv[++i];
         } else {
-            if (ctx.obj_count >= MAX_OBJECTS) fatal("Too many input files");
-            ctx.objects[ctx.obj_count++] = load_object(argv[i]);
+            if (ctx->obj_count >= MAX_OBJECTS) fatal("Too many input files");
+            ctx->objects[ctx->obj_count++] = load_object(argv[i]);
             inputs++;
         }
     }
 
     if (inputs == 0) fatal("No input files");
 
-    calculate_layout(&ctx);
-    collect_symbols(&ctx);
-    if (ctx.entry_addr == 0) printf("Warning: _start symbol not found.\n");
+    calculate_layout(ctx);
+    collect_symbols(ctx);
+    if (ctx->entry_addr == 0) printf("Warning: _start symbol not found.\n");
 
-    build_image(&ctx, outfile);
+    build_image(ctx, outfile);
     
     set_console_color(0x00FF00, 0x141414);
     printf("Success: Linked %s\n", outfile);
     set_console_color(0xD4D4D4, 0x141414);
 
+    free(ctx);
     return 0;
 }
