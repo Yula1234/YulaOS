@@ -5,6 +5,7 @@
 #include "syscall.h"
 
 void exit(int status) {
+    syscall(0, status, 0, 0); 
     while(1);
 }
 
