@@ -32,7 +32,7 @@
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
-
+#include <kernel/panic.h>
 
 #include <stdint.h>
 
@@ -116,7 +116,10 @@ void syncer_task(void* arg) {
 }
 
 __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
-    if (magic != 0x2BADB002) return;
+    if (magic != 0x2BADB002) {
+        registers_t dummy_regs = {0};
+        kernel_panic("Invalid multiboot magic number", __FILE__, __LINE__, &dummy_regs);
+    }
 
     kernel_init_simd(); 
 
@@ -158,17 +161,19 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
         memory_end_addr = 1024 * 1024 * 64; 
     }
     
-    // Master PIC (port 0x21): 
-    // Bit 0 - Timer (closed, we had APIC)
-    // Bit 1 - Keyboard (opened - 0)
-    // Bit 2 - Cascade (opened - 0)
-    outb(0x21, 0xF9); 
-
+    #define PIC_MASTER_PORT 0x21
+    #define PIC_SLAVE_PORT  0xA1
+    #define PIC_MASK_TIMER   (1 << 0)
+    #define PIC_MASK_KEYBOARD (1 << 1)
+    #define PIC_MASK_CASCADE (1 << 2)
+    #define PIC_MASK_MOUSE   (1 << 4)
+    #define PIC_MASK_HDD     (1 << 6)
+    
+    // Master PIC: disable timer (using APIC), enable keyboard and cascade
+    outb(PIC_MASTER_PORT, ~(PIC_MASK_KEYBOARD | PIC_MASK_CASCADE));
         
-    // Slave PIC (port 0xA1):
-    // Bit 4 - Mouse (IRQ 12, opened - 0)
-    // Bit 6 - HDD (IRQ 14).
-    outb(0xA1, 0xAF); // Opens IRQ 14 for Primary ATA
+    // Slave PIC: enable mouse (IRQ 12) and HDD (IRQ 14)
+    outb(PIC_SLAVE_PORT, ~(PIC_MASK_MOUSE | PIC_MASK_HDD));
     
     pmm_init(memory_end_addr, (uint32_t)&kernel_end);
     paging_init(memory_end_addr);

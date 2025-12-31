@@ -75,23 +75,39 @@ int window_pop_event(window_t* win, yula_event_t* out_ev) {
 }
 
 window_t* window_find_by_id(int window_id) {
+    if (window_id <= 0) return 0;
+    
+    sem_wait(&window_list_lock);
     window_t* win;
+    window_t* result = 0;
+    
     dlist_for_each_entry(win, &window_list, list) {
         if (win->window_id == window_id && win->is_active) {
-            return win;
+            result = win;
+            break;
         }
     }
-    return 0;
+    
+    sem_signal(&window_list_lock);
+    return result;
 }
 
 window_t* window_find_by_pid(int pid) {
+    if (pid <= 0) return 0;
+    
+    sem_wait(&window_list_lock);
     window_t* win;
+    window_t* result = 0;
+    
     dlist_for_each_entry(win, &window_list, list) {
         if (win->owner_pid == pid && win->is_active) {
-            return win;
+            result = win;
+            break;
         }
     }
-    return 0;
+    
+    sem_signal(&window_list_lock);
+    return result;
 }
 
 void window_bring_to_front_nolock(window_t* win) {
@@ -143,13 +159,16 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
     }
 
     win->canvas = (uint32_t*)kmalloc_a(canvas_w * canvas_h * sizeof(uint32_t));
-    if (win->canvas) memset(win->canvas, 0xFF, canvas_w * canvas_h * 4);
+    if (!win->canvas) {
+        sem_signal(&win->lock);
+        sem_signal(&window_list_lock);
+        kfree(win);
+        return 0;
+    }
     
-    if (win->canvas) {
-        int limit = canvas_w * canvas_h;
-        for(int j = 0; j < limit; j++) {
-            win->canvas[j] = 0x1E1E1E;
-        }
+    int limit = canvas_w * canvas_h;
+    for(int j = 0; j < limit; j++) {
+        win->canvas[j] = 0x1E1E1E;
     }
     win->is_dirty = 1;
     
@@ -179,8 +198,10 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
     win->owner_pid = curr ? curr->pid : 0;
     win->focused_pid = win->owner_pid;
     
+    if (next_window_id <= 0 || next_window_id >= 0x7FFFFFFF) {
+        next_window_id = 1;
+    }
     win->window_id = next_window_id++;
-    if (next_window_id <= 0) next_window_id = 1;
 
     dlist_add_tail(&win->list, &window_list);
     window_bring_to_front_nolock(win);
@@ -219,7 +240,22 @@ void window_draw_all() {
 
         sem_wait(&win->lock);
 
-        if (!vga_is_rect_dirty(win->x - 20, win->y - 20, win->w + 40, win->h + 40) && !win->is_dirty) {
+        int check_x = win->x - 20;
+        int check_y = win->y - 20;
+        int check_w = win->w + 40;
+        int check_h = win->h + 40;
+        
+        if (check_x < 0) {
+            check_w += check_x;
+            check_x = 0;
+        }
+        if (check_y < 0) {
+            check_h += check_y;
+            check_y = 0;
+        }
+        
+        if (check_w <= 0 || check_h <= 0 || 
+            (!vga_is_rect_dirty(check_x, check_y, check_w, check_h) && !win->is_dirty)) {
             sem_signal(&win->lock);
             continue;
         }
@@ -335,9 +371,10 @@ void window_close_all_by_pid(int pid) {
     if (focused_window_pid == pid) {
         focused_window_pid = 0;
         window_t* last_win = 0;
-        dlist_for_each_entry(win, &window_list, list) {
-            if (win->is_active) {
-                last_win = win;
+        window_t* iter;
+        dlist_for_each_entry(iter, &window_list, list) {
+            if (iter->is_active) {
+                last_win = iter;
             }
         }
         if (last_win) {

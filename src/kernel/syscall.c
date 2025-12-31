@@ -24,13 +24,15 @@ extern volatile uint32_t timer_ticks;
 extern uint32_t* paging_get_dir(void); 
 
 static int check_user_buffer(__attribute__((unused)) task_t* task, const void* buf, uint32_t size) {
+    if (!buf) return 0;
+    
     if (size == 0) return 1;
 
     uint32_t start = (uint32_t)buf;
     uint32_t end = start + size;
 
     if (end < start) return 0; 
-    if (end > 0xC0000000) return 0; 
+    if (start < 0x08000000 || end > 0xC0000000) return 0; 
 
     __attribute__((unused)) volatile char* p = (volatile char*)buf;
     
@@ -38,9 +40,7 @@ static int check_user_buffer(__attribute__((unused)) task_t* task, const void* b
     uint32_t end_page   = (end - 1) & 0xFFFFF000;
     
     for (uint32_t page = start_page; page <= end_page; page += 4096) {
-        __attribute__((unused)) uint32_t offset = page - start_page;
         uint32_t addr_to_check = page;
-
         if (page == start_page) addr_to_check = start;
 
         volatile char touch = ((volatile char*)addr_to_check)[0];
@@ -296,17 +296,31 @@ void syscall_handler(registers_t* regs) {
             if (!win || !win->is_active) {
                 regs->eax = 0; break;
             }
-            if (win->owner_pid != (int)curr->pid) { regs->eax = 0; break; }
+            
+            sem_wait(&win->lock);
+            if (win->owner_pid != (int)curr->pid || !win->canvas) {
+                sem_signal(&win->lock);
+                regs->eax = 0; 
+                break;
+            }
 
             uint32_t user_vaddr_start = 0xA0000000;
             
             int canvas_w = win->target_w - 12;
             int canvas_h = win->target_h - 44;
             
+            if (canvas_w <= 0 || canvas_h <= 0) {
+                sem_signal(&win->lock);
+                regs->eax = 0;
+                break;
+            }
+            
             uint32_t size_bytes = canvas_w * canvas_h * 4;
             uint32_t pages = (size_bytes + 0xFFF) / 4096;
             
             uint32_t kern_vaddr = (uint32_t)win->canvas;
+
+            sem_signal(&win->lock);
 
             for (uint32_t i = 0; i < pages; i++) {
                 uint32_t offset = i * 4096;
@@ -326,7 +340,11 @@ void syscall_handler(registers_t* regs) {
             int id = regs->ebx;
             window_t* win = window_find_by_id(id);
             if (win && win->is_active) {
-                win->is_dirty = 1; 
+                sem_wait(&win->lock);
+                if (win->is_active && win->owner_pid == (int)curr->pid) {
+                    win->is_dirty = 1;
+                }
+                sem_signal(&win->lock);
                 wake_up_gui();
             }
         }
@@ -337,9 +355,18 @@ void syscall_handler(registers_t* regs) {
             int id = regs->ebx;
             yula_event_t* user_ev = (yula_event_t*)regs->ecx;
             
+            if (!user_ev || !check_user_buffer(curr, user_ev, sizeof(yula_event_t))) {
+                regs->eax = 0;
+                break;
+            }
+            
             window_t* win = window_find_by_id(id);
             if (win && win->is_active) {
-                if (win->owner_pid == (int)curr->pid) {
+                sem_wait(&win->lock);
+                int is_owner = (win->owner_pid == (int)curr->pid);
+                sem_signal(&win->lock);
+                
+                if (is_owner) {
                     yula_event_t k_ev;
                     if (window_pop_event(win, &k_ev)) {
                         *user_ev = k_ev;
@@ -347,8 +374,12 @@ void syscall_handler(registers_t* regs) {
                     } else {
                         regs->eax = 0;
                     }
-                } else regs->eax = 0;
-            } else regs->eax = 0;
+                } else {
+                    regs->eax = 0;
+                }
+            } else {
+                regs->eax = 0;
+            }
         }
         break;
 
