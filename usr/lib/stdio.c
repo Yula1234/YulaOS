@@ -5,6 +5,7 @@
 #include <stdarg.h> 
 #include <stddef.h>
 
+#include "string.h"
 #include "syscall.h"
 
 int open(const char* path, int flags) {
@@ -21,54 +22,6 @@ int write(int fd, const void* buf, uint32_t size) {
 
 int close(int fd) {
     return syscall(6, fd, 0, 0);
-}
-
-size_t strlen(const char* s) {
-    size_t n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-int strcmp(const char* s1, const char* s2) {
-    while (*s1 && (*s1 == *s2)) {
-        s1++;
-        s2++;
-    }
-    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
-}
-
-int strncmp(const char* s1, const char* s2, size_t n) {
-    while (n && *s1 && (*s1 == *s2)) {
-        s1++;
-        s2++;
-        n--;
-    }
-    if (n == 0) return 0;
-    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
-}
-
-char* strcpy(char* dest, const char* src) {
-    char* d = dest;
-    while ((*d++ = *src++));
-    return dest;
-}
-
-char* strncpy(char* dest, const char* src, size_t n) {
-    size_t i;
-    for (i = 0; i < n && src[i] != '\0'; i++)
-        dest[i] = src[i];
-    for ( ; i < n; i++)
-        dest[i] = '\0';
-    return dest;
-}
-
-char* strcat(char* dest, const char* src) {
-    char* ptr = dest + strlen(dest);
-    while (*src != '\0') {
-        *ptr++ = *src++;
-    }
-    *ptr = '\0';
-    return dest;
 }
 
 static char* number(char* str, long num, int base, int size, int precision, int type) {
@@ -271,25 +224,11 @@ void printf(const char* fmt, ...) {
     print(buf);
 }
 
-void* memset(void* dst, int v, uint32_t n) {
-    uint8_t* p = (uint8_t*)dst;
-    while (n--) *p++ = (uint8_t)v;
-    return dst;
-}
-
-void* memcpy(void* dest, const void* src, uint32_t n) {
-    char* d = (char*)dest;
-    const char* s = (const char*)src;
-    while (n--) *d++ = *s++;
-    return dest;
-}
-
 int atoi(const char* str) {
     int res = 0;
     int sign = 1;
     int i = 0;
     
-    // Skip spaces
     while(str[i] == ' ') i++;
     
     if(str[i] == '-') {

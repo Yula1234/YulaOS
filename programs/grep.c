@@ -19,19 +19,6 @@ int opt_recursive = 0;
 int opt_show_filename = 1;
 int opt_line_number = 1;
 
-const char* strstr(const char* haystack, const char* needle) {
-    if (!*needle) return haystack;
-    for (; *haystack; haystack++) {
-        if (*haystack == *needle) {
-            const char* h = haystack;
-            const char* n = needle;
-            while (*h && *n && *h == *n) { h++; n++; }
-            if (!*n) return haystack;
-        }
-    }
-    return 0;
-}
-
 void print_match_line(const char* filename, int line_num, const char* line, const char* pattern) {
     const char* ptr = line;
     const char* match = strstr(line, pattern);

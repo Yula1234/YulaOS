@@ -65,8 +65,9 @@ echo "[user] compiling libs..."
 $ASM usr/start.asm bin/usr/start.o &
 $CC $CFLAGS_USER -c usr/lib/malloc.c -o bin/obj/malloc.o &
 $CC $CFLAGS_USER -c usr/lib/stdio.c  -o bin/obj/stdio.o &
+$CC $CFLAGS_USER -c usr/lib/string.c  -o bin/obj/string.o &
 
-USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o"
+USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o bin/obj/string.o"
 
 echo "[user] compiling apps..."
 for APP in "${USER_APPS[@]}"; do

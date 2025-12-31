@@ -9,6 +9,7 @@
 #include <stddef.h>
 
 #include <lib/syscall.h>
+#include <lib/string.h>
 
 #define YULA_EVENT_NONE       0
 #define YULA_EVENT_MOUSE_MOVE 1
@@ -126,15 +127,6 @@ static inline int munmap(void* addr, uint32_t length) {
     return syscall(32, (int)addr, length, 0);
 }
 
-size_t strlen(const char* s);
-int strcmp(const char* s1, const char* s2);
-int strncmp(const char* s1, const char* s2, size_t n);
-char* strcpy(char* dest, const char* src);
-char* strncpy(char* dest, const char* src, size_t n);
-char* strcat(char* dest, const char* src);
-
-void* memset(void* dst, int v, uint32_t n);
-void* memcpy(void* dest, const void* src, uint32_t n);
 int atoi(const char* str);
 
 typedef struct {
