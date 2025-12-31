@@ -209,7 +209,7 @@ void window_draw_all() {
 
         sem_wait(&win->lock);
 
-        if (!vga_is_rect_dirty(win->x - 20, win->y - 20, win->w + 40, win->h + 40 && !win->is_dirty)) {
+        if (!vga_is_rect_dirty(win->x - 20, win->y - 20, win->w + 40, win->h + 40) && !win->is_dirty) {
             sem_signal(&win->lock);
             continue;
         }
