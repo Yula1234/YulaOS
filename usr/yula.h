@@ -11,6 +11,7 @@
 #include <lib/syscall.h>
 #include <lib/string.h>
 #include <lib/stdlib.h>
+#include <lib/stdio.h>
 
 #define YULA_EVENT_NONE       0
 #define YULA_EVENT_MOUSE_MOVE 1
@@ -50,26 +51,6 @@ void* malloc(uint32_t size);
 void free(void* ptr);
 void* calloc(size_t nelem, size_t elsize);
 void* realloc(void* ptr, size_t size);
-
-void print_dec(int n);
-
-int open(const char* path, int flags);
-
-int read(int fd, void* buf, uint32_t size);
-
-int write(int fd, const void* buf, uint32_t size);
-
-int close(int fd);
-
-size_t strlen(const char* s);
-
-void print(const char* s);
-void print_hex(uint32_t n);
-void printf(const char* fmt, ...);
-void vprintf(const char* fmt, va_list args);
-int sprintf(char* str, const char* fmt, ...);
-int vsprintf(char* str, const char* fmt, va_list args);
-
 
 static inline void usleep(uint32_t us) {
     syscall(11, us, 0, 0);
@@ -123,8 +104,6 @@ static inline int munmap(void* addr, uint32_t length) {
     return syscall(32, (int)addr, length, 0);
 }
 
-int atoi(const char* str);
-
 typedef struct {
     uint32_t type; // 1=FILE, 2=DIR
     uint32_t size;
@@ -142,10 +121,6 @@ static inline int stat(const char* path, stat_t* buf) {
 
 static inline int get_fs_info(fs_info_t* buf) {
     return syscall(34, (int)buf, 0, 0);
-}
-
-static inline int rename(const char* old_path, const char* new_path) {
-    return syscall(35, (int)old_path, (int)new_path, 0);
 }
 
 #endif
