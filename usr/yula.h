@@ -10,6 +10,7 @@
 
 #include <lib/syscall.h>
 #include <lib/string.h>
+#include <lib/stdlib.h>
 
 #define YULA_EVENT_NONE       0
 #define YULA_EVENT_MOUSE_MOVE 1
@@ -24,11 +25,6 @@ typedef struct {
     int arg3;
 } yula_event_t;
 
-
-static inline void exit(int code) {
-    syscall(0, code, 0, 0);
-    while(1);
-}
 
 static inline void signal(int sig, void* handler) {
     __asm__ volatile("int $0x80" : : "a"(17), "b"(sig), "c"(handler));

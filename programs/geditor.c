@@ -77,7 +77,6 @@ const char* kwd_regs[] = {
 
 int min(int a, int b) { return a < b ? a : b; }
 int max(int a, int b) { return a > b ? a : b; }
-int abs(int a) { return a < 0 ? -a : a; }
 
 int is_digit(char c) { return (c >= '0' && c <= '9'); }
 int is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.'; }
