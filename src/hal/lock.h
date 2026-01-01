@@ -71,6 +71,7 @@ typedef struct {
 void sem_init(semaphore_t* sem, int init_count);
 void sem_wait(semaphore_t* sem);
 void sem_signal(semaphore_t* sem);
+int sem_try_acquire(semaphore_t* sem);
 
 typedef struct {
     semaphore_t lock;

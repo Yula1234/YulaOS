@@ -23,9 +23,8 @@ extern volatile uint32_t timer_ticks;
 
 extern uint32_t* paging_get_dir(void); 
 
-static int check_user_buffer(__attribute__((unused)) task_t* task, const void* buf, uint32_t size) {
+static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     if (!buf) return 0;
-    
     if (size == 0) return 1;
 
     uint32_t start = (uint32_t)buf;
@@ -34,17 +33,15 @@ static int check_user_buffer(__attribute__((unused)) task_t* task, const void* b
     if (end < start) return 0; 
     if (start < 0x08000000 || end > 0xC0000000) return 0; 
 
-    __attribute__((unused)) volatile char* p = (volatile char*)buf;
-    
+    if (!task || !task->page_dir) return 0;
+
     uint32_t start_page = start & 0xFFFFF000;
     uint32_t end_page   = (end - 1) & 0xFFFFF000;
     
     for (uint32_t page = start_page; page <= end_page; page += 4096) {
-        uint32_t addr_to_check = page;
-        if (page == start_page) addr_to_check = start;
-
-        volatile char touch = ((volatile char*)addr_to_check)[0];
-        (void)touch;
+        if (!paging_is_user_accessible(task->page_dir, page)) {
+            return 0;
+        }
     }
 
     return 1;

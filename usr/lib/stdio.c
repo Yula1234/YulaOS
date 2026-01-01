@@ -200,13 +200,13 @@ int snprintf(char* str, size_t size, const char* format, ...) {
 int sprintf(char* str, const char* format, ...) {
     va_list args;
     va_start(args, format);
-    int res = vsnprintf(str, 1024 * 1024, format, args); 
+    int res = vsnprintf(str, 4096, format, args); 
     va_end(args);
     return res;
 }
 
 int vsprintf(char* str, const char* format, va_list ap) {
-    return vsnprintf(str, 1024 * 1024, format, ap);
+    return vsnprintf(str, 4096, format, ap);
 }
 
 int vfprintf(FILE* stream, const char* format, va_list ap) {

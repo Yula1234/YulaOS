@@ -115,10 +115,55 @@ void syncer_task(void* arg) {
     }
 }
 
+static void kitoa_dec(uint32_t n, char* buf) {
+    int i = 0;
+    if (n == 0) {
+        buf[i++] = '0';
+        buf[i] = '\0';
+        return;
+    }
+    while (n > 0) {
+        buf[i++] = (char)('0' + (n % 10));
+        n /= 10;
+    }
+    buf[i] = '\0';
+    for (int j = 0; j < i / 2; j++) {
+        char t = buf[j];
+        buf[j] = buf[i - 1 - j];
+        buf[i - 1 - j] = t;
+    }
+}
+
+static void kitoa_hex(uint32_t n, char* buf) {
+    static const char* h = "0123456789ABCDEF";
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 8; i++) {
+        buf[9 - i] = h[(n >> (i * 4)) & 0xF];
+    }
+    buf[10] = '\0';
+}
+
 __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
     if (magic != 0x2BADB002) {
         registers_t dummy_regs = {0};
         kernel_panic("Invalid multiboot magic number", __FILE__, __LINE__, &dummy_regs);
+    }
+
+    if (!(mb_info->flags & (1u << 12))) {
+        registers_t dummy_regs = {0};
+        kernel_panic("Bootloader did not provide framebuffer info", __FILE__, __LINE__, &dummy_regs);
+    }
+
+    if (mb_info->framebuffer_type != 1 || mb_info->framebuffer_bpp != 32) {
+        registers_t dummy_regs = {0};
+        kernel_panic("Unsupported framebuffer mode (need 32bpp linear)", __FILE__, __LINE__, &dummy_regs);
+    }
+
+    if (mb_info->framebuffer_width == 0 || mb_info->framebuffer_height == 0 ||
+        mb_info->framebuffer_pitch < mb_info->framebuffer_width * 4) {
+        registers_t dummy_regs = {0};
+        kernel_panic("Invalid framebuffer parameters", __FILE__, __LINE__, &dummy_regs);
     }
 
     kernel_init_simd(); 
@@ -190,6 +235,29 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     vga_init();
     vga_init_graphics();
+    {
+        char buf[64];
+        vga_print("Boot config:\n");
+
+        vga_print(" RAM: ");
+        kitoa_dec(memory_end_addr / (1024 * 1024), buf);
+        vga_print(buf);
+        vga_print(" MB\n");
+
+        vga_print(" FB: ");
+        kitoa_dec(fb_width, buf);
+        vga_print(buf);
+        vga_print("x");
+        kitoa_dec(fb_height, buf);
+        vga_print(buf);
+        vga_print(" @32bpp pitch=");
+        kitoa_dec(fb_pitch, buf);
+        vga_print(buf);
+        vga_print(" addr=");
+        kitoa_hex((uint32_t)fb_ptr, buf);
+        vga_print(buf);
+        vga_print("\n");
+    }
     clipboard_init();
     
     kbd_init();

@@ -8,6 +8,10 @@
 
 #define MAX_PROCESS_FDS 16
 
+#define VFS_FLAG_PIPE_READ   1u
+#define VFS_FLAG_PIPE_WRITE  2u
+#define VFS_FLAG_EXEC_NODE   0x80000000u
+
 struct vfs_node;
 
 typedef struct vfs_ops {

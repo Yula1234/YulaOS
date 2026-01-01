@@ -165,6 +165,7 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
     memset(node, 0, sizeof(vfs_node_t));
     node->inode_idx = inode;
     node->ops = &yfs_vfs_ops;
+    node->flags = VFS_FLAG_EXEC_NODE;
     
     yfs_inode_t info;
     if (yulafs_stat(inode, &info) == 0) {

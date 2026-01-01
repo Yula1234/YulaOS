@@ -340,6 +340,17 @@ void sem_init(semaphore_t* sem, int init_count) {
     dlist_init(&sem->wait_list);
 }
 
+int sem_try_acquire(semaphore_t* sem) {
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    if (sem->count > 0) {
+        sem->count--;
+        spinlock_release_safe(&sem->lock, flags);
+        return 1;
+    }
+    spinlock_release_safe(&sem->lock, flags);
+    return 0;
+}
+
 void sem_wait(semaphore_t* sem) {
     while (1) {
         uint32_t flags = spinlock_acquire_safe(&sem->lock);

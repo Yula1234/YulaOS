@@ -209,7 +209,10 @@ void proc_free_resources(task_t* t) {
     while (m) {
         mmap_area_t* next = m->next;
         if (m->file && m->file->refs > 0) {
-             __sync_sub_and_fetch(&m->file->refs, 1);
+             uint32_t new_refs = __sync_sub_and_fetch(&m->file->refs, 1);
+             if (new_refs == 0 && (m->file->flags & VFS_FLAG_EXEC_NODE)) {
+                 kfree(m->file);
+             }
         }
         kfree(m);
         m = next;
