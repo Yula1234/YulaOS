@@ -725,6 +725,38 @@ InstrDef isa[] = {
     /* Simple inc/dec for 16-bit registers (rare, but cheap to support) */
     { "inc",   0x40, 0, ENC_R, 2 },    { "dec",   0x48, 0, ENC_R, 2 },
 
+    /* setcc: 0F 9x /r, r/m8 */
+    { "seto",   0x90, 0, ENC_0F_MR, 1 }, { "setno",  0x91, 0, ENC_0F_MR, 1 },
+    { "setb",   0x92, 0, ENC_0F_MR, 1 }, { "setnae", 0x92, 0, ENC_0F_MR, 1 }, { "setc",   0x92, 0, ENC_0F_MR, 1 },
+    { "setae",  0x93, 0, ENC_0F_MR, 1 }, { "setnb",  0x93, 0, ENC_0F_MR, 1 }, { "setnc",  0x93, 0, ENC_0F_MR, 1 },
+    { "sete",   0x94, 0, ENC_0F_MR, 1 }, { "setz",   0x94, 0, ENC_0F_MR, 1 },
+    { "setne",  0x95, 0, ENC_0F_MR, 1 }, { "setnz",  0x95, 0, ENC_0F_MR, 1 },
+    { "setbe",  0x96, 0, ENC_0F_MR, 1 }, { "setna",  0x96, 0, ENC_0F_MR, 1 },
+    { "seta",   0x97, 0, ENC_0F_MR, 1 }, { "setnbe", 0x97, 0, ENC_0F_MR, 1 },
+    { "sets",   0x98, 0, ENC_0F_MR, 1 }, { "setns",  0x99, 0, ENC_0F_MR, 1 },
+    { "setp",   0x9A, 0, ENC_0F_MR, 1 }, { "setpe",  0x9A, 0, ENC_0F_MR, 1 },
+    { "setnp",  0x9B, 0, ENC_0F_MR, 1 }, { "setpo",  0x9B, 0, ENC_0F_MR, 1 },
+    { "setl",   0x9C, 0, ENC_0F_MR, 1 }, { "setnge", 0x9C, 0, ENC_0F_MR, 1 },
+    { "setge",  0x9D, 0, ENC_0F_MR, 1 }, { "setnl",  0x9D, 0, ENC_0F_MR, 1 },
+    { "setle",  0x9E, 0, ENC_0F_MR, 1 }, { "setng",  0x9E, 0, ENC_0F_MR, 1 },
+    { "setg",   0x9F, 0, ENC_0F_MR, 1 }, { "setnle", 0x9F, 0, ENC_0F_MR, 1 },
+
+    /* cmovcc: 0F 4x /r, r16/32, r/m16/32 */
+    { "cmovo",   0x40, 0, ENC_0F_RM, 4 }, { "cmovno",  0x41, 0, ENC_0F_RM, 4 },
+    { "cmovb",   0x42, 0, ENC_0F_RM, 4 }, { "cmovnae", 0x42, 0, ENC_0F_RM, 4 }, { "cmovc",   0x42, 0, ENC_0F_RM, 4 },
+    { "cmovae",  0x43, 0, ENC_0F_RM, 4 }, { "cmovnb",  0x43, 0, ENC_0F_RM, 4 }, { "cmovnc",  0x43, 0, ENC_0F_RM, 4 },
+    { "cmove",   0x44, 0, ENC_0F_RM, 4 }, { "cmovz",   0x44, 0, ENC_0F_RM, 4 },
+    { "cmovne",  0x45, 0, ENC_0F_RM, 4 }, { "cmovnz",  0x45, 0, ENC_0F_RM, 4 },
+    { "cmovbe",  0x46, 0, ENC_0F_RM, 4 }, { "cmovna",  0x46, 0, ENC_0F_RM, 4 },
+    { "cmova",   0x47, 0, ENC_0F_RM, 4 }, { "cmovnbe", 0x47, 0, ENC_0F_RM, 4 },
+    { "cmovs",   0x48, 0, ENC_0F_RM, 4 }, { "cmovns",  0x49, 0, ENC_0F_RM, 4 },
+    { "cmovp",   0x4A, 0, ENC_0F_RM, 4 }, { "cmovpe",  0x4A, 0, ENC_0F_RM, 4 },
+    { "cmovnp",  0x4B, 0, ENC_0F_RM, 4 }, { "cmovpo",  0x4B, 0, ENC_0F_RM, 4 },
+    { "cmovl",   0x4C, 0, ENC_0F_RM, 4 }, { "cmovnge", 0x4C, 0, ENC_0F_RM, 4 },
+    { "cmovge",  0x4D, 0, ENC_0F_RM, 4 }, { "cmovnl",  0x4D, 0, ENC_0F_RM, 4 },
+    { "cmovle",  0x4E, 0, ENC_0F_RM, 4 }, { "cmovng",  0x4E, 0, ENC_0F_RM, 4 },
+    { "cmovg",   0x4F, 0, ENC_0F_RM, 4 }, { "cmovnle", 0x4F, 0, ENC_0F_RM, 4 },
+
     { "shl",   0xC1, 4, ENC_SHIFT, 4 }, { "shr",   0xC1, 5, ENC_SHIFT, 4 },
     { "sal",   0xC1, 4, ENC_SHIFT, 4 }, { "sar",   0xC1, 7, ENC_SHIFT, 4 },
     { "rol",   0xC1, 0, ENC_SHIFT, 4 }, { "ror",   0xC1, 1, ENC_SHIFT, 4 },
@@ -1491,6 +1523,49 @@ void write_elf(AssemblerCtx* ctx, const char* filename) {
     buf_free(&strtab); buf_free(&symtab); buf_free(&shstr);
 }
 
+static void assembler_run_pass(AssemblerCtx* ctx, char* src, int pass) {
+    ctx->pass = pass;
+    ctx->line_num = 0;
+
+    if (pass == 2) {
+        ctx->text.size = 0;
+        ctx->data.size = 0;
+        ctx->bss.size = 0;
+    }
+
+    int i = 0;
+    char line[256];
+
+    while (src[i]) {
+        int j = 0;
+        while (src[i] && src[i] != '\n') {
+            if (src[i] != '\r') line[j++] = src[i];
+            i++;
+        }
+        line[j] = 0;
+        if (src[i] == '\n') i++;
+        ctx->line_num++;
+        process_line(ctx, line);
+    }
+}
+
+static void assembler_free_resources(AssemblerCtx* ctx) {
+    sym_table_free(ctx);
+    buf_free(&ctx->text);
+    buf_free(&ctx->data);
+    buf_free(&ctx->bss);
+    buf_free(&ctx->rel_text);
+    buf_free(&ctx->rel_data);
+
+    if (isa_bucket_head) free(isa_bucket_head);
+    if (isa_bucket_tail) free(isa_bucket_tail);
+    if (isa_next) free(isa_next);
+    isa_bucket_head = isa_bucket_tail = isa_next = 0;
+    isa_bucket_size = 0;
+    isa_count = 0;
+    isa_index_built = 0;
+}
+
 int main(int argc, char** argv) {
     if(argc < 3) { printf("ASMC v2.2.1\nUsage: asmc in.asm out.o\n"); return 1; }
 
@@ -1520,19 +1595,7 @@ int main(int argc, char** argv) {
     buf_init(&ctx->bss, 0);     buf_init(&ctx->rel_text, 1024);
     buf_init(&ctx->rel_data, 1024);
 
-    ctx->pass = 1; ctx->line_num = 0;
-    char line[256]; int i=0;
-    while(src[i]) {
-        int j=0; 
-        while(src[i] && src[i]!='\n') {
-            if (src[i] != '\r') line[j++] = src[i];
-            i++;
-        }
-        line[j]=0; 
-        if(src[i]=='\n') i++;
-        ctx->line_num++;
-        process_line(ctx, line);
-    }
+    assembler_run_pass(ctx, src, 1);
 
     int elf_idx = 1;
     for(int k=0; k<ctx->sym_count; k++) {
@@ -1543,38 +1606,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    ctx->pass = 2; ctx->line_num = 0; i=0;
-    ctx->text.size = 0; ctx->data.size = 0; ctx->bss.size = 0;
-    
-    while(src[i]) {
-        int j=0; 
-        while(src[i] && src[i]!='\n') {
-            if (src[i] != '\r') line[j++] = src[i];
-            i++;
-        }
-        line[j]=0; 
-        if(src[i]=='\n') i++;
-        ctx->line_num++;
-        process_line(ctx, line);
-    }
+    assembler_run_pass(ctx, src, 2);
 
     write_elf(ctx, argv[2]);
     printf("Success: %s (%d bytes code, %d bytes data)\n", argv[2], ctx->text.size, ctx->data.size);
 
-    sym_table_free(ctx);
-    buf_free(&ctx->text);
-    buf_free(&ctx->data);
-    buf_free(&ctx->bss);
-    buf_free(&ctx->rel_text);
-    buf_free(&ctx->rel_data);
-
-    if (isa_bucket_head) free(isa_bucket_head);
-    if (isa_bucket_tail) free(isa_bucket_tail);
-    if (isa_next) free(isa_next);
-    isa_bucket_head = isa_bucket_tail = isa_next = 0;
-    isa_bucket_size = 0;
-    isa_count = 0;
-    isa_index_built = 0;
+    assembler_free_resources(ctx);
 
     free(ctx);
     buf_free(&src_buf);
