@@ -59,6 +59,9 @@ typedef struct {
 
 extern void wake_up_gui();
 
+extern volatile uint32_t timer_ticks;
+#define TICKS_PER_SEC 15000 
+
 static char* itoa(uint32_t n) {
     static char buf[12];
     int i = 10; buf[11] = '\0';
@@ -496,6 +499,25 @@ void shell_task(void* arg) {
 
                 spinlock_release_safe(&ctx->lock, flags);
 
+                int measure_time = 0;
+                uint32_t start_ticks = 0;
+
+                if (arg_count > 0 && strcmp(args[0], "time") == 0) {
+                    if (arg_count < 2) {
+                        term_print(my_term, "Usage: time <command>\n");
+                        goto loop_end; 
+                    }
+                    
+                    measure_time = 1;
+                    start_ticks = timer_ticks;
+
+                    for (int i = 0; i < arg_count - 1; i++) {
+                        args[i] = args[i+1];
+                    }
+                    args[arg_count - 1] = 0;
+                    arg_count--;
+                }
+
                 if (arg_count > 0) {
                     int pipe_idx = -1;
                     for(int i=0; i<arg_count; i++) {
@@ -574,6 +596,41 @@ void shell_task(void* arg) {
                         }
                     }
                 }
+
+                if (measure_time) {
+                    uint32_t end_ticks = timer_ticks;
+                    uint32_t diff = end_ticks - start_ticks;
+                    
+                    uint32_t sec = diff / TICKS_PER_SEC;
+                    uint32_t sub_sec = diff % TICKS_PER_SEC;
+                    
+                    uint32_t ms = (sub_sec * 1000) / TICKS_PER_SEC;
+
+                    char* s_sec = itoa(sec);
+                    char buf_sec[16]; memcpy(buf_sec, s_sec, strlen(s_sec)+1);
+                    
+                    char* s_ms = itoa(ms);
+                    char buf_ms[16]; memcpy(buf_ms, s_ms, strlen(s_ms)+1);
+                    
+                    char* s_ticks = itoa(diff);
+                    
+                    my_term->curr_fg = C_ACCENT;
+                    term_print(my_term, "\n[TIME] ");
+                    
+                    my_term->curr_fg = C_TEXT;
+                    term_print(my_term, "Real: ");
+                    term_print(my_term, buf_sec);
+                    term_print(my_term, ".");
+                    
+                    if (ms < 100) term_print(my_term, "0");
+                    if (ms < 10) term_print(my_term, "0");
+                    term_print(my_term, buf_ms);
+                    term_print(my_term, "s (");
+                    term_print(my_term, s_ticks);
+                    term_print(my_term, " ticks)\n");
+                }
+
+                loop_end: 
 
                 flags = spinlock_acquire_safe(&ctx->lock);
 
