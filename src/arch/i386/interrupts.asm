@@ -72,6 +72,7 @@ match items, ISR_LIST {
 
 gen_isr 0x80
 gen_isr 0xFF
+gen_isr 0xF0
 
 section '.data' writeable
 

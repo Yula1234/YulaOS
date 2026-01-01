@@ -28,11 +28,12 @@
 #define LAPIC_TIMER_CUR     0x0390
 #define LAPIC_TIMER_DIV     0x03E0
 
+#define IPI_TLB_VECTOR      0xF0
+
 void lapic_init(void);
 void lapic_timer_init(uint32_t hz);
 void lapic_eoi(void);
 
-// Добавляем inline функции для доступа к регистрам
 static inline uint32_t lapic_read(uint32_t reg) {
     return *(volatile uint32_t*)(LAPIC_BASE + reg);
 }

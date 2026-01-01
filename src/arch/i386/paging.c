@@ -7,6 +7,8 @@
 #include <hal/lock.h>
 #include "paging.h"
 
+extern void smp_tlb_shootdown(uint32_t virt);
+
 extern void load_page_directory(uint32_t*);
 extern void enable_paging(void);
 
@@ -41,9 +43,13 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
     pt[pt_idx] = (phys & ~0xFFF) | flags;
 
-    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
-
     spinlock_release_safe(&paging_lock, int_flags);
+
+    if (dir == kernel_page_directory) {
+        smp_tlb_shootdown(virt);
+    } else {
+        __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+    }
 }
 
 static void paging_allocate_table(uint32_t virt) {

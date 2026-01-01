@@ -43,11 +43,14 @@ volatile uint32_t timer_ticks = 0;
 extern uint32_t isr_stub_table[];
 extern void isr_stub_0x80(void);
 extern void isr_stub_0xFF(void);
+extern void isr_stub_0xF0(void);
 extern uint32_t* kernel_page_directory;
 
 extern void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
 
 static irq_handler_t irq_handlers[16] = {0};
+
+extern void smp_tlb_ipi_handler(void);
 
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_low = base & 0xFFFF;
@@ -86,6 +89,12 @@ extern void proc_check_sleepers(uint32_t current_tick);
 
 void isr_handler(registers_t* regs) {
     if (regs->int_no == 0xFF) {
+        return;
+    }
+
+    if (regs->int_no == IPI_TLB_VECTOR) {
+        smp_tlb_ipi_handler();
+        lapic_eoi();
         return;
     }
     cpu_t* cpu = cpu_current();
@@ -352,6 +361,7 @@ void idt_init(void) {
     idt_set_gate(0x80, (uint32_t)isr_stub_0x80, 0x08, 0xEE);
     
     idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
+    idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
 
     outb(0x20, 0x11); io_wait();
     outb(0xA0, 0x11); io_wait();

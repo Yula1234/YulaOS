@@ -404,11 +404,12 @@ void vmm_free_pages(void* virt, size_t pages) {
     for (size_t i = 0; i < pages; i++) {
         uint32_t curr = vaddr + i * PAGE_SIZE;
         uint32_t phys = paging_get_phys(kernel_page_directory, curr);
-        if (phys) pmm_free_block((void*)phys);
 
-        paging_map(kernel_page_directory, curr, 0, 0); 
+        paging_map(kernel_page_directory, curr, 0, 0);
 
-        __asm__ volatile("invlpg (%0)" :: "r" (curr) : "memory");
+        if (phys) {
+            pmm_free_block((void*)phys);
+        }
     }
     vmm_used_pages_count -= pages;
 
