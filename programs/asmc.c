@@ -698,6 +698,60 @@ InstrDef isa[] = {
     { 0,0,0,0,0 }
 };
 
+static int* isa_bucket_head;
+static int* isa_bucket_tail;
+static int* isa_next;
+static int isa_bucket_size;
+static int isa_count;
+static int isa_index_built;
+
+static uint32_t isa_hash_calc(const char* s) {
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (uint8_t)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void isa_build_index(void) {
+    if (isa_index_built) return;
+
+    isa_count = 0;
+    while (isa[isa_count].mnem) isa_count++;
+
+    isa_bucket_size = 1;
+    while (isa_bucket_size < isa_count * 2) isa_bucket_size <<= 1;
+
+    isa_bucket_head = (int*)malloc(sizeof(int) * (size_t)isa_bucket_size);
+    isa_bucket_tail = (int*)malloc(sizeof(int) * (size_t)isa_bucket_size);
+    isa_next = (int*)malloc(sizeof(int) * (size_t)isa_count);
+    if (!isa_bucket_head || !isa_bucket_tail || !isa_next) exit(1);
+
+    for (int i = 0; i < isa_bucket_size; i++) {
+        isa_bucket_head[i] = -1;
+        isa_bucket_tail[i] = -1;
+    }
+
+    for (int i = 0; i < isa_count; i++) {
+        const char* m = isa[i].mnem;
+        if (!m) continue;
+        uint32_t h = isa_hash_calc(m);
+        int slot = (int)(h & (uint32_t)(isa_bucket_size - 1));
+        isa_next[i] = -1;
+        if (isa_bucket_head[slot] == -1) {
+            isa_bucket_head[slot] = i;
+            isa_bucket_tail[slot] = i;
+        } else {
+            int tail = isa_bucket_tail[slot];
+            isa_next[tail] = i;
+            isa_bucket_tail[slot] = i;
+        }
+    }
+
+    isa_index_built = 1;
+}
+
 void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
     memset(op, 0, sizeof(Operand));
     op->reg = -1;
@@ -869,7 +923,11 @@ void emit_dword(AssemblerCtx* ctx, uint32_t d) {
 void emit_reloc(AssemblerCtx* ctx, int type, char* label, uint32_t offset) {
     if (ctx->pass != 2) return;
     Symbol* s = sym_find(ctx, label);
-    if (!s) panic(ctx, "Undefined symbol");
+    if (!s) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Undefined symbol '%s'", label);
+        panic(ctx, buf);
+    }
     
     Elf32_Rel r;
     r.r_offset = offset;
@@ -977,7 +1035,16 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
 
     if (size == 2) emit_byte(ctx, 0x66);
 
-    for (int i = 0; isa[i].mnem; i++) {
+    isa_build_index();
+
+    if (!isa_bucket_head || isa_bucket_size <= 0) {
+        panic(ctx, "Internal error: ISA index not initialized");
+    }
+
+    uint32_t h = isa_hash_calc(name);
+    int slot = (int)(h & (uint32_t)(isa_bucket_size - 1));
+
+    for (int i = isa_bucket_head[slot]; i != -1; i = isa_next[i]) {
         InstrDef* d = &isa[i];
         if (strcmp(d->mnem, name) != 0) continue;
         
@@ -1114,11 +1181,16 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             return;
         }
     }
-    panic(ctx, "Unknown instruction");
+
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Unknown instruction '%s'", name);
+        panic(ctx, buf);
+    }
 }
 
 void process_line(AssemblerCtx* ctx, char* line) {
-    char* tokens[16]; int count = 0;
+    char* tokens[MAX_LINE_LEN]; int count = 0;
     char* p = line;
     while(*p) {
         while(*p == ' ' || *p == '\t' || *p == ',' || *p == '\r') *p++ = 0;
@@ -1129,7 +1201,7 @@ void process_line(AssemblerCtx* ctx, char* line) {
         else if (*p == '[') { while(*p && *p != ']') p++; if(*p == ']') p++; }
         else { while(*p && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && *p != '\r') p++; }
         tokens[count++] = start;
-        if(count >= 16) break;
+        if(count >= MAX_LINE_LEN) break;
     }
     if(count == 0) return;
 
