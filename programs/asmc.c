@@ -110,8 +110,11 @@ typedef struct {
     Buffer rel_text;
     Buffer rel_data;
     
-    Symbol symbols[MAX_SYMBOLS];
+    Symbol* symbols;
     int sym_count;
+    int sym_capacity;
+    int* sym_hash;
+    int sym_hash_size;
 } AssemblerCtx;
 
 void panic(AssemblerCtx* ctx, const char* msg) {
@@ -165,9 +168,89 @@ uint32_t buf_add_string(Buffer* b, const char* str) {
     return offset;
 }
 
-Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
+static uint32_t sym_hash_calc(const char* s) {
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (uint8_t)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void sym_hash_rebuild(AssemblerCtx* ctx, int new_size) {
+    if (new_size < 32) new_size = 32;
+    int p = 1;
+    while (p < new_size) p <<= 1;
+    new_size = p;
+
+    int* new_hash = (int*)malloc(sizeof(int) * new_size);
+    if (!new_hash) exit(1);
+    for (int i = 0; i < new_size; i++) new_hash[i] = -1;
+
     for (int i = 0; i < ctx->sym_count; i++) {
-        if (strcmp(ctx->symbols[i].name, name) == 0) return &ctx->symbols[i];
+        uint32_t h = sym_hash_calc(ctx->symbols[i].name);
+        int mask = new_size - 1;
+        for (int step = 0; step < new_size; step++) {
+            int slot = (int)((h + (uint32_t)step) & (uint32_t)mask);
+            if (new_hash[slot] == -1) {
+                new_hash[slot] = i;
+                break;
+            }
+        }
+    }
+
+    if (ctx->sym_hash) free(ctx->sym_hash);
+    ctx->sym_hash = new_hash;
+    ctx->sym_hash_size = new_size;
+}
+
+static void sym_hash_insert(AssemblerCtx* ctx, int index) {
+    if (ctx->sym_hash_size == 0 || !ctx->sym_hash) {
+        sym_hash_rebuild(ctx, 256);
+    } else if (ctx->sym_count * 4 >= ctx->sym_hash_size * 3) {
+        sym_hash_rebuild(ctx, ctx->sym_hash_size * 2);
+    }
+
+    uint32_t h = sym_hash_calc(ctx->symbols[index].name);
+    int mask = ctx->sym_hash_size - 1;
+    for (int step = 0; step < ctx->sym_hash_size; step++) {
+        int slot = (int)((h + (uint32_t)step) & (uint32_t)mask);
+        if (ctx->sym_hash[slot] == -1) {
+            ctx->sym_hash[slot] = index;
+            return;
+        }
+    }
+}
+
+void sym_table_init(AssemblerCtx* ctx) {
+    ctx->sym_capacity = 256;
+    ctx->symbols = (Symbol*)malloc(sizeof(Symbol) * (size_t)ctx->sym_capacity);
+    if (!ctx->symbols) exit(1);
+    ctx->sym_count = 0;
+    ctx->sym_hash = 0;
+    ctx->sym_hash_size = 0;
+}
+
+void sym_table_free(AssemblerCtx* ctx) {
+    if (ctx->symbols) free(ctx->symbols);
+    if (ctx->sym_hash) free(ctx->sym_hash);
+    ctx->symbols = 0;
+    ctx->sym_hash = 0;
+    ctx->sym_capacity = 0;
+    ctx->sym_hash_size = 0;
+    ctx->sym_count = 0;
+}
+
+Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
+    if (!ctx->sym_hash || ctx->sym_hash_size <= 0) return 0;
+    uint32_t h = sym_hash_calc(name);
+    int mask = ctx->sym_hash_size - 1;
+
+    for (int step = 0; step < ctx->sym_hash_size; step++) {
+        int slot = (int)((h + (uint32_t)step) & (uint32_t)mask);
+        int idx = ctx->sym_hash[slot];
+        if (idx == -1) return 0;
+        if (strcmp(ctx->symbols[idx].name, name) == 0) return &ctx->symbols[idx];
     }
     return 0;
 }
@@ -442,12 +525,29 @@ int eval_number(AssemblerCtx* ctx, const char* s) {
 Symbol* sym_add(AssemblerCtx* ctx, const char* name) {
     Symbol* s = sym_find(ctx, name);
     if (s) return s;
-    if (ctx->sym_count >= MAX_SYMBOLS) panic(ctx, "Symbol table overflow");
-    s = &ctx->symbols[ctx->sym_count++];
+    if (!ctx->symbols || ctx->sym_capacity <= 0) {
+        sym_table_init(ctx);
+    }
+    if (ctx->sym_count >= ctx->sym_capacity) {
+        int new_cap = ctx->sym_capacity * 2;
+        if (new_cap < 64) new_cap = 64;
+        Symbol* ns = (Symbol*)malloc(sizeof(Symbol) * (size_t)new_cap);
+        if (!ns) exit(1);
+        if (ctx->symbols && ctx->sym_count > 0) {
+            memcpy(ns, ctx->symbols, sizeof(Symbol) * (size_t)ctx->sym_count);
+        }
+        if (ctx->symbols) free(ctx->symbols);
+        ctx->symbols = ns;
+        ctx->sym_capacity = new_cap;
+    }
+    int idx = ctx->sym_count++;
+    s = &ctx->symbols[idx];
     strcpy(s->name, name);
     s->bind = SYM_UNDEF;
     s->section = SEC_NULL;
     s->value = 0;
+    s->elf_idx = 0;
+    sym_hash_insert(ctx, idx);
     return s;
 }
 
@@ -1261,14 +1361,22 @@ int main(int argc, char** argv) {
 
     int fd = open(argv[1], 0);
     if(fd < 0) { printf("Cannot open input file\n"); return 1; }
-    
-    char* src = malloc(65536);
-    if (!src) { printf("Memory error\n"); return 1; }
-    int len = read(fd, src, 65535);
-    src[len] = 0; close(fd);
+
+    Buffer src_buf;
+    buf_init(&src_buf, 4096);
+    while (1) {
+        char tmp[1024];
+        int r = read(fd, tmp, sizeof(tmp));
+        if (r < 0) { printf("Read error\n"); close(fd); return 1; }
+        if (r == 0) break;
+        buf_write(&src_buf, tmp, (uint32_t)r);
+    }
+    close(fd);
+    buf_push(&src_buf, 0);
+    char* src = (char*)src_buf.data;
 
     AssemblerCtx* ctx = malloc(sizeof(AssemblerCtx));
-    if (!ctx) { printf("Out of memory for context\n"); free(src); return 1; }
+    if (!ctx) { printf("Out of memory for context\n"); buf_free(&src_buf); return 1; }
     memset(ctx, 0, sizeof(AssemblerCtx));
 
     buf_init(&ctx->text, 4096); buf_init(&ctx->data, 4096);
@@ -1315,8 +1423,15 @@ int main(int argc, char** argv) {
 
     write_elf(ctx, argv[2]);
     printf("Success: %s (%d bytes code, %d bytes data)\n", argv[2], ctx->text.size, ctx->data.size);
-    
+
+    sym_table_free(ctx);
+    buf_free(&ctx->text);
+    buf_free(&ctx->data);
+    buf_free(&ctx->bss);
+    buf_free(&ctx->rel_text);
+    buf_free(&ctx->rel_data);
+
     free(ctx);
-    free(src);
+    buf_free(&src_buf);
     return 0;
 }
