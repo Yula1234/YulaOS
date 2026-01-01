@@ -471,11 +471,14 @@ typedef enum { OP_NONE, OP_REG, OP_MEM, OP_IMM } OpType;
 
 typedef struct {
     OpType type;
-    int reg;
-    int size; // 1, 2, 4
+    int reg;      
+    int size; 
     int32_t disp;
     char label[64];
     int has_label;
+    int base_reg;
+    int index_reg;
+    int scale;
 } Operand;
 
 const char* reg_names32[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
@@ -493,7 +496,7 @@ int get_reg_info(const char* s, int* size) {
 
 typedef enum {
     ENC_NONE, ENC_R, ENC_I, ENC_M, ENC_MR, ENC_RM, ENC_MI, ENC_OI, ENC_J, ENC_SHIFT,
-    ENC_0F, ENC_0F_MR
+    ENC_0F, ENC_0F_MR, ENC_0F_RM
 } EncMode;
 
 typedef struct {
@@ -511,6 +514,12 @@ InstrDef isa[] = {
     { "popa",  0x61, 0, ENC_NONE, 0 }, { "leave", 0xC9, 0, ENC_NONE, 0 },
     { "cld",   0xFC, 0, ENC_NONE, 0 }, { "std",   0xFD, 0, ENC_NONE, 0 },
     { "int3",  0xCC, 0, ENC_NONE, 0 },
+
+    { "movsb", 0xA4, 0, ENC_NONE, 0 }, { "movsd", 0xA5, 0, ENC_NONE, 0 },
+    { "stosb", 0xAA, 0, ENC_NONE, 0 }, { "stosd", 0xAB, 0, ENC_NONE, 0 },
+    { "lodsb", 0xAC, 0, ENC_NONE, 0 }, { "lodsd", 0xAD, 0, ENC_NONE, 0 },
+    { "cmpsb", 0xA6, 0, ENC_NONE, 0 }, { "cmpsd", 0xA7, 0, ENC_NONE, 0 },
+    { "scasb", 0xAE, 0, ENC_NONE, 0 }, { "scasd", 0xAF, 0, ENC_NONE, 0 },
     
     { "ud2",   0x0B, 0, ENC_0F, 0 },   { "rdtsc", 0x31, 0, ENC_0F, 0 },
 
@@ -553,6 +562,11 @@ InstrDef isa[] = {
     { "movzx", 0xB6, 0, ENC_0F_MR, 1 }, { "movzx", 0xB7, 0, ENC_0F_MR, 4 }, 
     { "movsx", 0xBE, 0, ENC_0F_MR, 1 }, { "movsx", 0xBF, 0, ENC_0F_MR, 4 },
 
+    { "bt",    0xA3, 0, ENC_0F_MR, 4 }, { "bts",   0xAB, 0, ENC_0F_MR, 4 },
+    { "btr",   0xB3, 0, ENC_0F_MR, 4 }, { "btc",   0xBB, 0, ENC_0F_MR, 4 },
+
+    { "bsf",   0xBC, 0, ENC_0F_RM, 4 }, { "bsr",   0xBD, 0, ENC_0F_RM, 4 },
+
     { "movb",  0xC6, 0, ENC_MI, 1 },   { "movb",  0x88, 0, ENC_MR, 1 },   { "movb",  0x8A, 0, ENC_RM, 1 },   
 
     { "add",   0x00, 0, ENC_MR, 1 }, { "add",   0x02, 0, ENC_RM, 1 }, { "add",   0x80, 0, ENC_MI, 1 },
@@ -588,6 +602,9 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
     memset(op, 0, sizeof(Operand));
     op->reg = -1;
     op->size = 0; 
+    op->base_reg = -1;
+    op->index_reg = -1;
+    op->scale = 1;
     if (!text || !*text) { op->type = OP_NONE; return; }
 
     if (text[0] == '[') {
@@ -596,37 +613,96 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
         if (text[len-1] != ']') panic(ctx, "Missing ']'");
         text[len-1] = 0;
         char* content = text + 1;
-        
-        char* plus = 0; char* ptr = content;
-        while(*ptr) { if(*ptr=='+' || *ptr=='-') plus=ptr; ptr++; }
 
-        char* base_part = content;
-        char* disp_part = 0;
+        char* p = content;
         int sign = 1;
 
-        if (plus) {
-            if (*plus == '-') sign = -1;
-            *plus = 0;
-            disp_part = plus + 1;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '+' || *p == '-') {
+            sign = (*p == '-') ? -1 : 1;
+            p++;
         }
 
-        while (*base_part == ' ') base_part++;
-        int sz;
-        int r = get_reg_info(base_part, &sz);
-        
-        if (r != -1) {
-            if (sz != 4) panic(ctx, "Memory base register must be 32-bit");
-            op->reg = r;
-        } else {
-            if ((base_part[0] >= '0' && base_part[0] <= '9') || base_part[0] == '-') 
-                op->disp = eval_number(ctx, base_part);
-            else { strcpy(op->label, base_part); op->has_label = 1; }
+        while (1) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == 0) break;
+
+            char* t = p;
+            while (*p && *p != '+' && *p != '-') p++;
+            int term_len = (int)(p - t);
+            while (term_len > 0 && (t[term_len-1] == ' ' || t[term_len-1] == '\t')) term_len--;
+            if (term_len <= 0) {
+                if (*p == '+' || *p == '-') {
+                    sign = (*p == '-') ? -1 : 1;
+                    p++;
+                    continue;
+                }
+                break;
+            }
+
+            char tmp[64];
+            int n = term_len;
+            if (n > 63) n = 63;
+            memcpy(tmp, t, n);
+            tmp[n] = 0;
+
+            char* star = 0;
+            for (char* q = tmp; *q; q++) {
+                if (*q == '*') { star = q; break; }
+            }
+
+            if (star) {
+                *star = 0;
+                char* left = tmp;
+                char* right = star + 1;
+
+                while (*left == ' ' || *left == '\t') left++;
+                char* end = left + strlen(left);
+                while (end > left && (end[-1] == ' ' || end[-1] == '\t')) { *--end = 0; }
+
+                while (*right == ' ' || *right == '\t') right++;
+                end = right + strlen(right);
+                while (end > right && (end[-1] == ' ' || end[-1] == '\t')) { *--end = 0; }
+
+                int sz;
+                int r = get_reg_info(left, &sz);
+                if (r == -1 || sz != 4) panic(ctx, "Index register must be 32-bit");
+                if (sign < 0) panic(ctx, "Negative scaled index not supported");
+                int sc = eval_number(ctx, right);
+                if (sc != 1 && sc != 2 && sc != 4 && sc != 8) panic(ctx, "Scale must be 1,2,4 or 8");
+                if (op->index_reg != -1) panic(ctx, "Multiple index registers");
+                op->index_reg = r;
+                op->scale = sc;
+            } else {
+                int sz;
+                int r = get_reg_info(tmp, &sz);
+                if (r != -1) {
+                    if (sz != 4) panic(ctx, "Memory register must be 32-bit");
+                    if (sign < 0) panic(ctx, "Negative register not supported");
+                    if (op->base_reg == -1) op->base_reg = r;
+                    else if (op->index_reg == -1) { op->index_reg = r; op->scale = 1; }
+                    else panic(ctx, "Too many registers in memory operand");
+                } else if ((tmp[0] >= '0' && tmp[0] <= '9') || tmp[0] == '-' || tmp[0] == '(') {
+                    int val = eval_number(ctx, tmp);
+                    op->disp += sign * val;
+                } else {
+                    if (op->has_label) panic(ctx, "Multiple labels in memory operand");
+                    if (op->base_reg != -1 || op->index_reg != -1) panic(ctx, "Labels with registers not supported in memory operand");
+                    if (sign < 0) panic(ctx, "Negative label not supported");
+                    op->has_label = 1;
+                    strcpy(op->label, tmp);
+                }
+            }
+
+            if (*p == '+' || *p == '-') {
+                sign = (*p == '-') ? -1 : 1;
+                p++;
+            } else {
+                break;
+            }
         }
 
-        if (disp_part) {
-            while (*disp_part == ' ') disp_part++;
-            op->disp += (sign * eval_number(ctx, disp_part));
-        }
+        if (op->base_reg != -1) op->reg = op->base_reg;
         return;
     }
 
@@ -711,26 +787,82 @@ void emit_modrm(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
     if (rm->type == OP_REG) {
         emit_byte(ctx, 0xC0 | ((reg_opcode & 7) << 3) | (rm->reg & 7));
     } else {
-        if (rm->reg == -1) {
+        int base = rm->base_reg;
+        int index = rm->index_reg;
+        int32_t disp = rm->disp;
+
+        if (base == -1 && index == -1) {
             emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | 5);
-            uint32_t val = rm->disp;
+            uint32_t val = (uint32_t)disp;
             if (rm->has_label) { emit_reloc(ctx, R_386_32, rm->label, buf->size); val = 0; }
             emit_dword(ctx, val);
-        } else {
-            if (rm->disp == 0 && rm->reg != 5) {
-                emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | (rm->reg & 7));
-                if (rm->reg == 4) emit_byte(ctx, 0x24);
+            return;
+        }
+
+        int use_sib = 0;
+        if (index != -1 || base == 4) use_sib = 1;
+
+        if (!use_sib) {
+            uint8_t mod;
+            uint8_t rm_bits = (uint8_t)(base & 7);
+
+            if (disp == 0 && base != 5) {
+                mod = 0;
+            } else if (disp >= -128 && disp <= 127) {
+                mod = 1;
             } else {
-                if (rm->disp >= -128 && rm->disp <= 127) {
-                    emit_byte(ctx, (1 << 6) | ((reg_opcode & 7) << 3) | (rm->reg & 7));
-                    if (rm->reg == 4) emit_byte(ctx, 0x24);
-                    emit_byte(ctx, (uint8_t)rm->disp);
-                } else {
-                    emit_byte(ctx, (2 << 6) | ((reg_opcode & 7) << 3) | (rm->reg & 7));
-                    if (rm->reg == 4) emit_byte(ctx, 0x24);
-                    emit_dword(ctx, rm->disp);
-                }
+                mod = 2;
             }
+
+            emit_byte(ctx, (mod << 6) | ((reg_opcode & 7) << 3) | rm_bits);
+
+            if (mod == 1) {
+                emit_byte(ctx, (uint8_t)disp);
+            } else if (mod == 2 || (mod == 0 && base == 5)) {
+                uint32_t val = (uint32_t)disp;
+                emit_dword(ctx, val);
+            }
+            return;
+        }
+
+        int scale_bits = 0;
+        if (rm->scale == 1) scale_bits = 0;
+        else if (rm->scale == 2) scale_bits = 1;
+        else if (rm->scale == 4) scale_bits = 2;
+        else if (rm->scale == 8) scale_bits = 3;
+
+        int index_bits = (index == -1) ? 4 : (index & 7);
+        int base_bits;
+        uint8_t mod;
+
+        if (base == -1) {
+            base_bits = 5;
+            mod = 0;
+            emit_byte(ctx, (mod << 6) | ((reg_opcode & 7) << 3) | 4);
+            emit_byte(ctx, (uint8_t)((scale_bits << 6) | (index_bits << 3) | base_bits));
+            uint32_t val = (uint32_t)disp;
+            emit_dword(ctx, val);
+            return;
+        }
+
+        if (disp == 0 && base != 5) {
+            mod = 0;
+        } else if (disp >= -128 && disp <= 127) {
+            mod = 1;
+        } else {
+            mod = 2;
+        }
+
+        base_bits = base & 7;
+
+        emit_byte(ctx, (mod << 6) | ((reg_opcode & 7) << 3) | 4);
+        emit_byte(ctx, (uint8_t)((scale_bits << 6) | (index_bits << 3) | base_bits));
+
+        if (mod == 1) {
+            emit_byte(ctx, (uint8_t)disp);
+        } else if (mod == 2 || (mod == 0 && base_bits == 5)) {
+            uint32_t val = (uint32_t)disp;
+            emit_dword(ctx, val);
         }
     }
 }
@@ -770,6 +902,13 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             emit_byte(ctx, 0x0F);
             emit_byte(ctx, d->op_base); 
             emit_modrm(ctx, o2->reg, o1);
+            return;
+        }
+        if (d->mode == ENC_0F_RM) {
+            if (o1->type != OP_REG || o2->type == OP_IMM) continue;
+            emit_byte(ctx, 0x0F);
+            emit_byte(ctx, d->op_base);
+            emit_modrm(ctx, o1->reg, o2);
             return;
         }
         if (d->mode == ENC_R) {
