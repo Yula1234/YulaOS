@@ -38,6 +38,7 @@ static void kbd_put_char(char c) {
 }
 
 extern void wake_up_gui();
+extern volatile uint32_t timer_ticks;
 
 static void send_key_to_focused(char code) {
     task_t* focused_task = 0;
@@ -170,7 +171,7 @@ void kbd_reboot(void) {
 }
 
 static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
-    (void)node; (void)offset; (void)size;   
+    (void)node; (void)offset; (void)size;
     char* b = (char*)buffer;
     task_t* curr = proc_current();
 
@@ -180,13 +181,73 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
             return -2; // EINTR
         }
 
+        while (1) {
+            task_t* focused_task = 0;
+            if (focused_window_pid > 0) {
+                focused_task = proc_find_by_pid((uint32_t)focused_window_pid);
+            }
+
+            int block_for_focus = 0;
+            if (focused_task &&
+                focused_task->term_mode == 1 &&
+                curr->term_mode == 1 &&
+                focused_task->terminal &&
+                curr->terminal &&
+                focused_task->terminal != curr->terminal) {
+                block_for_focus = 1;
+            }
+
+            if (!block_for_focus) {
+                break;
+            }
+
+            uint32_t target = timer_ticks + 5;
+            proc_sleep_add(curr, target);
+
+            if (curr->pending_signals & (1 << 2)) {
+                curr->pending_signals &= ~(1 << 2);
+                return -2;
+            }
+        }
+
         sem_wait(&kbd_sem);
 
         char c;
-        if (kbd_try_read_char(&c)) {
-            b[0] = c;
-            return 1;
+        if (!kbd_try_read_char(&c)) {
+            continue;
         }
+
+        task_t* focused_task = 0;
+        if (focused_window_pid > 0) {
+            focused_task = proc_find_by_pid((uint32_t)focused_window_pid);
+        }
+
+        int block_for_focus = 0;
+        if (focused_task &&
+            focused_task->term_mode == 1 &&
+            curr->term_mode == 1 &&
+            focused_task->terminal &&
+            curr->terminal &&
+            focused_task->terminal != curr->terminal) {
+            block_for_focus = 1;
+        }
+
+        if (block_for_focus) {
+            kbd_put_char(c);
+
+            uint32_t target = timer_ticks + 5;
+            proc_sleep_add(curr, target);
+
+            if (curr->pending_signals & (1 << 2)) {
+                curr->pending_signals &= ~(1 << 2);
+                return -2;
+            }
+
+            continue;
+        }
+
+        b[0] = c;
+        return 1;
     }
 }
 

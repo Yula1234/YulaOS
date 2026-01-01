@@ -553,6 +553,7 @@ void shell_task(void* arg) {
                                 focused_window_pid = right_task->pid;
                                 proc_wait(right_task->pid);
                                 win->focused_pid = win->owner_pid;
+                                focused_window_pid = win->owner_pid;
                             }
                         } else {
                             term_print(my_term, "Pipe creation failed\n");
@@ -588,6 +589,7 @@ void shell_task(void* arg) {
                                 focused_window_pid = child->pid;
                                 proc_wait(child->pid);
                                 win->focused_pid = win->owner_pid;
+                                focused_window_pid = win->owner_pid;
                             } else {
                                 term_print(my_term, "Command not found: ");
                                 term_print(my_term, args[0]);

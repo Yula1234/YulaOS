@@ -46,7 +46,7 @@ void kernel_panic(const char* message, const char* file, uint32_t line, register
 
     uint32_t total_pixels = fb_width * fb_height;
     for (uint32_t i = 0; i < total_pixels; i++) {
-        fb_ptr[i] = 0xFF000088;
+        fb_ptr[i] = 0xFF0000AA;
     }
 
     int y = 50;

@@ -18,7 +18,7 @@ uint32_t* back_buffer;
 static uint32_t cursor_x = 0;
 static uint32_t cursor_y = 0;
 static uint32_t fg_color = COLOR_WHITE;
-static uint32_t bg_color = COLOR_BLUE;
+static uint32_t bg_color = 0x000000;
 
 static uint32_t* vga_current_target = 0;
 static uint32_t  vga_target_w = 1024;

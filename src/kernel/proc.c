@@ -590,14 +590,6 @@ void proc_wait(uint32_t pid) {
     if (!target) return;
 
     sem_wait(&target->exit_sem);
-    
-    if (target->state == TASK_ZOMBIE) {
-        uint32_t flags = spinlock_acquire_safe(&proc_lock);
-        target->state = TASK_UNUSED;
-        spinlock_release_safe(&proc_lock, flags);
-
-        proc_free_resources(target);
-    }
 }
 
 
@@ -627,6 +619,8 @@ void reaper_task_func(void* arg) {
                 curr->state = TASK_UNUSED; 
                 
                 spinlock_release_safe(&proc_lock, flags);
+                
+                sched_remove(curr);
                 
                 proc_free_resources(curr);
                 
