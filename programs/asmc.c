@@ -687,7 +687,10 @@ InstrDef isa[] = {
     { "sub",   0x29, 0, ENC_MR, 4 }, { "sub",   0x2B, 0, ENC_RM, 4 }, { "sub",   0x81, 5, ENC_MI, 4 }, { "sub", 0x83, 5, ENC_MI, 4 },
     { "xor",   0x31, 0, ENC_MR, 4 }, { "xor",   0x33, 0, ENC_RM, 4 }, { "xor",   0x81, 6, ENC_MI, 4 }, { "xor", 0x83, 6, ENC_MI, 4 },
     { "cmp",   0x39, 0, ENC_MR, 4 }, { "cmp",   0x3B, 0, ENC_RM, 4 }, { "cmp",   0x81, 7, ENC_MI, 4 }, { "cmp", 0x83, 7, ENC_MI, 4 },
-    { "test",  0x85, 0, ENC_MR, 4 }, { "test",  0xF7, 0, ENC_MI, 4 }, 
+    { "test",  0x85, 0, ENC_MR, 4 }, { "test",  0xF7, 0, ENC_MI, 4 },
+
+    /* Simple inc/dec for 16-bit registers (rare, but cheap to support) */
+    { "inc",   0x40, 0, ENC_R, 2 },    { "dec",   0x48, 0, ENC_R, 2 },
 
     { "shl",   0xC1, 4, ENC_SHIFT, 4 }, { "shr",   0xC1, 5, ENC_SHIFT, 4 },
     { "sal",   0xC1, 4, ENC_SHIFT, 4 }, { "sar",   0xC1, 7, ENC_SHIFT, 4 },
@@ -1034,12 +1037,6 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
     if (size == 0) size = 4;
 
     if (size == 2) emit_byte(ctx, 0x66);
-
-    isa_build_index();
-
-    if (!isa_bucket_head || isa_bucket_size <= 0) {
-        panic(ctx, "Internal error: ISA index not initialized");
-    }
 
     uint32_t h = isa_hash_calc(name);
     int slot = (int)(h & (uint32_t)(isa_bucket_size - 1));
@@ -1451,6 +1448,8 @@ int main(int argc, char** argv) {
     if (!ctx) { printf("Out of memory for context\n"); buf_free(&src_buf); return 1; }
     memset(ctx, 0, sizeof(AssemblerCtx));
 
+    isa_build_index();
+
     buf_init(&ctx->text, 4096); buf_init(&ctx->data, 4096);
     buf_init(&ctx->bss, 0);     buf_init(&ctx->rel_text, 1024);
     buf_init(&ctx->rel_data, 1024);
@@ -1502,6 +1501,14 @@ int main(int argc, char** argv) {
     buf_free(&ctx->bss);
     buf_free(&ctx->rel_text);
     buf_free(&ctx->rel_data);
+
+    if (isa_bucket_head) free(isa_bucket_head);
+    if (isa_bucket_tail) free(isa_bucket_tail);
+    if (isa_next) free(isa_next);
+    isa_bucket_head = isa_bucket_tail = isa_next = 0;
+    isa_bucket_size = 0;
+    isa_count = 0;
+    isa_index_built = 0;
 
     free(ctx);
     buf_free(&src_buf);
