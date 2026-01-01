@@ -1264,20 +1264,148 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
     }
 }
 
-void process_line(AssemblerCtx* ctx, char* line) {
-    char* tokens[MAX_LINE_LEN]; int count = 0;
+static int tokenize_line(char* line, char** tokens, int max_tokens) {
+    int count = 0;
     char* p = line;
-    while(*p) {
-        while(*p == ' ' || *p == '\t' || *p == ',' || *p == '\r') *p++ = 0;
-        if(*p == 0 || *p == ';') break;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == '\r') *p++ = 0;
+        if (*p == 0 || *p == ';') break;
         char* start = p;
-        if (*p == '"') { p++; while(*p && *p != '"') p++; if(*p == '"') p++; }
-        else if (*p == '\'') { p++; while(*p && *p != '\'') p++; if(*p == '\'') p++; }
-        else if (*p == '[') { while(*p && *p != ']') p++; if(*p == ']') p++; }
-        else { while(*p && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && *p != '\r') p++; }
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"') p++;
+            if (*p == '"') p++;
+        } else if (*p == '\'') {
+            p++;
+            while (*p && *p != '\'') p++;
+            if (*p == '\'') p++;
+        } else if (*p == '[') {
+            while (*p && *p != ']') p++;
+            if (*p == ']') p++;
+        } else {
+            while (*p && *p != ' ' && *p != '\t' && *p != ',' && *p != ';' && *p != '\r') p++;
+        }
         tokens[count++] = start;
-        if(count >= MAX_LINE_LEN) break;
+        if (count >= max_tokens) break;
     }
+    return count;
+}
+
+static int handle_directive(AssemblerCtx* ctx, char* cmd_name, char** tokens, int count) {
+    if (strcmp(cmd_name, "section") == 0) {
+        if (strcmp(tokens[1], ".text") == 0) ctx->cur_sec = SEC_TEXT;
+        else if (strcmp(tokens[1], ".data") == 0) ctx->cur_sec = SEC_DATA;
+        else if (strcmp(tokens[1], ".bss") == 0) ctx->cur_sec = SEC_BSS;
+        return 1;
+    }
+    if (strcmp(cmd_name, "global") == 0) {
+        if (ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_GLOBAL; }
+        return 1;
+    }
+    if (strcmp(cmd_name, "extern") == 0) {
+        if (ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_EXTERN; }
+        return 1;
+    }
+    if (strcmp(cmd_name, "align") == 0) {
+        int a = eval_number(ctx, tokens[1]);
+        if (a <= 0) panic(ctx, "Invalid alignment");
+
+        Buffer* b = get_cur_buffer(ctx);
+        if (ctx->cur_sec == SEC_BSS) {
+            uint32_t size = ctx->bss.size;
+            uint32_t aligned = (size + (uint32_t)a - 1) & ~((uint32_t)a - 1);
+            ctx->bss.size = aligned;
+        } else {
+            if (ctx->pass == 1) {
+                uint32_t size = b->size;
+                uint32_t aligned = (size + (uint32_t)a - 1) & ~((uint32_t)a - 1);
+                b->size = aligned;
+            } else {
+                while (b->size % (uint32_t)a != 0) {
+                    buf_push(b, 0);
+                }
+            }
+        }
+        return 1;
+    }
+    if (strcmp(cmd_name, "db") == 0) {
+        Buffer* b = get_cur_buffer(ctx);
+        for (int k = 1; k < count; k++) {
+            if (tokens[k][0] == '"') {
+                char* s = tokens[k] + 1;
+                while (*s && *s != '"') {
+                    if (ctx->pass == 2) buf_push(b, *s); else b->size++;
+                    s++;
+                }
+            } else {
+                if (ctx->pass == 2) buf_push(b, eval_number(ctx, tokens[k])); else b->size++;
+            }
+        }
+        return 1;
+    }
+    if (strcmp(cmd_name, "dw") == 0) {
+        Buffer* b = get_cur_buffer(ctx);
+        for (int k = 1; k < count; k++) {
+            if (ctx->pass == 2) {
+                int val = eval_number(ctx, tokens[k]);
+                buf_push(b, val & 0xFF);
+                buf_push(b, (val >> 8) & 0xFF);
+            } else {
+                b->size += 2;
+            }
+        }
+        return 1;
+    }
+    if (strcmp(cmd_name, "dd") == 0) {
+        Buffer* b = get_cur_buffer(ctx);
+        for (int k = 1; k < count; k++) {
+            if (ctx->pass == 2) {
+                if ((tokens[k][0] >= '0' && tokens[k][0] <= '9') || tokens[k][0] == '-')
+                    buf_push_u32(b, eval_number(ctx, tokens[k]));
+                else {
+                    char full[64];
+                    const char* name = tokens[k];
+                    if (tokens[k][0] == '.') {
+                        normalize_symbol_name(ctx, tokens[k], full, sizeof(full));
+                        name = full;
+                    }
+
+                    Symbol* s = sym_find(ctx, name);
+                    if (s && s->section == SEC_ABS) {
+                        buf_push_u32(b, s->value);
+                    } else if (s) {
+                        emit_reloc(ctx, R_386_32, (char*)name, b->size); buf_push_u32(b, 0);
+                    } else {
+                        buf_push_u32(b, eval_number(ctx, tokens[k]));
+                    }
+                }
+            } else {
+                b->size += 4;
+            }
+        }
+        return 1;
+    }
+    if (strcmp(cmd_name, "resb") == 0 || strcmp(cmd_name, "rb") == 0) {
+        if (ctx->cur_sec != SEC_BSS) panic(ctx, "resb only in .bss");
+        ctx->bss.size += eval_number(ctx, tokens[1]);
+        return 1;
+    }
+    if (strcmp(cmd_name, "resw") == 0 || strcmp(cmd_name, "rw") == 0) {
+        if (ctx->cur_sec != SEC_BSS) panic(ctx, "resw only in .bss");
+        ctx->bss.size += eval_number(ctx, tokens[1]) * 2;
+        return 1;
+    }
+    if (strcmp(cmd_name, "resd") == 0 || strcmp(cmd_name, "rd") == 0) {
+        if (ctx->cur_sec != SEC_BSS) panic(ctx, "resd only in .bss");
+        ctx->bss.size += eval_number(ctx, tokens[1]) * 4;
+        return 1;
+    }
+    return 0;
+}
+
+void process_line(AssemblerCtx* ctx, char* line) {
+    char* tokens[MAX_LINE_LEN];
+    int count = tokenize_line(line, tokens, MAX_LINE_LEN);
     if(count == 0) return;
 
     int len = strlen(tokens[0]);
@@ -1327,114 +1455,7 @@ void process_line(AssemblerCtx* ctx, char* line) {
     
     if (strcmp(cmd_name, "movb") == 0) { cmd_name = "mov"; force_size = 1; }
 
-    if(strcmp(cmd_name, "section") == 0) {
-        if(strcmp(tokens[1], ".text") == 0) ctx->cur_sec = SEC_TEXT;
-        else if(strcmp(tokens[1], ".data") == 0) ctx->cur_sec = SEC_DATA;
-        else if(strcmp(tokens[1], ".bss") == 0) ctx->cur_sec = SEC_BSS;
-        return;
-    }
-    if(strcmp(cmd_name, "global") == 0) {
-        if(ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_GLOBAL; }
-        return;
-    }
-    if(strcmp(cmd_name, "extern") == 0) {
-        if(ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_EXTERN; }
-        return;
-    }
-    if(strcmp(cmd_name, "align") == 0) {
-        int a = eval_number(ctx, tokens[1]);
-        if (a <= 0) panic(ctx, "Invalid alignment");
-
-        Buffer* b = get_cur_buffer(ctx);
-        if (ctx->cur_sec == SEC_BSS) {
-            uint32_t size = ctx->bss.size;
-            uint32_t aligned = (size + (uint32_t)a - 1) & ~((uint32_t)a - 1);
-            ctx->bss.size = aligned;
-        } else {
-            if (ctx->pass == 1) {
-                uint32_t size = b->size;
-                uint32_t aligned = (size + (uint32_t)a - 1) & ~((uint32_t)a - 1);
-                b->size = aligned;
-            } else {
-                while (b->size % (uint32_t)a != 0) {
-                    buf_push(b, 0);
-                }
-            }
-        }
-        return;
-    }
-    if(strcmp(cmd_name, "db") == 0) {
-        Buffer* b = get_cur_buffer(ctx);
-        for(int k=1; k<count; k++) {
-            if(tokens[k][0] == '"') {
-                char* s = tokens[k]+1;
-                while(*s && *s != '"') {
-                    if(ctx->pass == 2) buf_push(b, *s); else b->size++;
-                    s++;
-                }
-            } else {
-                if(ctx->pass == 2) buf_push(b, eval_number(ctx, tokens[k])); else b->size++;
-            }
-        }
-        return;
-    }
-    if(strcmp(cmd_name, "dw") == 0) {
-        Buffer* b = get_cur_buffer(ctx);
-        for (int k = 1; k < count; k++) {
-            if(ctx->pass == 2) {
-                int val = eval_number(ctx, tokens[k]);
-                buf_push(b, val & 0xFF);
-                buf_push(b, (val >> 8) & 0xFF);
-            } else {
-                b->size += 2;
-            }
-        }
-        return;
-    }
-    if(strcmp(cmd_name, "dd") == 0) {
-        Buffer* b = get_cur_buffer(ctx);
-        for (int k = 1; k < count; k++) {
-            if(ctx->pass == 2) {
-                if ((tokens[k][0] >= '0' && tokens[k][0] <= '9') || tokens[k][0] == '-') 
-                    buf_push_u32(b, eval_number(ctx, tokens[k]));
-                else {
-                    char full[64];
-                    const char* name = tokens[k];
-                    if (tokens[k][0] == '.') {
-                        normalize_symbol_name(ctx, tokens[k], full, sizeof(full));
-                        name = full;
-                    }
-
-                    Symbol* s = sym_find(ctx, name);
-                    if (s && s->section == SEC_ABS) {
-                        buf_push_u32(b, s->value);
-                    } else if (s) { 
-                        emit_reloc(ctx, R_386_32, (char*)name, b->size); buf_push_u32(b, 0); 
-                    } else {
-                        buf_push_u32(b, eval_number(ctx, tokens[k]));
-                    }
-                }
-            } else {
-                b->size += 4;
-            }
-        }
-        return;
-    }
-    if(strcmp(cmd_name, "resb") == 0 || strcmp(cmd_name, "rb") == 0) {
-        if(ctx->cur_sec != SEC_BSS) panic(ctx, "resb only in .bss");
-        ctx->bss.size += eval_number(ctx, tokens[1]);
-        return;
-    }
-    if(strcmp(cmd_name, "resw") == 0 || strcmp(cmd_name, "rw") == 0) {
-        if(ctx->cur_sec != SEC_BSS) panic(ctx, "resw only in .bss");
-        ctx->bss.size += eval_number(ctx, tokens[1]) * 2;
-        return;
-    }
-    if(strcmp(cmd_name, "resd") == 0 || strcmp(cmd_name, "rd") == 0) {
-        if(ctx->cur_sec != SEC_BSS) panic(ctx, "resd only in .bss");
-        ctx->bss.size += eval_number(ctx, tokens[1]) * 4;
-        return;
-    }
+    if (handle_directive(ctx, cmd_name, tokens, count)) return;
 
     Operand o1 = {0}, o2 = {0};
     if(c_idx > 0) parse_operand(ctx, clean_tokens[0], &o1);
