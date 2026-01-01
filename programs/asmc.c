@@ -172,11 +172,213 @@ Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
     return 0;
 }
 
-int eval_number(AssemblerCtx* ctx, const char* s) {
+typedef struct {
+    const char* s;
+    AssemblerCtx* ctx;
+} ExprState;
+
+static void expr_skip_spaces(ExprState* st) {
+    while (*st->s == ' ' || *st->s == '\t') st->s++;
+}
+
+static int expr_parse_number(ExprState* st) {
+    expr_skip_spaces(st);
+    const char* p = st->s;
+
+    if (p[0] == '0' && p[1] == 'x') {
+        p += 2;
+        uint32_t val = 0;
+        while (*p) {
+            char c = *p;
+            if (c >= '0' && c <= '9') val = (val << 4) | (uint32_t)(c - '0');
+            else if (c >= 'a' && c <= 'f') val = (val << 4) | (uint32_t)(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') val = (val << 4) | (uint32_t)(c - 'A' + 10);
+            else break;
+            p++;
+        }
+        st->s = p;
+        return (int)val;
+    }
+
+    if (*p >= '0' && *p <= '9') {
+        int val = 0;
+        while (*p >= '0' && *p <= '9') {
+            val = val * 10 + (*p - '0');
+            p++;
+        }
+        st->s = p;
+        return val;
+    }
+
+    return 0;
+}
+
+static int expr_parse_identifier(ExprState* st) {
+    expr_skip_spaces(st);
+    const char* p = st->s;
+    char name[64];
+    int n = 0;
+
+    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_') {
+        if (n < 63) {
+            name[n++] = *p;
+        }
+        p++;
+    }
+
+    if (n == 0) {
+        return 0;
+    }
+
+    name[n] = 0;
+    st->s = p;
+
+    Symbol* sym = sym_find(st->ctx, name);
+    if (sym && sym->section == SEC_ABS) {
+        return (int)sym->value;
+    }
+    return 0;
+}
+
+static int expr_parse_primary(ExprState* st);
+
+static int expr_parse_unary(ExprState* st) {
+    expr_skip_spaces(st);
+    if (*st->s == '+' || *st->s == '-') {
+        char op = *st->s;
+        st->s++;
+        int v = expr_parse_unary(st);
+        return (op == '-') ? -v : v;
+    }
+    return expr_parse_primary(st);
+}
+
+static int expr_parse_primary(ExprState* st) {
+    expr_skip_spaces(st);
+    if (*st->s == '(') {
+        st->s++;
+        int v;
+
+        int expr_parse_or(ExprState* st);
+        v = expr_parse_or(st);
+
+        expr_skip_spaces(st);
+        if (*st->s == ')') {
+            st->s++;
+        }
+        return v;
+    }
+
+    if ((*st->s >= '0' && *st->s <= '9') || (st->s[0] == '0' && st->s[1] == 'x')) {
+        return expr_parse_number(st);
+    }
+
+    return expr_parse_identifier(st);
+}
+
+static int expr_parse_mul(ExprState* st) {
+    int v = expr_parse_unary(st);
+    while (1) {
+        expr_skip_spaces(st);
+        if (*st->s == '*' || *st->s == '/') {
+            char op = *st->s;
+            st->s++;
+            int rhs = expr_parse_unary(st);
+            if (op == '*') v = v * rhs;
+            else if (rhs != 0) v = v / rhs;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static int expr_parse_shift(ExprState* st) {
+    int v = expr_parse_mul(st);
+    while (1) {
+        expr_skip_spaces(st);
+        if (st->s[0] == '<' && st->s[1] == '<') {
+            st->s += 2;
+            int rhs = expr_parse_mul(st);
+            v = v << rhs;
+        } else if (st->s[0] == '>' && st->s[1] == '>') {
+            st->s += 2;
+            int rhs = expr_parse_mul(st);
+            v = v >> rhs;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static int expr_parse_add(ExprState* st) {
+    int v = expr_parse_shift(st);
+    while (1) {
+        expr_skip_spaces(st);
+        if (*st->s == '+' || *st->s == '-') {
+            char op = *st->s;
+            st->s++;
+            int rhs = expr_parse_shift(st);
+            if (op == '+') v = v + rhs;
+            else v = v - rhs;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static int expr_parse_and(ExprState* st) {
+    int v = expr_parse_add(st);
+    while (1) {
+        expr_skip_spaces(st);
+        if (*st->s == '&') {
+            st->s++;
+            int rhs = expr_parse_add(st);
+            v = v & rhs;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static int expr_parse_xor(ExprState* st) {
+    int v = expr_parse_and(st);
+    while (1) {
+        expr_skip_spaces(st);
+        if (*st->s == '^') {
+            st->s++;
+            int rhs = expr_parse_and(st);
+            v = v ^ rhs;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+int expr_parse_or(ExprState* st) {
+    int v = expr_parse_xor(st);
+    while (1) {
+        expr_skip_spaces(st);
+        if (*st->s == '|') {
+            st->s++;
+            int rhs = expr_parse_xor(st);
+            v = v | rhs;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static int eval_simple_number(AssemblerCtx* ctx, const char* s) {
     if (!s) return 0;
     int sign = 1;
     if (*s == '-') { sign = -1; s++; }
-    
+
     if (s[0] == '0' && s[1] == 'x') {
         s += 2;
         uint32_t val = 0;
@@ -190,7 +392,7 @@ int eval_number(AssemblerCtx* ctx, const char* s) {
         }
         return (int)val * sign;
     }
-    
+
     if (*s >= '0' && *s <= '9') {
         int val = 0;
         while (*s >= '0' && *s <= '9') {
@@ -206,6 +408,35 @@ int eval_number(AssemblerCtx* ctx, const char* s) {
     }
 
     return 0;
+}
+
+int eval_number(AssemblerCtx* ctx, const char* s) {
+    if (!s) return 0;
+
+    const char* p = s;
+    int has_ops = 0;
+    while (*p) {
+        char c = *p;
+        if (c == '+' || c == '-' || c == '*' || c == '/' ||
+            c == '(' || c == ')' || c == '&' || c == '|' ||
+            c == '<' || c == '>' || c == '^') {
+            has_ops = 1;
+            break;
+        }
+        p++;
+    }
+
+    if (!has_ops) {
+        return eval_simple_number(ctx, s);
+    }
+
+    ExprState st;
+    st.s = s;
+    st.ctx = ctx;
+
+    int v = expr_parse_or(&st);
+    expr_skip_spaces(&st);
+    return v;
 }
 
 Symbol* sym_add(AssemblerCtx* ctx, const char* name) {
@@ -711,6 +942,28 @@ void process_line(AssemblerCtx* ctx, char* line) {
         if(ctx->pass == 1) { Symbol* s = sym_add(ctx, tokens[1]); s->bind = SYM_EXTERN; }
         return;
     }
+    if(strcmp(cmd_name, "align") == 0) {
+        int a = eval_number(ctx, tokens[1]);
+        if (a <= 0) panic(ctx, "Invalid alignment");
+
+        Buffer* b = get_cur_buffer(ctx);
+        if (ctx->cur_sec == SEC_BSS) {
+            uint32_t size = ctx->bss.size;
+            uint32_t aligned = (size + (uint32_t)a - 1) & ~((uint32_t)a - 1);
+            ctx->bss.size = aligned;
+        } else {
+            if (ctx->pass == 1) {
+                uint32_t size = b->size;
+                uint32_t aligned = (size + (uint32_t)a - 1) & ~((uint32_t)a - 1);
+                b->size = aligned;
+            } else {
+                while (b->size % (uint32_t)a != 0) {
+                    buf_push(b, 0);
+                }
+            }
+        }
+        return;
+    }
     if(strcmp(cmd_name, "db") == 0) {
         Buffer* b = get_cur_buffer(ctx);
         for(int k=1; k<count; k++) {
@@ -728,34 +981,52 @@ void process_line(AssemblerCtx* ctx, char* line) {
     }
     if(strcmp(cmd_name, "dw") == 0) {
         Buffer* b = get_cur_buffer(ctx);
-        if(ctx->pass == 2) {
-            int val = eval_number(ctx, tokens[1]);
-            buf_push(b, val & 0xFF);
-            buf_push(b, (val >> 8) & 0xFF);
-        } else b->size += 2;
+        for (int k = 1; k < count; k++) {
+            if(ctx->pass == 2) {
+                int val = eval_number(ctx, tokens[k]);
+                buf_push(b, val & 0xFF);
+                buf_push(b, (val >> 8) & 0xFF);
+            } else {
+                b->size += 2;
+            }
+        }
         return;
     }
     if(strcmp(cmd_name, "dd") == 0) {
         Buffer* b = get_cur_buffer(ctx);
-        if(ctx->pass == 2) {
-            if ((tokens[1][0] >= '0' && tokens[1][0] <= '9') || tokens[1][0] == '-') 
-                buf_push_u32(b, eval_number(ctx, tokens[1]));
-            else {
-                Symbol* s = sym_find(ctx, tokens[1]);
-                if (s && s->section == SEC_ABS) {
-                    buf_push_u32(b, s->value);
-                } else if (s) { 
-                    emit_reloc(ctx, R_386_32, tokens[1], b->size); buf_push_u32(b, 0); 
-                } else {
-                    buf_push_u32(b, eval_number(ctx, tokens[1]));
+        for (int k = 1; k < count; k++) {
+            if(ctx->pass == 2) {
+                if ((tokens[k][0] >= '0' && tokens[k][0] <= '9') || tokens[k][0] == '-') 
+                    buf_push_u32(b, eval_number(ctx, tokens[k]));
+                else {
+                    Symbol* s = sym_find(ctx, tokens[k]);
+                    if (s && s->section == SEC_ABS) {
+                        buf_push_u32(b, s->value);
+                    } else if (s) { 
+                        emit_reloc(ctx, R_386_32, tokens[k], b->size); buf_push_u32(b, 0); 
+                    } else {
+                        buf_push_u32(b, eval_number(ctx, tokens[k]));
+                    }
                 }
+            } else {
+                b->size += 4;
             }
-        } else b->size += 4;
+        }
         return;
     }
     if(strcmp(cmd_name, "resb") == 0 || strcmp(cmd_name, "rb") == 0) {
         if(ctx->cur_sec != SEC_BSS) panic(ctx, "resb only in .bss");
         ctx->bss.size += eval_number(ctx, tokens[1]);
+        return;
+    }
+    if(strcmp(cmd_name, "resw") == 0 || strcmp(cmd_name, "rw") == 0) {
+        if(ctx->cur_sec != SEC_BSS) panic(ctx, "resw only in .bss");
+        ctx->bss.size += eval_number(ctx, tokens[1]) * 2;
+        return;
+    }
+    if(strcmp(cmd_name, "resd") == 0 || strcmp(cmd_name, "rd") == 0) {
+        if(ctx->cur_sec != SEC_BSS) panic(ctx, "resd only in .bss");
+        ctx->bss.size += eval_number(ctx, tokens[1]) * 4;
         return;
     }
 
