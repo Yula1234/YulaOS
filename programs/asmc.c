@@ -115,6 +115,7 @@ typedef struct {
     int sym_capacity;
     int* sym_hash;
     int sym_hash_size;
+    char current_scope[64];
 } AssemblerCtx;
 
 void panic(AssemblerCtx* ctx, const char* msg) {
@@ -241,6 +242,28 @@ void sym_table_free(AssemblerCtx* ctx) {
     ctx->sym_count = 0;
 }
 
+static void normalize_symbol_name(AssemblerCtx* ctx, const char* in, char* out, size_t out_size) {
+    if (!in || out_size == 0) return;
+    if (in[0] == '.') {
+        if (!ctx->current_scope[0]) {
+            panic(ctx, "Local label without global label");
+        }
+        size_t base_len = strlen(ctx->current_scope);
+        size_t local_len = strlen(in + 1);
+        if (base_len + 1 + local_len >= out_size) {
+            panic(ctx, "Symbol name too long");
+        }
+        memcpy(out, ctx->current_scope, base_len);
+        out[base_len] = '$';
+        memcpy(out + base_len + 1, in + 1, local_len + 1);
+    } else {
+        size_t len = strlen(in);
+        if (len >= out_size) len = out_size - 1;
+        memcpy(out, in, len);
+        out[len] = 0;
+    }
+}
+
 Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
     if (!ctx->sym_hash || ctx->sym_hash_size <= 0) return 0;
     uint32_t h = sym_hash_calc(name);
@@ -302,7 +325,8 @@ static int expr_parse_identifier(ExprState* st) {
     char name[64];
     int n = 0;
 
-    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_') {
+    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+           (*p >= '0' && *p <= '9') || *p == '_' || *p == '.') {
         if (n < 63) {
             name[n++] = *p;
         }
@@ -316,7 +340,9 @@ static int expr_parse_identifier(ExprState* st) {
     name[n] = 0;
     st->s = p;
 
-    Symbol* sym = sym_find(st->ctx, name);
+    char full[64];
+    normalize_symbol_name(st->ctx, name, full, sizeof(full));
+    Symbol* sym = sym_find(st->ctx, full);
     if (sym && sym->section == SEC_ABS) {
         return (int)sym->value;
     }
@@ -485,7 +511,14 @@ static int eval_simple_number(AssemblerCtx* ctx, const char* s) {
         return val * sign;
     }
 
-    Symbol* sym = sym_find(ctx, s);
+    char full[64];
+    const char* name = s;
+    if (s[0] == '.') {
+        normalize_symbol_name(ctx, s, full, sizeof(full));
+        name = full;
+    }
+
+    Symbol* sym = sym_find(ctx, name);
     if (sym && sym->section == SEC_ABS) {
         return sym->value * sign;
     }
@@ -847,7 +880,13 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
                     if (op->base_reg != -1 || op->index_reg != -1) panic(ctx, "Labels with registers not supported in memory operand");
                     if (sign < 0) panic(ctx, "Negative label not supported");
                     op->has_label = 1;
-                    strcpy(op->label, tmp);
+                    char full[64];
+                    const char* name = tmp;
+                    if (tmp[0] == '.') {
+                        normalize_symbol_name(ctx, tmp, full, sizeof(full));
+                        name = full;
+                    }
+                    strcpy(op->label, name);
                 }
             }
 
@@ -885,13 +924,20 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
         if (op->disp >= -128 && op->disp <= 255) op->size = 1; 
         else op->size = 4;
     } else {
-        Symbol* s = sym_find(ctx, text);
+        char full[64];
+        const char* name = text;
+        if (text[0] == '.') {
+            normalize_symbol_name(ctx, text, full, sizeof(full));
+            name = full;
+        }
+
+        Symbol* s = sym_find(ctx, name);
         if (s && s->section == SEC_ABS) {
             op->disp = s->value;
             if (op->disp >= -128 && op->disp <= 255) op->size = 1;
             else op->size = 4;
         } else {
-            strcpy(op->label, text);
+            strcpy(op->label, name);
             op->has_label = 1;
             op->size = 4; 
         }
@@ -1205,7 +1251,18 @@ void process_line(AssemblerCtx* ctx, char* line) {
     int len = strlen(tokens[0]);
     if(tokens[0][len-1] == ':') {
         tokens[0][len-1] = 0;
-        sym_define_label(ctx, tokens[0]);
+
+        char full[64];
+        normalize_symbol_name(ctx, tokens[0], full, sizeof(full));
+
+        if (tokens[0][0] != '.') {
+            size_t gl = strlen(tokens[0]);
+            if (gl >= sizeof(ctx->current_scope)) gl = sizeof(ctx->current_scope) - 1;
+            memcpy(ctx->current_scope, tokens[0], gl);
+            ctx->current_scope[gl] = 0;
+        }
+
+        sym_define_label(ctx, full);
         for(int k=0; k<count-1; k++) tokens[k] = tokens[k+1];
         count--;
         if(count == 0) return;
@@ -1218,7 +1275,9 @@ void process_line(AssemblerCtx* ctx, char* line) {
     
     if (count >= 3 && strcmp(tokens[1], "equ") == 0) {
         if (ctx->pass == 1) {
-            Symbol* s = sym_add(ctx, tokens[0]);
+            char full[64];
+            normalize_symbol_name(ctx, tokens[0], full, sizeof(full));
+            Symbol* s = sym_add(ctx, full);
             s->value = eval_number(ctx, tokens[2]);
             s->section = SEC_ABS;
             s->bind = SYM_LOCAL;
@@ -1307,11 +1366,18 @@ void process_line(AssemblerCtx* ctx, char* line) {
                 if ((tokens[k][0] >= '0' && tokens[k][0] <= '9') || tokens[k][0] == '-') 
                     buf_push_u32(b, eval_number(ctx, tokens[k]));
                 else {
-                    Symbol* s = sym_find(ctx, tokens[k]);
+                    char full[64];
+                    const char* name = tokens[k];
+                    if (tokens[k][0] == '.') {
+                        normalize_symbol_name(ctx, tokens[k], full, sizeof(full));
+                        name = full;
+                    }
+
+                    Symbol* s = sym_find(ctx, name);
                     if (s && s->section == SEC_ABS) {
                         buf_push_u32(b, s->value);
                     } else if (s) { 
-                        emit_reloc(ctx, R_386_32, tokens[k], b->size); buf_push_u32(b, 0); 
+                        emit_reloc(ctx, R_386_32, (char*)name, b->size); buf_push_u32(b, 0); 
                     } else {
                         buf_push_u32(b, eval_number(ctx, tokens[k]));
                     }
