@@ -22,7 +22,6 @@
 #include "elf.h"
 #include "cpu.h"
 
-#define KSTACK_SIZE 16384  
 #define PID_HASH_SIZE 16384
 #define PID_HASH_LOCKS_COUNT 256
 
@@ -344,7 +343,7 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     t->entry = entry; 
     t->arg = arg;
     t->page_dir = 0;
-    t->mem_pages = 4;
+    t->mem_pages = 0;
     t->priority = prio;
 
     memcpy(t->fpu_state, initial_fpu_state, 512);

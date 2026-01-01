@@ -878,7 +878,7 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     }
 
     uint32_t read_count = 0;
-    uint8_t* scratch = kmalloc(YFS_BLOCK_SIZE);
+    uint8_t* scratch = kmalloc_a(YFS_BLOCK_SIZE);
     if (!scratch) { rwlock_release_read(lock); return -1; }
 
     uint32_t last_prefetched_log_blk = 0xFFFFFFFF;

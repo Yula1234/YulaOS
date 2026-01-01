@@ -200,7 +200,8 @@ static void monitor_draw(window_t* win, int x, int y) {
         vga_print_at(cpu_s, right_x + 145, ry + 4, C_TEXT_DIM);
         
         char mem_sz[16];
-        strlcpy(mem_sz, itoa_p(t->mem_pages * 4), 16);
+        uint32_t total_mem_kb = (t->mem_pages * 4) + (t->kstack_size / 1024);
+        strlcpy(mem_sz, itoa_p(total_mem_kb), 16);
         strlcat(mem_sz, "K", 16);
         vga_print_at(mem_sz, right_x + 180, ry + 4, C_TEXT_DIM);
 

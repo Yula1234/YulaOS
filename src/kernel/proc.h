@@ -11,6 +11,8 @@
 
 #include <stdint.h>
 
+#define KSTACK_SIZE 32768
+
 typedef enum {
     TASK_UNUSED = 0,
     TASK_RUNNABLE,
