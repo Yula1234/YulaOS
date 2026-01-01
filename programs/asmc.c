@@ -3,9 +3,10 @@
 
 #include <yula.h>
 
-#define MAX_LINE_LEN    256
+#define MAX_LINE_LEN   1024
 #define MAX_TOKEN_LEN   64
-#define MAX_SYMBOLS     2048
+#define MAX_TOKENS      256
+#define MAX_SYMBOLS    2048
 
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
@@ -90,6 +91,7 @@ typedef struct {
 
 typedef enum { SEC_NULL=0, SEC_TEXT, SEC_DATA, SEC_BSS, SEC_ABS } SectionID;
 typedef enum { SYM_UNDEF, SYM_LOCAL, SYM_GLOBAL, SYM_EXTERN } SymBind;
+typedef enum { FMT_ELF=0, FMT_BIN } OutputFormat;
 
 typedef struct {
     char name[64];
@@ -116,6 +118,14 @@ typedef struct {
     int* sym_hash;
     int sym_hash_size;
     char current_scope[64];
+    OutputFormat format;
+    int default_size;
+    int code16;
+    uint32_t text_base;
+    uint32_t data_base;
+    uint32_t bss_base;
+    uint32_t org;
+    int has_org;
 } AssemblerCtx;
 
 void panic(AssemblerCtx* ctx, const char* msg) {
@@ -292,6 +302,21 @@ static void resolve_symbol_name(AssemblerCtx* ctx, const char* in, char* out, si
     if (len >= out_size) len = out_size - 1;
     memcpy(out, in, len);
     out[len] = 0;
+}
+
+static uint32_t resolve_abs_addr(AssemblerCtx* ctx, Symbol* s) {
+    if (!s) panic(ctx, "Internal error: null symbol");
+
+    if (s->bind == SYM_EXTERN || s->section == SEC_NULL) {
+        panic(ctx, "External/undefined symbol in binary format");
+    }
+
+    if (s->section == SEC_ABS) return s->value;
+    if (s->section == SEC_TEXT) return ctx->text_base + s->value;
+    if (s->section == SEC_DATA) return ctx->data_base + s->value;
+    if (s->section == SEC_BSS)  return ctx->bss_base  + s->value;
+
+    return 0;
 }
 
 Symbol* sym_find(AssemblerCtx* ctx, const char* name) {
@@ -653,6 +678,10 @@ int get_reg_info(const char* s, int* size) {
     return -1;
 }
 
+static int is_16bit_addr_reg(int reg_index) {
+    return reg_index == 3 || reg_index == 5 || reg_index == 6 || reg_index == 7;
+}
+
 typedef enum {
     ENC_NONE, ENC_R, ENC_I, ENC_M, ENC_MR, ENC_RM, ENC_MI, ENC_OI, ENC_J, ENC_SHIFT,
     ENC_0F, ENC_0F_MR, ENC_0F_RM
@@ -859,6 +888,73 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
         text[len-1] = 0;
         char* content = text + 1;
 
+        if (ctx->code16) {
+            char* p = content;
+            int sign = 1;
+
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '+' || *p == '-') {
+                sign = (*p == '-') ? -1 : 1;
+                p++;
+            }
+
+            while (1) {
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == 0) break;
+
+                char* t = p;
+                while (*p && *p != '+' && *p != '-') p++;
+                int term_len = (int)(p - t);
+                while (term_len > 0 && (t[term_len-1] == ' ' || t[term_len-1] == '\t')) term_len--;
+                if (term_len <= 0) {
+                    if (*p == '+' || *p == '-') {
+                        sign = (*p == '-') ? -1 : 1;
+                        p++;
+                        continue;
+                    }
+                    break;
+                }
+
+                char tmp[64];
+                int n = term_len;
+                if (n > 63) n = 63;
+                memcpy(tmp, t, n);
+                tmp[n] = 0;
+
+                int sz;
+                int r = get_reg_info(tmp, &sz);
+                if (r != -1) {
+                    if (sz != 2) panic(ctx, "Only 16-bit registers allowed in use16");
+                    if (!is_16bit_addr_reg(r)) panic(ctx, "Only BX,BP,SI,DI allowed in 16-bit memory address");
+                    if (sign < 0) panic(ctx, "Negative register not supported");
+                    if (op->base_reg == -1) op->base_reg = r;
+                    else if (op->index_reg == -1) op->index_reg = r;
+                    else panic(ctx, "Too many registers in 16-bit memory address");
+                } else if ((tmp[0] >= '0' && tmp[0] <= '9') || tmp[0] == '-' || tmp[0] == '(') {
+                    int val = eval_number(ctx, tmp);
+                    op->disp += sign * val;
+                } else {
+                    if (op->has_label) panic(ctx, "Multiple labels in memory operand");
+                    if (op->base_reg != -1 || op->index_reg != -1) panic(ctx, "Labels with registers not supported in 16-bit memory operand");
+                    if (sign < 0) panic(ctx, "Negative label not supported");
+                    op->has_label = 1;
+                    char full[64];
+                    resolve_symbol_name(ctx, tmp, full, sizeof(full));
+                    strcpy(op->label, full);
+                }
+
+                if (*p == '+' || *p == '-') {
+                    sign = (*p == '-') ? -1 : 1;
+                    p++;
+                } else {
+                    break;
+                }
+            }
+
+            if (op->base_reg != -1) op->reg = op->base_reg;
+            return;
+        }
+
         char* p = content;
         int sign = 1;
 
@@ -939,14 +1035,15 @@ void parse_operand(AssemblerCtx* ctx, char* text, Operand* op) {
                     resolve_symbol_name(ctx, tmp, full, sizeof(full));
                     strcpy(op->label, full);
                 }
+
+                if (*p == '+' || *p == '-') {
+                    sign = (*p == '-') ? -1 : 1;
+                    p++;
+                } else {
+                    break;
+                }
             }
 
-            if (*p == '+' || *p == '-') {
-                sign = (*p == '-') ? -1 : 1;
-                p++;
-            } else {
-                break;
-            }
         }
 
         if (op->base_reg != -1) op->reg = op->base_reg;
@@ -1033,6 +1130,93 @@ void emit_reloc(AssemblerCtx* ctx, int type, char* label, uint32_t offset) {
     buf_write(target, &r, sizeof(r));
 }
 
+static void emit_modrm16(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
+    if (ctx->pass != 2) return;
+
+    int base = rm->base_reg;
+    int index = rm->index_reg;
+    int32_t disp = rm->disp;
+
+    if (base == -1 && index == -1) {
+        uint16_t val = (uint16_t)disp;
+        if (rm->has_label) {
+            if (ctx->format != FMT_BIN) {
+                panic(ctx, "16-bit relocations in ELF are not supported");
+            }
+            Symbol* s = sym_find(ctx, rm->label);
+            if (!s) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Undefined symbol '%s'", rm->label);
+                panic(ctx, msg);
+            }
+            val = (uint16_t)resolve_abs_addr(ctx, s);
+        }
+        emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | 6);
+        emit_word(ctx, val);
+        return;
+    }
+
+    int has_bx = 0, has_bp = 0, has_si = 0, has_di = 0;
+    int regs[2] = { base, index };
+    for (int i = 0; i < 2; i++) {
+        int r = regs[i];
+        if (r == -1) continue;
+        if (r == 3) has_bx = 1;  /* BX */
+        else if (r == 5) has_bp = 1; /* BP */
+        else if (r == 6) has_si = 1; /* SI */
+        else if (r == 7) has_di = 1; /* DI */
+        else {
+            panic(ctx, "Invalid register in 16-bit address");
+        }
+    }
+
+    int rm_bits = -1;
+    if (has_bx && has_si && !has_bp && !has_di) rm_bits = 0;
+    else if (has_bx && has_di && !has_bp && !has_si) rm_bits = 1;
+    else if (has_bp && has_si && !has_bx && !has_di) rm_bits = 2;
+    else if (has_bp && has_di && !has_bx && !has_si) rm_bits = 3;
+    else if (has_si && !has_bx && !has_bp && !has_di) rm_bits = 4;
+    else if (has_di && !has_bx && !has_bp && !has_si) rm_bits = 5;
+    else if (has_bp && !has_bx && !has_si && !has_di) rm_bits = 6;
+    else if (has_bx && !has_bp && !has_si && !has_di) rm_bits = 7;
+    else {
+        panic(ctx, "Unsupported 16-bit addressing combination");
+    }
+
+    uint8_t mod;
+    uint16_t disp16 = (uint16_t)disp;
+
+    if (!rm->has_label) {
+        if (disp == 0 && rm_bits != 6) {
+            mod = 0;
+        } else if (disp >= -128 && disp <= 127) {
+            mod = 1;
+        } else {
+            mod = 2;
+        }
+    } else {
+        if (ctx->format != FMT_BIN) {
+            panic(ctx, "16-bit relocations in ELF are not supported");
+        }
+        Symbol* s = sym_find(ctx, rm->label);
+        if (!s) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Undefined symbol '%s'", rm->label);
+            panic(ctx, msg);
+        }
+        disp16 = (uint16_t)resolve_abs_addr(ctx, s);
+        mod = 2; 
+    }
+
+    emit_byte(ctx, (mod << 6) | ((reg_opcode & 7) << 3) | rm_bits);
+
+    if (mod == 1) {
+        emit_byte(ctx, (uint8_t)disp);
+    } else if (mod == 2 || (mod == 0 && rm_bits == 6)) {
+        emit_word(ctx, disp16);
+    }
+}
+
 void emit_modrm(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
     if (ctx->pass != 2) return;
     
@@ -1041,6 +1225,11 @@ void emit_modrm(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
     if (rm->type == OP_REG) {
         emit_byte(ctx, 0xC0 | ((reg_opcode & 7) << 3) | (rm->reg & 7));
     } else {
+        if (ctx->code16) {
+            emit_modrm16(ctx, reg_opcode, rm);
+            return;
+        }
+
         int base = rm->base_reg;
         int index = rm->index_reg;
         int32_t disp = rm->disp;
@@ -1048,7 +1237,20 @@ void emit_modrm(AssemblerCtx* ctx, int reg_opcode, Operand* rm) {
         if (base == -1 && index == -1) {
             emit_byte(ctx, (0 << 6) | ((reg_opcode & 7) << 3) | 5);
             uint32_t val = (uint32_t)disp;
-            if (rm->has_label) { emit_reloc(ctx, R_386_32, rm->label, buf->size); val = 0; }
+            if (rm->has_label) {
+                if (ctx->format == FMT_BIN) {
+                    Symbol* s = sym_find(ctx, rm->label);
+                    if (!s) {
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "Undefined symbol '%s'", rm->label);
+                        panic(ctx, msg);
+                    }
+                    val = resolve_abs_addr(ctx, s);
+                } else {
+                    emit_reloc(ctx, R_386_32, rm->label, buf->size);
+                    val = 0;
+                }
+            }
             emit_dword(ctx, val);
             return;
         }
@@ -1127,9 +1329,13 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
         if (o1->type == OP_REG) size = o1->size;
         else if (o2->type == OP_REG) size = o2->size;
     }
-    if (size == 0) size = 4;
+    if (size == 0) size = ctx->default_size ? ctx->default_size : 4;
 
-    if (size == 2) emit_byte(ctx, 0x66);
+    if (size == 2) {
+        if (!ctx->code16) emit_byte(ctx, 0x66); 
+    } else if (size == 4) {
+        if (ctx->code16) emit_byte(ctx, 0x66); 
+    }
 
     uint32_t h = isa_hash_calc(name);
     int slot = (int)(h & (uint32_t)(isa_bucket_size - 1));
@@ -1180,7 +1386,20 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
                 emit_byte(ctx, d->op_base);
                 uint32_t val = o1->disp;
                 Buffer* buf = get_cur_buffer(ctx);
-                if (o1->has_label) { emit_reloc(ctx, R_386_32, o1->label, buf->size); val = 0; }
+                if (o1->has_label) {
+                    if (ctx->format == FMT_BIN) {
+                        Symbol* s = sym_find(ctx, o1->label);
+                        if (!s) {
+                            char msg[128];
+                            snprintf(msg, sizeof(msg), "Undefined symbol '%s'", o1->label);
+                            panic(ctx, msg);
+                        }
+                        val = resolve_abs_addr(ctx, s);
+                    } else {
+                        emit_reloc(ctx, R_386_32, o1->label, buf->size);
+                        val = 0;
+                    }
+                }
                 
                 if (size == 2) emit_word(ctx, (uint16_t)val);
                 else emit_dword(ctx, val);
@@ -1204,14 +1423,29 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
 
             if (d->op_base >= 0x80 && d->op_base <= 0x8F) emit_byte(ctx, 0x0F);
             emit_byte(ctx, d->op_base);
-            
+
             uint32_t val = 0;
             if (ctx->pass == 2) {
                 if (o1->has_label) {
-                    emit_reloc(ctx, R_386_PC32, o1->label, buf->size);
-                    val = -4; 
+                    if (ctx->format == FMT_BIN) {
+                        Symbol* s = sym_find(ctx, o1->label);
+                        if (!s) {
+                            char msg[128];
+                            snprintf(msg, sizeof(msg), "Undefined symbol '%s'", o1->label);
+                            panic(ctx, msg);
+                        }
+                        if (s->section != ctx->cur_sec) {
+                            panic(ctx, "PC-relative jump across sections not supported in binary format");
+                        }
+                        int32_t target = (int32_t)s->value;
+                        int32_t pc = (int32_t)(buf->size + 4);
+                        val = (uint32_t)(target - pc);
+                    } else {
+                        emit_reloc(ctx, R_386_PC32, o1->label, buf->size);
+                        val = (uint32_t)-4;
+                    }
                 } else {
-                    val = o1->disp;
+                    val = (uint32_t)o1->disp;
                 }
             }
             emit_dword(ctx, val);
@@ -1222,7 +1456,20 @@ void assemble_instr(AssemblerCtx* ctx, char* name, int explicit_size, Operand* o
             emit_byte(ctx, d->op_base + o1->reg);
             uint32_t val = o2->disp;
             Buffer* buf = get_cur_buffer(ctx);
-            if (o2->has_label && ctx->pass == 2) { emit_reloc(ctx, R_386_32, o2->label, buf->size); val = 0; }
+            if (o2->has_label && ctx->pass == 2) {
+                if (ctx->format == FMT_BIN) {
+                    Symbol* s = sym_find(ctx, o2->label);
+                    if (!s) {
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "Undefined symbol '%s'", o2->label);
+                        panic(ctx, msg);
+                    }
+                    val = resolve_abs_addr(ctx, s);
+                } else {
+                    emit_reloc(ctx, R_386_32, o2->label, buf->size);
+                    val = 0;
+                }
+            }
             
             if (size == 1) emit_byte(ctx, (uint8_t)val);
             else if (size == 2) emit_word(ctx, (uint16_t)val);
@@ -1307,6 +1554,32 @@ static int tokenize_line(char* line, char** tokens, int max_tokens) {
 }
 
 static int handle_directive(AssemblerCtx* ctx, char* cmd_name, char** tokens, int count) {
+    if (strcmp(cmd_name, "format") == 0) {
+        if (count < 2) panic(ctx, "format requires argument");
+        if (strcmp(tokens[1], "binary") == 0) ctx->format = FMT_BIN;
+        else if (strcmp(tokens[1], "elf") == 0) ctx->format = FMT_ELF;
+        else panic(ctx, "Unknown format");
+        return 1;
+    }
+    if (strcmp(cmd_name, "use16") == 0) {
+        ctx->default_size = 2;
+        ctx->code16 = 1;
+        return 1;
+    }
+    if (strcmp(cmd_name, "use32") == 0) {
+        ctx->default_size = 4;
+        ctx->code16 = 0;
+        return 1;
+    }
+    if (strcmp(cmd_name, "org") == 0) {
+        if (ctx->format != FMT_BIN) panic(ctx, "org only valid in binary format");
+        if (count < 2) panic(ctx, "org requires argument");
+        if (ctx->pass == 1) {
+            ctx->org = (uint32_t)eval_number(ctx, tokens[1]);
+            ctx->has_org = 1;
+        }
+        return 1;
+    }
     if (strcmp(cmd_name, "section") == 0) {
         if (strcmp(tokens[1], ".text") == 0) ctx->cur_sec = SEC_TEXT;
         else if (strcmp(tokens[1], ".data") == 0) ctx->cur_sec = SEC_DATA;
@@ -1385,7 +1658,12 @@ static int handle_directive(AssemblerCtx* ctx, char* cmd_name, char** tokens, in
                     if (s && s->section == SEC_ABS) {
                         buf_push_u32(b, s->value);
                     } else if (s) {
-                        emit_reloc(ctx, R_386_32, full, b->size); buf_push_u32(b, 0);
+                        if (ctx->format == FMT_BIN) {
+                            uint32_t addr = resolve_abs_addr(ctx, s);
+                            buf_push_u32(b, addr);
+                        } else {
+                            emit_reloc(ctx, R_386_32, full, b->size); buf_push_u32(b, 0);
+                        }
                     } else {
                         buf_push_u32(b, eval_number(ctx, tokens[k]));
                     }
@@ -1415,8 +1693,8 @@ static int handle_directive(AssemblerCtx* ctx, char* cmd_name, char** tokens, in
 }
 
 void process_line(AssemblerCtx* ctx, char* line) {
-    char* tokens[MAX_LINE_LEN];
-    int count = tokenize_line(line, tokens, MAX_LINE_LEN);
+    char* tokens[MAX_TOKENS];
+    int count = tokenize_line(line, tokens, MAX_TOKENS);
     if(count == 0) return;
 
     int len = strlen(tokens[0]);
@@ -1555,6 +1833,16 @@ void write_elf(AssemblerCtx* ctx, const char* filename) {
     buf_free(&strtab); buf_free(&symtab); buf_free(&shstr);
 }
 
+void write_binary(AssemblerCtx* ctx, const char* filename) {
+    int fd = open(filename, 1);
+    if (fd < 0) { printf("Error creating file\n"); return; }
+
+    if (ctx->text.size) write(fd, ctx->text.data, ctx->text.size);
+    if (ctx->data.size) write(fd, ctx->data.data, ctx->data.size);
+
+    close(fd);
+}
+
 static void assembler_run_pass(AssemblerCtx* ctx, char* src, int pass) {
     ctx->pass = pass;
     ctx->line_num = 0;
@@ -1566,12 +1854,12 @@ static void assembler_run_pass(AssemblerCtx* ctx, char* src, int pass) {
     }
 
     int i = 0;
-    char line[256];
+    char line[MAX_LINE_LEN];
 
     while (src[i]) {
         int j = 0;
         while (src[i] && src[i] != '\n') {
-            if (src[i] != '\r') line[j++] = src[i];
+            if (src[i] != '\r' && j < (MAX_LINE_LEN - 1)) line[j++] = src[i];
             i++;
         }
         line[j] = 0;
@@ -1620,6 +1908,9 @@ int main(int argc, char** argv) {
     AssemblerCtx* ctx = malloc(sizeof(AssemblerCtx));
     if (!ctx) { printf("Out of memory for context\n"); buf_free(&src_buf); return 1; }
     memset(ctx, 0, sizeof(AssemblerCtx));
+    ctx->format = FMT_ELF;
+    ctx->default_size = 4;
+    ctx->code16 = 0;
 
     isa_build_index();
 
@@ -1638,9 +1929,21 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (ctx->format == FMT_BIN) {
+        uint32_t base = ctx->has_org ? ctx->org : 0;
+        ctx->text_base = base;
+        ctx->data_base = ctx->text_base + ctx->text.size;
+        ctx->bss_base  = ctx->data_base + ctx->data.size;
+    } else {
+        ctx->text_base = 0;
+        ctx->data_base = 0;
+        ctx->bss_base  = 0;
+    }
+
     assembler_run_pass(ctx, src, 2);
 
-    write_elf(ctx, argv[2]);
+    if (ctx->format == FMT_BIN) write_binary(ctx, argv[2]);
+    else write_elf(ctx, argv[2]);
     printf("Success: %s (%d bytes code, %d bytes data)\n", argv[2], ctx->text.size, ctx->data.size);
 
     assembler_free_resources(ctx);
