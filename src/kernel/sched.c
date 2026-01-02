@@ -56,11 +56,12 @@ static int get_best_cpu(void) {
     uint32_t flags = spinlock_acquire_safe(&cpu_cache_lock);
     
     uint32_t current_tick = timer_ticks;
+    int active_cpus = 1 + ap_running_count;
     int cache_valid = (cached_best_cpu >= 0 && 
                        cache_tick != 0 &&
                        current_tick - cache_tick < CPU_CACHE_INVALIDATE_TICKS);
     
-    if (cache_valid) {
+    if (cache_valid && active_cpus <= 1) {
         int result = cached_best_cpu;
         spinlock_release_safe(&cpu_cache_lock, flags);
         return result;
@@ -70,9 +71,12 @@ static int get_best_cpu(void) {
     
     int best_cpu = 0;
     uint32_t min_score = 0xFFFFFFFF;
-    int active_cpus = 1 + ap_running_count;
 
-    for (int i = 0; i < active_cpus; i++) {
+    cpu_t* me = cpu_current();
+    int start_cpu = me ? me->index : 0;
+
+    for (int ofs = 1; ofs <= active_cpus; ofs++) {
+        int i = (start_cpu + ofs) % active_cpus;
         cpu_t* c = &cpus[i];
         
         uint32_t load = c->load_percent;
@@ -80,6 +84,10 @@ static int get_best_cpu(void) {
         int weight = c->total_priority_weight;
         
         uint32_t score = load + (runq * 20) + (weight > 0 ? weight : 0);
+
+        if (i == 0 && active_cpus > 1) {
+            score += 25;
+        }
 
         if (score < min_score) {
             min_score = score;
@@ -155,7 +163,7 @@ void sched_add(task_t* t) {
         if (min_task) {
             t->vruntime = min_task->vruntime;
         } else {
-            t->vruntime = (uint64_t)timer_ticks * NICE_0_LOAD;
+            t->vruntime = (uint64_t)target->sched_ticks * NICE_0_LOAD;
         }
     }
     

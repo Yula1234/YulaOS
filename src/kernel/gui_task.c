@@ -120,9 +120,33 @@ void vga_draw_wireframe(int x, int y, int w, int h, uint32_t color) {
 }
 
 semaphore_t gui_event_sem;
+static volatile int gui_event_sem_ready = 0;
 
 void wake_up_gui() {
-    sem_signal(&gui_event_sem);
+    if (!gui_event_sem_ready) return;
+
+    uint32_t flags = spinlock_acquire_safe(&gui_event_sem.lock);
+
+    if (gui_event_sem.count == 0) {
+        gui_event_sem.count = 1;
+    }
+
+    if (!dlist_empty(&gui_event_sem.wait_list)) {
+        task_t* t = container_of(gui_event_sem.wait_list.next, task_t, sem_node);
+
+        dlist_del(&t->sem_node);
+
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
+        t->blocked_on_sem = 0;
+
+        if (t->state != TASK_ZOMBIE) {
+            t->state = TASK_RUNNABLE;
+            sched_add(t);
+        }
+    }
+
+    spinlock_release_safe(&gui_event_sem.lock, flags);
 }
 
 extern spinlock_t window_lock;
@@ -142,6 +166,7 @@ void gui_task(void* arg) {
     int first_frame = 1;
     
     sem_init(&gui_event_sem, 0);
+    gui_event_sem_ready = 1;
     vga_reset_dirty();
 
     while (1) {

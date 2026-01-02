@@ -115,35 +115,6 @@ void syncer_task(void* arg) {
     }
 }
 
-static void kitoa_dec(uint32_t n, char* buf) {
-    int i = 0;
-    if (n == 0) {
-        buf[i++] = '0';
-        buf[i] = '\0';
-        return;
-    }
-    while (n > 0) {
-        buf[i++] = (char)('0' + (n % 10));
-        n /= 10;
-    }
-    buf[i] = '\0';
-    for (int j = 0; j < i / 2; j++) {
-        char t = buf[j];
-        buf[j] = buf[i - 1 - j];
-        buf[i - 1 - j] = t;
-    }
-}
-
-static void kitoa_hex(uint32_t n, char* buf) {
-    static const char* h = "0123456789ABCDEF";
-    buf[0] = '0';
-    buf[1] = 'x';
-    for (int i = 0; i < 8; i++) {
-        buf[9 - i] = h[(n >> (i * 4)) & 0xF];
-    }
-    buf[10] = '\0';
-}
-
 __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
     if (magic != 0x2BADB002) {
         registers_t dummy_regs = {0};
