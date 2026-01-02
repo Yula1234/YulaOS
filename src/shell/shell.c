@@ -172,7 +172,7 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
     term_instance_t* term = ctx->term;
     if(!term) return;
 
-    uint32_t flags = spinlock_acquire_safe(&term->lock);
+    spinlock_acquire(&term->lock);
     
     int canvas_w = self->target_w - 12;
     int canvas_h = self->target_h - 44; 
@@ -225,7 +225,7 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
         }
     }
 
-    spinlock_release_safe(&term->lock, flags);
+    spinlock_release(&term->lock);
 }
 
 static void print_padded(term_instance_t* term, const char* text, int width, uint32_t color) {
@@ -445,8 +445,10 @@ void shell_task(void* arg) {
 
     ctx->term = my_term; ctx->hist = my_hist;
     hist_init(my_hist);
-    proc_current()->terminal = my_term;
-    proc_current()->term_mode = 1;
+
+    task_t* self = proc_current();
+    self->terminal = my_term;
+    self->term_mode = 1;
     memset(my_term->buffer, ' ', TERM_W * TERM_H);
     my_term->curr_fg = C_TEXT; my_term->curr_bg = C_BG;
     for(int i=0; i<TERM_W * TERM_HISTORY; i++) {
@@ -547,13 +549,17 @@ void shell_task(void* arg) {
                             vfs_close(saved_stdout);
                             vfs_close(saved_stdin);
 
-                            if (left_task) proc_wait(left_task->pid);
+                            if (left_task) {
+                                proc_wait(left_task->pid);
+                            }
                             if (right_task) {
                                 win->focused_pid = right_task->pid;
                                 focused_window_pid = right_task->pid;
                                 proc_wait(right_task->pid);
                                 win->focused_pid = win->owner_pid;
                                 focused_window_pid = win->owner_pid;
+                                win->is_dirty = 1;
+                                wake_up_gui();
                             }
                         } else {
                             term_print(my_term, "Pipe creation failed\n");
@@ -590,6 +596,8 @@ void shell_task(void* arg) {
                                 proc_wait(child->pid);
                                 win->focused_pid = win->owner_pid;
                                 focused_window_pid = win->owner_pid;
+                                win->is_dirty = 1;
+                                wake_up_gui();
                             } else {
                                 term_print(my_term, "Command not found: ");
                                 term_print(my_term, args[0]);

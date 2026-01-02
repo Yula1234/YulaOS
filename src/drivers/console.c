@@ -6,6 +6,7 @@
 #include <hal/irq.h>
 #include <fs/vfs.h>
 #include <kernel/proc.h>
+#include <kernel/sched.h>
 #include <hal/lock.h>
 
 #include "console.h"
@@ -22,14 +23,27 @@ static int console_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, c
     term_instance_t* term = (term_instance_t*)curr->terminal;
 
     const char* char_buf = (const char*)buffer;
-    
-    uint32_t flags = spinlock_acquire_safe(&term->lock);
-    
-    for (uint32_t i = 0; i < size; i++) {
-        term_putc(term, char_buf[i]);
+
+    const uint32_t BATCH = 8;
+    uint32_t pos = 0;
+
+    while (pos < size) {
+        spinlock_acquire(&term->lock);
+
+        uint32_t end = pos + BATCH;
+        if (end > size) end = size;
+
+        for (uint32_t i = pos; i < end; i++) {
+            term_putc(term, char_buf[i]);
+        }
+
+        spinlock_release(&term->lock);
+        pos = end;
+
+        if (pos < size) {
+            sched_yield();
+        }
     }
-    
-    spinlock_release_safe(&term->lock, flags);
 
     extern void window_mark_dirty_by_pid(int pid);
     

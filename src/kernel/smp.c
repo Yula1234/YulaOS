@@ -46,6 +46,8 @@ void smp_ap_main(cpu_t* cpu_arg) {
     lapic_init();
     lapic_timer_init(15000);
     kernel_init_simd();
+
+    __asm__ volatile("sti");
     
     __sync_fetch_and_add(&ap_running_count, 1);
     

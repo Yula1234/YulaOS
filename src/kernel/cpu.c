@@ -18,6 +18,8 @@ void cpu_init_system(void) {
         cpus[i].stat_total_ticks = 0;
         cpus[i].stat_idle_ticks = 0;
 
+        cpus[i].sched_ticks = 1;
+
         cpus[i].snap_total_ticks = 0;
         cpus[i].snap_idle_ticks = 0;
         cpus[i].load_percent = 0;
@@ -37,6 +39,15 @@ static inline uint32_t lapic_read_local(uint32_t reg) {
 }
 
 cpu_t* cpu_current(void) {
+    uint16_t tr_sel = 0;
+    __asm__ volatile("str %0" : "=m"(tr_sel));
+
+    int gdt_index = (int)(tr_sel >> 3);
+    int cpu_idx = gdt_index - 5;
+    if (cpu_idx >= 0 && cpu_idx < MAX_CPUS) {
+        return &cpus[cpu_idx];
+    }
+
     if (cpu_count == 0) return &cpus[0];
 
     uint32_t apic_id_reg = lapic_read_local(LAPIC_ID);

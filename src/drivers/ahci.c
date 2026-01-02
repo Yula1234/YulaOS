@@ -230,7 +230,7 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
     
     if (!state->active || !ex->dma_buf_virt[0]) return 0;
     
-    uint32_t flags = spinlock_acquire_safe(&state->lock);
+    spinlock_acquire(&state->lock);
     volatile HBA_PORT* port = (volatile HBA_PORT*)state->port_mmio;
 
     if (port->is & (1 << 30)) {
@@ -240,14 +240,14 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
 
     int slot = find_cmdslot(port, port_no);
     if (slot == -1 || slot < 0 || slot >= 32) {
-        spinlock_release_safe(&state->lock, flags);
+        spinlock_release(&state->lock);
         return 0;
     }
 
     uint8_t* dma_virt = (uint8_t*)ex->dma_buf_virt[slot];
     
     if (!dma_virt) {
-        spinlock_release_safe(&state->lock, flags);
+        spinlock_release(&state->lock);
         return 0;
     }
     
@@ -255,7 +255,7 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
         if (byte_count <= AHCI_DMA_BUF_SIZE) {
             memcpy(dma_virt, buf, byte_count);
         } else {
-            spinlock_release_safe(&state->lock, flags);
+            spinlock_release(&state->lock);
             return 0;
         }
     } else {
@@ -291,15 +291,16 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
 
     state->slot_sem[slot].count = 0;
 
+    spinlock_release(&state->lock);
+
     int spin = 0;
     while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) && spin < 1000000) {
-        spin++; __asm__ volatile("pause");
+        spin++;
+        __asm__ volatile("pause");
     }
 
     __sync_fetch_and_or(&port_active_slots[port_no], (1 << slot));
     port->ci = 1 << slot;
-
-    spinlock_release_safe(&state->lock, flags);
 
     int success = 1;
 

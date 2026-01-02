@@ -350,17 +350,22 @@ void* vmm_alloc_pages(size_t pages) {
         rb_delete(node);
     }
 
+    spinlock_release_safe(&vmm_lock, flags);
+
     for (size_t i = 0; i < pages; i++) {
         void* phys = pmm_alloc_block();
         if (!phys) {
-            spinlock_release_safe(&vmm_lock, flags);
             return 0;
         }
-        paging_map(kernel_page_directory, alloc_virt_addr + i * PAGE_SIZE, (uint32_t)phys, 3);
+        paging_map(kernel_page_directory,
+                   alloc_virt_addr + i * PAGE_SIZE,
+                   (uint32_t)phys,
+                   3);
     }
 
+    uint32_t flags2 = spinlock_acquire_safe(&vmm_lock);
     vmm_used_pages_count += pages;
-    spinlock_release_safe(&vmm_lock, flags);
+    spinlock_release_safe(&vmm_lock, flags2);
     
     return (void*)alloc_virt_addr;
 }
@@ -398,8 +403,6 @@ static vm_free_block_t* find_successor(uint32_t addr) {
 void vmm_free_pages(void* virt, size_t pages) {
     if (!virt || pages == 0) return;
     uint32_t vaddr = (uint32_t)virt;
-    
-    uint32_t flags = spinlock_acquire_safe(&vmm_lock);
 
     for (size_t i = 0; i < pages; i++) {
         uint32_t curr = vaddr + i * PAGE_SIZE;
@@ -411,6 +414,9 @@ void vmm_free_pages(void* virt, size_t pages) {
             pmm_free_block((void*)phys);
         }
     }
+
+    uint32_t flags = spinlock_acquire_safe(&vmm_lock);
+
     vmm_used_pages_count -= pages;
 
     vm_free_block_t* prev = find_predecessor(vaddr);

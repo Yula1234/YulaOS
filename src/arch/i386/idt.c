@@ -108,6 +108,8 @@ void isr_handler(registers_t* regs) {
 
     else if (regs->int_no >= 32 && regs->int_no <= 47) {
         if (regs->int_no == 32) {
+            cpu->sched_ticks++;
+
             if (cpu->index == 0) {
                 timer_ticks++;
 
@@ -126,7 +128,7 @@ void isr_handler(registers_t* regs) {
             if (((uint32_t)cpu->stat_total_ticks % 100) == 0) {
                 uint64_t delta_total = cpu->stat_total_ticks - cpu->snap_total_ticks;
                 uint64_t delta_idle  = cpu->stat_idle_ticks  - cpu->snap_idle_ticks;
-                
+
                 cpu->snap_total_ticks = cpu->stat_total_ticks;
                 cpu->snap_idle_ticks  = cpu->stat_idle_ticks;
 
@@ -143,12 +145,12 @@ void isr_handler(registers_t* regs) {
 
             if (curr && curr->state == TASK_RUNNING && curr->pid != 0) {
                 if (curr->exec_start > 0) {
-                    uint64_t delta_exec = timer_ticks - curr->exec_start;
+                    uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
                     if (delta_exec >= 1) {
                         uint32_t weight = calc_weight(curr->priority);
                         uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, weight);
                         curr->vruntime += delta_vruntime;
-                        curr->exec_start = timer_ticks;
+                        curr->exec_start = cpu->sched_ticks;
                     }
                 }
                 

@@ -26,6 +26,8 @@ typedef struct {
     volatile uint64_t stat_total_ticks;
     volatile uint64_t stat_idle_ticks;
 
+    volatile uint64_t sched_ticks;
+
     volatile uint64_t snap_total_ticks;
     volatile uint64_t snap_idle_ticks;
     

@@ -23,9 +23,9 @@ static uint32_t cache_tick = 0;
 static spinlock_t cpu_cache_lock;
 
 uint32_t calc_weight(task_prio_t prio) {
-    int nice = (int)prio - 10;
-    if (nice < -20) nice = -20;
-    if (nice > 19) nice = 19;
+	int nice = 10 - (int)prio;
+	if (nice < -20) nice = -20;
+	if (nice > 19) nice = 19;
     
     static const uint32_t prio_to_weight[40] = {
         88761, 71755, 56483, 46273, 36291,
@@ -127,7 +127,16 @@ void sched_add(task_t* t) {
 
     t->is_queued = 1;
 
-    t->quantum = (t->priority + 1) * 3;
+    uint32_t base_quantum;
+    if (t->priority >= PRIO_GUI) {
+        base_quantum = 8;
+    } else if (t->priority >= PRIO_USER) {
+        base_quantum = 4;
+    } else {
+        base_quantum = 2;
+    }
+
+    t->quantum = base_quantum;
     t->ticks_left = t->quantum;
     
     if (t->vruntime == 0) {
@@ -146,11 +155,11 @@ void sched_add(task_t* t) {
         if (min_task) {
             t->vruntime = min_task->vruntime;
         } else {
-            t->vruntime = timer_ticks * NICE_0_LOAD;
+            t->vruntime = (uint64_t)timer_ticks * NICE_0_LOAD;
         }
     }
     
-    t->exec_start = timer_ticks;
+    t->exec_start = 0;
     
     target->total_priority_weight += t->priority;
     target->total_task_count++;
@@ -233,6 +242,8 @@ void sched_start(task_t* first) {
 }
 
 void sched_yield(void) {
+    uint32_t eflags;
+    __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
     __asm__ volatile("cli");
     
     cpu_t* me = cpu_current();
@@ -243,7 +254,7 @@ void sched_yield(void) {
         fpu_save(prev->fpu_state);
         
         if (prev->exec_start > 0 && prev->pid != 0) {
-            uint64_t delta_exec = timer_ticks - prev->exec_start;
+            uint64_t delta_exec = me->sched_ticks - prev->exec_start;
             if (delta_exec > 0) {
                 uint32_t weight = calc_weight(prev->priority);
                 uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, weight);
@@ -267,15 +278,18 @@ void sched_yield(void) {
                 if (next->pid == 0) {
                     __asm__ volatile("sti; hlt; cli");
                 }
+                if (eflags & 0x200) __asm__ volatile("sti");
                 return;
             }
             
-            next->exec_start = timer_ticks;
+            next->exec_start = me->sched_ticks;
             
             me->current_task = next;
             sched_set_current(next);
 
             fpu_restore(next->fpu_state);
+
+            if (eflags & 0x200) __asm__ volatile("sti");
 
             if (prev) {
                 ctx_switch(&prev->esp, next->esp);

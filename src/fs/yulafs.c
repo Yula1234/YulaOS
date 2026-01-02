@@ -127,64 +127,83 @@ static void rb_insert_fixup(rb_node_t* z) {
 }
 
 static void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
-    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    spinlock_acquire(&dcache_lock);
+
+    rb_node_t* x = dcache_root;
+    rb_node_t* y = 0;
+
+    while (x) {
+        y = x;
+        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+        if (cmp == 0) {
+            x->target_ino = target;
+            spinlock_release(&dcache_lock);
+            return;
+        }
+        if (cmp < 0) x = x->left;
+        else x = x->right;
+    }
+
+    spinlock_release(&dcache_lock);
 
     rb_node_t* z = (rb_node_t*)kmalloc(sizeof(rb_node_t));
     if (!z) {
-        spinlock_release_safe(&dcache_lock, flags);
         return;
     }
-    
+
     z->parent_ino = parent;
     strlcpy(z->name, name, YFS_NAME_MAX);
     z->target_ino = target;
     z->left = z->right = z->parent = 0;
     z->color = RB_RED;
 
-    rb_node_t* y = 0;
-    rb_node_t* x = dcache_root;
-    
+    spinlock_acquire(&dcache_lock);
+
+    x = dcache_root;
+    y = 0;
+
     while (x) {
         y = x;
-        int cmp = rb_compare(z->parent_ino, z->name, x->parent_ino, x->name);
+        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
         if (cmp == 0) {
             x->target_ino = target;
+            spinlock_release(&dcache_lock);
             kfree(z);
-            spinlock_release_safe(&dcache_lock, flags);
             return;
         }
         if (cmp < 0) x = x->left;
         else x = x->right;
     }
-    
+
     z->parent = y;
-    if (!y) dcache_root = z;
-    else {
-        int cmp = rb_compare(z->parent_ino, z->name, y->parent_ino, y->name);
+    if (!y) {
+        dcache_root = z;
+    } else {
+        int cmp = rb_compare(parent, name, y->parent_ino, y->name);
         if (cmp < 0) y->left = z;
         else y->right = z;
     }
-    
+
     rb_insert_fixup(z);
-    spinlock_release_safe(&dcache_lock, flags);
+    spinlock_release(&dcache_lock);
 }
 
 static yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name) {
-    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    spinlock_acquire(&dcache_lock);
     
     rb_node_t* x = dcache_root;
     while (x) {
         int cmp = rb_compare(parent, name, x->parent_ino, x->name);
         if (cmp == 0) {
             yfs_ino_t res = x->target_ino;
-            spinlock_release_safe(&dcache_lock, flags);
+            spinlock_release(&dcache_lock);
             return res;
         }
         if (cmp < 0) x = x->left;
         else x = x->right;
     }
     
-    spinlock_release_safe(&dcache_lock, flags);
+    spinlock_release(&dcache_lock);
     return 0;
 }
 
@@ -196,7 +215,7 @@ static void rb_free_tree(rb_node_t* node) {
 }
 
 static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
-    uint32_t flags = spinlock_acquire_safe(&dcache_lock);
+    spinlock_acquire(&dcache_lock);
     
     rb_node_t* x = dcache_root;
     while (x) {
@@ -209,7 +228,7 @@ static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
         else x = x->right;
     }
     
-    spinlock_release_safe(&dcache_lock, flags);
+    spinlock_release(&dcache_lock);
 }
 
 static void flush_sb(void) {

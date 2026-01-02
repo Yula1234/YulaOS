@@ -233,31 +233,31 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     acpi_init();
 
+    if (cpu_count > 0) {
+        uint32_t apic_id_reg = lapic_read(LAPIC_ID);
+        int bsp_apic_id = (apic_id_reg >> 24) & 0xFF;
+
+        int bsp_idx = -1;
+        for (int i = 0; i < cpu_count; i++) {
+            if (cpus[i].id == bsp_apic_id) {
+                bsp_idx = i;
+                break;
+            }
+        }
+
+        if (bsp_idx > 0) {
+            cpu_t tmp = cpus[0];
+            cpus[0] = cpus[bsp_idx];
+            cpus[bsp_idx] = tmp;
+
+            cpus[0].index = 0;
+            cpus[bsp_idx].index = bsp_idx;
+        }
+    }
+
     vga_init();
     vga_init_graphics();
-    {
-        char buf[64];
-        vga_print("Boot config:\n");
 
-        vga_print(" RAM: ");
-        kitoa_dec(memory_end_addr / (1024 * 1024), buf);
-        vga_print(buf);
-        vga_print(" MB\n");
-
-        vga_print(" FB: ");
-        kitoa_dec(fb_width, buf);
-        vga_print(buf);
-        vga_print("x");
-        kitoa_dec(fb_height, buf);
-        vga_print(buf);
-        vga_print(" @32bpp pitch=");
-        kitoa_dec(fb_pitch, buf);
-        vga_print(buf);
-        vga_print(" addr=");
-        kitoa_hex((uint32_t)fb_ptr, buf);
-        vga_print(buf);
-        vga_print("\n");
-    }
     clipboard_init();
     
     kbd_init();

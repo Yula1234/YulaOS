@@ -82,41 +82,52 @@ static void* slub_alloc_from_page(page_t* page) {
 }
 
 void* kmem_cache_alloc(kmem_cache_t* cache) {
-    uint32_t flags = spinlock_acquire_safe(&cache->lock);
-    
-    page_t* page = cache->cpu_slab;
-    
-    if (page && page->freelist) {
-        void* obj = slub_alloc_from_page(page);
-        spinlock_release_safe(&cache->lock, flags);
-        return obj;
-    }
-    
-    if (cache->partial) {
-        page = cache->partial;
-        slab_list_remove(&cache->partial, page);
-        cache->cpu_slab = page;
-        void* obj = slub_alloc_from_page(page);
-        spinlock_release_safe(&cache->lock, flags);
-        return obj;
-    }
+    while (1) {
+        uint32_t flags = spinlock_acquire_safe(&cache->lock);
 
-    void* new_virt = vmm_alloc_pages(1);
-    if (!new_virt) {
+        page_t* page = cache->cpu_slab;
+
+        if (page && page->freelist) {
+            void* obj = slub_alloc_from_page(page);
+            spinlock_release_safe(&cache->lock, flags);
+            return obj;
+        }
+
+        if (cache->partial) {
+            page = cache->partial;
+            slab_list_remove(&cache->partial, page);
+            cache->cpu_slab = page;
+            void* obj = slub_alloc_from_page(page);
+            spinlock_release_safe(&cache->lock, flags);
+            return obj;
+        }
+
         spinlock_release_safe(&cache->lock, flags);
-        return 0;
+
+        void* new_virt = vmm_alloc_pages(1);
+        if (!new_virt) {
+            return 0;
+        }
+
+        uint32_t phys = paging_get_phys(kernel_page_directory, (uint32_t)new_virt);
+        page_t* new_page = pmm_phys_to_page(phys);
+        if (!new_page) {
+            vmm_free_pages(new_virt, 1);
+            return 0;
+        }
+
+        slub_init_page(cache, new_page, new_virt);
+
+        flags = spinlock_acquire_safe(&cache->lock);
+
+        if (!cache->cpu_slab) {
+            cache->cpu_slab = new_page;
+        } else {
+            slab_list_add(&cache->partial, new_page);
+        }
+
+        spinlock_release_safe(&cache->lock, flags);
     }
-    
-    uint32_t phys = paging_get_phys(kernel_page_directory, (uint32_t)new_virt);
-    page = pmm_phys_to_page(phys);
-    
-    slub_init_page(cache, page, new_virt);
-    
-    cache->cpu_slab = page;
-    
-    void* obj = slub_alloc_from_page(page);
-    spinlock_release_safe(&cache->lock, flags);
-    return obj;
 }
 
 void kmem_cache_free(kmem_cache_t* cache, void* obj) {

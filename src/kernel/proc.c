@@ -586,10 +586,24 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 }
 
 void proc_wait(uint32_t pid) {
-    task_t* target = proc_find_by_pid(pid);
+    task_t* target = 0;
+
+    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    task_t* curr = tasks_head;
+    while (curr) {
+        if (curr->pid == pid) {
+            target = curr;
+            __sync_fetch_and_add(&target->exit_waiters, 1);
+            break;
+        }
+        curr = curr->next;
+    }
+    spinlock_release_safe(&proc_lock, flags);
+
     if (!target) return;
 
     sem_wait(&target->exit_sem);
+    __sync_fetch_and_sub(&target->exit_waiters, 1);
 }
 
 
@@ -611,7 +625,7 @@ void reaper_task_func(void* arg) {
                 
                 int has_waiters = !dlist_empty(&curr->exit_sem.wait_list);
 
-                if (still_running || has_waiters) {
+                if (still_running || has_waiters || curr->exit_waiters > 0) {
                     curr = curr->next;
                     continue;
                 }

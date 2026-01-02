@@ -16,6 +16,16 @@ static inline void spinlock_init(spinlock_t* lock) {
     lock->locked = 0;
 }
 
+static inline void spinlock_acquire(spinlock_t* lock) {
+    while (1) {
+        if (__sync_lock_test_and_set(&lock->locked, 1) == 0) {
+            break;
+        }
+        __asm__ volatile ("pause");
+    }
+    __sync_synchronize();
+}
+
 static inline uint32_t spinlock_acquire_safe(spinlock_t* lock) {
     uint32_t flags;
     

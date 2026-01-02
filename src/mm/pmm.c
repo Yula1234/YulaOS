@@ -105,7 +105,6 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
 
 void* pmm_alloc_pages(uint32_t order) {
     if (order > PMM_MAX_ORDER) return 0;
-
     uint32_t flags = spinlock_acquire_safe(&pmm_lock);
 
     uint32_t current_order = order;
@@ -158,7 +157,6 @@ void pmm_free_pages(void* addr, uint32_t order) {
 
     page_t* page = pmm_phys_to_page((uint32_t)addr);
     if (!page) return;
-
     uint32_t flags = spinlock_acquire_safe(&pmm_lock);
 
     if (page->flags == PMM_FLAG_FREE) {

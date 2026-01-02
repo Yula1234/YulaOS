@@ -103,8 +103,8 @@ typedef struct task {
     uint32_t    quantum;
     uint32_t    ticks_left;
     
-    uint64_t    vruntime;      // Virtual runtime for CFS scheduling
-    uint64_t    exec_start;    // When task started executing (tick count)
+    uint64_t    vruntime;
+    uint64_t    exec_start;
 
     uint8_t term_mode;
 
@@ -116,6 +116,7 @@ typedef struct task {
     dlist_head_t sem_node;
     void* blocked_on_sem;
 
+    volatile uint32_t exit_waiters;
     semaphore_t exit_sem; 
   
 } task_t;

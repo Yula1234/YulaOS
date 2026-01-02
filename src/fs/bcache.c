@@ -126,19 +126,19 @@ void bcache_init(void) {
 int bcache_read(uint32_t block_idx, uint8_t* buf) {
     if (!buf) return 0;
     
-    uint32_t flags = spinlock_acquire_safe(&cache_lock);
+    spinlock_acquire(&cache_lock);
 
     cache_block_t* b = cache_lookup(block_idx);
     if (b) {
         lru_touch(b);
         memcpy(buf, b->data, BLOCK_SIZE);
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         return 1;
     }
 
     b = lru_tail;
     if (!b) { 
-        spinlock_release_safe(&cache_lock, flags); 
+        spinlock_release(&cache_lock); 
         return 0; 
     }
 
@@ -151,26 +151,26 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
     }
     
     hash_remove(b);
-    spinlock_release_safe(&cache_lock, flags);
+    spinlock_release(&cache_lock);
     
     if (was_dirty) {
         disk_write_4k(old_idx, dirty_data);
     }
     disk_read_4k(block_idx, buf);
 
-    flags = spinlock_acquire_safe(&cache_lock);
+    spinlock_acquire(&cache_lock);
     
     cache_block_t* race_check = cache_lookup(block_idx);
     if (race_check) {
         lru_touch(race_check);
         memcpy(buf, race_check->data, BLOCK_SIZE);
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         return 1;
     }
 
     b = lru_tail;
     if (!b) {
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         return 0;
     }
     
@@ -190,7 +190,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
     hash_insert(b);
     lru_touch(b);
     
-    spinlock_release_safe(&cache_lock, flags);
+    spinlock_release(&cache_lock);
     
     if (new_was_dirty) {
         disk_write_4k(new_old_idx, new_dirty_data);
@@ -202,19 +202,19 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 int bcache_write(uint32_t block_idx, const uint8_t* buf) {
     if (!buf) return 0;
     
-    uint32_t flags = spinlock_acquire_safe(&cache_lock);
+    spinlock_acquire(&cache_lock);
     cache_block_t* b = cache_lookup(block_idx);
     if (b) {
         lru_touch(b);
         memcpy(b->data, buf, BLOCK_SIZE);
         b->dirty = 1;
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         return 1;
     }
     
     b = lru_tail;
     if (!b) {
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         return 0;
     }
     
@@ -234,7 +234,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
     hash_insert(b);
     lru_touch(b);
     
-    spinlock_release_safe(&cache_lock, flags);
+    spinlock_release(&cache_lock);
     
     if (was_dirty) {
         disk_write_4k(old_idx, dirty_data);
@@ -245,26 +245,48 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 
 void bcache_sync(void) {
     for (int i = 0; i < BCACHE_SIZE; i++) {
+        uint8_t  tmp_buf[BLOCK_SIZE];
+        uint32_t blk_idx = 0;
+        int      do_flush = 0;
+
+        spinlock_acquire(&cache_lock);
         cache_block_t* b = &pool[i];
+
         if (b->valid && b->dirty) {
-            uint32_t flags = spinlock_acquire_safe(&cache_lock);
-            if (b->valid && b->dirty) {
-                disk_write_4k(b->block_idx, b->data);
-                b->dirty = 0;
-            }
-            spinlock_release_safe(&cache_lock, flags);
+            blk_idx = b->block_idx;
+            memcpy(tmp_buf, b->data, BLOCK_SIZE);
+            b->dirty = 0;
+            do_flush = 1;
+        }
+
+        spinlock_release(&cache_lock);
+
+        if (do_flush) {
+            disk_write_4k(blk_idx, tmp_buf);
         }
     }
 }
 
 void bcache_flush_block(uint32_t block_idx) {
-    uint32_t flags = spinlock_acquire_safe(&cache_lock);
+    uint8_t  tmp_buf[BLOCK_SIZE];
+    uint32_t phys_idx = 0;
+    int      do_flush = 0;
+
+    spinlock_acquire(&cache_lock);
     cache_block_t* b = cache_lookup(block_idx);
+
     if (b && b->dirty) {
-        disk_write_4k(b->block_idx, b->data);
+        phys_idx = b->block_idx;
+        memcpy(tmp_buf, b->data, BLOCK_SIZE);
         b->dirty = 0;
+        do_flush = 1;
     }
-    spinlock_release_safe(&cache_lock, flags);
+
+    spinlock_release(&cache_lock);
+
+    if (do_flush) {
+        disk_write_4k(phys_idx, tmp_buf);
+    }
 }
 
 void bcache_readahead(uint32_t start_block, uint32_t count) {
@@ -276,17 +298,17 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
     for (uint32_t i = 1; i <= count; i++) {
         uint32_t block_idx = start_block + i;
         
-        uint32_t flags = spinlock_acquire_safe(&cache_lock);
+        spinlock_acquire(&cache_lock);
         cache_block_t* b = cache_lookup(block_idx);
         if (b) {
             lru_touch(b);
-            spinlock_release_safe(&cache_lock, flags);
+            spinlock_release(&cache_lock);
             continue;
         }
         
         b = lru_tail;
         if (!b) {
-            spinlock_release_safe(&cache_lock, flags);
+            spinlock_release(&cache_lock);
             continue;
         }
         
@@ -299,7 +321,7 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         }
         
         hash_remove(b);
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         
         if (was_dirty) {
             disk_write_4k(old_idx, dirty_data);
@@ -310,20 +332,20 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         
         disk_read_4k(block_idx, scratch);
         
-        flags = spinlock_acquire_safe(&cache_lock);
+        spinlock_acquire(&cache_lock);
         
         cache_block_t* race_check = cache_lookup(block_idx);
         if (race_check) {
             lru_touch(race_check);
             kfree(scratch);
-            spinlock_release_safe(&cache_lock, flags);
+            spinlock_release(&cache_lock);
             continue;
         }
         
         b = lru_tail;
         if (!b) {
             kfree(scratch);
-            spinlock_release_safe(&cache_lock, flags);
+            spinlock_release(&cache_lock);
             continue;
         }
         
@@ -343,7 +365,7 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         hash_insert(b);
         lru_touch(b);
         
-        spinlock_release_safe(&cache_lock, flags);
+        spinlock_release(&cache_lock);
         
         if (new_was_dirty) {
             disk_write_4k(new_old_idx, new_dirty_data);
