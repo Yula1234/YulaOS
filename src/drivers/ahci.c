@@ -6,6 +6,7 @@
 #include <lib/string.h>
 #include <mm/heap.h>
 #include <kernel/sched.h>
+#include <kernel/cpu.h>
 #include <hal/irq.h>
 #include <hal/io.h>
 
@@ -41,9 +42,29 @@ static ahci_port_extended_t ports_ex[32];
 static int primary_port_idx = -1;
 static int g_ahci_async_mode = 0;
 
+#define AHCI_MSI_VECTOR 0xA1
+
+static uint8_t g_ahci_pci_bus = 0;
+static uint8_t g_ahci_pci_slot = 0;
+static uint8_t g_ahci_pci_func = 0;
+static uint8_t g_ahci_legacy_irq_line = 0;
+static int g_ahci_has_device = 0;
+static int g_ahci_msi_enabled = 0;
+
 static volatile uint32_t port_active_slots[32] = {0};
 
 void ahci_set_async_mode(int enable) { g_ahci_async_mode = enable; }
+
+int ahci_msi_configure_cpu(int cpu_index) {
+    if (!g_ahci_has_device) return 0;
+    if (cpu_index < 0 || cpu_index >= cpu_count) return 0;
+    if (cpus[cpu_index].id < 0) return 0;
+
+    int ok = pci_msi_configure(g_ahci_pci_bus, g_ahci_pci_slot, g_ahci_pci_func,
+                               AHCI_MSI_VECTOR, (uint8_t)cpus[cpu_index].id);
+    if (ok) g_ahci_msi_enabled = 1;
+    return ok;
+}
 
 static int find_cmdslot(volatile HBA_PORT *port, int port_no) {
     uint32_t slots = (port->sact | port->ci | port_active_slots[port_no]);
@@ -387,6 +408,11 @@ void ahci_init(void) {
     uint8_t bus, slot, func;
     if (!pci_find_ahci_device(&bus, &slot, &func)) return;
 
+    g_ahci_pci_bus = bus;
+    g_ahci_pci_slot = slot;
+    g_ahci_pci_func = func;
+    g_ahci_has_device = 1;
+
     uint32_t pci_cmd = pci_read(bus, slot, func, 0x04);
     if (!(pci_cmd & 0x04) || (pci_cmd & 0x400)) {
         pci_cmd |= 0x04;
@@ -397,12 +423,24 @@ void ahci_init(void) {
     uint32_t pci_irq_info = pci_read(bus, slot, func, 0x3C);
     uint8_t irq_line = pci_irq_info & 0xFF;
 
-    irq_install_handler(irq_line, ahci_irq_handler);
-    
-    if (irq_line < 8) outb(0x21, inb(0x21) & ~(1 << irq_line));
-    else {
-        outb(0xA1, inb(0xA1) & ~(1 << (irq_line - 8)));
-        outb(0x21, inb(0x21) & ~(1 << 2)); 
+    g_ahci_legacy_irq_line = irq_line;
+
+    int msi_ok = 0;
+    if (cpu_count > 0 && cpus[0].id >= 0) {
+        msi_ok = pci_msi_configure(bus, slot, func, AHCI_MSI_VECTOR, (uint8_t)cpus[0].id);
+    }
+
+    if (msi_ok) {
+        irq_install_vector_handler(AHCI_MSI_VECTOR, ahci_irq_handler);
+        g_ahci_msi_enabled = 1;
+    } else {
+        irq_install_handler(irq_line, ahci_irq_handler);
+
+        if (irq_line < 8) outb(0x21, inb(0x21) & ~(1 << irq_line));
+        else {
+            outb(0xA1, inb(0xA1) & ~(1 << (irq_line - 8)));
+            outb(0x21, inb(0x21) & ~(1 << 2));
+        }
     }
 
     uint32_t bar5 = pci_get_bar5(bus, slot, func);

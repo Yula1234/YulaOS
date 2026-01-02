@@ -257,6 +257,17 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
 
     smp_boot_aps();
+
+    if (cpu_count > 1) {
+        for (volatile int i = 0; i < 2000000; i++) {
+            if (ap_running_count > 0 && cpus[1].started) break;
+            __asm__ volatile("pause");
+        }
+
+        if (ap_running_count > 0 && cpus[1].started) {
+            ahci_msi_configure_cpu(1);
+        }
+    }
     
     proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
 

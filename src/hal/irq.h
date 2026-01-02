@@ -10,4 +10,6 @@ typedef void (*irq_handler_t)(registers_t*);
 
 void irq_install_handler(int irq_no, irq_handler_t handler);
 
+void irq_install_vector_handler(int vector, irq_handler_t handler);
+
 #endif

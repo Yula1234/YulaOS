@@ -137,4 +137,6 @@ static inline int ahci_write_sector(uint32_t lba, const uint8_t* buf) {
 uint32_t ahci_get_capacity(void);
 void ahci_set_async_mode(int enable);
 
+int ahci_msi_configure_cpu(int cpu_index);
+
 #endif

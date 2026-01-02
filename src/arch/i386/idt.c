@@ -44,11 +44,13 @@ extern uint32_t isr_stub_table[];
 extern void isr_stub_0x80(void);
 extern void isr_stub_0xFF(void);
 extern void isr_stub_0xF0(void);
+extern void isr_stub_0xA1(void);
 extern uint32_t* kernel_page_directory;
 
 extern void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
 
 static irq_handler_t irq_handlers[16] = {0};
+static irq_handler_t irq_vector_handlers[256] = {0};
 
 extern void smp_tlb_ipi_handler(void);
 
@@ -65,7 +67,18 @@ void idt_load(void) {
 }
 
 void irq_install_handler(int irq_no, irq_handler_t handler) {
+    if (irq_no < 0 || irq_no >= 16) return;
     irq_handlers[irq_no] = handler;
+
+    int vec = 32 + irq_no;
+    if (vec >= 0 && vec < 256) {
+        irq_vector_handlers[vec] = handler;
+    }
+}
+
+void irq_install_vector_handler(int vector, irq_handler_t handler) {
+    if (vector < 0 || vector >= 256) return;
+    irq_vector_handlers[vector] = handler;
 }
 
 __attribute__((unused)) static const char* exception_messages[] = {
@@ -102,11 +115,12 @@ void isr_handler(registers_t* regs) {
 
     if (regs->int_no == 0x80) {
         syscall_handler(regs);
+        return;
     }
 
     if (regs->int_no == 255) return; 
 
-    else if (regs->int_no >= 32 && regs->int_no <= 47) {
+    else if (regs->int_no >= 32) {
         if (regs->int_no == 32) {
             cpu->sched_ticks++;
 
@@ -166,12 +180,17 @@ void isr_handler(registers_t* regs) {
             return;
         } 
         else {
-            int irq_no = regs->int_no - 32;
-            if (irq_handlers[irq_no]) irq_handlers[irq_no](regs);
-            
-            if (regs->int_no >= 40) outb(0xA0, 0x20);
-            outb(0x20, 0x20);
-            lapic_eoi(); 
+            if (irq_vector_handlers[regs->int_no]) {
+                irq_vector_handlers[regs->int_no](regs);
+            }
+
+            if (regs->int_no >= 32 && regs->int_no <= 47) {
+                if (regs->int_no >= 40) outb(0xA0, 0x20);
+                outb(0x20, 0x20);
+            }
+
+            lapic_eoi();
+            return;
         }
     }
 
@@ -364,6 +383,7 @@ void idt_init(void) {
     
     idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
     idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
+    idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
 
     outb(0x20, 0x11); io_wait();
     outb(0xA0, 0x11); io_wait();
