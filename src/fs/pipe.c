@@ -10,6 +10,8 @@
 
 #define PIPE_SIZE 4096
 
+#define PIPE_BATCH 128
+
 typedef struct {
     char buffer[PIPE_SIZE];
     uint32_t read_ptr;
@@ -24,6 +26,25 @@ typedef struct {
     spinlock_t lock;
 } pipe_t;
 
+static uint32_t sem_take_up_to(semaphore_t* sem, uint32_t max) {
+    if (max == 0) return 0;
+
+    sem_wait(sem);
+
+    uint32_t taken = 1;
+    while (taken < max && sem_try_acquire(sem)) {
+        taken++;
+    }
+
+    return taken;
+}
+
+static void sem_give_n(semaphore_t* sem, uint32_t n) {
+    while (n--) {
+        sem_signal(sem);
+    }
+}
+
 static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
     (void)offset;
     pipe_t* p = (pipe_t*)node->private_data;
@@ -31,29 +52,54 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
     uint32_t read_count = 0;
 
     while (read_count < size) {
-        sem_wait(&p->sem_read);
-
         uint32_t flags = spinlock_acquire_safe(&p->lock);
-        
         uint32_t available = p->write_ptr - p->read_ptr;
-        
-        if (available == 0) {
-            if (p->writers == 0) {
-                sem_signal(&p->sem_read); 
-                spinlock_release_safe(&p->lock, flags);
-                return (int)read_count;
-            }
-             spinlock_release_safe(&p->lock, flags);
-             continue;
+        int writers = p->writers;
+        spinlock_release_safe(&p->lock, flags);
+
+        if (available == 0 && writers == 0) {
+            return (int)read_count;
         }
 
-        buf[read_count] = p->buffer[p->read_ptr % PIPE_SIZE];
-        p->read_ptr++;
-        read_count++;
-        
+        uint32_t want = size - read_count;
+        if (want > PIPE_BATCH) want = PIPE_BATCH;
+
+        uint32_t take = sem_take_up_to(&p->sem_read, want);
+
+        flags = spinlock_acquire_safe(&p->lock);
+        uint32_t now_avail = p->write_ptr - p->read_ptr;
+
+        if (now_avail == 0 && p->writers == 0) {
+            spinlock_release_safe(&p->lock, flags);
+            sem_give_n(&p->sem_read, take);
+            return (int)read_count;
+        }
+
+        uint32_t n = take;
+        if (n > now_avail) n = now_avail;
+
+        uint32_t rp = p->read_ptr % PIPE_SIZE;
+        uint32_t contig = PIPE_SIZE - rp;
+
+        uint32_t n1 = n;
+        if (n1 > contig) n1 = contig;
+        memcpy(&buf[read_count], &p->buffer[rp], n1);
+        p->read_ptr += n1;
+        read_count += n1;
+
+        uint32_t n2 = n - n1;
+        if (n2 > 0) {
+            memcpy(&buf[read_count], &p->buffer[0], n2);
+            p->read_ptr += n2;
+            read_count += n2;
+        }
+
         spinlock_release_safe(&p->lock, flags);
-        
-        sem_signal(&p->sem_write);
+
+        if (n < take) {
+            sem_give_n(&p->sem_read, take - n);
+        }
+        sem_give_n(&p->sem_write, n);
     }
     return (int)read_count;
 }
@@ -65,22 +111,46 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
     uint32_t written_count = 0;
 
     while (written_count < size) {
-        sem_wait(&p->sem_write);
-        
         uint32_t flags = spinlock_acquire_safe(&p->lock);
-        
-        if (p->readers == 0) {
-            spinlock_release_safe(&p->lock, flags);
+        int readers = p->readers;
+        spinlock_release_safe(&p->lock, flags);
+
+        if (readers == 0) {
             return (written_count > 0) ? (int)written_count : -1;
         }
 
-        p->buffer[p->write_ptr % PIPE_SIZE] = buf[written_count];
-        p->write_ptr++;
-        written_count++;
+        uint32_t want = size - written_count;
+        if (want > PIPE_BATCH) want = PIPE_BATCH;
+
+        uint32_t take = sem_take_up_to(&p->sem_write, want);
+
+        flags = spinlock_acquire_safe(&p->lock);
+        if (p->readers == 0) {
+            spinlock_release_safe(&p->lock, flags);
+            sem_give_n(&p->sem_write, take);
+            return (written_count > 0) ? (int)written_count : -1;
+        }
+
+        uint32_t n = take;
+        uint32_t wp = p->write_ptr % PIPE_SIZE;
+        uint32_t contig = PIPE_SIZE - wp;
+
+        uint32_t n1 = n;
+        if (n1 > contig) n1 = contig;
+        memcpy(&p->buffer[wp], &buf[written_count], n1);
+        p->write_ptr += n1;
+        written_count += n1;
+
+        uint32_t n2 = n - n1;
+        if (n2 > 0) {
+            memcpy(&p->buffer[0], &buf[written_count], n2);
+            p->write_ptr += n2;
+            written_count += n2;
+        }
 
         spinlock_release_safe(&p->lock, flags);
-        
-        sem_signal(&p->sem_read);
+
+        sem_give_n(&p->sem_read, n);
     }
     return (int)written_count;
 }
@@ -97,9 +167,9 @@ static int pipe_close(vfs_node_t* node) {
     spinlock_release_safe(&p->lock, flags);
 
     if (node->flags == 1) { 
-        sem_signal(&p->sem_write); // Wake up writers so they see Broken Pipe
+        sem_signal(&p->sem_write);
     } else {
-        sem_signal(&p->sem_read);  // Wake up readers so they see EOF
+        sem_signal(&p->sem_read);
     }
 
     if (readers == 0 && writers == 0) {
