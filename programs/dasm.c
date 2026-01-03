@@ -471,11 +471,18 @@ int main(int argc, char** argv) {
     
     int n = read(fd, file_buf, MAX_FILE_SIZE);
     close(fd);
+
+    if (n < 0) panic("Read error");
     
-    if (n < sizeof(Elf32_Ehdr)) panic("File too small");
+    if (n < (int)sizeof(Elf32_Ehdr)) panic("File too small");
     
     ehdr = (Elf32_Ehdr*)file_buf;
-    if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E') panic("Not an ELF file");
+    if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' || ehdr->e_ident[2] != 'L' || ehdr->e_ident[3] != 'F') {
+        char msg[128];
+        sprintf(msg, "Not an ELF file (magic: %02x %02x %02x %02x, read=%d)",
+                (unsigned)file_buf[0], (unsigned)file_buf[1], (unsigned)file_buf[2], (unsigned)file_buf[3], n);
+        panic(msg);
+    }
     
     shdrs = (Elf32_Shdr*)(file_buf + ehdr->e_shoff);
     shstrtab = (char*)(file_buf + shdrs[ehdr->e_shstrndx].sh_offset);

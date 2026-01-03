@@ -35,15 +35,6 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
 
     if (!task || !task->page_dir) return 0;
 
-    uint32_t start_page = start & 0xFFFFF000;
-    uint32_t end_page   = (end - 1) & 0xFFFFF000;
-    
-    for (uint32_t page = start_page; page <= end_page; page += 4096) {
-        if (!paging_is_user_accessible(task->page_dir, page)) {
-            return 0;
-        }
-    }
-
     return 1;
 }
 

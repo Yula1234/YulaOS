@@ -316,6 +316,44 @@ static uint32_t dir_find(YulaCtx* ctx, uint32_t dir_ino, const char* name) {
     return 0;
 }
 
+static uint32_t path_resolve(YulaCtx* ctx, const char* os_path) {
+    if (!os_path || !*os_path) return 1;
+
+    const char* p = os_path;
+    if (*p == '/') p++;
+
+    uint32_t curr = 1;
+
+    while (1) {
+        while (*p == '/') p++;
+        if (*p == 0) break;
+
+        const char* start = p;
+        while (*p && *p != '/') p++;
+
+        int len = (int)(p - start);
+        if (len <= 0) break;
+        if (len >= NAME_MAX) panic(ctx, "Path component too long: %.*s", len, start);
+
+        char name[NAME_MAX];
+        memcpy(name, start, (size_t)len);
+        name[len] = 0;
+
+        uint32_t next = dir_find(ctx, curr, name);
+        if (!next) return 0;
+
+        if (*p) {
+            yfs_inode_t inode;
+            inode_read(ctx, next, &inode);
+            if (inode.type != 2) return 0;
+        }
+
+        curr = next;
+    }
+
+    return curr;
+}
+
 static void dir_add(YulaCtx* ctx, uint32_t dir_ino, uint32_t child_ino, const char* name) {
     yfs_inode_t dir;
     inode_read(ctx, dir_ino, &dir);
@@ -520,9 +558,45 @@ static void op_import(YulaCtx* ctx, const char* host_path, const char* os_path) 
     free(data);
 }
 
+static void op_export(YulaCtx* ctx, const char* os_path, const char* host_path) {
+    uint32_t ino = path_resolve(ctx, os_path);
+    if (!ino) panic(ctx, "Path not found in image: %s", os_path);
+
+    yfs_inode_t node;
+    inode_read(ctx, ino, &node);
+    if (node.type != 1) panic(ctx, "Not a file: %s", os_path);
+
+    FILE* hf = fopen(host_path, "wb");
+    if (!hf) panic(ctx, "Cannot open host output file: %s", host_path);
+
+    uint8_t sector[BLOCK_SIZE];
+    uint32_t offset = 0;
+
+    while (offset < node.size) {
+        uint32_t blk_idx = offset / BLOCK_SIZE;
+        uint32_t off = offset % BLOCK_SIZE;
+        uint32_t chunk = BLOCK_SIZE - off;
+        if (chunk > node.size - offset) chunk = node.size - offset;
+
+        uint32_t lba = inode_resolve_block(ctx, &node, blk_idx, 0);
+        if (lba) disk_read(ctx, lba, sector);
+        else memset(sector, 0, sizeof(sector));
+
+        if (fwrite(sector + off, 1, chunk, hf) != chunk) {
+            fclose(hf);
+            panic(ctx, "Host file write error: %s", host_path);
+        }
+
+        offset += chunk;
+    }
+
+    fclose(hf);
+    log_info("Exported %s -> %s (inode %u, size %u)", os_path, host_path, ino, node.size);
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
-        printf("Usage: %s <disk.img> [format | import <host> <os>]\n", argv[0]);
+        printf("Usage: %s <disk.img> [format | import <host> <os> | export <os> <host>]\n", argv[0]);
         return 1;
     }
 
@@ -548,6 +622,14 @@ int main(int argc, char** argv) {
         
         op_import(&ctx, argv[3], argv[4]);
     } 
+    else if (strcmp(cmd, "export") == 0) {
+        if (argc < 5) panic(&ctx, "Missing args for export: <os_path> <host_path>");
+
+        disk_read(&ctx, 1, &ctx.sb);
+        if (ctx.sb.magic != YFS_MAGIC) panic(&ctx, "Invalid YulaFS signature");
+
+        op_export(&ctx, argv[3], argv[4]);
+    }
     else {
         panic(&ctx, "Unknown command: %s", cmd);
     }

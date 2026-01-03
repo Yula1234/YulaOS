@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "explorer" "cp" "mv" "touch" "tree")
+USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -103,6 +103,7 @@ for APP in "${USER_APPS[@]}"; do
     "$TOOL" "$DISK_IMG" import "bin/usr/$APP.exe" "/bin/$APP.exe" > /dev/null
 done
 
+"$TOOL" "$DISK_IMG" import bin/usr/start.o /bin/start.o > /dev/null
 "$TOOL" "$DISK_IMG" import programs/loop.asm /home/loop.asm > /dev/null
 
 cp bin/kernel.bin "$ISODIR/boot/kernel.bin"
