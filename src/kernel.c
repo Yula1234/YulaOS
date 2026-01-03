@@ -26,9 +26,11 @@
 #include <arch/i386/idt.h>
 
 #include <hal/apic.h>
+#include <hal/irq.h>
 #include <hal/simd.h>
 #include <hal/pit.h>
 #include <hal/io.h>
+#include <hal/ioapic.h>
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
@@ -233,6 +235,36 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     
     kbd_init();
     mouse_init();
+
+    if (ioapic_is_initialized() == 0) {
+        uint32_t ioapic_phys = 0;
+        uint32_t ioapic_gsi_base = 0;
+        if (acpi_get_ioapic(&ioapic_phys, &ioapic_gsi_base)) {
+            if (ioapic_init(ioapic_phys, ioapic_gsi_base)) {
+                uint32_t gsi;
+                int active_low;
+                int level_trigger;
+
+                if (!acpi_get_iso(1, &gsi, &active_low, &level_trigger)) {
+                    gsi = 1;
+                    active_low = 0;
+                    level_trigger = 0;
+                }
+                ioapic_route_gsi(gsi, (uint8_t)(32 + 1), (uint8_t)cpus[0].id, active_low, level_trigger);
+
+                if (!acpi_get_iso(12, &gsi, &active_low, &level_trigger)) {
+                    gsi = 12;
+                    active_low = 0;
+                    level_trigger = 0;
+                }
+                ioapic_route_gsi(gsi, (uint8_t)(32 + 12), (uint8_t)cpus[0].id, active_low, level_trigger);
+
+                irq_set_legacy_pic_enabled(0);
+                outb(0x21, 0xFF);
+                outb(0xA1, 0xFF);
+            }
+        }
+    }
     
     ahci_init();
 
@@ -257,15 +289,35 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
 
     smp_boot_aps();
-
+ 
     if (cpu_count > 1) {
         for (volatile int i = 0; i < 2000000; i++) {
             if (ap_running_count > 0 && cpus[1].started) break;
             __asm__ volatile("pause");
         }
-
+ 
         if (ap_running_count > 0 && cpus[1].started) {
             ahci_msi_configure_cpu(1);
+
+            if (ioapic_is_initialized()) {
+                uint32_t gsi;
+                int active_low;
+                int level_trigger;
+
+                if (!acpi_get_iso(1, &gsi, &active_low, &level_trigger)) {
+                    gsi = 1;
+                    active_low = 0;
+                    level_trigger = 0;
+                }
+                ioapic_route_gsi(gsi, (uint8_t)(32 + 1), (uint8_t)cpus[1].id, active_low, level_trigger);
+
+                if (!acpi_get_iso(12, &gsi, &active_low, &level_trigger)) {
+                    gsi = 12;
+                    active_low = 0;
+                    level_trigger = 0;
+                }
+                ioapic_route_gsi(gsi, (uint8_t)(32 + 12), (uint8_t)cpus[1].id, active_low, level_trigger);
+            }
         }
     }
     

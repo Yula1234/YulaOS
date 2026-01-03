@@ -51,6 +51,7 @@ extern void kernel_panic(const char* message, const char* file, uint32_t line, r
 
 static irq_handler_t irq_handlers[16] = {0};
 static irq_handler_t irq_vector_handlers[256] = {0};
+static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
 
@@ -79,6 +80,10 @@ void irq_install_handler(int irq_no, irq_handler_t handler) {
 void irq_install_vector_handler(int vector, irq_handler_t handler) {
     if (vector < 0 || vector >= 256) return;
     irq_vector_handlers[vector] = handler;
+}
+
+void irq_set_legacy_pic_enabled(int enabled) {
+    g_legacy_pic_enabled = enabled ? 1 : 0;
 }
 
 __attribute__((unused)) static const char* exception_messages[] = {
@@ -184,7 +189,7 @@ void isr_handler(registers_t* regs) {
                 irq_vector_handlers[regs->int_no](regs);
             }
 
-            if (regs->int_no >= 32 && regs->int_no <= 47) {
+            if (g_legacy_pic_enabled && regs->int_no >= 32 && regs->int_no <= 47) {
                 if (regs->int_no >= 40) outb(0xA0, 0x20);
                 outb(0x20, 0x20);
             }

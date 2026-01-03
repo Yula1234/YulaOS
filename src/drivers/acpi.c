@@ -41,13 +41,37 @@ typedef struct {
     uint8_t length;
 } __attribute__((packed)) madt_entry_header_t;
 
-// Type 0: Processor Local APIC
 typedef struct {
     madt_entry_header_t h;
     uint8_t acpi_processor_id;
     uint8_t apic_id;
     uint32_t flags; // Bit 0 = Processor Enabled
 } __attribute__((packed)) madt_processor_apic_t;
+
+typedef struct {
+    madt_entry_header_t h;
+    uint8_t ioapic_id;
+    uint8_t reserved;
+    uint32_t ioapic_addr;
+    uint32_t gsi_base;
+} __attribute__((packed)) madt_ioapic_t;
+
+typedef struct {
+    madt_entry_header_t h;
+    uint8_t bus;
+    uint8_t source_irq;
+    uint32_t gsi;
+    uint16_t flags;
+} __attribute__((packed)) madt_iso_t;
+
+static volatile int g_acpi_ready = 0;
+static uint32_t g_ioapic_phys = 0;
+static uint32_t g_ioapic_gsi_base = 0;
+static int g_have_ioapic = 0;
+
+static uint32_t g_iso_gsi[16];
+static uint8_t g_iso_active_low[16];
+static uint8_t g_iso_level_trigger[16];
 
 static void ensure_mapped(uint32_t phys_addr) {
     uint32_t vaddr = phys_addr; 
@@ -110,6 +134,13 @@ void acpi_init(void) {
 
     if (!madt) return;
 
+    for (int i = 0; i < 16; i++) {
+        g_iso_gsi[i] = (uint32_t)i;
+        g_iso_active_low[i] = 0;
+        g_iso_level_trigger[i] = 0;
+    }
+    g_have_ioapic = 0;
+
     cpu_count = 0;
     
     uint8_t* ptr = (uint8_t*)madt + sizeof(madt_t);
@@ -130,7 +161,54 @@ void acpi_init(void) {
                 }
             }
         }
+
+        if (entry->type == 1) {
+            if (!g_have_ioapic && entry->length >= sizeof(madt_ioapic_t)) {
+                madt_ioapic_t* ioa = (madt_ioapic_t*)entry;
+                g_ioapic_phys = ioa->ioapic_addr;
+                g_ioapic_gsi_base = ioa->gsi_base;
+                g_have_ioapic = 1;
+            }
+        }
+
+        if (entry->type == 2) {
+            if (entry->length >= sizeof(madt_iso_t)) {
+                madt_iso_t* iso = (madt_iso_t*)entry;
+                if (iso->source_irq < 16) {
+                    g_iso_gsi[iso->source_irq] = iso->gsi;
+
+                    uint16_t pol = iso->flags & 0x3;
+                    uint16_t trg = (iso->flags >> 2) & 0x3;
+
+                    if (pol == 3) g_iso_active_low[iso->source_irq] = 1;
+                    else if (pol == 1) g_iso_active_low[iso->source_irq] = 0;
+
+                    if (trg == 3) g_iso_level_trigger[iso->source_irq] = 1;
+                    else if (trg == 1) g_iso_level_trigger[iso->source_irq] = 0;
+                }
+            }
+        }
         
         ptr += entry->length;
     }
+
+    g_acpi_ready = 1;
+}
+
+int acpi_get_ioapic(uint32_t* out_phys_addr, uint32_t* out_gsi_base) {
+    if (!g_acpi_ready || !g_have_ioapic) return 0;
+    if (!out_phys_addr || !out_gsi_base) return 0;
+    *out_phys_addr = g_ioapic_phys;
+    *out_gsi_base = g_ioapic_gsi_base;
+    return 1;
+}
+
+int acpi_get_iso(uint8_t source_irq, uint32_t* out_gsi, int* out_active_low, int* out_level_trigger) {
+    if (!g_acpi_ready) return 0;
+    if (source_irq >= 16) return 0;
+    if (!out_gsi || !out_active_low || !out_level_trigger) return 0;
+    *out_gsi = g_iso_gsi[source_irq];
+    *out_active_low = g_iso_active_low[source_irq] ? 1 : 0;
+    *out_level_trigger = g_iso_level_trigger[source_irq] ? 1 : 0;
+    return 1;
 }

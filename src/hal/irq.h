@@ -12,4 +12,6 @@ void irq_install_handler(int irq_no, irq_handler_t handler);
 
 void irq_install_vector_handler(int vector, irq_handler_t handler);
 
+void irq_set_legacy_pic_enabled(int enabled);
+
 #endif

@@ -7,8 +7,10 @@
 #include <mm/heap.h>
 #include <kernel/sched.h>
 #include <kernel/cpu.h>
+#include <drivers/acpi.h>
 #include <hal/irq.h>
 #include <hal/io.h>
+#include <hal/ioapic.h>
 
 #include "ahci.h"
 #include "pci.h"
@@ -436,10 +438,22 @@ void ahci_init(void) {
     } else {
         irq_install_handler(irq_line, ahci_irq_handler);
 
-        if (irq_line < 8) outb(0x21, inb(0x21) & ~(1 << irq_line));
-        else {
-            outb(0xA1, inb(0xA1) & ~(1 << (irq_line - 8)));
-            outb(0x21, inb(0x21) & ~(1 << 2));
+        if (ioapic_is_initialized() && cpu_count > 0 && cpus[0].id >= 0) {
+            uint32_t gsi;
+            int active_low;
+            int level_trigger;
+            if (!acpi_get_iso(irq_line, &gsi, &active_low, &level_trigger)) {
+                gsi = (uint32_t)irq_line;
+                active_low = 0;
+                level_trigger = 0;
+            }
+            ioapic_route_gsi(gsi, (uint8_t)(32 + irq_line), (uint8_t)cpus[0].id, active_low, level_trigger);
+        } else {
+            if (irq_line < 8) outb(0x21, inb(0x21) & ~(1 << irq_line));
+            else {
+                outb(0xA1, inb(0xA1) & ~(1 << (irq_line - 8)));
+                outb(0x21, inb(0x21) & ~(1 << 2));
+            }
         }
     }
 
