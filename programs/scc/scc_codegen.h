@@ -35,35 +35,218 @@
      buf_write(cg->rel_text, &r, sizeof(r));
  }
 
- static void emit_reloc_data(Codegen* cg, uint32_t offset, int sym_index, int type) {
-     Elf32_Rel r;
-     r.r_offset = (Elf32_Addr)offset;
-     r.r_info = ELF32_R_INFO((Elf32_Word)sym_index, (Elf32_Word)type);
-     buf_write(cg->rel_data, &r, sizeof(r));
- }
+static void emit_reloc_data(Codegen* cg, uint32_t offset, int sym_index, int type) {
+    Elf32_Rel r;
+    r.r_offset = (Elf32_Addr)offset;
+    r.r_info = ELF32_R_INFO((Elf32_Word)sym_index, (Elf32_Word)type);
+    buf_write(cg->rel_data, &r, sizeof(r));
+}
 
- static Var* cg_find_var(Codegen* cg, const char* name) {
-     for (Var* v = cg->vars; v; v = v->next) {
-         if (strcmp(v->name, name) == 0) return v;
-     }
-     return 0;
- }
+static Var* cg_find_var(Codegen* cg, const char* name) {
+    for (Var* v = cg->vars; v; v = v->next) {
+        if (strcmp(v->name, name) == 0) return v;
+    }
+    return 0;
+}
 
- static void u32_to_dec(char* out, uint32_t v) {
-     char tmp[16];
-     int n = 0;
-     if (v == 0) {
-         out[0] = '0';
-         out[1] = 0;
-         return;
-     }
-     while (v) {
-         tmp[n++] = (char)('0' + (v % 10));
-         v /= 10;
-     }
-     for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
-     out[n] = 0;
- }
+static Type* cg_expr_type(Codegen* cg, AstExpr* e);
+static Type* cg_lvalue_type(Codegen* cg, AstExpr* e);
+static void cg_gen_addr(Codegen* cg, AstExpr* e);
+
+static void cg_scale_eax_u32(Codegen* cg, uint32_t scale, Token tok) {
+    if (scale == 1) return;
+
+    if (scale == 4) {
+        emit_x86_shl_eax_imm8(cg->text, 2);
+        return;
+    }
+
+    if (scale == 0) {
+        scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Pointer arithmetic on void* is not supported");
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Unsupported pointer arithmetic scale");
+}
+
+static void cg_scale_ecx_u32(Codegen* cg, uint32_t scale, Token tok) {
+    if (scale == 1) return;
+
+    if (scale == 4) {
+        emit_x86_shl_ecx_imm8(cg->text, 2);
+        return;
+    }
+
+    if (scale == 0) {
+        scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Pointer arithmetic on void* is not supported");
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Unsupported pointer arithmetic scale");
+}
+
+static void cg_load_from_addr(Codegen* cg, Type* ty, Token tok) {
+    if (!ty) {
+        emit_x86_mov_eax_memeax_u32(cg->text);
+        return;
+    }
+
+    if (ty->kind == TYPE_VOID) {
+        scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Cannot load a value of type void");
+    }
+
+    if (ty->kind == TYPE_CHAR) {
+        emit_x86_movzx_eax_memeax_u8(cg->text);
+        return;
+    }
+
+    emit_x86_mov_eax_memeax_u32(cg->text);
+}
+
+static void cg_store_to_addr_ecx(Codegen* cg, Type* ty, Token tok) {
+    if (ty && ty->kind == TYPE_VOID) {
+        scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Cannot store a value of type void");
+    }
+
+    if (ty && ty->kind == TYPE_CHAR) {
+        emit_x86_mov_memecx_u8_al(cg->text);
+        return;
+    }
+
+    emit_x86_mov_memecx_u32_eax(cg->text);
+}
+
+static Type* cg_lvalue_type(Codegen* cg, AstExpr* e) {
+    if (!e) return 0;
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) return e->v.name.var->ty;
+
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(cg->syms, e->v.name.name);
+        return s ? s->ty : 0;
+    }
+
+    if (e->kind == AST_EXPR_UNARY && e->v.unary.op == AST_UNOP_DEREF) {
+        Type* pt = cg_expr_type(cg, e->v.unary.expr);
+        if (pt && pt->kind == TYPE_PTR) return pt->base;
+        return 0;
+    }
+
+    return 0;
+}
+
+static Type* cg_expr_type(Codegen* cg, AstExpr* e) {
+    if (!e) return 0;
+
+    if (e->kind == AST_EXPR_INT_LIT) return 0;
+
+    if (e->kind == AST_EXPR_STR) {
+        Type* ch = type_char(cg->p);
+        return type_ptr_to(cg->p, ch);
+    }
+
+    if (e->kind == AST_EXPR_CAST) return e->v.cast.ty;
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) return e->v.name.var->ty;
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(cg->syms, e->v.name.name);
+        return s ? s->ty : 0;
+    }
+
+    if (e->kind == AST_EXPR_CALL) {
+        Symbol* s = symtab_find(cg->syms, e->v.call.callee);
+        if (s) return s->ftype.ret;
+        return 0;
+    }
+
+    if (e->kind == AST_EXPR_UNARY) {
+        if (e->v.unary.op == AST_UNOP_ADDR) {
+            Type* base = cg_lvalue_type(cg, e->v.unary.expr);
+            return base ? type_ptr_to(cg->p, base) : 0;
+        }
+        if (e->v.unary.op == AST_UNOP_DEREF) {
+            Type* pt = cg_expr_type(cg, e->v.unary.expr);
+            if (pt && pt->kind == TYPE_PTR) return pt->base;
+            return 0;
+        }
+        return 0;
+    }
+
+    if (e->kind == AST_EXPR_ASSIGN) {
+        return cg_lvalue_type(cg, e->v.assign.left);
+    }
+
+    if (e->kind == AST_EXPR_BINARY) {
+        Type* lt = cg_expr_type(cg, e->v.binary.left);
+        Type* rt = cg_expr_type(cg, e->v.binary.right);
+
+        if (e->v.binary.op == AST_BINOP_ADD) {
+            if (lt && lt->kind == TYPE_PTR && (!rt || rt->kind != TYPE_PTR)) return lt;
+            if (rt && rt->kind == TYPE_PTR && (!lt || lt->kind != TYPE_PTR)) return rt;
+            return 0;
+        }
+
+        if (e->v.binary.op == AST_BINOP_SUB) {
+            if (lt && lt->kind == TYPE_PTR) {
+                if (rt && rt->kind == TYPE_PTR) return 0;
+                return lt;
+            }
+            return 0;
+        }
+
+        return 0;
+    }
+
+    return 0;
+}
+
+static void cg_gen_addr(Codegen* cg, AstExpr* e) {
+    if (!e) {
+        scc_fatal_at(cg->p->file, cg->p->src, cg->p->tok.line, cg->p->tok.col, "Internal error: cannot take address of null expression");
+    }
+
+    if (e->kind == AST_EXPR_NAME) {
+        Var* v = e->v.name.var;
+        if (v) {
+            emit_x86_lea_eax_membp_disp(cg->text, v->ebp_offset);
+            return;
+        }
+
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(cg->syms, e->v.name.name);
+        if (!s || s->kind != SYM_DATA) {
+            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown identifier");
+        }
+
+        uint32_t off = cg->text->size;
+        emit_x86_mov_eax_imm32(cg->text, 0);
+        emit_reloc_text(cg, off + 1, s->elf_index, R_386_32);
+        return;
+    }
+
+    if (e->kind == AST_EXPR_UNARY && e->v.unary.op == AST_UNOP_DEREF) {
+        gen_expr(cg, e->v.unary.expr);
+        return;
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Expression is not addressable");
+}
+
+static void u32_to_dec(char* out, uint32_t v) {
+    char tmp[16];
+    int n = 0;
+    if (v == 0) {
+        out[0] = '0';
+        out[1] = 0;
+        return;
+    }
+    while (v) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    out[n] = 0;
+}
 
 static Symbol* cg_intern_string(Codegen* cg, const char* bytes, int len) {
     char namebuf[32];
@@ -175,19 +358,54 @@ static void cg_eval_const_u32(Codegen* cg, AstExpr* e, uint32_t* out_val, Symbol
 }
 
 static void gen_expr_binary_arith(Codegen* cg, AstExpr* e) {
+    Type* lt = cg_expr_type(cg, e->v.binary.left);
+    Type* rt = cg_expr_type(cg, e->v.binary.right);
+
     gen_expr(cg, e->v.binary.left);
     emit_x86_push_eax(cg->text);
     gen_expr(cg, e->v.binary.right);
     emit_x86_pop_ecx(cg->text);
 
     if (e->v.binary.op == AST_BINOP_ADD) {
+        if (lt && lt->kind == TYPE_PTR && (!rt || rt->kind != TYPE_PTR)) {
+            uint32_t scale = type_size(lt->base);
+            cg_scale_eax_u32(cg, scale, e->tok);
+        } else if (rt && rt->kind == TYPE_PTR && (!lt || lt->kind != TYPE_PTR)) {
+            uint32_t scale = type_size(rt->base);
+            cg_scale_ecx_u32(cg, scale, e->tok);
+        } else if ((lt && lt->kind == TYPE_PTR) || (rt && rt->kind == TYPE_PTR)) {
+            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unsupported pointer addition");
+        }
         emit_x86_add_eax_ecx(cg->text);
         return;
     }
 
     if (e->v.binary.op == AST_BINOP_SUB) {
+        if (lt && lt->kind == TYPE_PTR && (!rt || rt->kind != TYPE_PTR)) {
+            uint32_t scale = type_size(lt->base);
+            cg_scale_eax_u32(cg, scale, e->tok);
+        } else if (lt && lt->kind == TYPE_PTR && rt && rt->kind == TYPE_PTR) {
+            if (lt->base != rt->base) {
+                scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Pointer subtraction requires compatible pointer types");
+            }
+        } else if (rt && rt->kind == TYPE_PTR) {
+            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Cannot subtract a pointer from an integer");
+        }
         emit_x86_sub_ecx_eax(cg->text);
         emit_x86_mov_eax_ecx(cg->text);
+
+        if (lt && lt->kind == TYPE_PTR && rt && rt->kind == TYPE_PTR) {
+            uint32_t scale = type_size(lt->base);
+            if (scale == 0) {
+                scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Pointer arithmetic on void* is not supported");
+            } else if (scale == 1) {
+                return;
+            } else if (scale == 4) {
+                emit_x86_sar_eax_imm8(cg->text, 2);
+                return;
+            }
+            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unsupported pointer difference scale");
+        }
         return;
     }
 
@@ -259,7 +477,6 @@ static void gen_expr_binary_logical(Codegen* cg, AstExpr* e) {
 
         emit_x86_mov_eax_imm32(cg->text, 1);
         uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
-
         uint32_t false_off = cg->text->size;
         emit_x86_mov_eax_imm32(cg->text, 0);
         uint32_t end_off = cg->text->size;
@@ -281,7 +498,6 @@ static void gen_expr_binary_logical(Codegen* cg, AstExpr* e) {
 
         emit_x86_mov_eax_imm32(cg->text, 0);
         uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
-
         uint32_t true_off = cg->text->size;
         emit_x86_mov_eax_imm32(cg->text, 1);
         uint32_t end_off = cg->text->size;
@@ -395,6 +611,19 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
     }
 
     if (e->kind == AST_EXPR_UNARY) {
+        if (e->v.unary.op == AST_UNOP_ADDR) {
+            cg_gen_addr(cg, e->v.unary.expr);
+            return;
+        }
+
+        if (e->v.unary.op == AST_UNOP_DEREF) {
+            Type* pt = cg_expr_type(cg, e->v.unary.expr);
+            Type* base = (pt && pt->kind == TYPE_PTR) ? pt->base : 0;
+            gen_expr(cg, e->v.unary.expr);
+            cg_load_from_addr(cg, base, e->tok);
+            return;
+        }
+
         gen_expr(cg, e->v.unary.expr);
         if (e->v.unary.op == AST_UNOP_NEG) {
             emit_x86_neg_eax(cg->text);
@@ -420,157 +649,169 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
     }
 
     if (e->kind == AST_EXPR_ASSIGN) {
-        if (e->v.assign.left->kind != AST_EXPR_NAME) {
-            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Invalid assignment target");
-        }
+        Type* lvt = cg_lvalue_type(cg, e->v.assign.left);
 
-        gen_expr(cg, e->v.assign.right);
+        if (e->v.assign.left->kind == AST_EXPR_NAME) {
+            gen_expr(cg, e->v.assign.right);
 
-        Var* v = e->v.assign.left->v.name.var;
-        if (v) {
-            if (v->ty && v->ty->kind == TYPE_CHAR) {
-                emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
+            Var* v = e->v.assign.left->v.name.var;
+            if (v) {
+                if (v->ty && v->ty->kind == TYPE_CHAR) {
+                    emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
+                } else {
+                    emit_x86_mov_membp_disp_eax(cg->text, v->ebp_offset);
+                }
+                return;
+            }
+
+            Symbol* s = e->v.assign.left->v.name.sym;
+            if (!s) s = symtab_find(cg->syms, e->v.assign.left->v.name.name);
+            if (!s || s->kind != SYM_DATA) {
+                scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown identifier in assignment");
+            }
+
+            uint32_t off = cg->text->size;
+            if (s->ty && s->ty->kind == TYPE_CHAR) {
+                emit_x86_mov_memabs_u8_al(cg->text, 0);
+                emit_reloc_text(cg, off + 2, s->elf_index, R_386_32);
             } else {
-                emit_x86_mov_membp_disp_eax(cg->text, v->ebp_offset);
+                emit_x86_mov_memabs_u32_eax(cg->text, 0);
+                emit_reloc_text(cg, off + 1, s->elf_index, R_386_32);
             }
             return;
         }
 
-        Symbol* s = e->v.assign.left->v.name.sym;
-        if (!s) s = symtab_find(cg->syms, e->v.assign.left->v.name.name);
-        if (!s || s->kind != SYM_DATA) {
-            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown identifier in assignment");
+        if (e->v.assign.left->kind == AST_EXPR_UNARY && e->v.assign.left->v.unary.op == AST_UNOP_DEREF) {
+            cg_gen_addr(cg, e->v.assign.left);
+            emit_x86_push_eax(cg->text);
+            gen_expr(cg, e->v.assign.right);
+            emit_x86_pop_ecx(cg->text);
+            cg_store_to_addr_ecx(cg, lvt, e->tok);
+            return;
         }
 
-        uint32_t off = cg->text->size;
-        if (s->ty && s->ty->kind == TYPE_CHAR) {
-            emit_x86_mov_memabs_u8_al(cg->text, 0);
-            emit_reloc_text(cg, off + 2, s->elf_index, R_386_32);
-        } else {
-            emit_x86_mov_memabs_u32_eax(cg->text, 0);
-            emit_reloc_text(cg, off + 1, s->elf_index, R_386_32);
-        }
+        scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Invalid assignment target");
         return;
-     }
- 
-     scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown expression kind");
- }
+    }
 
- static int gen_stmt(Codegen* cg, AstStmt* s);
+    scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown expression kind");
+}
 
- static int gen_stmt_list(Codegen* cg, AstStmt* s) {
-     while (s) {
-         int did = gen_stmt(cg, s);
-         if (did) return 1;
-         s = s->next;
-     }
-     return 0;
- }
+static int gen_stmt(Codegen* cg, AstStmt* s);
 
- static int gen_stmt(Codegen* cg, AstStmt* s) {
-     if (!s) return 0;
+static int gen_stmt_list(Codegen* cg, AstStmt* s) {
+    while (s) {
+        int did = gen_stmt(cg, s);
+        if (did) return 1;
+        s = s->next;
+    }
+    return 0;
+}
 
-     if (s->kind == AST_STMT_DECL) {
-         if (s->v.decl.init) {
-             gen_expr(cg, s->v.decl.init);
-             Var* v = s->v.decl.decl_var;
-             if (!v) scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Internal error: decl var not found");
-             if (v->ty && v->ty->kind == TYPE_CHAR) emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
-             else emit_x86_mov_membp_disp_eax(cg->text, v->ebp_offset);
-         }
-         return 0;
-     }
+static int gen_stmt(Codegen* cg, AstStmt* s) {
+    if (!s) return 0;
 
-     if (s->kind == AST_STMT_EXPR) {
-         if (s->v.expr.expr) gen_expr(cg, s->v.expr.expr);
-         return 0;
-     }
+    if (s->kind == AST_STMT_DECL) {
+        if (s->v.decl.init) {
+            gen_expr(cg, s->v.decl.init);
+            Var* v = s->v.decl.decl_var;
+            if (!v) scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Internal error: decl var not found");
+            if (v->ty && v->ty->kind == TYPE_CHAR) emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
+            else emit_x86_mov_membp_disp_eax(cg->text, v->ebp_offset);
+        }
+        return 0;
+    }
 
-     if (s->kind == AST_STMT_RETURN) {
-         gen_expr(cg, s->v.expr.expr);
-         emit_x86_epilogue(cg->text);
-         return 1;
-     }
+    if (s->kind == AST_STMT_EXPR) {
+        if (s->v.expr.expr) gen_expr(cg, s->v.expr.expr);
+        return 0;
+    }
 
-     if (s->kind == AST_STMT_BLOCK) {
-         return gen_stmt_list(cg, s->v.block.first);
-     }
+    if (s->kind == AST_STMT_RETURN) {
+        gen_expr(cg, s->v.expr.expr);
+        emit_x86_epilogue(cg->text);
+        return 1;
+    }
 
-     if (s->kind == AST_STMT_IF) {
-         gen_expr(cg, s->v.if_stmt.cond);
-         emit_x86_test_eax_eax(cg->text);
+    if (s->kind == AST_STMT_BLOCK) {
+        return gen_stmt_list(cg, s->v.block.first);
+    }
 
-         if (s->v.if_stmt.else_stmt) {
-             uint32_t jz_else = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
-             int then_ret = gen_stmt(cg, s->v.if_stmt.then_stmt);
-             uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
-             uint32_t else_off = cg->text->size;
-             patch_rel32(cg->text, jz_else, else_off);
-             int else_ret = gen_stmt(cg, s->v.if_stmt.else_stmt);
-             uint32_t end_off = cg->text->size;
-             patch_rel32(cg->text, jmp_end, end_off);
-             return (then_ret && else_ret) ? 1 : 0;
-         }
+    if (s->kind == AST_STMT_IF) {
+        gen_expr(cg, s->v.if_stmt.cond);
+        emit_x86_test_eax_eax(cg->text);
 
-         uint32_t jz_end = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
-         (void)gen_stmt(cg, s->v.if_stmt.then_stmt);
-         uint32_t end_off = cg->text->size;
-         patch_rel32(cg->text, jz_end, end_off);
-         return 0;
-     }
+        if (s->v.if_stmt.else_stmt) {
+            uint32_t jz_else = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+            int then_ret = gen_stmt(cg, s->v.if_stmt.then_stmt);
+            uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
+            uint32_t else_off = cg->text->size;
+            patch_rel32(cg->text, jz_else, else_off);
+            int else_ret = gen_stmt(cg, s->v.if_stmt.else_stmt);
+            uint32_t end_off = cg->text->size;
+            patch_rel32(cg->text, jmp_end, end_off);
+            return (then_ret && else_ret) ? 1 : 0;
+        }
 
-     if (s->kind == AST_STMT_WHILE) {
-         uint32_t start_off = cg->text->size;
+        uint32_t jz_end = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+        (void)gen_stmt(cg, s->v.if_stmt.then_stmt);
+        uint32_t end_off = cg->text->size;
+        patch_rel32(cg->text, jz_end, end_off);
+        return 0;
+    }
 
-         if (cg->loop_depth >= (int)(sizeof(cg->loops) / sizeof(cg->loops[0]))) {
-             scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Loop nesting too deep");
-         }
-         LoopCtx* lc = &cg->loops[cg->loop_depth++];
-         memset(lc, 0, sizeof(*lc));
-         lc->start_off = start_off;
+    if (s->kind == AST_STMT_WHILE) {
+        uint32_t start_off = cg->text->size;
 
-         gen_expr(cg, s->v.while_stmt.cond);
-         emit_x86_test_eax_eax(cg->text);
-         uint32_t jz_end = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
-         (void)gen_stmt(cg, s->v.while_stmt.body);
-         uint32_t jmp_back = emit_x86_jmp_rel32_fixup(cg->text);
-         patch_rel32(cg->text, jmp_back, start_off);
-         uint32_t end_off = cg->text->size;
-         patch_rel32(cg->text, jz_end, end_off);
+        if (cg->loop_depth >= (int)(sizeof(cg->loops) / sizeof(cg->loops[0]))) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Loop nesting too deep");
+        }
+        LoopCtx* lc = &cg->loops[cg->loop_depth++];
+        memset(lc, 0, sizeof(*lc));
+        lc->start_off = start_off;
 
-         for (int i = 0; i < lc->break_count; i++) {
-             patch_rel32(cg->text, lc->break_fixups[i], end_off);
-         }
+        gen_expr(cg, s->v.while_stmt.cond);
+        emit_x86_test_eax_eax(cg->text);
+        uint32_t jz_end = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+        (void)gen_stmt(cg, s->v.while_stmt.body);
+        uint32_t jmp_back = emit_x86_jmp_rel32_fixup(cg->text);
+        patch_rel32(cg->text, jmp_back, start_off);
+        uint32_t end_off = cg->text->size;
+        patch_rel32(cg->text, jz_end, end_off);
 
-         cg->loop_depth--;
-         return 0;
-     }
+        for (int i = 0; i < lc->break_count; i++) {
+            patch_rel32(cg->text, lc->break_fixups[i], end_off);
+        }
 
-     if (s->kind == AST_STMT_BREAK) {
-         if (cg->loop_depth <= 0) {
-             scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "break not within loop");
-         }
-         LoopCtx* lc = &cg->loops[cg->loop_depth - 1];
-         if (lc->break_count >= (int)(sizeof(lc->break_fixups) / sizeof(lc->break_fixups[0]))) {
-             scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Too many breaks in loop");
-         }
-         uint32_t jmp = emit_x86_jmp_rel32_fixup(cg->text);
-         lc->break_fixups[lc->break_count++] = jmp;
-         return 0;
-     }
+        cg->loop_depth--;
+        return 0;
+    }
 
-     if (s->kind == AST_STMT_CONTINUE) {
-         if (cg->loop_depth <= 0) {
-             scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "continue not within loop");
-         }
-         LoopCtx* lc = &cg->loops[cg->loop_depth - 1];
-         uint32_t jmp = emit_x86_jmp_rel32_fixup(cg->text);
-         patch_rel32(cg->text, jmp, lc->start_off);
-         return 0;
-     }
+    if (s->kind == AST_STMT_BREAK) {
+        if (cg->loop_depth <= 0) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "break not within loop");
+        }
+        LoopCtx* lc = &cg->loops[cg->loop_depth - 1];
+        if (lc->break_count >= (int)(sizeof(lc->break_fixups) / sizeof(lc->break_fixups[0]))) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Too many breaks in loop");
+        }
+        uint32_t jmp = emit_x86_jmp_rel32_fixup(cg->text);
+        lc->break_fixups[lc->break_count++] = jmp;
+        return 0;
+    }
 
-     scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Unknown statement kind");
-     return 0;
- }
+    if (s->kind == AST_STMT_CONTINUE) {
+        if (cg->loop_depth <= 0) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "continue not within loop");
+        }
+        LoopCtx* lc = &cg->loops[cg->loop_depth - 1];
+        uint32_t jmp = emit_x86_jmp_rel32_fixup(cg->text);
+        patch_rel32(cg->text, jmp, lc->start_off);
+        return 0;
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Unknown statement kind");
+    return 0;
+}
 
 #endif

@@ -132,6 +132,17 @@ static AstExpr* parse_unary(Parser* p) {
         return e;
     }
 
+    if (p->tok.kind == TOK_AMP || p->tok.kind == TOK_STAR) {
+        Token t = p->tok;
+        AstUnOp op = (p->tok.kind == TOK_AMP) ? AST_UNOP_ADDR : AST_UNOP_DEREF;
+        parser_next(p);
+
+        AstExpr* e = ast_new_expr(p, AST_EXPR_UNARY, t);
+        e->v.unary.op = op;
+        e->v.unary.expr = parse_unary(p);
+        return e;
+    }
+
     if (p->tok.kind == TOK_PLUS || p->tok.kind == TOK_MINUS) {
         Token t = p->tok;
         AstUnOp op = (p->tok.kind == TOK_MINUS) ? AST_UNOP_NEG : AST_UNOP_POS;
@@ -146,6 +157,13 @@ static AstExpr* parse_unary(Parser* p) {
     return parse_postfix(p);
 }
 
+static int expr_is_lvalue(AstExpr* e) {
+    if (!e) return 0;
+    if (e->kind == AST_EXPR_NAME) return 1;
+    if (e->kind == AST_EXPR_UNARY && e->v.unary.op == AST_UNOP_DEREF) return 1;
+    return 0;
+}
+
 static AstExpr* parse_expr_prec(Parser* p, int min_prec) {
     AstExpr* lhs = parse_unary(p);
 
@@ -158,8 +176,8 @@ static AstExpr* parse_expr_prec(Parser* p, int min_prec) {
             parser_next(p);
             int next_min = right_assoc ? prec : (prec + 1);
             AstExpr* rhs = parse_expr_prec(p, next_min);
-            if (lhs->kind != AST_EXPR_NAME) {
-                scc_fatal_at(p->file, p->src, t.line, t.col, "Left-hand side of assignment must be an identifier");
+            if (!expr_is_lvalue(lhs)) {
+                scc_fatal_at(p->file, p->src, t.line, t.col, "Left-hand side of assignment must be an assignable expression");
             }
             AstExpr* e = ast_new_expr(p, AST_EXPR_ASSIGN, t);
             e->v.assign.left = lhs;
@@ -273,7 +291,7 @@ static AstStmt* parse_stmt(Parser* p) {
         return ast_new_stmt(p, AST_STMT_CONTINUE, t);
     }
 
-    if (p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_CONST) {
+    if (p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_VOID || p->tok.kind == TOK_KW_CONST) {
         Token t = p->tok;
         AstStmt* s = ast_new_stmt(p, AST_STMT_DECL, t);
         Type* ty = parse_type(p);

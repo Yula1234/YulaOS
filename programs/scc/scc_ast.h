@@ -19,6 +19,8 @@ typedef enum {
     AST_UNOP_POS = 1,
     AST_UNOP_NEG,
     AST_UNOP_NOT,
+    AST_UNOP_ADDR,
+    AST_UNOP_DEREF,
 } AstUnOp;
 
 typedef enum {

@@ -50,6 +50,7 @@ typedef enum {
 
     TOK_ANDAND,
     TOK_OROR,
+    TOK_AMP,
 
     TOK_BANG,
 
@@ -275,7 +276,7 @@ static Token lx_next(Lexer* lx) {
             t.len = 2;
             t.kind = TOK_ANDAND;
         } else {
-            scc_fatal_at(lx->file, lx->src, t.line, t.col, "Unexpected character");
+            t.kind = TOK_AMP;
         }
     } else if (c == '|') {
         if (lx_cur(lx) == '|') {
