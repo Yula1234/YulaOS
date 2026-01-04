@@ -9,6 +9,12 @@
 #define BASE_ADDR       0x08048000
 #define PAGE_ALIGN      4096
 #define SECT_ALIGN      16
+#define SHN_UNDEF 0
+
+ #define SHT_REL 9
+
+ #define MAX_RODATA_SECTIONS 64
+ #define MAX_REL_SECTIONS    64
 
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
@@ -23,7 +29,6 @@ typedef uint32_t Elf32_Word;
 #define R_386_PC32 2
 #define ELF32_R_SYM(i)    ((i)>>8)
 #define ELF32_R_TYPE(i)   ((unsigned char)(i))
-#define SHN_UNDEF 0
 
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
@@ -89,14 +94,20 @@ typedef struct {
     Elf32_Shdr* shdrs;
     
     Elf32_Shdr* sh_text;
+    Elf32_Shdr* sh_rodata[MAX_RODATA_SECTIONS];
+    int rodata_count;
     Elf32_Shdr* sh_data;
     Elf32_Shdr* sh_bss;
     Elf32_Shdr* sh_symtab;
     Elf32_Shdr* sh_strtab;
     Elf32_Shdr* sh_rel_text;
     Elf32_Shdr* sh_rel_data;
+
+     Elf32_Shdr* sh_rel[MAX_REL_SECTIONS];
+     int rel_count;
     
     uint32_t text_out_offset;
+    uint32_t rodata_out_offset[MAX_RODATA_SECTIONS];
     uint32_t data_out_offset;
     uint32_t bss_out_offset;
 } ObjectFile;
@@ -115,6 +126,7 @@ typedef struct {
     int sym_count;
     
     uint32_t total_text_size;
+    uint32_t total_rodata_size;
     uint32_t total_data_size;
     uint32_t total_bss_size;
     
@@ -175,19 +187,30 @@ ObjectFile* load_object(const char* filename) {
         const char* name = strtab + sh->sh_name;
         
         if (strcmp(name, ".text") == 0) obj->sh_text = sh;
+        else if (strncmp(name, ".rodata", 7) == 0) {
+            if (obj->rodata_count < MAX_RODATA_SECTIONS) {
+                obj->sh_rodata[obj->rodata_count++] = sh;
+            }
+        }
         else if (strcmp(name, ".data") == 0) obj->sh_data = sh;
         else if (strcmp(name, ".bss") == 0) obj->sh_bss = sh;
         else if (strcmp(name, ".symtab") == 0) obj->sh_symtab = sh;
         else if (strcmp(name, ".strtab") == 0) obj->sh_strtab = sh;
         else if (strcmp(name, ".rel.text") == 0) obj->sh_rel_text = sh;
         else if (strcmp(name, ".rel.data") == 0) obj->sh_rel_data = sh;
+
+        if (sh->sh_type == SHT_REL) {
+            if (obj->rel_count < MAX_REL_SECTIONS) {
+                obj->sh_rel[obj->rel_count++] = sh;
+            }
+        }
     }
     
     return obj;
 }
 
 void calculate_layout(LinkerCtx* ctx) {
-    uint32_t text_off = 0, data_off = 0, bss_off = 0;
+    uint32_t text_off = 0, rodata_off = 0, data_off = 0, bss_off = 0;
     
     for (int i = 0; i < ctx->obj_count; i++) {
         ObjectFile* obj = ctx->objects[i];
@@ -198,6 +221,16 @@ void calculate_layout(LinkerCtx* ctx) {
         }
     }
     ctx->total_text_size = (text_off + (SECT_ALIGN-1)) & ~(SECT_ALIGN-1);
+
+    for (int i = 0; i < ctx->obj_count; i++) {
+        ObjectFile* obj = ctx->objects[i];
+        for (int k = 0; k < obj->rodata_count; k++) {
+            rodata_off = (rodata_off + (SECT_ALIGN-1)) & ~(SECT_ALIGN-1);
+            obj->rodata_out_offset[k] = rodata_off;
+            rodata_off += obj->sh_rodata[k]->sh_size;
+        }
+    }
+    ctx->total_rodata_size = (rodata_off + (SECT_ALIGN-1)) & ~(SECT_ALIGN-1);
 
     for (int i = 0; i < ctx->obj_count; i++) {
         ObjectFile* obj = ctx->objects[i];
@@ -229,7 +262,8 @@ GlobalSymbol* find_global(LinkerCtx* ctx, const char* name) {
 
 void collect_symbols(LinkerCtx* ctx) {
     uint32_t base_text = BASE_ADDR + sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr);
-    uint32_t base_data = base_text + ctx->total_text_size;
+    uint32_t base_rodata = base_text + ctx->total_text_size;
+    uint32_t base_data = base_rodata + ctx->total_rodata_size;
     uint32_t base_bss  = base_data + ctx->total_data_size;
     
     for (int i = 0; i < ctx->obj_count; i++) {
@@ -258,6 +292,14 @@ void collect_symbols(LinkerCtx* ctx) {
                 if (sec == obj->sh_text) section_base = base_text + obj->text_out_offset;
                 else if (sec == obj->sh_data) section_base = base_data + obj->data_out_offset;
                 else if (sec == obj->sh_bss)  section_base = base_bss  + obj->bss_out_offset;
+                else {
+                    for (int r = 0; r < obj->rodata_count; r++) {
+                        if (sec == obj->sh_rodata[r]) {
+                            section_base = base_rodata + obj->rodata_out_offset[r];
+                            break;
+                        }
+                    }
+                }
                 
                 gs->value = section_base + s->st_value;
                 if (strcmp(name, "_start") == 0) ctx->entry_addr = gs->value;
@@ -266,18 +308,43 @@ void collect_symbols(LinkerCtx* ctx) {
     }
 }
 
-void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel, int is_text) {
+void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel) {
     if (!sh_rel) return;
+    if (!obj->sh_symtab) return;
     
+    if (sh_rel->sh_info >= (uint32_t)obj->ehdr->e_shnum) return;
+
     uint32_t base_text = BASE_ADDR + sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr);
-    uint32_t base_data = base_text + ctx->total_text_size;
+    uint32_t base_rodata = base_text + ctx->total_text_size;
+    uint32_t base_data = base_rodata + ctx->total_rodata_size;
     uint32_t base_bss  = base_data + ctx->total_data_size;
-    
-    uint32_t section_base_addr = is_text ? (base_text + obj->text_out_offset) : (base_data + obj->data_out_offset);
-    
-    uint8_t* buffer_ptr = ctx->out_buffer + sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr);
-    if (is_text) buffer_ptr += obj->text_out_offset;
-    else buffer_ptr += ctx->total_text_size + obj->data_out_offset;
+
+    uint32_t headers_sz = sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr);
+
+    Elf32_Shdr* target = &obj->shdrs[sh_rel->sh_info];
+
+    uint32_t section_base_addr = 0;
+    uint8_t* buffer_ptr = 0;
+
+    if (target == obj->sh_text) {
+        section_base_addr = base_text + obj->text_out_offset;
+        buffer_ptr = ctx->out_buffer + headers_sz + obj->text_out_offset;
+    } else if (target == obj->sh_data) {
+        section_base_addr = base_data + obj->data_out_offset;
+        buffer_ptr = ctx->out_buffer + headers_sz + ctx->total_text_size + ctx->total_rodata_size + obj->data_out_offset;
+    } else if (target == obj->sh_bss) {
+        return;
+    } else {
+        for (int r = 0; r < obj->rodata_count; r++) {
+            if (target == obj->sh_rodata[r]) {
+                section_base_addr = base_rodata + obj->rodata_out_offset[r];
+                buffer_ptr = ctx->out_buffer + headers_sz + ctx->total_text_size + obj->rodata_out_offset[r];
+                break;
+            }
+        }
+    }
+
+    if (!buffer_ptr) return;
 
     Elf32_Rel* rels = (Elf32_Rel*)(obj->raw_data + sh_rel->sh_offset);
     int count = sh_rel->sh_size / sizeof(Elf32_Rel);
@@ -302,6 +369,14 @@ void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel, int 
             if (sec == obj->sh_text) s_base = base_text + obj->text_out_offset;
             else if (sec == obj->sh_data) s_base = base_data + obj->data_out_offset;
             else if (sec == obj->sh_bss)  s_base = base_bss  + obj->bss_out_offset;
+            else {
+                for (int r = 0; r < obj->rodata_count; r++) {
+                    if (sec == obj->sh_rodata[r]) {
+                        s_base = base_rodata + obj->rodata_out_offset[r];
+                        break;
+                    }
+                }
+            }
             sym_val = s_base + s->st_value;
         }
         
@@ -320,7 +395,7 @@ void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel, int 
 
 void build_image(LinkerCtx* ctx, const char* outfile) {
     uint32_t headers_sz = sizeof(Elf32_Ehdr) + sizeof(Elf32_Phdr);
-    uint32_t file_sz = headers_sz + ctx->total_text_size + ctx->total_data_size;
+    uint32_t file_sz = headers_sz + ctx->total_text_size + ctx->total_rodata_size + ctx->total_data_size;
     
     char shstrtab[128];
     memset(shstrtab, 0, 128);
@@ -353,17 +428,24 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
     ph->p_align = PAGE_ALIGN;
     
     uint8_t* ptr_text = ctx->out_buffer + headers_sz;
-    uint8_t* ptr_data = ptr_text + ctx->total_text_size;
+    uint8_t* ptr_rodata = ptr_text + ctx->total_text_size;
+    uint8_t* ptr_data = ptr_rodata + ctx->total_rodata_size;
     
     for (int i = 0; i < ctx->obj_count; i++) {
         ObjectFile* obj = ctx->objects[i];
         if (obj->sh_text) memcpy(ptr_text + obj->text_out_offset, obj->raw_data + obj->sh_text->sh_offset, obj->sh_text->sh_size);
+        for (int r = 0; r < obj->rodata_count; r++) {
+            Elf32_Shdr* sh = obj->sh_rodata[r];
+            memcpy(ptr_rodata + obj->rodata_out_offset[r], obj->raw_data + sh->sh_offset, sh->sh_size);
+        }
         if (obj->sh_data) memcpy(ptr_data + obj->data_out_offset, obj->raw_data + obj->sh_data->sh_offset, obj->sh_data->sh_size);
     }
     
     for (int i = 0; i < ctx->obj_count; i++) {
-        apply_relocations(ctx, ctx->objects[i], ctx->objects[i]->sh_rel_text, 1);
-        apply_relocations(ctx, ctx->objects[i], ctx->objects[i]->sh_rel_data, 0);
+        ObjectFile* obj = ctx->objects[i];
+        for (int r = 0; r < obj->rel_count; r++) {
+            apply_relocations(ctx, obj, obj->sh_rel[r]);
+        }
     }
     
     Elf32_Shdr sh[5] = {0};
@@ -371,7 +453,7 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
     sh[1].sh_addr = BASE_ADDR + headers_sz; sh[1].sh_offset = headers_sz; sh[1].sh_size = ctx->total_text_size;
     
     sh[2].sh_name = n_dat; sh[2].sh_type = 1; sh[2].sh_flags = 3;
-    sh[2].sh_addr = BASE_ADDR + headers_sz + ctx->total_text_size; sh[2].sh_offset = headers_sz + ctx->total_text_size; sh[2].sh_size = ctx->total_data_size;
+    sh[2].sh_addr = BASE_ADDR + headers_sz + ctx->total_text_size; sh[2].sh_offset = headers_sz + ctx->total_text_size; sh[2].sh_size = ctx->total_rodata_size + ctx->total_data_size;
     
     sh[3].sh_name = n_bss; sh[3].sh_type = 8; sh[3].sh_flags = 3;
     sh[3].sh_addr = sh[2].sh_addr + sh[2].sh_size; sh[3].sh_offset = sh[2].sh_offset + sh[2].sh_size; sh[3].sh_size = ctx->total_bss_size;
