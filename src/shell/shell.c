@@ -136,19 +136,43 @@ static int get_prompt_len(const char* path) {
     return 11 + 1 + strlen(path) + 2;
 }
 
-static void refresh_line(term_instance_t* term, const char* path, char* line, int cursor) {
-    for (int i = 0; i < TERM_W; i++) {
-        term->buffer[term->row * TERM_W + i] = ' ';
+static void refresh_line(term_instance_t* term, const char* path, char* line, int cursor, int* input_start_row, int* input_rows) {
+    int prompt_len = get_prompt_len(path);
+    int line_len = strlen(line);
+    int total_len = prompt_len + line_len;
+    int needed_rows = (total_len / TERM_W) + 1;
+
+    int start_row = *input_start_row;
+    int prev_rows = *input_rows;
+    if (prev_rows < 1) prev_rows = 1;
+    if (needed_rows < 1) needed_rows = 1;
+    int clear_rows = (needed_rows > prev_rows) ? needed_rows : prev_rows;
+
+    for (int r = 0; r < clear_rows; r++) {
+        int row = start_row + r;
+        if (row < 0 || row >= TERM_HISTORY) break;
+        for (int i = 0; i < TERM_W; i++) {
+            int idx = row * TERM_W + i;
+            term->buffer[idx] = ' ';
+            term->fg_colors[idx] = term->curr_fg;
+            term->bg_colors[idx] = term->curr_bg;
+        }
     }
+
+    term->row = start_row;
     term->col = 0;
     print_prompt_text(term, path);
     term_print(term, line);
+
+    *input_rows = needed_rows;
+
+    int visual_cursor = prompt_len + cursor;
+    int cursor_row = visual_cursor / TERM_W;
+    int cursor_col = visual_cursor % TERM_W;
+    term->row = start_row + cursor_row;
+    term->col = cursor_col;
     
-    int visual_cursor = get_prompt_len(path) + cursor;
-    if (visual_cursor >= TERM_W) visual_cursor = TERM_W - 1;
-    term->col = visual_cursor;
-    
-    int visible_rows = 14; 
+    int visible_rows = TERM_H;
     if (term->row < term->view_row || term->row >= term->view_row + visible_rows) {
          if (term->row >= visible_rows) 
              term->view_row = term->row - visible_rows + 1;
@@ -474,6 +498,8 @@ void shell_task(void* arg) {
     vfs_open("/dev/console", 1); 
 
     print_prompt_text(my_term, path);
+    int input_start_row = my_term->row;
+    int input_rows = 1;
     if (yulafs_lookup("/bin") == -1) yulafs_mkdir("/bin");
     if (yulafs_lookup("/home") == -1) yulafs_mkdir("/home");
 
@@ -488,8 +514,9 @@ void shell_task(void* arg) {
 
             if (c == '\n') {
                 
-                my_term->col = get_prompt_len(path) + line_len;
-                if (my_term->col >= TERM_W) my_term->col = TERM_W - 1;
+                int visual_end = get_prompt_len(path) + line_len;
+                my_term->row = input_start_row + (visual_end / TERM_W);
+                my_term->col = visual_end % TERM_W;
 
                 term_putc(my_term, '\n');
 
@@ -656,6 +683,8 @@ void shell_task(void* arg) {
                 memset(line, 0, LINE_MAX);
                 
                 print_prompt_text(my_term, path);
+                input_start_row = my_term->row;
+                input_rows = 1;
                 
                 win->is_dirty = 1;
             } 
@@ -665,7 +694,7 @@ void shell_task(void* arg) {
                     if (my_hist->view_idx == (my_hist->head - 1 + HIST_MAX) % HIST_MAX) strlcpy(my_hist->temp_line, line, LINE_MAX);
                     strlcpy(line, h_str, LINE_MAX);
                     line_len = strlen(line); cursor_pos = line_len;
-                    refresh_line(my_term, path, line, cursor_pos);
+                    refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
                 }
             }
             else if (c == 0x14) { 
@@ -674,11 +703,11 @@ void shell_task(void* arg) {
                     if (strlen(h_str) == 0 && my_hist->view_idx == -1) strlcpy(line, my_hist->temp_line, LINE_MAX);
                     else strlcpy(line, h_str, LINE_MAX);
                     line_len = strlen(line); cursor_pos = line_len;
-                    refresh_line(my_term, path, line, cursor_pos);
+                    refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
                 }
             }
-            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; refresh_line(my_term, path, line, cursor_pos); } }
-            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; refresh_line(my_term, path, line, cursor_pos); } }
+            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows); } }
+            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows); } }
             else if (c == (char)0x80) { if (my_term->view_row > 0) { my_term->view_row--; win->is_dirty = 1; } }
             else if (c == (char)0x81) { 
                 int visible_rows = (win->target_h - 44 - 22) / 16;
@@ -688,14 +717,14 @@ void shell_task(void* arg) {
                 if (cursor_pos > 0) {
                     for (int i = cursor_pos; i < line_len; i++) line[i-1] = line[i];
                     line_len--; cursor_pos--; line[line_len] = 0;
-                    refresh_line(my_term, path, line, cursor_pos);
+                    refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
                 }
             } 
             else if (line_len < LINE_MAX - 1 && (uint8_t)c >= 32) {
                 for (int i = line_len; i > cursor_pos; i--) line[i] = line[i-1];
                 line[cursor_pos] = c;
                 line_len++; cursor_pos++; line[line_len] = 0;
-                refresh_line(my_term, path, line, cursor_pos);
+                refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
             }
             spinlock_release_safe(&ctx->lock, flags);
             win->is_dirty = 1;
