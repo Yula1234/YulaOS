@@ -304,12 +304,20 @@ typedef enum {
     TOK_ANDAND,
     TOK_OROR,
 
+    TOK_BANG,
+
     TOK_KW_INT,
     TOK_KW_CHAR,
     TOK_KW_CONST,
     TOK_KW_VOID,
     TOK_KW_RETURN,
     TOK_KW_EXTERN,
+
+    TOK_KW_IF,
+    TOK_KW_ELSE,
+    TOK_KW_WHILE,
+    TOK_KW_BREAK,
+    TOK_KW_CONTINUE,
 } TokenKind;
 
 typedef struct {
@@ -416,6 +424,11 @@ static Token lx_next(Lexer* lx) {
         else if (tok_text_eq(&t, "void")) t.kind = TOK_KW_VOID;
         else if (tok_text_eq(&t, "return")) t.kind = TOK_KW_RETURN;
         else if (tok_text_eq(&t, "extern")) t.kind = TOK_KW_EXTERN;
+        else if (tok_text_eq(&t, "if")) t.kind = TOK_KW_IF;
+        else if (tok_text_eq(&t, "else")) t.kind = TOK_KW_ELSE;
+        else if (tok_text_eq(&t, "while")) t.kind = TOK_KW_WHILE;
+        else if (tok_text_eq(&t, "break")) t.kind = TOK_KW_BREAK;
+        else if (tok_text_eq(&t, "continue")) t.kind = TOK_KW_CONTINUE;
 
         return t;
     }
@@ -491,7 +504,7 @@ static Token lx_next(Lexer* lx) {
             t.len = 2;
             t.kind = TOK_NE;
         } else {
-            scc_fatal_at(lx->file, lx->src, t.line, t.col, "Unexpected character");
+            t.kind = TOK_BANG;
         }
     } else if (c == '<') {
         if (lx_cur(lx) == '=') {
@@ -532,225 +545,230 @@ static Token lx_next(Lexer* lx) {
     return t;
 }
 
-typedef struct {
-    uint8_t* base;
-    uint32_t used;
-    uint32_t cap;
-} Arena;
-
-static void arena_init(Arena* a, uint32_t cap) {
-    if (cap < 4096) cap = 4096;
-    a->base = (uint8_t*)malloc(cap);
-    if (!a->base) exit(1);
-    a->used = 0;
-    a->cap = cap;
-}
-
-static void arena_free(Arena* a) {
-    if (a->base) free(a->base);
-    a->base = 0;
-    a->used = 0;
-    a->cap = 0;
-}
-
-static void* arena_alloc(Arena* a, uint32_t size, uint32_t align) {
-    if (align == 0) align = 1;
-    uint32_t p = a->used;
-    uint32_t mask = align - 1;
-    if ((p & mask) != 0) p = (p + mask) & ~mask;
-
-    uint32_t need = p + size;
-    if (need > a->cap) {
-        uint32_t ncap = a->cap;
-        while (ncap < need) ncap *= 2;
-        uint8_t* nb = (uint8_t*)malloc(ncap);
-        if (!nb) exit(1);
-        if (a->used) memcpy(nb, a->base, a->used);
-        free(a->base);
-        a->base = nb;
-        a->cap = ncap;
-    }
-
-    void* out = a->base + p;
-    a->used = need;
-    memset(out, 0, size);
-    return out;
-}
-
-static char* arena_strndup(Arena* a, const char* s, int len) {
-    char* out = (char*)arena_alloc(a, (uint32_t)len + 1, 1);
-    memcpy(out, s, (size_t)len);
-    out[len] = 0;
-    return out;
-}
-
-typedef enum {
-    TYPE_INT = 1,
-    TYPE_CHAR,
-    TYPE_VOID,
-    TYPE_PTR,
-} TypeKind;
-
-typedef struct Type {
-    TypeKind kind;
-    struct Type* base;
-    uint8_t is_const;
-} Type;
-
-static uint32_t type_size(Type* ty) {
-    if (!ty) return 4;
-    if (ty->kind == TYPE_CHAR) return 1;
-    if (ty->kind == TYPE_INT) return 4;
-    if (ty->kind == TYPE_PTR) return 4;
-    return 0;
-}
-
-static uint32_t align_up_u32(uint32_t v, uint32_t align) {
-    if (align == 0) return v;
-    uint32_t mask = align - 1u;
-    return (v + mask) & ~mask;
-}
-
-typedef struct {
-    Type* ret;
-    Type** params;
-    int param_count;
-} FuncType;
-
-typedef enum {
-    SYM_FUNC = 1,
-    SYM_DATA,
-} SymbolKind;
-
-typedef struct {
-    char* name;
-    SymbolKind kind;
-    Type* ty;
-    uint8_t bind;
-    uint16_t shndx;
-    uint32_t value;
-    uint32_t size;
-    int elf_index;
-    FuncType ftype;
-} Symbol;
-
-typedef struct {
-    Symbol* data;
-    int count;
-    int cap;
-} SymTable;
-
-static void symtab_init(SymTable* st) {
-    st->count = 0;
-    st->cap = 32;
-    st->data = (Symbol*)malloc((uint32_t)st->cap * sizeof(Symbol));
-    if (!st->data) exit(1);
-    memset(st->data, 0, (uint32_t)st->cap * sizeof(Symbol));
-}
-
-static void symtab_free(SymTable* st) {
-    if (st->data) free(st->data);
-    st->data = 0;
-    st->count = 0;
-    st->cap = 0;
-}
-
-static Symbol* symtab_find(SymTable* st, const char* name) {
-    for (int i = 0; i < st->count; i++) {
-        if (strcmp(st->data[i].name, name) == 0) return &st->data[i];
-    }
-    return 0;
-}
-
-static Symbol* symtab_add_func(SymTable* st, Arena* a, const char* name, FuncType ft) {
-    if (st->count == st->cap) {
-        int ncap = st->cap * 2;
-        Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
-        if (!nd) exit(1);
-        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
-        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
-        free(st->data);
-        st->data = nd;
-        st->cap = ncap;
-    }
-
-    Symbol* s = &st->data[st->count++];
-    memset(s, 0, sizeof(*s));
-    s->name = arena_strndup(a, name, (int)strlen(name));
-    s->kind = SYM_FUNC;
-    s->ty = 0;
-    s->bind = STB_GLOBAL;
-    s->shndx = SHN_UNDEF;
-    s->value = 0;
-    s->size = 0;
-    s->elf_index = st->count;
-    s->ftype = ft;
-    return s;
-}
-
-static Symbol* symtab_add_global_data(SymTable* st, Arena* a, const char* name, Type* ty) {
-    if (st->count == st->cap) {
-        int ncap = st->cap * 2;
-        Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
-        if (!nd) exit(1);
-        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
-        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
-        free(st->data);
-        st->data = nd;
-        st->cap = ncap;
-    }
-
-    Symbol* s = &st->data[st->count++];
-    memset(s, 0, sizeof(*s));
-    s->name = arena_strndup(a, name, (int)strlen(name));
-    s->kind = SYM_DATA;
-    s->ty = ty;
-    s->bind = STB_GLOBAL;
-    s->shndx = SHN_UNDEF;
-    s->value = 0;
-    s->size = 4;
-    s->elf_index = st->count;
-    return s;
-}
-
-static Symbol* symtab_add_local_data(SymTable* st, Arena* a, const char* name, uint32_t value, uint32_t size) {
-    if (st->count == st->cap) {
-        int ncap = st->cap * 2;
-        Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
-        if (!nd) exit(1);
-        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
-        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
-        free(st->data);
-        st->data = nd;
-        st->cap = ncap;
-    }
-
-    Symbol* s = &st->data[st->count++];
-    memset(s, 0, sizeof(*s));
-    s->name = arena_strndup(a, name, (int)strlen(name));
-    s->kind = SYM_DATA;
-    s->ty = 0;
-    s->bind = STB_LOCAL;
-    s->shndx = 2;
-    s->value = value;
-    s->size = size;
-    s->elf_index = st->count;
-    return s;
-}
-
-typedef enum {
-    VAR_PARAM = 1,
-    VAR_LOCAL,
-} VarKind;
-
-typedef struct Var {
-    char* name;
-    Type* ty;
-    VarKind kind;
-    int32_t ebp_offset;
-    struct Var* next;
-} Var;
-
+ typedef struct {
+     uint8_t* base;
+     uint32_t used;
+     uint32_t cap;
+ } Arena;
+ 
+ static void arena_init(Arena* a, uint32_t cap) {
+     if (cap < 4096) cap = 4096;
+     a->base = (uint8_t*)malloc(cap);
+     if (!a->base) exit(1);
+     a->used = 0;
+     a->cap = cap;
+ }
+ 
+ static void arena_free(Arena* a) {
+     if (a->base) free(a->base);
+     a->base = 0;
+     a->used = 0;
+     a->cap = 0;
+ }
+ 
+ static void* arena_alloc(Arena* a, uint32_t size, uint32_t align) {
+     if (align == 0) align = 1;
+     uint32_t p = a->used;
+     uint32_t mask = align - 1;
+     if ((p & mask) != 0) p = (p + mask) & ~mask;
+ 
+     uint32_t need = p + size;
+     if (need > a->cap) {
+         uint32_t ncap = a->cap;
+         while (ncap < need) ncap *= 2;
+         uint8_t* nb = (uint8_t*)malloc(ncap);
+         if (!nb) exit(1);
+         if (a->used) memcpy(nb, a->base, a->used);
+         free(a->base);
+         a->base = nb;
+         a->cap = ncap;
+     }
+ 
+     void* out = a->base + p;
+     a->used = need;
+     memset(out, 0, size);
+     return out;
+ }
+ 
+ static char* arena_strndup(Arena* a, const char* s, int len) {
+     char* out = (char*)arena_alloc(a, (uint32_t)len + 1, 1);
+     memcpy(out, s, (size_t)len);
+     out[len] = 0;
+     return out;
+ }
+ 
+ typedef enum {
+     TYPE_INT = 1,
+     TYPE_CHAR,
+     TYPE_VOID,
+     TYPE_PTR,
+ } TypeKind;
+ 
+ typedef struct Type {
+     TypeKind kind;
+     struct Type* base;
+     uint8_t is_const;
+ } Type;
+ 
+ static uint32_t type_size(Type* ty) {
+     if (!ty) return 4;
+     if (ty->kind == TYPE_CHAR) return 1;
+     if (ty->kind == TYPE_INT) return 4;
+     if (ty->kind == TYPE_PTR) return 4;
+     return 0;
+ }
+ 
+ static uint32_t align_up_u32(uint32_t v, uint32_t align) {
+     if (align == 0) return v;
+     uint32_t mask = align - 1u;
+     return (v + mask) & ~mask;
+ }
+ 
+ typedef struct {
+     Type* ret;
+     Type** params;
+     int param_count;
+ } FuncType;
+ 
+ typedef enum {
+     SYM_FUNC = 1,
+     SYM_DATA,
+ } SymbolKind;
+ 
+ typedef struct {
+     char* name;
+     SymbolKind kind;
+     Type* ty;
+     uint8_t bind;
+     uint16_t shndx;
+     uint32_t value;
+     uint32_t size;
+     int elf_index;
+     FuncType ftype;
+ } Symbol;
+ 
+ typedef struct {
+     Symbol* data;
+     int count;
+     int cap;
+ } SymTable;
+ 
+ static void symtab_init(SymTable* st) {
+     st->count = 0;
+     st->cap = 32;
+     st->data = (Symbol*)malloc((uint32_t)st->cap * sizeof(Symbol));
+     if (!st->data) exit(1);
+     memset(st->data, 0, (uint32_t)st->cap * sizeof(Symbol));
+ }
+ 
+ static void symtab_free(SymTable* st) {
+     if (st->data) free(st->data);
+     st->data = 0;
+     st->count = 0;
+     st->cap = 0;
+ }
+ 
+ static Symbol* symtab_find(SymTable* st, const char* name) {
+     for (int i = 0; i < st->count; i++) {
+         if (strcmp(st->data[i].name, name) == 0) return &st->data[i];
+     }
+     return 0;
+ }
+ 
+ static Symbol* symtab_add_func(SymTable* st, Arena* a, const char* name, FuncType ft) {
+     if (st->count == st->cap) {
+         int ncap = st->cap * 2;
+         Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
+         if (!nd) exit(1);
+         memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
+         memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
+         free(st->data);
+         st->data = nd;
+         st->cap = ncap;
+     }
+ 
+     Symbol* s = &st->data[st->count++];
+     memset(s, 0, sizeof(*s));
+     s->name = arena_strndup(a, name, (int)strlen(name));
+     s->kind = SYM_FUNC;
+     s->ty = 0;
+     s->bind = STB_GLOBAL;
+     s->shndx = SHN_UNDEF;
+     s->value = 0;
+     s->size = 0;
+     s->elf_index = st->count;
+     s->ftype = ft;
+     return s;
+ }
+ 
+ static Symbol* symtab_add_global_data(SymTable* st, Arena* a, const char* name, Type* ty) {
+     if (st->count == st->cap) {
+         int ncap = st->cap * 2;
+         Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
+         if (!nd) exit(1);
+         memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
+         memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
+         free(st->data);
+         st->data = nd;
+         st->cap = ncap;
+     }
+ 
+     Symbol* s = &st->data[st->count++];
+     memset(s, 0, sizeof(*s));
+     s->name = arena_strndup(a, name, (int)strlen(name));
+     s->kind = SYM_DATA;
+     s->ty = ty;
+     s->bind = STB_GLOBAL;
+     s->shndx = SHN_UNDEF;
+     s->value = 0;
+     s->size = 4;
+     s->elf_index = st->count;
+     return s;
+ }
+ 
+ static Symbol* symtab_add_local_data(SymTable* st, Arena* a, const char* name, uint32_t value, uint32_t size) {
+     if (st->count == st->cap) {
+         int ncap = st->cap * 2;
+         Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
+         if (!nd) exit(1);
+         memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
+         memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
+         free(st->data);
+         st->data = nd;
+         st->cap = ncap;
+     }
+ 
+     Symbol* s = &st->data[st->count++];
+     memset(s, 0, sizeof(*s));
+     s->name = arena_strndup(a, name, (int)strlen(name));
+     s->kind = SYM_DATA;
+     s->ty = 0;
+     s->bind = STB_LOCAL;
+     s->shndx = 2;
+     s->value = value;
+     s->size = size;
+     s->elf_index = st->count;
+     return s;
+ }
+ 
+ typedef enum {
+     VAR_PARAM = 1,
+     VAR_LOCAL,
+ } VarKind;
+ 
+ typedef struct Var {
+     char* name;
+     Type* ty;
+     VarKind kind;
+     int32_t ebp_offset;
+     struct Var* next;
+ } Var;
+ 
+ typedef struct ScopeFrame {
+     Var* prev_vars;
+     struct ScopeFrame* next;
+ } ScopeFrame;
+ 
 typedef enum {
     AST_EXPR_INT_LIT = 1,
     AST_EXPR_NAME,
@@ -765,6 +783,7 @@ typedef enum {
 typedef enum {
     AST_UNOP_POS = 1,
     AST_UNOP_NEG,
+    AST_UNOP_NOT,
 } AstUnOp;
 
 typedef enum {
@@ -790,6 +809,8 @@ typedef struct AstExpr {
         int32_t int_lit;
         struct {
             char* name;
+            Var* var;
+            Symbol* sym;
         } name;
         struct {
             char* bytes;
@@ -824,15 +845,43 @@ typedef enum {
     AST_STMT_RETURN = 1,
     AST_STMT_EXPR,
     AST_STMT_DECL,
+    AST_STMT_BLOCK,
+    AST_STMT_IF,
+    AST_STMT_WHILE,
+    AST_STMT_BREAK,
+    AST_STMT_CONTINUE,
 } AstStmtKind;
 
-typedef struct AstStmt {
+ typedef struct AstStmt AstStmt;
+
+struct AstStmt {
     AstStmtKind kind;
-    AstExpr* expr;
-    Type* decl_type;
-    char* decl_name;
+    Token tok;
+    union {
+        struct {
+            AstExpr* expr;
+        } expr;
+        struct {
+            Type* decl_type;
+            char* decl_name;
+            Var* decl_var;
+            AstExpr* init;
+        } decl;
+        struct {
+            struct AstStmt* first;
+        } block;
+        struct {
+            AstExpr* cond;
+            struct AstStmt* then_stmt;
+            struct AstStmt* else_stmt;
+        } if_stmt;
+        struct {
+            AstExpr* cond;
+            struct AstStmt* body;
+        } while_stmt;
+    } v;
     struct AstStmt* next;
-} AstStmt;
+};
 
 typedef struct AstFunc {
     char* name;
@@ -866,8 +915,10 @@ typedef struct {
     SymTable* syms;
 
     Var* scope_vars;
+    ScopeFrame* scope_frames;
     int scope_local_size;
     int scope_param_count;
+    int loop_depth;
 } Parser;
 
 static void parser_next(Parser* p) {
@@ -896,12 +947,9 @@ static AstExpr* ast_new_expr(Parser* p, AstExprKind kind, Token tok) {
 
 static AstStmt* ast_new_stmt(Parser* p, AstStmtKind kind, Token tok) {
     AstStmt* s = (AstStmt*)arena_alloc(p->arena, sizeof(AstStmt), 8);
+    memset(s, 0, sizeof(*s));
     s->kind = kind;
-    s->expr = 0;
-    s->decl_type = 0;
-    s->decl_name = 0;
-    s->next = 0;
-    (void)tok;
+    s->tok = tok;
     return s;
 }
 
@@ -997,9 +1045,32 @@ static Var* scope_find(Parser* p, const char* name) {
     return 0;
 }
 
+static Var* scope_find_current(Parser* p, const char* name) {
+    Var* stop = 0;
+    if (p->scope_frames) stop = p->scope_frames->prev_vars;
+    for (Var* v = p->scope_vars; v && v != stop; v = v->next) {
+        if (strcmp(v->name, name) == 0) return v;
+    }
+    return 0;
+}
+
+static void scope_enter(Parser* p) {
+    ScopeFrame* f = (ScopeFrame*)arena_alloc(p->arena, sizeof(ScopeFrame), 8);
+    memset(f, 0, sizeof(*f));
+    f->prev_vars = p->scope_vars;
+    f->next = p->scope_frames;
+    p->scope_frames = f;
+}
+
+static void scope_leave(Parser* p) {
+    if (!p->scope_frames) return;
+    p->scope_vars = p->scope_frames->prev_vars;
+    p->scope_frames = p->scope_frames->next;
+}
+
 static Var* scope_add_param(Parser* p, const char* name, Type* ty, int index) {
     if (!name) return 0;
-    if (scope_find(p, name)) {
+    if (scope_find_current(p, name)) {
         scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Duplicate parameter name");
     }
     Var* v = (Var*)arena_alloc(p->arena, sizeof(Var), 8);
@@ -1014,7 +1085,7 @@ static Var* scope_add_param(Parser* p, const char* name, Type* ty, int index) {
 }
 
 static Var* scope_add_local(Parser* p, const char* name, Type* ty) {
-    if (scope_find(p, name)) {
+    if (scope_find_current(p, name)) {
         scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Duplicate local name");
     }
     p->scope_local_size += 4;
@@ -1130,6 +1201,25 @@ static AstExpr* parse_postfix(Parser* p) {
         e = call;
     }
 
+    if (e->kind == AST_EXPR_NAME) {
+        Var* v = scope_find(p, e->v.name.name);
+        if (v) {
+            e->v.name.var = v;
+            e->v.name.sym = 0;
+            return e;
+        }
+
+        Symbol* s = symtab_find(p->syms, e->v.name.name);
+        if (s && s->kind == SYM_DATA) {
+            e->v.name.var = 0;
+            e->v.name.sym = s;
+            return e;
+        }
+
+        e->v.name.var = 0;
+        e->v.name.sym = 0;
+    }
+
     return e;
 }
 
@@ -1153,6 +1243,16 @@ static AstExpr* parse_unary(Parser* p) {
 
         p->lx = snap_lx;
         p->tok = snap_tok;
+    }
+
+    if (p->tok.kind == TOK_BANG) {
+        Token t = p->tok;
+        parser_next(p);
+
+        AstExpr* e = ast_new_expr(p, AST_EXPR_UNARY, t);
+        e->v.unary.op = AST_UNOP_NOT;
+        e->v.unary.expr = parse_unary(p);
+        return e;
     }
 
     if (p->tok.kind == TOK_PLUS || p->tok.kind == TOK_MINUS) {
@@ -1218,6 +1318,84 @@ static AstExpr* parse_expr(Parser* p) {
 }
 
 static AstStmt* parse_stmt(Parser* p) {
+    if (p->tok.kind == TOK_LBRACE) {
+        Token t = p->tok;
+        parser_next(p);
+
+        scope_enter(p);
+        AstStmt* first = 0;
+        AstStmt* last = 0;
+        while (p->tok.kind != TOK_RBRACE) {
+            if (p->tok.kind == TOK_EOF) {
+                scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Unexpected end of file in block");
+            }
+            AstStmt* s = parse_stmt(p);
+            if (!first) first = s;
+            else last->next = s;
+            last = s;
+        }
+        parser_expect(p, TOK_RBRACE, "Expected '}' after block");
+        scope_leave(p);
+
+        AstStmt* b = ast_new_stmt(p, AST_STMT_BLOCK, t);
+        b->v.block.first = first;
+        return b;
+    }
+
+    if (p->tok.kind == TOK_KW_IF) {
+        Token t = p->tok;
+        parser_next(p);
+        parser_expect(p, TOK_LPAREN, "Expected '(' after if");
+        AstExpr* cond = parse_expr(p);
+        parser_expect(p, TOK_RPAREN, "Expected ')' after if condition");
+        AstStmt* then_stmt = parse_stmt(p);
+        AstStmt* else_stmt = 0;
+        if (parser_match(p, TOK_KW_ELSE)) {
+            else_stmt = parse_stmt(p);
+        }
+        AstStmt* s = ast_new_stmt(p, AST_STMT_IF, t);
+        s->v.if_stmt.cond = cond;
+        s->v.if_stmt.then_stmt = then_stmt;
+        s->v.if_stmt.else_stmt = else_stmt;
+        return s;
+    }
+
+    if (p->tok.kind == TOK_KW_WHILE) {
+        Token t = p->tok;
+        parser_next(p);
+        parser_expect(p, TOK_LPAREN, "Expected '(' after while");
+        AstExpr* cond = parse_expr(p);
+        parser_expect(p, TOK_RPAREN, "Expected ')' after while condition");
+
+        p->loop_depth++;
+        AstStmt* body = parse_stmt(p);
+        p->loop_depth--;
+        AstStmt* s = ast_new_stmt(p, AST_STMT_WHILE, t);
+        s->v.while_stmt.cond = cond;
+        s->v.while_stmt.body = body;
+        return s;
+    }
+
+    if (p->tok.kind == TOK_KW_BREAK) {
+        Token t = p->tok;
+        parser_next(p);
+        if (p->loop_depth <= 0) {
+            scc_fatal_at(p->file, p->src, t.line, t.col, "break not within loop");
+        }
+        parser_expect(p, TOK_SEMI, "Expected ';' after break");
+        return ast_new_stmt(p, AST_STMT_BREAK, t);
+    }
+
+    if (p->tok.kind == TOK_KW_CONTINUE) {
+        Token t = p->tok;
+        parser_next(p);
+        if (p->loop_depth <= 0) {
+            scc_fatal_at(p->file, p->src, t.line, t.col, "continue not within loop");
+        }
+        parser_expect(p, TOK_SEMI, "Expected ';' after continue");
+        return ast_new_stmt(p, AST_STMT_CONTINUE, t);
+    }
+
     if (p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_CONST) {
         Token t = p->tok;
         AstStmt* s = ast_new_stmt(p, AST_STMT_DECL, t);
@@ -1230,14 +1408,15 @@ static AstStmt* parse_stmt(Parser* p) {
             scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Expected identifier in declaration");
         }
 
-        s->decl_name = arena_strndup(p->arena, p->tok.begin, p->tok.len);
-        s->decl_type = ty;
+        s->v.decl.decl_name = arena_strndup(p->arena, p->tok.begin, p->tok.len);
+        s->v.decl.decl_type = ty;
         parser_next(p);
 
-        scope_add_local(p, s->decl_name, ty);
-
+        Var* dv = scope_add_local(p, s->v.decl.decl_name, ty);
+        s->v.decl.decl_var = dv;
+        s->v.decl.init = 0;
         if (parser_match(p, TOK_ASSIGN)) {
-            s->expr = parse_expr(p);
+            s->v.decl.init = parse_expr(p);
         }
         parser_expect(p, TOK_SEMI, "Expected ';' after declaration");
         return s;
@@ -1249,11 +1428,11 @@ static AstStmt* parse_stmt(Parser* p) {
         parser_next(p);
 
         if (parser_match(p, TOK_SEMI)) {
-            s->expr = 0;
+            s->v.expr.expr = 0;
             return s;
         }
 
-        s->expr = parse_expr(p);
+        s->v.expr.expr = parse_expr(p);
         parser_expect(p, TOK_SEMI, "Expected ';' after return");
         return s;
     }
@@ -1261,14 +1440,14 @@ static AstStmt* parse_stmt(Parser* p) {
     if (parser_match(p, TOK_SEMI)) {
         Token t = p->tok;
         AstStmt* s = ast_new_stmt(p, AST_STMT_EXPR, t);
-        s->expr = 0;
+        s->v.expr.expr = 0;
         return s;
     }
 
     {
         Token t = p->tok;
         AstStmt* s = ast_new_stmt(p, AST_STMT_EXPR, t);
-        s->expr = parse_expr(p);
+        s->v.expr.expr = parse_expr(p);
         parser_expect(p, TOK_SEMI, "Expected ';' after expression");
         return s;
     }
@@ -1451,12 +1630,16 @@ static ToplevelKind parse_toplevel_decl(Parser* p, AstFunc** out_func, AstGlobal
     parser_expect(p, TOK_LBRACE, "Expected '{' to start function body");
 
     Var* prev_scope = p->scope_vars;
+    ScopeFrame* prev_frames = p->scope_frames;
     int prev_local_size = p->scope_local_size;
     int prev_param_count = p->scope_param_count;
 
     p->scope_vars = 0;
+    p->scope_frames = 0;
     p->scope_local_size = 0;
     p->scope_param_count = pl.count;
+
+    scope_enter(p);
 
     for (int i = 0; i < pl.count; i++) {
         if (pl.data[i].name) scope_add_param(p, pl.data[i].name, pl.data[i].ty, i);
@@ -1476,17 +1659,21 @@ static ToplevelKind parse_toplevel_decl(Parser* p, AstFunc** out_func, AstGlobal
 
     parser_expect(p, TOK_RBRACE, "Expected '}' after function body");
 
+    Var* func_vars = p->scope_vars;
+    scope_leave(p);
+
     AstFunc* f = (AstFunc*)arena_alloc(p->arena, sizeof(AstFunc), 8);
     memset(f, 0, sizeof(*f));
     f->name = name;
     f->first_stmt = first;
     f->sym = sym;
-    f->vars = p->scope_vars;
+    f->vars = func_vars;
     f->local_size = p->scope_local_size;
     f->param_count = pl.count;
     f->next = 0;
 
     p->scope_vars = prev_scope;
+    p->scope_frames = prev_frames;
     p->scope_local_size = prev_local_size;
     p->scope_param_count = prev_param_count;
 
@@ -1612,6 +1799,50 @@ static void emit_x86_idiv_ebx(Buffer* text) {
     buf_push_u8(text, 0xFB);
 }
 
+static void emit_x86_test_eax_eax(Buffer* text) {
+    buf_push_u8(text, 0x85);
+    buf_push_u8(text, 0xC0);
+}
+
+static void emit_x86_cmp_ecx_eax(Buffer* text) {
+    buf_push_u8(text, 0x39);
+    buf_push_u8(text, 0xC1);
+}
+
+static void emit_x86_xor_eax_eax(Buffer* text) {
+    buf_push_u8(text, 0x31);
+    buf_push_u8(text, 0xC0);
+}
+
+static void emit_x86_setcc_al(Buffer* text, uint8_t cc) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, (uint8_t)(0x90u + cc));
+    buf_push_u8(text, 0xC0);
+}
+
+static uint32_t emit_x86_jcc_rel32_fixup(Buffer* text, uint8_t cc) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, (uint8_t)(0x80u + cc));
+    uint32_t imm_off = text->size;
+    buf_push_u32(text, 0);
+    return imm_off;
+}
+
+static uint32_t emit_x86_jmp_rel32_fixup(Buffer* text) {
+    buf_push_u8(text, 0xE9);
+    uint32_t imm_off = text->size;
+    buf_push_u32(text, 0);
+    return imm_off;
+}
+
+static void patch_rel32(Buffer* text, uint32_t imm_off, uint32_t target_off) {
+    int32_t rel = (int32_t)target_off - (int32_t)(imm_off + 4u);
+    text->data[imm_off + 0] = (uint8_t)(rel & 0xFF);
+    text->data[imm_off + 1] = (uint8_t)((rel >> 8) & 0xFF);
+    text->data[imm_off + 2] = (uint8_t)((rel >> 16) & 0xFF);
+    text->data[imm_off + 3] = (uint8_t)((rel >> 24) & 0xFF);
+}
+
 static void emit_x86_neg_eax(Buffer* text) {
     buf_push_u8(text, 0xF7);
     buf_push_u8(text, 0xD8);
@@ -1639,6 +1870,12 @@ static void emit_x86_add_esp_imm32(Buffer* text, uint32_t imm) {
     buf_push_u32(text, imm);
 }
 
+ typedef struct {
+     uint32_t start_off;
+     uint32_t break_fixups[64];
+     int break_count;
+ } LoopCtx;
+
 typedef struct {
     Buffer* text;
     Buffer* rel_text;
@@ -1650,6 +1887,9 @@ typedef struct {
 
     Var* vars;
     uint32_t str_id;
+
+     LoopCtx loops[16];
+     int loop_depth;
 } Codegen;
 
 static void gen_expr(Codegen* cg, AstExpr* e);
@@ -1763,6 +2003,7 @@ static void cg_eval_const_u32(Codegen* cg, AstExpr* e, uint32_t* out_val, Symbol
 
         int32_t sv = (int32_t)v;
         if (e->v.unary.op == AST_UNOP_NEG) sv = -sv;
+        else if (e->v.unary.op == AST_UNOP_NOT) sv = (sv == 0) ? 1 : 0;
         *out_val = (uint32_t)sv;
         *out_reloc_sym = 0;
         return;
@@ -1835,6 +2076,91 @@ static void gen_expr_binary_arith(Codegen* cg, AstExpr* e) {
     scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Binary operator not supported in codegen yet");
 }
 
+static void gen_expr_binary_cmp(Codegen* cg, AstExpr* e) {
+    gen_expr(cg, e->v.binary.left);
+    emit_x86_push_eax(cg->text);
+    gen_expr(cg, e->v.binary.right);
+    emit_x86_pop_ecx(cg->text);
+
+    emit_x86_cmp_ecx_eax(cg->text);
+    emit_x86_mov_eax_imm32(cg->text, 0);
+
+    if (e->v.binary.op == AST_BINOP_EQ) {
+        emit_x86_setcc_al(cg->text, 0x4);
+        return;
+    }
+    if (e->v.binary.op == AST_BINOP_NE) {
+        emit_x86_setcc_al(cg->text, 0x5);
+        return;
+    }
+    if (e->v.binary.op == AST_BINOP_LT) {
+        emit_x86_setcc_al(cg->text, 0xC);
+        return;
+    }
+    if (e->v.binary.op == AST_BINOP_LE) {
+        emit_x86_setcc_al(cg->text, 0xE);
+        return;
+    }
+    if (e->v.binary.op == AST_BINOP_GT) {
+        emit_x86_setcc_al(cg->text, 0xF);
+        return;
+    }
+    if (e->v.binary.op == AST_BINOP_GE) {
+        emit_x86_setcc_al(cg->text, 0xD);
+        return;
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Comparison operator not supported in codegen yet");
+}
+
+static void gen_expr_binary_logical(Codegen* cg, AstExpr* e) {
+    if (e->v.binary.op == AST_BINOP_ANDAND) {
+        gen_expr(cg, e->v.binary.left);
+        emit_x86_test_eax_eax(cg->text);
+        uint32_t jz_false = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+
+        gen_expr(cg, e->v.binary.right);
+        emit_x86_test_eax_eax(cg->text);
+        uint32_t jz_false2 = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+
+        emit_x86_mov_eax_imm32(cg->text, 1);
+        uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
+
+        uint32_t false_off = cg->text->size;
+        emit_x86_mov_eax_imm32(cg->text, 0);
+        uint32_t end_off = cg->text->size;
+
+        patch_rel32(cg->text, jz_false, false_off);
+        patch_rel32(cg->text, jz_false2, false_off);
+        patch_rel32(cg->text, jmp_end, end_off);
+        return;
+    }
+
+    if (e->v.binary.op == AST_BINOP_OROR) {
+        gen_expr(cg, e->v.binary.left);
+        emit_x86_test_eax_eax(cg->text);
+        uint32_t jnz_true = emit_x86_jcc_rel32_fixup(cg->text, 0x5);
+
+        gen_expr(cg, e->v.binary.right);
+        emit_x86_test_eax_eax(cg->text);
+        uint32_t jnz_true2 = emit_x86_jcc_rel32_fixup(cg->text, 0x5);
+
+        emit_x86_mov_eax_imm32(cg->text, 0);
+        uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
+
+        uint32_t true_off = cg->text->size;
+        emit_x86_mov_eax_imm32(cg->text, 1);
+        uint32_t end_off = cg->text->size;
+
+        patch_rel32(cg->text, jnz_true, true_off);
+        patch_rel32(cg->text, jnz_true2, true_off);
+        patch_rel32(cg->text, jmp_end, end_off);
+        return;
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Logical operator not supported in codegen yet");
+}
+
 static void gen_expr(Codegen* cg, AstExpr* e) {
     if (!e) {
         emit_x86_mov_eax_imm32(cg->text, 0);
@@ -1847,7 +2173,7 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
     }
 
     if (e->kind == AST_EXPR_NAME) {
-        Var* v = cg_find_var(cg, e->v.name.name);
+        Var* v = e->v.name.var;
         if (v) {
             if (v->ty && v->ty->kind == TYPE_CHAR) {
                 emit_x86_movzx_eax_membp_disp(cg->text, v->ebp_offset);
@@ -1857,7 +2183,8 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
             return;
         }
 
-        Symbol* s = symtab_find(cg->syms, e->v.name.name);
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(cg->syms, e->v.name.name);
         if (!s || s->kind != SYM_DATA) {
             scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown identifier");
         }
@@ -1937,12 +2264,24 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
         gen_expr(cg, e->v.unary.expr);
         if (e->v.unary.op == AST_UNOP_NEG) {
             emit_x86_neg_eax(cg->text);
+        } else if (e->v.unary.op == AST_UNOP_NOT) {
+            emit_x86_test_eax_eax(cg->text);
+            emit_x86_mov_eax_imm32(cg->text, 0);
+            emit_x86_setcc_al(cg->text, 0x4);
         }
         return;
     }
 
     if (e->kind == AST_EXPR_BINARY) {
-        gen_expr_binary_arith(cg, e);
+        if (e->v.binary.op == AST_BINOP_ADD || e->v.binary.op == AST_BINOP_SUB || e->v.binary.op == AST_BINOP_MUL || e->v.binary.op == AST_BINOP_DIV || e->v.binary.op == AST_BINOP_MOD) {
+            gen_expr_binary_arith(cg, e);
+        } else if (e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE || e->v.binary.op == AST_BINOP_LT || e->v.binary.op == AST_BINOP_LE || e->v.binary.op == AST_BINOP_GT || e->v.binary.op == AST_BINOP_GE) {
+            gen_expr_binary_cmp(cg, e);
+        } else if (e->v.binary.op == AST_BINOP_ANDAND || e->v.binary.op == AST_BINOP_OROR) {
+            gen_expr_binary_logical(cg, e);
+        } else {
+            scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Binary operator not supported in codegen yet");
+        }
         return;
     }
 
@@ -1953,7 +2292,7 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
 
         gen_expr(cg, e->v.assign.right);
 
-        Var* v = cg_find_var(cg, e->v.assign.left->v.name.name);
+        Var* v = e->v.assign.left->v.name.var;
         if (v) {
             if (v->ty && v->ty->kind == TYPE_CHAR) {
                 emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
@@ -1963,7 +2302,8 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
             return;
         }
 
-        Symbol* s = symtab_find(cg->syms, e->v.assign.left->v.name.name);
+        Symbol* s = e->v.assign.left->v.name.sym;
+        if (!s) s = symtab_find(cg->syms, e->v.assign.left->v.name.name);
         if (!s || s->kind != SYM_DATA) {
             scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown identifier in assignment");
         }
@@ -1982,40 +2322,120 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
     scc_fatal_at(cg->p->file, cg->p->src, e->tok.line, e->tok.col, "Unknown expression kind");
 }
 
+static int gen_stmt(Codegen* cg, AstStmt* s);
+
 static int gen_stmt_list(Codegen* cg, AstStmt* s) {
     while (s) {
-        if (s->kind == AST_STMT_DECL) {
-            if (s->expr) {
-                gen_expr(cg, s->expr);
-                Var* v = cg_find_var(cg, s->decl_name);
-                if (!v) {
-                    scc_fatal_at(cg->p->file, cg->p->src, 1, 1, "Internal error: decl var not found");
-                }
-                if (v->ty && v->ty->kind == TYPE_CHAR) {
-                    emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
-                } else {
-                    emit_x86_mov_membp_disp_eax(cg->text, v->ebp_offset);
-                }
-            }
-            s = s->next;
-            continue;
-        }
+        int did = gen_stmt(cg, s);
+        if (did) return 1;
+        s = s->next;
+    }
+    return 0;
+}
 
-        if (s->kind == AST_STMT_EXPR) {
-            if (s->expr) gen_expr(cg, s->expr);
-            s = s->next;
-            continue;
-        }
+static int gen_stmt(Codegen* cg, AstStmt* s) {
+    if (!s) return 0;
 
-        if (s->kind == AST_STMT_RETURN) {
-            gen_expr(cg, s->expr);
-            emit_x86_epilogue(cg->text);
-            return 1;
+    if (s->kind == AST_STMT_DECL) {
+        if (s->v.decl.init) {
+            gen_expr(cg, s->v.decl.init);
+            Var* v = s->v.decl.decl_var;
+            if (!v) scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Internal error: decl var not found");
+            if (v->ty && v->ty->kind == TYPE_CHAR) emit_x86_mov_membp_disp_al(cg->text, v->ebp_offset);
+            else emit_x86_mov_membp_disp_eax(cg->text, v->ebp_offset);
         }
-
-        scc_fatal_at(cg->p->file, cg->p->src, 1, 1, "Unknown statement kind");
+        return 0;
     }
 
+    if (s->kind == AST_STMT_EXPR) {
+        if (s->v.expr.expr) gen_expr(cg, s->v.expr.expr);
+        return 0;
+    }
+
+    if (s->kind == AST_STMT_RETURN) {
+        gen_expr(cg, s->v.expr.expr);
+        emit_x86_epilogue(cg->text);
+        return 1;
+    }
+
+    if (s->kind == AST_STMT_BLOCK) {
+        return gen_stmt_list(cg, s->v.block.first);
+    }
+
+    if (s->kind == AST_STMT_IF) {
+        gen_expr(cg, s->v.if_stmt.cond);
+        emit_x86_test_eax_eax(cg->text);
+
+        if (s->v.if_stmt.else_stmt) {
+            uint32_t jz_else = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+            int then_ret = gen_stmt(cg, s->v.if_stmt.then_stmt);
+            uint32_t jmp_end = emit_x86_jmp_rel32_fixup(cg->text);
+            uint32_t else_off = cg->text->size;
+            patch_rel32(cg->text, jz_else, else_off);
+            int else_ret = gen_stmt(cg, s->v.if_stmt.else_stmt);
+            uint32_t end_off = cg->text->size;
+            patch_rel32(cg->text, jmp_end, end_off);
+            return (then_ret && else_ret) ? 1 : 0;
+        }
+
+        uint32_t jz_end = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+        (void)gen_stmt(cg, s->v.if_stmt.then_stmt);
+        uint32_t end_off = cg->text->size;
+        patch_rel32(cg->text, jz_end, end_off);
+        return 0;
+    }
+
+    if (s->kind == AST_STMT_WHILE) {
+        uint32_t start_off = cg->text->size;
+
+        if (cg->loop_depth >= (int)(sizeof(cg->loops) / sizeof(cg->loops[0]))) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Loop nesting too deep");
+        }
+        LoopCtx* lc = &cg->loops[cg->loop_depth++];
+        memset(lc, 0, sizeof(*lc));
+        lc->start_off = start_off;
+
+        gen_expr(cg, s->v.while_stmt.cond);
+        emit_x86_test_eax_eax(cg->text);
+        uint32_t jz_end = emit_x86_jcc_rel32_fixup(cg->text, 0x4);
+        (void)gen_stmt(cg, s->v.while_stmt.body);
+        uint32_t jmp_back = emit_x86_jmp_rel32_fixup(cg->text);
+        patch_rel32(cg->text, jmp_back, start_off);
+        uint32_t end_off = cg->text->size;
+        patch_rel32(cg->text, jz_end, end_off);
+
+        for (int i = 0; i < lc->break_count; i++) {
+            patch_rel32(cg->text, lc->break_fixups[i], end_off);
+        }
+
+        cg->loop_depth--;
+        return 0;
+    }
+
+    if (s->kind == AST_STMT_BREAK) {
+        if (cg->loop_depth <= 0) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "break not within loop");
+        }
+        LoopCtx* lc = &cg->loops[cg->loop_depth - 1];
+        if (lc->break_count >= (int)(sizeof(lc->break_fixups) / sizeof(lc->break_fixups[0]))) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Too many breaks in loop");
+        }
+        uint32_t jmp = emit_x86_jmp_rel32_fixup(cg->text);
+        lc->break_fixups[lc->break_count++] = jmp;
+        return 0;
+    }
+
+    if (s->kind == AST_STMT_CONTINUE) {
+        if (cg->loop_depth <= 0) {
+            scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "continue not within loop");
+        }
+        LoopCtx* lc = &cg->loops[cg->loop_depth - 1];
+        uint32_t jmp = emit_x86_jmp_rel32_fixup(cg->text);
+        patch_rel32(cg->text, jmp, lc->start_off);
+        return 0;
+    }
+
+    scc_fatal_at(cg->p->file, cg->p->src, s->tok.line, s->tok.col, "Unknown statement kind");
     return 0;
 }
 
