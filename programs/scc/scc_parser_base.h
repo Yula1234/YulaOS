@@ -92,6 +92,14 @@ static Type* type_char(Parser* p) {
     return t;
 }
 
+static Type* type_bool(Parser* p) {
+    Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+    t->kind = TYPE_BOOL;
+    t->base = 0;
+    t->is_const = 0;
+    return t;
+}
+
 static Type* type_void(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_VOID;
@@ -118,6 +126,9 @@ static Type* parse_type(Parser* p) {
         parser_next(p);
     } else if (p->tok.kind == TOK_KW_CHAR) {
         base = type_char(p);
+        parser_next(p);
+    } else if (p->tok.kind == TOK_KW_BOOL) {
+        base = type_bool(p);
         parser_next(p);
     } else if (p->tok.kind == TOK_KW_VOID) {
         base = type_void(p);

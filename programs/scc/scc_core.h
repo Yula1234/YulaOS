@@ -58,6 +58,7 @@ static char* arena_strndup(Arena* a, const char* s, int len) {
 typedef enum {
     TYPE_INT = 1,
     TYPE_CHAR,
+    TYPE_BOOL,
     TYPE_VOID,
     TYPE_PTR,
 } TypeKind;
@@ -71,6 +72,7 @@ typedef struct Type {
 static uint32_t type_size(Type* ty) {
     if (!ty) return 4;
     if (ty->kind == TYPE_CHAR) return 1;
+    if (ty->kind == TYPE_BOOL) return 1;
     if (ty->kind == TYPE_INT) return 4;
     if (ty->kind == TYPE_PTR) return 4;
     return 0;

@@ -1,0 +1,801 @@
+#ifndef SCC_IR_LOWER_H_INCLUDED
+#define SCC_IR_LOWER_H_INCLUDED
+
+#include "scc_ir.h"
+#include "scc_parser_base.h"
+#include "scc_buffer.h"
+
+typedef struct {
+    Parser* p;
+    SymTable* syms;
+    IrModule* m;
+    Buffer* data;
+    uint32_t str_id;
+} IrLowerCtx;
+
+static void ir_lower_u32_to_dec(char out[16], uint32_t v) {
+    char tmp[16];
+    int n = 0;
+
+    if (v == 0) {
+        out[0] = '0';
+        out[1] = 0;
+        return;
+    }
+
+    while (v) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    out[n] = 0;
+}
+
+static Symbol* ir_lower_intern_string(IrLowerCtx* lc, const char* bytes, int len) {
+    if (!lc || !lc->p || !lc->syms || !lc->data) return 0;
+
+    char namebuf[32];
+    char dec[16];
+    ir_lower_u32_to_dec(dec, lc->str_id++);
+
+    int n = 0;
+    namebuf[n++] = '.';
+    namebuf[n++] = 'L';
+    namebuf[n++] = 's';
+    namebuf[n++] = 't';
+    namebuf[n++] = 'r';
+    for (int i = 0; dec[i]; i++) namebuf[n++] = dec[i];
+    namebuf[n] = 0;
+
+    uint32_t off = lc->data->size;
+    if (len) buf_write(lc->data, bytes, (uint32_t)len);
+    buf_push_u8(lc->data, 0);
+
+    return symtab_add_local_data(lc->syms, lc->p->arena, namebuf, off, (uint32_t)len + 1u);
+}
+
+typedef struct IrLowerVarSlot IrLowerVarSlot;
+struct IrLowerVarSlot {
+    Var* var;
+    IrValueId addr;
+    IrLowerVarSlot* next;
+};
+
+typedef struct IrLowerLoop IrLowerLoop;
+struct IrLowerLoop {
+    IrBlockId break_target;
+    IrBlockId continue_target;
+    IrLowerLoop* next;
+};
+
+typedef struct {
+    IrLowerCtx* lc;
+    IrFunc* f;
+    AstFunc* af;
+    IrBlockId cur;
+    IrLowerVarSlot* vars;
+    IrLowerLoop* loops;
+} IrLowerFuncCtx;
+
+static IrValueId ir_lower_get_var_addr(IrLowerFuncCtx* fc, Var* v);
+static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e);
+static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e);
+static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* dst_ty, Token tok);
+static IrValueId ir_lower_expr_bool(IrLowerFuncCtx* fc, AstExpr* e, Token tok);
+static void ir_lower_stmt(IrLowerFuncCtx* fc, AstStmt* s);
+
+static IrType* ir_type_from_scc(IrFunc* f, Type* t) {
+    if (!t) return f->ty_i32;
+
+    if (t->kind == TYPE_VOID) return f->ty_void;
+    if (t->kind == TYPE_INT) return f->ty_i32;
+    if (t->kind == TYPE_CHAR) return f->ty_i8;
+    if (t->kind == TYPE_BOOL) return f->ty_bool;
+
+    if (t->kind == TYPE_PTR) {
+        IrType* base = ir_type_from_scc(f, t->base);
+        return ir_type_ptr(f, base);
+    }
+
+    return f->ty_i32;
+}
+
+static IrValueId ir_lower_addr(IrLowerFuncCtx* fc, AstExpr* e);
+
+static IrValueId ir_lower_addr(IrLowerFuncCtx* fc, AstExpr* e) {
+    if (!fc || !fc->lc || !fc->f || !e) return 0;
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) {
+            return ir_lower_get_var_addr(fc, e->v.name.var);
+        }
+
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(fc->lc->syms, e->v.name.name);
+        if (!s || s->kind != SYM_DATA) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unknown identifier");
+        }
+
+        IrType* base = ir_type_from_scc(fc->f, s->ty);
+        IrType* pty = ir_type_ptr(fc->f, base);
+        return ir_emit_global_addr(fc->f, fc->cur, pty, s);
+    }
+
+    if (e->kind == AST_EXPR_UNARY && e->v.unary.op == AST_UNOP_DEREF) {
+        Type* pt = ir_lower_expr_type(fc->lc, e->v.unary.expr);
+        Type* base = (pt && pt->kind == TYPE_PTR) ? pt->base : 0;
+        if (!base) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot dereference non-pointer");
+        }
+
+        IrType* base_ir = ir_type_from_scc(fc->f, base);
+        IrType* pty = ir_type_ptr(fc->f, base_ir);
+        IrValueId pv = ir_lower_expr(fc, e->v.unary.expr);
+        return ir_lower_cast_value(fc, pv, pty, e->tok);
+    }
+
+    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Expression is not addressable");
+    return 0;
+}
+
+static int ir_block_is_terminated(IrFunc* f, IrBlockId b) {
+    if (!f || b == 0 || b > f->block_count) return 1;
+    return f->blocks[b - 1].term.kind != IR_TERM_INVALID;
+}
+
+static IrLowerVarSlot* ir_lower_find_var(IrLowerFuncCtx* fc, Var* v) {
+    if (!fc || !v) return 0;
+    for (IrLowerVarSlot* it = fc->vars; it; it = it->next) {
+        if (it->var == v) return it;
+    }
+    return 0;
+}
+
+static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* dst_ty, Token tok) {
+    if (!fc || !fc->f) return 0;
+    if (!dst_ty) return v;
+
+    if (dst_ty->kind == IR_TY_VOID) return 0;
+    if (v == 0) return ir_emit_undef(fc->f, fc->cur, dst_ty);
+
+    IrType* src_ty = fc->f->values[v - 1].type;
+    if (src_ty == dst_ty) return v;
+
+    if (dst_ty->kind == IR_TY_BOOL) {
+        if (src_ty && src_ty->kind == IR_TY_BOOL) return v;
+
+        IrValueId vi32 = v;
+        if (src_ty && src_ty->kind == IR_TY_PTR) vi32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+        else if (src_ty && src_ty->kind == IR_TY_I8) vi32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        else if (src_ty && src_ty->kind == IR_TY_BOOL) vi32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+
+        IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
+        return ir_emit_icmp(fc->f, fc->cur, IR_ICMP_NE, vi32, z);
+    }
+
+    if (dst_ty->kind == IR_TY_I32) {
+        if (src_ty && src_ty->kind == IR_TY_PTR) return ir_emit_ptrtoint(fc->f, fc->cur, v);
+        if (src_ty && (src_ty->kind == IR_TY_I8 || src_ty->kind == IR_TY_BOOL)) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        return v;
+    }
+
+    if (dst_ty->kind == IR_TY_I8) {
+        if (src_ty && src_ty->kind == IR_TY_I32) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, v);
+        if (src_ty && src_ty->kind == IR_TY_PTR) {
+            IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_BOOL) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i8, v);
+        return v;
+    }
+
+    if (dst_ty->kind == IR_TY_PTR) {
+        if (src_ty && src_ty->kind == IR_TY_PTR) {
+            IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+            return ir_emit_inttoptr(fc->f, fc->cur, dst_ty, i32);
+        }
+
+        IrValueId i32 = v;
+        if (src_ty && (src_ty->kind == IR_TY_I8 || src_ty->kind == IR_TY_BOOL)) i32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        return ir_emit_inttoptr(fc->f, fc->cur, dst_ty, i32);
+    }
+
+    (void)tok;
+    return v;
+}
+
+static uint32_t ir_lower_align_for_type(Type* t) {
+    uint32_t sz = type_size(t);
+    if (sz == 1) return 1;
+    return 4;
+}
+
+static IrValueId ir_lower_get_var_addr(IrLowerFuncCtx* fc, Var* v) {
+    if (!fc || !fc->lc || !fc->f || !v) return 0;
+
+    IrLowerVarSlot* slot = ir_lower_find_var(fc, v);
+    if (slot) return slot->addr;
+
+    IrType* ty = ir_type_from_scc(fc->f, v->ty);
+    uint32_t al = ir_lower_align_for_type(v->ty);
+    IrValueId addr = ir_emit_alloca(fc->f, fc->f->entry, ty, al);
+
+    IrLowerVarSlot* ns = (IrLowerVarSlot*)arena_alloc(fc->f->arena, sizeof(IrLowerVarSlot), 8);
+    memset(ns, 0, sizeof(*ns));
+    ns->var = v;
+    ns->addr = addr;
+    ns->next = fc->vars;
+    fc->vars = ns;
+
+    if (v->kind == VAR_PARAM) {
+        int idx = (v->ebp_offset - 8) / 4;
+        if (idx < 0 || idx >= (int)fc->f->param_count) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, fc->lc->p->tok.line, fc->lc->p->tok.col, "Internal error: invalid parameter index");
+        }
+        IrValueId pv = fc->f->blocks[fc->f->entry - 1].params[idx];
+        ir_emit_store(fc->f, fc->f->entry, addr, pv);
+    }
+
+    return addr;
+}
+
+static Type* ir_lower_lvalue_type(IrLowerCtx* lc, AstExpr* e) {
+    if (!lc || !e) return 0;
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) return e->v.name.var->ty;
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(lc->syms, e->v.name.name);
+        return s ? s->ty : 0;
+    }
+
+    if (e->kind == AST_EXPR_UNARY && e->v.unary.op == AST_UNOP_DEREF) {
+        Type* pt = ir_lower_expr_type(lc, e->v.unary.expr);
+        if (pt && pt->kind == TYPE_PTR) return pt->base;
+        return 0;
+    }
+
+    return 0;
+}
+
+static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
+    if (!lc || !e) return 0;
+
+    if (e->kind == AST_EXPR_INT_LIT) return 0;
+
+    if (e->kind == AST_EXPR_STR) {
+        Type* ch = type_char(lc->p);
+        return type_ptr_to(lc->p, ch);
+    }
+
+    if (e->kind == AST_EXPR_CAST) return e->v.cast.ty;
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) return e->v.name.var->ty;
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(lc->syms, e->v.name.name);
+        return s ? s->ty : 0;
+    }
+
+    if (e->kind == AST_EXPR_CALL) {
+        Symbol* s = symtab_find(lc->syms, e->v.call.callee);
+        if (s) return s->ftype.ret;
+        return 0;
+    }
+
+    if (e->kind == AST_EXPR_UNARY) {
+        if (e->v.unary.op == AST_UNOP_ADDR) {
+            Type* base = ir_lower_lvalue_type(lc, e->v.unary.expr);
+            return base ? type_ptr_to(lc->p, base) : 0;
+        }
+        if (e->v.unary.op == AST_UNOP_DEREF) {
+            Type* pt = ir_lower_expr_type(lc, e->v.unary.expr);
+            if (pt && pt->kind == TYPE_PTR) return pt->base;
+            return 0;
+        }
+        return 0;
+    }
+
+    if (e->kind == AST_EXPR_ASSIGN) {
+        return ir_lower_lvalue_type(lc, e->v.assign.left);
+    }
+
+    if (e->kind == AST_EXPR_BINARY) {
+        Type* lt = ir_lower_expr_type(lc, e->v.binary.left);
+        Type* rt = ir_lower_expr_type(lc, e->v.binary.right);
+
+        if (e->v.binary.op == AST_BINOP_ADD) {
+            if (lt && lt->kind == TYPE_PTR && (!rt || rt->kind != TYPE_PTR)) return lt;
+            if (rt && rt->kind == TYPE_PTR && (!lt || lt->kind != TYPE_PTR)) return rt;
+            return 0;
+        }
+
+        if (e->v.binary.op == AST_BINOP_SUB) {
+            if (lt && lt->kind == TYPE_PTR) {
+                if (rt && rt->kind == TYPE_PTR) return 0;
+                return lt;
+            }
+            return 0;
+        }
+
+        return 0;
+    }
+
+    return 0;
+}
+
+static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e);
+
+static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
+    if (!fc || !fc->lc || !fc->f) return 0;
+    if (!e) return ir_emit_iconst(fc->f, fc->cur, 0);
+
+    if (e->kind == AST_EXPR_INT_LIT) {
+        return ir_emit_iconst(fc->f, fc->cur, e->v.int_lit);
+    }
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) {
+            IrValueId addr = ir_lower_get_var_addr(fc, e->v.name.var);
+            IrType* ty = ir_type_from_scc(fc->f, e->v.name.var->ty);
+            return ir_emit_load(fc->f, fc->cur, ty, addr);
+        }
+
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(fc->lc->syms, e->v.name.name);
+        if (!s || s->kind != SYM_DATA) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unknown identifier");
+        }
+
+        IrType* ty = ir_type_from_scc(fc->f, s->ty);
+        IrType* pty = ir_type_ptr(fc->f, ty);
+        IrValueId addr = ir_emit_global_addr(fc->f, fc->cur, pty, s);
+        return ir_emit_load(fc->f, fc->cur, ty, addr);
+    }
+
+    if (e->kind == AST_EXPR_STR) {
+        if (!fc->lc->data) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: string literal lowering requires data buffer");
+        }
+        Symbol* s = ir_lower_intern_string(fc->lc, e->v.str.bytes, e->v.str.len);
+        IrType* pty = ir_type_ptr(fc->f, fc->f->ty_i8);
+        return ir_emit_global_addr(fc->f, fc->cur, pty, s);
+    }
+
+    if (e->kind == AST_EXPR_CAST) {
+        IrValueId v = ir_lower_expr(fc, e->v.cast.expr);
+        IrType* dst = ir_type_from_scc(fc->f, e->v.cast.ty);
+        return ir_lower_cast_value(fc, v, dst, e->tok);
+    }
+
+    if (e->kind == AST_EXPR_CALL) {
+        if (strcmp(e->v.call.callee, "__syscall") == 0) {
+            if (e->v.call.arg_count != 4) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "__syscall requires exactly 4 arguments");
+            }
+            IrValueId n = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.call.args[0]), fc->f->ty_i32, e->tok);
+            IrValueId a1 = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.call.args[1]), fc->f->ty_i32, e->tok);
+            IrValueId a2 = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.call.args[2]), fc->f->ty_i32, e->tok);
+            IrValueId a3 = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.call.args[3]), fc->f->ty_i32, e->tok);
+            return ir_emit_syscall(fc->f, fc->cur, n, a1, a2, a3);
+        }
+
+        Symbol* s = symtab_find(fc->lc->syms, e->v.call.callee);
+        if (!s || s->kind != SYM_FUNC) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Call to undeclared function");
+        }
+
+        if (s->ftype.param_count != e->v.call.arg_count) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Argument count mismatch in call");
+        }
+
+        uint32_t argc = (uint32_t)e->v.call.arg_count;
+        IrValueId* args = 0;
+        if (argc) args = (IrValueId*)arena_alloc(fc->f->arena, argc * sizeof(IrValueId), 8);
+
+        for (int i = e->v.call.arg_count - 1; i >= 0; i--) {
+            IrValueId av = ir_lower_expr(fc, e->v.call.args[i]);
+            IrType* aty = ir_type_from_scc(fc->f, s->ftype.params ? s->ftype.params[i] : 0);
+            args[i] = ir_lower_cast_value(fc, av, aty, e->tok);
+        }
+
+        IrType* ret_ty = ir_type_from_scc(fc->f, s->ftype.ret);
+        return ir_emit_call(fc->f, fc->cur, ret_ty, s, args, argc);
+    }
+
+    if (e->kind == AST_EXPR_UNARY) {
+        if (e->v.unary.op == AST_UNOP_ADDR) {
+            return ir_lower_addr(fc, e->v.unary.expr);
+        }
+
+        if (e->v.unary.op == AST_UNOP_DEREF) {
+            Type* pt = ir_lower_expr_type(fc->lc, e->v.unary.expr);
+            Type* base = (pt && pt->kind == TYPE_PTR) ? pt->base : 0;
+            if (!base) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot dereference non-pointer");
+            }
+
+            IrType* base_ir = ir_type_from_scc(fc->f, base);
+            IrType* pty = ir_type_ptr(fc->f, base_ir);
+
+            IrValueId pv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.unary.expr), pty, e->tok);
+            return ir_emit_load(fc->f, fc->cur, base_ir, pv);
+        }
+
+        IrValueId v = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.unary.expr), fc->f->ty_i32, e->tok);
+
+        if (e->v.unary.op == AST_UNOP_POS) return v;
+        if (e->v.unary.op == AST_UNOP_NEG) {
+            IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
+            return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, fc->f->ty_i32, z, v);
+        }
+        if (e->v.unary.op == AST_UNOP_NOT) {
+            IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
+            return ir_emit_icmp(fc->f, fc->cur, IR_ICMP_EQ, v, z);
+        }
+    }
+
+    if (e->kind == AST_EXPR_ASSIGN) {
+        Type* lvt = ir_lower_lvalue_type(fc->lc, e->v.assign.left);
+        if (!lvt) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Invalid assignment target");
+        }
+
+        IrType* lvir = ir_type_from_scc(fc->f, lvt);
+        if (lvir && lvir->kind == IR_TY_VOID) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot assign to void lvalue");
+        }
+
+        IrValueId addr = ir_lower_addr(fc, e->v.assign.left);
+        IrValueId rv = ir_lower_expr(fc, e->v.assign.right);
+        IrValueId cv = ir_lower_cast_value(fc, rv, lvir, e->tok);
+        ir_emit_store(fc->f, fc->cur, addr, cv);
+        return cv;
+    }
+
+    if (e->kind == AST_EXPR_BINARY) {
+        if (e->v.binary.op == AST_BINOP_ANDAND || e->v.binary.op == AST_BINOP_OROR) {
+            IrValueId lv = ir_lower_expr_bool(fc, e->v.binary.left, e->tok);
+            IrBlockId rhs_b = ir_block_new(fc->f);
+            IrBlockId join_b = ir_block_new(fc->f);
+            IrValueId res = ir_block_add_param(fc->f, join_b, fc->f->ty_bool);
+
+            if (e->v.binary.op == AST_BINOP_ANDAND) {
+                IrValueId fargs[1] = { lv };
+                ir_set_term_condbr(fc->f, fc->cur, lv, rhs_b, 0, 0, join_b, fargs, 1);
+
+                fc->cur = rhs_b;
+                IrValueId rv = ir_lower_expr_bool(fc, e->v.binary.right, e->tok);
+                IrValueId targs[1] = { rv };
+                if (!ir_block_is_terminated(fc->f, fc->cur)) {
+                    ir_set_term_br(fc->f, fc->cur, join_b, targs, 1);
+                }
+
+                fc->cur = join_b;
+                return res;
+            }
+
+            if (e->v.binary.op == AST_BINOP_OROR) {
+                IrValueId targs[1] = { lv };
+                ir_set_term_condbr(fc->f, fc->cur, lv, join_b, targs, 1, rhs_b, 0, 0);
+
+                fc->cur = rhs_b;
+                IrValueId rv = ir_lower_expr_bool(fc, e->v.binary.right, e->tok);
+                IrValueId fargs[1] = { rv };
+                if (!ir_block_is_terminated(fc->f, fc->cur)) {
+                    ir_set_term_br(fc->f, fc->cur, join_b, fargs, 1);
+                }
+
+                fc->cur = join_b;
+                return res;
+            }
+        }
+
+        Type* lt = ir_lower_expr_type(fc->lc, e->v.binary.left);
+        Type* rt = ir_lower_expr_type(fc->lc, e->v.binary.right);
+        int lptr = (lt && lt->kind == TYPE_PTR);
+        int rptr = (rt && rt->kind == TYPE_PTR);
+
+        if (e->v.binary.op == AST_BINOP_ADD || e->v.binary.op == AST_BINOP_SUB) {
+            if ((e->v.binary.op == AST_BINOP_ADD && (lptr ^ rptr)) || (e->v.binary.op == AST_BINOP_SUB && lptr && !rptr)) {
+                Type* pty = lptr ? lt : rt;
+                uint32_t scale = type_size(pty->base);
+                if (scale == 0) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer arithmetic on void* is not supported");
+                }
+
+                AstExpr* base_e = lptr ? e->v.binary.left : e->v.binary.right;
+                AstExpr* off_e = lptr ? e->v.binary.right : e->v.binary.left;
+
+                IrType* base_ir = ir_type_from_scc(fc->f, pty->base);
+                IrType* ptr_ir = ir_type_ptr(fc->f, base_ir);
+
+                IrValueId basev = ir_lower_cast_value(fc, ir_lower_expr(fc, base_e), ptr_ir, e->tok);
+                IrValueId offv = ir_lower_cast_value(fc, ir_lower_expr(fc, off_e), fc->f->ty_i32, e->tok);
+
+                if (scale != 1) {
+                    IrValueId sc = ir_emit_iconst(fc->f, fc->cur, (int32_t)scale);
+                    offv = ir_emit_bin(fc->f, fc->cur, IR_INSTR_MUL, fc->f->ty_i32, offv, sc);
+                }
+
+                if (e->v.binary.op == AST_BINOP_SUB) {
+                    IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
+                    offv = ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, fc->f->ty_i32, z, offv);
+                }
+
+                return ir_emit_ptr_add(fc->f, fc->cur, ptr_ir, basev, offv);
+            }
+
+            if (e->v.binary.op == AST_BINOP_ADD && (lptr && rptr)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unsupported pointer addition");
+            }
+
+            if (e->v.binary.op == AST_BINOP_SUB && rptr && !lptr) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot subtract a pointer from an integer");
+            }
+
+            if (e->v.binary.op == AST_BINOP_SUB && lptr && rptr) {
+                if (lt->base != rt->base) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer subtraction requires compatible pointer types");
+                }
+
+                uint32_t scale = type_size(lt->base);
+                if (scale == 0) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer arithmetic on void* is not supported");
+                }
+
+                IrValueId li = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
+                IrValueId ri = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+                IrValueId diff = ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, fc->f->ty_i32, li, ri);
+
+                if (scale == 1) return diff;
+                if (scale == 4) {
+                    IrValueId sc = ir_emit_iconst(fc->f, fc->cur, 4);
+                    return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SDIV, fc->f->ty_i32, diff, sc);
+                }
+
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unsupported pointer difference scale");
+            }
+        }
+
+        if (e->v.binary.op == AST_BINOP_MUL || e->v.binary.op == AST_BINOP_DIV || e->v.binary.op == AST_BINOP_MOD) {
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+
+            IrInstrKind k = IR_INSTR_INVALID;
+            if (e->v.binary.op == AST_BINOP_MUL) k = IR_INSTR_MUL;
+            else if (e->v.binary.op == AST_BINOP_DIV) k = IR_INSTR_SDIV;
+            else if (e->v.binary.op == AST_BINOP_MOD) k = IR_INSTR_SREM;
+            return ir_emit_bin(fc->f, fc->cur, k, fc->f->ty_i32, lv, rv);
+        }
+
+        if (e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE || e->v.binary.op == AST_BINOP_LT || e->v.binary.op == AST_BINOP_LE || e->v.binary.op == AST_BINOP_GT || e->v.binary.op == AST_BINOP_GE) {
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+
+            IrIcmpPred p = IR_ICMP_EQ;
+            if (e->v.binary.op == AST_BINOP_EQ) p = IR_ICMP_EQ;
+            else if (e->v.binary.op == AST_BINOP_NE) p = IR_ICMP_NE;
+            else if (e->v.binary.op == AST_BINOP_LT) p = IR_ICMP_SLT;
+            else if (e->v.binary.op == AST_BINOP_LE) p = IR_ICMP_SLE;
+            else if (e->v.binary.op == AST_BINOP_GT) p = IR_ICMP_SGT;
+            else if (e->v.binary.op == AST_BINOP_GE) p = IR_ICMP_SGE;
+            return ir_emit_icmp(fc->f, fc->cur, p, lv, rv);
+        }
+
+        if (e->v.binary.op == AST_BINOP_ADD || e->v.binary.op == AST_BINOP_SUB) {
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+            IrInstrKind k = (e->v.binary.op == AST_BINOP_ADD) ? IR_INSTR_ADD : IR_INSTR_SUB;
+            return ir_emit_bin(fc->f, fc->cur, k, fc->f->ty_i32, lv, rv);
+        }
+
+        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Binary operator not lowered to IR yet");
+    }
+
+    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Expression kind is not lowered to IR yet");
+    return 0;
+}
+
+static IrValueId ir_lower_expr_bool(IrLowerFuncCtx* fc, AstExpr* e, Token tok) {
+    if (!fc || !fc->f) return 0;
+    IrValueId v = ir_lower_expr(fc, e);
+    return ir_lower_cast_value(fc, v, fc->f->ty_bool, tok);
+}
+
+static void ir_lower_stmt_list(IrLowerFuncCtx* fc, AstStmt* first);
+
+static void ir_lower_stmt_list(IrLowerFuncCtx* fc, AstStmt* first) {
+    if (!fc) return;
+    for (AstStmt* it = first; it; it = it->next) {
+        if (ir_block_is_terminated(fc->f, fc->cur)) return;
+        ir_lower_stmt(fc, it);
+    }
+}
+
+static void ir_lower_stmt(IrLowerFuncCtx* fc, AstStmt* s);
+
+static void ir_lower_stmt(IrLowerFuncCtx* fc, AstStmt* s) {
+    if (!fc || !fc->lc || !fc->f || !s) return;
+
+    if (s->kind == AST_STMT_BLOCK) {
+        ir_lower_stmt_list(fc, s->v.block.first);
+        return;
+    }
+
+    if (s->kind == AST_STMT_DECL) {
+        IrValueId addr = ir_lower_get_var_addr(fc, s->v.decl.decl_var);
+        if (s->v.decl.init) {
+            IrValueId iv = ir_lower_expr(fc, s->v.decl.init);
+            IrType* ty = ir_type_from_scc(fc->f, s->v.decl.decl_type);
+            IrValueId cv = ir_lower_cast_value(fc, iv, ty, s->tok);
+            ir_emit_store(fc->f, fc->cur, addr, cv);
+        }
+        (void)addr;
+        return;
+    }
+
+    if (s->kind == AST_STMT_EXPR) {
+        if (s->v.expr.expr) (void)ir_lower_expr(fc, s->v.expr.expr);
+        return;
+    }
+
+    if (s->kind == AST_STMT_RETURN) {
+        IrValueId rv = 0;
+        if (fc->f->ret_type && fc->f->ret_type->kind != IR_TY_VOID) {
+            if (s->v.expr.expr) {
+                rv = ir_lower_expr(fc, s->v.expr.expr);
+            } else {
+                rv = ir_emit_iconst(fc->f, fc->cur, 0);
+            }
+            rv = ir_lower_cast_value(fc, rv, fc->f->ret_type, s->tok);
+        }
+        ir_set_term_ret(fc->f, fc->cur, rv);
+        return;
+    }
+
+    if (s->kind == AST_STMT_BREAK) {
+        if (!fc->loops) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, s->tok.line, s->tok.col, "break not within loop");
+        }
+        ir_set_term_br(fc->f, fc->cur, fc->loops->break_target, 0, 0);
+        return;
+    }
+
+    if (s->kind == AST_STMT_CONTINUE) {
+        if (!fc->loops) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, s->tok.line, s->tok.col, "continue not within loop");
+        }
+        ir_set_term_br(fc->f, fc->cur, fc->loops->continue_target, 0, 0);
+        return;
+    }
+
+    if (s->kind == AST_STMT_IF) {
+        IrValueId cond = ir_lower_expr_bool(fc, s->v.if_stmt.cond, s->tok);
+
+        IrBlockId then_b = ir_block_new(fc->f);
+        IrBlockId end_b = ir_block_new(fc->f);
+        IrBlockId else_b = s->v.if_stmt.else_stmt ? ir_block_new(fc->f) : end_b;
+
+        ir_set_term_condbr(fc->f, fc->cur, cond, then_b, 0, 0, else_b, 0, 0);
+
+        fc->cur = then_b;
+        ir_lower_stmt(fc, s->v.if_stmt.then_stmt);
+        if (!ir_block_is_terminated(fc->f, fc->cur)) {
+            ir_set_term_br(fc->f, fc->cur, end_b, 0, 0);
+        }
+
+        if (s->v.if_stmt.else_stmt) {
+            fc->cur = else_b;
+            ir_lower_stmt(fc, s->v.if_stmt.else_stmt);
+            if (!ir_block_is_terminated(fc->f, fc->cur)) {
+                ir_set_term_br(fc->f, fc->cur, end_b, 0, 0);
+            }
+        }
+
+        fc->cur = end_b;
+        return;
+    }
+
+    if (s->kind == AST_STMT_WHILE) {
+        IrBlockId cond_b = ir_block_new(fc->f);
+        IrBlockId body_b = ir_block_new(fc->f);
+        IrBlockId exit_b = ir_block_new(fc->f);
+
+        ir_set_term_br(fc->f, fc->cur, cond_b, 0, 0);
+
+        fc->cur = cond_b;
+        IrValueId cond = ir_lower_expr_bool(fc, s->v.while_stmt.cond, s->tok);
+        ir_set_term_condbr(fc->f, fc->cur, cond, body_b, 0, 0, exit_b, 0, 0);
+
+        fc->cur = body_b;
+        IrLowerLoop loop;
+        loop.break_target = exit_b;
+        loop.continue_target = cond_b;
+        loop.next = fc->loops;
+        fc->loops = &loop;
+
+        ir_lower_stmt(fc, s->v.while_stmt.body);
+
+        fc->loops = loop.next;
+        if (!ir_block_is_terminated(fc->f, fc->cur)) {
+            ir_set_term_br(fc->f, fc->cur, cond_b, 0, 0);
+        }
+
+        fc->cur = exit_b;
+        return;
+    }
+
+    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, s->tok.line, s->tok.col, "Statement kind is not lowered to IR yet");
+}
+
+static void ir_lower_func_signature(IrLowerCtx* lc, IrFunc* f, Symbol* sym) {
+    if (!lc || !f || !sym) return;
+
+    f->ret_type = ir_type_from_scc(f, sym->ftype.ret);
+    f->param_count = (uint32_t)sym->ftype.param_count;
+
+    if (f->param_count) {
+        IrType** pts = (IrType**)arena_alloc(f->arena, f->param_count * sizeof(IrType*), 8);
+        for (uint32_t i = 0; i < f->param_count; i++) {
+            Type* st = sym->ftype.params ? sym->ftype.params[i] : 0;
+            pts[i] = ir_type_from_scc(f, st);
+        }
+        f->param_types = pts;
+    }
+}
+
+static void ir_lower_func_stub_body(IrLowerCtx* lc, IrFunc* f, AstFunc* af) {
+    if (!lc || !f || !af) return;
+
+    IrBlockId entry = ir_block_new(f);
+    f->entry = entry;
+
+    for (uint32_t i = 0; i < f->param_count; i++) {
+        (void)ir_block_add_param(f, entry, f->param_types[i]);
+    }
+
+    IrLowerFuncCtx fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.lc = lc;
+    fc.f = f;
+    fc.af = af;
+    fc.cur = entry;
+    fc.vars = 0;
+    fc.loops = 0;
+
+    ir_lower_stmt_list(&fc, af->first_stmt);
+
+    if (!ir_block_is_terminated(f, fc.cur)) {
+        IrValueId rv = 0;
+        if (f->ret_type && f->ret_type->kind != IR_TY_VOID) {
+            rv = ir_emit_iconst(f, fc.cur, 0);
+            rv = ir_lower_cast_value(&fc, rv, f->ret_type, af->first_stmt ? af->first_stmt->tok : (Token){0});
+        }
+        ir_set_term_ret(f, fc.cur, rv);
+    }
+}
+
+static void ir_lower_unit_stub(IrModule* m, Parser* p, SymTable* syms, Buffer* data, uint32_t* io_str_id, AstUnit* u) {
+    IrLowerCtx lc;
+    memset(&lc, 0, sizeof(lc));
+    lc.p = p;
+    lc.syms = syms;
+    lc.m = m;
+    lc.data = data;
+    lc.str_id = io_str_id ? *io_str_id : 0;
+
+    for (AstFunc* af = u ? u->first_func : 0; af; af = af->next) {
+        if (!af->sym) continue;
+        if (af->sym->kind != SYM_FUNC) continue;
+        if (af->sym->shndx == SHN_UNDEF) continue;
+
+        IrFunc* f = ir_func_new(m, af->sym);
+        ir_lower_func_signature(&lc, f, af->sym);
+        ir_lower_func_stub_body(&lc, f, af);
+    }
+
+    if (io_str_id) *io_str_id = lc.str_id;
+}
+
+#endif

@@ -18,7 +18,12 @@
 
 #include "scc/scc_x86.h"
 #include "scc/scc_obj_writer.h"
+#include "scc/scc_consteval.h"
 #include "scc/scc_codegen.h"
+
+#include "scc/scc_ir.h"
+#include "scc/scc_ir_lower.h"
+#include "scc/scc_ir_x86.h"
 
 static char* read_entire_file(const char* path, Buffer* tmp_storage) {
     int fd = open(path, 0);
@@ -94,6 +99,13 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
     cg.rel_data = &rel_data;
     cg.str_id = 0;
 
+    SccConstEval ce;
+    memset(&ce, 0, sizeof(ce));
+    ce.p = &p;
+    ce.syms = &syms;
+    ce.data = &data;
+    ce.str_id = cg.str_id;
+
     uint32_t bss_size = 0;
     for (AstGlobal* g = u->first_global; g; g = g->next) {
         if (!g->sym) continue;
@@ -112,11 +124,13 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
 
             uint32_t v = 0;
             Symbol* rs = 0;
-            cg_eval_const_u32(&cg, g->init, &v, &rs);
+            scc_eval_const_u32(&ce, g->init, &v, &rs);
+            cg.str_id = ce.str_id;
 
             if (sz == 1) {
                 if (rs) scc_fatal_at(p.file, p.src, g->init->tok.line, g->init->tok.col, "Relocation is not supported for 1-byte global initializer");
-                buf_push_u8(&data, (uint8_t)v);
+                if (g->ty && g->ty->kind == TYPE_BOOL) buf_push_u8(&data, (v != 0) ? 1u : 0u);
+                else buf_push_u8(&data, (uint8_t)v);
             } else if (sz == 4) {
                 uint32_t off = data.size;
                 buf_push_u32(&data, v);
@@ -133,27 +147,18 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
         }
     }
 
-    for (AstFunc* f = u->first_func; f; f = f->next) {
-        while ((text.size & 3u) != 0) buf_push_u8(&text, 0);
+    IrModule m;
+    ir_module_init(&m, &arena);
+    ir_lower_unit_stub(&m, &p, &syms, &data, &cg.str_id, u);
 
-        uint32_t func_start = text.size;
-        f->sym->value = func_start;
-        cg.vars = f->vars;
-        emit_x86_prologue(&text);
-
-        if (f->local_size) {
-            emit_x86_sub_esp_imm32(&text, (uint32_t)f->local_size);
-        }
-
-        int did_return = gen_stmt_list(&cg, f->first_stmt);
-        if (!did_return) {
-            emit_x86_mov_eax_imm32(&text, 0);
-            emit_x86_epilogue(&text);
-        }
-
-        uint32_t func_size = text.size - func_start;
-        f->sym->size = func_size;
-    }
+    IrX86Ctx ix;
+    memset(&ix, 0, sizeof(ix));
+    ix.text = &text;
+    ix.data = &data;
+    ix.rel_text = &rel_text;
+    ix.rel_data = &rel_data;
+    ix.syms = &syms;
+    ir_x86_codegen_module_stub(&ix, &m);
 
     write_elf_object(out_path, &text, &data, bss_size, &rel_text, &rel_data, &syms);
 
@@ -168,7 +173,7 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        printf("SCC v0.1\nUsage: scc -o out.o input.c\n       scc input.c out.o\n");
+        printf("SCC v0.2\nUsage: scc -o out.o input.c\n       scc input.c out.o\n");
         return 1;
     }
 

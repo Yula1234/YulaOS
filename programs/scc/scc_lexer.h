@@ -56,6 +56,7 @@ typedef enum {
 
     TOK_KW_INT,
     TOK_KW_CHAR,
+    TOK_KW_BOOL,
     TOK_KW_CONST,
     TOK_KW_VOID,
     TOK_KW_RETURN,
@@ -168,6 +169,7 @@ static Token lx_next(Lexer* lx) {
 
         if (tok_text_eq(&t, "int")) t.kind = TOK_KW_INT;
         else if (tok_text_eq(&t, "char")) t.kind = TOK_KW_CHAR;
+        else if (tok_text_eq(&t, "bool") || tok_text_eq(&t, "_Bool")) t.kind = TOK_KW_BOOL;
         else if (tok_text_eq(&t, "const")) t.kind = TOK_KW_CONST;
         else if (tok_text_eq(&t, "void")) t.kind = TOK_KW_VOID;
         else if (tok_text_eq(&t, "return")) t.kind = TOK_KW_RETURN;

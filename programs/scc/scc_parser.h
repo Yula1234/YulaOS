@@ -107,7 +107,7 @@ static AstExpr* parse_unary(Parser* p) {
 
         Token t = p->tok;
         parser_next(p);
-        if (p->tok.kind == TOK_KW_CONST || p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_VOID) {
+        if (p->tok.kind == TOK_KW_CONST || p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_BOOL || p->tok.kind == TOK_KW_VOID) {
             Type* ty = parse_type(p);
             parser_expect(p, TOK_RPAREN, "Expected ')' after cast type");
 
@@ -291,7 +291,7 @@ static AstStmt* parse_stmt(Parser* p) {
         return ast_new_stmt(p, AST_STMT_CONTINUE, t);
     }
 
-    if (p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_VOID || p->tok.kind == TOK_KW_CONST) {
+    if (p->tok.kind == TOK_KW_INT || p->tok.kind == TOK_KW_CHAR || p->tok.kind == TOK_KW_BOOL || p->tok.kind == TOK_KW_VOID || p->tok.kind == TOK_KW_CONST) {
         Token t = p->tok;
         AstStmt* s = ast_new_stmt(p, AST_STMT_DECL, t);
         Type* ty = parse_type(p);
@@ -587,7 +587,7 @@ static AstUnit* parse_unit(Parser* p) {
     AstGlobal* glast = 0;
 
     while (p->tok.kind != TOK_EOF) {
-        if (p->tok.kind != TOK_KW_EXTERN && p->tok.kind != TOK_KW_INT && p->tok.kind != TOK_KW_CHAR && p->tok.kind != TOK_KW_VOID && p->tok.kind != TOK_KW_CONST) {
+        if (p->tok.kind != TOK_KW_EXTERN && p->tok.kind != TOK_KW_INT && p->tok.kind != TOK_KW_CHAR && p->tok.kind != TOK_KW_BOOL && p->tok.kind != TOK_KW_VOID && p->tok.kind != TOK_KW_CONST) {
             scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Expected top-level declaration");
         }
 
