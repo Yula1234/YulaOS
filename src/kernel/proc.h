@@ -118,6 +118,9 @@ typedef struct task {
     mmap_area_t* mmap_list;
     uint32_t mmap_top;
 
+    int winmap_win_id;
+    uint32_t winmap_pages;
+
     uint8_t fpu_state[512] __attribute__((aligned(16)));
 
     dlist_head_t sem_node;

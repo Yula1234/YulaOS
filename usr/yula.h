@@ -18,6 +18,7 @@
 #define YULA_EVENT_MOUSE_DOWN 2
 #define YULA_EVENT_MOUSE_UP   3
 #define YULA_EVENT_KEY_DOWN   4
+#define YULA_EVENT_RESIZE     5
 
 typedef struct {
     int type;

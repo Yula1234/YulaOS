@@ -14,6 +14,7 @@
 #define YULA_EVENT_MOUSE_DOWN 2
 #define YULA_EVENT_MOUSE_UP   3
 #define YULA_EVENT_KEY_DOWN   4
+#define YULA_EVENT_RESIZE     5
 
 typedef struct {
     int type;
@@ -49,6 +50,7 @@ typedef struct window {
     int target_w, target_h;
 
     uint32_t* canvas; 
+    uint32_t* old_canvas;
     int is_dirty;     
 
     yula_event_t event_queue[MAX_WIN_EVENTS];

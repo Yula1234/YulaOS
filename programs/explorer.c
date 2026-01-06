@@ -4,8 +4,8 @@
 #include <yula.h>
 #include <font.h>
 
-#define WIN_W 640
-#define WIN_H 480
+static int WIN_W = 640;
+static int WIN_H = 480;
 
 #define C_WIN_BG      0x1E1E1E
 #define C_SIDEBAR     0x252526
@@ -277,6 +277,7 @@ int main(int argc, char** argv) {
     if (win_id < 0) return 1;
 
     canvas = (uint32_t*)map_window(win_id);
+    if (!canvas) return 1;
     
     render_all();
     update_window(win_id);
@@ -355,9 +356,16 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            else if (ev.type == YULA_EVENT_RESIZE) {
+                WIN_W = ev.arg1;
+                WIN_H = ev.arg2;
+                canvas = (uint32_t*)map_window(win_id);
+                if (!canvas) running = 0;
+                need_update = 1;
+            }
         }
 
-        if (need_update) {
+        if (need_update && canvas) {
             render_all();
             update_window(win_id);
         }

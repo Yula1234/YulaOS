@@ -405,8 +405,20 @@ void gui_task(void* arg) {
                 if (dragged_window->is_resizing) {
                     int new_w = dragged_window->ghost_w;
                     int new_h = dragged_window->ghost_h;
-                    
-                    if (dragged_window->canvas) kfree(dragged_window->canvas);
+
+                    if (dragged_window->on_draw) {
+                        if (dragged_window->canvas) kfree(dragged_window->canvas);
+                        if (dragged_window->old_canvas) {
+                            kfree(dragged_window->old_canvas);
+                            dragged_window->old_canvas = 0;
+                        }
+                    } else {
+                        if (!dragged_window->old_canvas) {
+                            dragged_window->old_canvas = dragged_window->canvas;
+                        } else {
+                            if (dragged_window->canvas) kfree(dragged_window->canvas);
+                        }
+                    }
 
                     int canvas_w = new_w - 12;
                     int canvas_h = new_h - 44;
@@ -418,6 +430,10 @@ void gui_task(void* arg) {
                     dragged_window->is_resizing = 0;
                     dragged_window->is_dirty = 1;
                     vga_mark_dirty(dragged_window->x - 10, dragged_window->y - 10, new_w + 20, new_h + 20);
+
+                    if (!dragged_window->on_draw) {
+                        window_push_event(dragged_window, YULA_EVENT_RESIZE, canvas_w, canvas_h, 0);
+                    }
                 }
                 sem_signal(&dragged_window->lock);
                 dragged_window = 0;

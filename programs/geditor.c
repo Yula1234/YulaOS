@@ -4,8 +4,8 @@
 #include <yula.h>
 #include <font.h>
 
-#define WIN_W 800
-#define WIN_H 600
+static int WIN_W = 800;
+static int WIN_H = 600;
 
 #define C_BG            0x1E1E1E
 #define C_GUTTER_BG     0x1E1E1E 
@@ -477,6 +477,7 @@ int main(int argc, char** argv) {
     win_id = create_window(WIN_W, WIN_H, "GEditor");
     if (win_id < 0) return 1;
     canvas = (uint32_t*)map_window(win_id);
+    if (!canvas) return 1;
 
     render_editor();
     render_ui();
@@ -538,6 +539,13 @@ int main(int argc, char** argv) {
             else if (ev.type == YULA_EVENT_MOUSE_UP) {
                 ed.is_dragging = 0;
                 if (ed.sel_bound == ed.cursor) ed.sel_bound = -1;
+                update = 1;
+            }
+            else if (ev.type == YULA_EVENT_RESIZE) {
+                WIN_W = ev.arg1;
+                WIN_H = ev.arg2;
+                canvas = (uint32_t*)map_window(win_id);
+                if (!canvas) { ed.quit = 1; break; }
                 update = 1;
             }
         }

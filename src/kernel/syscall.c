@@ -310,14 +310,44 @@ void syscall_handler(registers_t* regs) {
 
             sem_signal(&win->lock);
 
+            if (curr->winmap_pages > 0) {
+                for (uint32_t i = 0; i < curr->winmap_pages; i++) {
+                    uint32_t v = user_vaddr_start + i * 4096;
+                    if (paging_is_user_accessible(curr->page_dir, v)) {
+                        paging_map(curr->page_dir, v, 0, 0);
+                    }
+                }
+                if (curr->mem_pages >= curr->winmap_pages) curr->mem_pages -= curr->winmap_pages;
+                else curr->mem_pages = 0;
+                curr->winmap_pages = 0;
+                curr->winmap_win_id = 0;
+            }
+
+            uint32_t mapped_pages = 0;
+
             for (uint32_t i = 0; i < pages; i++) {
                 uint32_t offset = i * 4096;
                 uint32_t phys = paging_get_phys(kernel_page_directory, kern_vaddr + offset);
                 if (phys) {
-                    paging_map(curr->page_dir, user_vaddr_start + offset, phys, 0x207); 
+                    paging_map(curr->page_dir, user_vaddr_start + offset, phys, 0x207);
                     curr->mem_pages++;
+                    mapped_pages++;
                 }
             }
+
+            curr->winmap_pages = mapped_pages;
+            curr->winmap_win_id = id;
+
+            win = window_find_by_id(id);
+            if (win && win->is_active) {
+                sem_wait(&win->lock);
+                if (win->owner_pid == (int)curr->pid && win->old_canvas) {
+                    kfree(win->old_canvas);
+                    win->old_canvas = 0;
+                }
+                sem_signal(&win->lock);
+            }
+
             __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
             regs->eax = user_vaddr_start;
         }

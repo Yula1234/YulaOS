@@ -350,6 +350,11 @@ void window_close_all_by_pid(int pid) {
                 win->canvas = 0;
             }
 
+            if (win->old_canvas) {
+                kfree(win->old_canvas);
+                win->old_canvas = 0;
+            }
+
             if (win->on_close) {
                 win->on_close(win);
             }
