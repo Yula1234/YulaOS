@@ -147,6 +147,15 @@ void keyboard_irq_handler(registers_t* regs) {
             if (scancode == 0x1F) { send_key_to_focused(0x15); return; } // Ctrl+S
             if (scancode == 0x10) { send_key_to_focused(0x17); return; } // Ctrl+Q
             if (scancode == 0x2F) { send_key_to_focused(0x16); return; } // Ctrl+V
+
+            task_t* target_task = proc_find_by_pid(focused_window_pid);
+            if (target_task && target_task->term_mode == 0) {
+                if (scancode == 0x21) { send_key_to_focused(0x06); return; } // Ctrl+F
+                if (scancode == 0x22) { send_key_to_focused(0x07); return; } // Ctrl+G
+                if (scancode == 0x2C) { send_key_to_focused(0x1A); return; } // Ctrl+Z
+                if (scancode == 0x15) { send_key_to_focused(0x19); return; } // Ctrl+Y
+                if (scancode == 0x31) { send_key_to_focused(0x0E); return; } // Ctrl+N
+            }
         }
 
         char c = shift_pressed ? map_shift[scancode] : map_norm[scancode];
