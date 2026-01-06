@@ -20,9 +20,10 @@
 
 #include "shell.h"
 
-#define LINE_MAX 256
-#define TOK_MAX 16
-#define HIST_MAX 16 
+#define LINE_INIT_CAP 256
+#define ARGV_INIT_CAP 16
+#define HIST_INIT_CAP 16
+#define PATH_INIT_CAP 64
 
 #define C_BG      0x141414  
 #define C_TEXT    0xD4D4D4  
@@ -44,20 +45,26 @@
 #define C_ZOMBIE    0xF44747 
 
 typedef struct {
-    char lines[HIST_MAX][LINE_MAX];
-    int head;  
-    int count; 
-    int view_idx; 
-    char temp_line[LINE_MAX]; 
+    char** lines;
+    int count;
+    int cap;
+    int view_idx;
+    char* temp_line;
+    size_t temp_cap;
 } shell_history_t;
 
 typedef struct {
     term_instance_t* term;
     shell_history_t* hist;
+    char* line;
+    char* cwd_path;
     spinlock_t lock;
 } shell_context_t;
 
 extern void wake_up_gui();
+
+static void hist_init(shell_history_t* h);
+static void hist_destroy(shell_history_t* h);
 
 extern volatile uint32_t timer_ticks;
 #define TICKS_PER_SEC 15000 
@@ -148,6 +155,47 @@ static int get_prompt_len(const char* path) {
     return 11 + 1 + strlen(path) + 2;
 }
 
+static int line_ensure_cap(char** line, size_t* cap, size_t need) {
+    if (!line || !cap) return 0;
+    if (need <= *cap) return 1;
+    size_t new_cap = *cap ? *cap : LINE_INIT_CAP;
+    while (new_cap < need) new_cap *= 2;
+    char* nl = (char*)krealloc(*line, new_cap);
+    if (!nl) return 0;
+    *line = nl;
+    *cap = new_cap;
+    return 1;
+}
+
+static int path_ensure_cap(char** path, size_t* cap, size_t need) {
+    if (!path || !cap) return 0;
+    if (need <= *cap) return 1;
+    size_t new_cap = *cap ? *cap : PATH_INIT_CAP;
+    while (new_cap < need) new_cap *= 2;
+    char* np = (char*)krealloc(*path, new_cap);
+    if (!np) return 0;
+    *path = np;
+    *cap = new_cap;
+    return 1;
+}
+
+static int path_set(char** path, size_t* cap, const char* src) {
+    if (!path || !cap || !src) return 0;
+    size_t n = strlen(src) + 1;
+    if (!path_ensure_cap(path, cap, n)) return 0;
+    memcpy(*path, src, n);
+    return 1;
+}
+
+static int path_append(char** path, size_t* cap, const char* src) {
+    if (!path || !cap || !src) return 0;
+    size_t a = (*path) ? strlen(*path) : 0;
+    size_t b = strlen(src);
+    if (!path_ensure_cap(path, cap, a + b + 1)) return 0;
+    memcpy(*path + a, src, b + 1);
+    return 1;
+}
+
 static void refresh_line(term_instance_t* term, const char* path, char* line, int cursor, int* input_start_row, int* input_rows) {
     int prompt_len = get_prompt_len(path);
     int line_len = strlen(line);
@@ -195,7 +243,9 @@ static void shell_cleanup_handler(window_t* win) {
             term_destroy(ctx->term);
             kfree(ctx->term);
         }
-        if (ctx->hist) kfree(ctx->hist);
+        if (ctx->hist) { hist_destroy(ctx->hist); kfree(ctx->hist); }
+        if (ctx->line) kfree(ctx->line);
+        if (ctx->cwd_path) kfree(ctx->cwd_path);
         kfree(ctx);
     }
 }
@@ -343,7 +393,7 @@ static void shell_ls(term_instance_t* term, const char* arg, uint32_t cwd_inode)
     term->curr_fg = C_TEXT; term->curr_bg = C_BG;
 }
 
-static void shell_cd(term_instance_t* term, const char* new_path, uint32_t* cwd_inode, char* path_str) {
+static void shell_cd(term_instance_t* term, const char* new_path, uint32_t* cwd_inode, char** path_str, size_t* path_cap) {
     int inode = yulafs_lookup(new_path);
     if (inode == -1) { term_print(term, "cd: no such directory\n"); return; }
     
@@ -353,58 +403,149 @@ static void shell_cd(term_instance_t* term, const char* new_path, uint32_t* cwd_
     if (info.type != YFS_TYPE_DIR) { term_print(term, "cd: not a directory\n"); return; }
     
     *cwd_inode = (uint32_t)inode;
-    if (new_path[0] == '/') strlcpy(path_str, new_path, 64);
-    else {
-        if (strcmp(new_path, "..") == 0) {
-            int len = strlen(path_str);
-            if (len > 1) for (int i = len - 1; i >= 0; i--) if (path_str[i] == '/') { path_str[i == 0 ? 1 : i] = '\0'; break; }
-        } else {
-            if (strlen(path_str) > 1) strlcat(path_str, "/", 64);
-            strlcat(path_str, new_path, 64);
-        }
+    if (!path_str || !path_cap || !*path_str) return;
+
+    if (new_path[0] == '/') {
+        path_set(path_str, path_cap, new_path);
+        return;
     }
+
+    if (strcmp(new_path, "..") == 0) {
+        int len = (int)strlen(*path_str);
+        if (len <= 1) return;
+        for (int i = len - 1; i >= 0; i--) {
+            if ((*path_str)[i] == '/') {
+                (*path_str)[i == 0 ? 1 : i] = '\0';
+                break;
+            }
+        }
+        return;
+    }
+
+    if (strlen(*path_str) > 1) path_append(path_str, path_cap, "/");
+    path_append(path_str, path_cap, new_path);
 }
 
-static int parse_args(char* line, char** args) {
-    int count = 0; char* ptr = line; int in_quote = 0;
-    while (*ptr && count < TOK_MAX) {
+static int parse_args(char* line, char*** out_args) {
+    if (out_args) *out_args = 0;
+    if (!line || !out_args) return 0;
+
+    int cap = ARGV_INIT_CAP;
+    if (cap < 2) cap = 2;
+    char** args = (char**)kmalloc(sizeof(char*) * cap);
+    if (!args) return 0;
+
+    int count = 0;
+    char* ptr = line;
+    int in_quote = 0;
+
+    while (*ptr) {
         while (*ptr == ' ') *ptr++ = 0;
         if (!*ptr) break;
-        if (*ptr == '"') { in_quote = 1; ptr++; args[count++] = ptr; } else args[count++] = ptr;
+
+        if (count + 1 >= cap) {
+            int new_cap = cap * 2;
+            char** na = (char**)krealloc(args, sizeof(char*) * new_cap);
+            if (!na) { kfree(args); return 0; }
+            args = na;
+            cap = new_cap;
+        }
+
+        if (*ptr == '"') { in_quote = 1; ptr++; args[count++] = ptr; }
+        else args[count++] = ptr;
+
         while (*ptr) {
-            if (in_quote) { if (*ptr == '"') { *ptr++ = 0; in_quote = 0; break; } }
-            else { if (*ptr == ' ') break; }
+            if (in_quote) {
+                if (*ptr == '"') { *ptr++ = 0; in_quote = 0; break; }
+            } else {
+                if (*ptr == ' ') break;
+            }
             ptr++;
         }
     }
+
+    args[count] = 0;
+    *out_args = args;
     return count;
 }
 
-static void hist_init(shell_history_t* h) { memset(h, 0, sizeof(shell_history_t)); h->view_idx = -1; }
-static void hist_add(shell_history_t* h, const char* cmd) {
-    if (strlen(cmd) == 0) return;
-    int last = (h->head - 1 + HIST_MAX) % HIST_MAX;
-    if (h->count > 0 && strcmp(h->lines[last], cmd) == 0) return;
-    strlcpy(h->lines[h->head], cmd, LINE_MAX);
-    h->head = (h->head + 1) % HIST_MAX;
-    if (h->count < HIST_MAX) h->count++;
+static void hist_init(shell_history_t* h) {
+    if (!h) return;
+    memset(h, 0, sizeof(*h));
+    h->cap = HIST_INIT_CAP;
+    h->lines = (char**)kzalloc(sizeof(char*) * h->cap);
+    h->temp_cap = LINE_INIT_CAP;
+    h->temp_line = (char*)kzalloc(h->temp_cap);
     h->view_idx = -1;
 }
+
+static void hist_destroy(shell_history_t* h) {
+    if (!h) return;
+    if (h->lines) {
+        for (int i = 0; i < h->count; i++) {
+            if (h->lines[i]) kfree(h->lines[i]);
+        }
+        kfree(h->lines);
+    }
+    if (h->temp_line) kfree(h->temp_line);
+    memset(h, 0, sizeof(*h));
+    h->view_idx = -1;
+}
+
+static void hist_save_temp_line(shell_history_t* h, const char* line) {
+    if (!h || !line) return;
+    size_t n = strlen(line) + 1;
+    if (n > h->temp_cap) {
+        size_t new_cap = h->temp_cap ? h->temp_cap : LINE_INIT_CAP;
+        while (new_cap < n) new_cap *= 2;
+        char* t = (char*)krealloc(h->temp_line, new_cap);
+        if (!t) return;
+        h->temp_line = t;
+        h->temp_cap = new_cap;
+    }
+    memcpy(h->temp_line, line, n);
+}
+
+static int hist_ensure_cap(shell_history_t* h, int need) {
+    if (!h) return 0;
+    if (need <= h->cap) return 1;
+    int new_cap = h->cap ? h->cap : HIST_INIT_CAP;
+    while (new_cap < need) new_cap *= 2;
+    char** new_lines = (char**)krealloc(h->lines, sizeof(char*) * new_cap);
+    if (!new_lines) return 0;
+    memset(new_lines + h->cap, 0, sizeof(char*) * (new_cap - h->cap));
+    h->lines = new_lines;
+    h->cap = new_cap;
+    return 1;
+}
+
+static void hist_add(shell_history_t* h, const char* cmd) {
+    if (!h || !cmd) return;
+    if (strlen(cmd) == 0) return;
+    if (h->count > 0 && h->lines[h->count - 1] && strcmp(h->lines[h->count - 1], cmd) == 0) return;
+    if (!hist_ensure_cap(h, h->count + 1)) return;
+    size_t n = strlen(cmd) + 1;
+    char* s = (char*)kmalloc(n);
+    if (!s) return;
+    memcpy(s, cmd, n);
+    h->lines[h->count++] = s;
+    h->view_idx = -1;
+}
+
 static const char* hist_get_prev(shell_history_t* h) {
-    if (h->count == 0) return 0;
-    if (h->view_idx == -1) h->view_idx = (h->head - 1 + HIST_MAX) % HIST_MAX;
+    if (!h || h->count == 0) return 0;
+    if (h->view_idx == -1) h->view_idx = h->count - 1;
     else {
-        int oldest = (h->head - h->count + HIST_MAX) % HIST_MAX;
-        if (h->view_idx == oldest) return 0;
-        h->view_idx = (h->view_idx - 1 + HIST_MAX) % HIST_MAX;
+        if (h->view_idx == 0) return 0;
+        h->view_idx--;
     }
     return h->lines[h->view_idx];
 }
+
 static const char* hist_get_next(shell_history_t* h) {
-    if (h->count == 0 || h->view_idx == -1) return 0;
-    int newest = (h->head - 1 + HIST_MAX) % HIST_MAX;
-    if (h->view_idx == newest) { h->view_idx = -1; return ""; }
-    h->view_idx = (h->view_idx + 1) % HIST_MAX;
+    if (!h || h->count == 0 || h->view_idx == -1) return 0;
+    if (h->view_idx == h->count - 1) { h->view_idx = -1; return ""; }
+    h->view_idx++;
     return h->lines[h->view_idx];
 }
 
@@ -412,20 +553,184 @@ static task_t* spawn_command(const char* cmd, int argc, char** argv) {
     task_t* child = proc_spawn_elf(cmd, argc, argv);
     if (child) return child;
 
-    char tmp[64];
-    strlcpy(tmp, cmd, 64); strlcat(tmp, ".exe", 64);
-    child = proc_spawn_elf(tmp, argc, argv);
-    if (child) return child;
+    size_t cmd_len = strlen(cmd);
+
+    char* tmp = (char*)kmalloc(cmd_len + 5);
+    if (tmp) {
+        memcpy(tmp, cmd, cmd_len);
+        memcpy(tmp + cmd_len, ".exe", 5);
+        child = proc_spawn_elf(tmp, argc, argv);
+        kfree(tmp);
+        if (child) return child;
+    }
 
     if (cmd[0] != '/') {
-        strlcpy(tmp, "/bin/", 64); strlcat(tmp, cmd, 64);
-        child = proc_spawn_elf(tmp, argc, argv);
-        if (child) return child;
+        const char* bin = "/bin/";
+        size_t bin_len = 5;
 
-        strlcat(tmp, ".exe", 64);
-        child = proc_spawn_elf(tmp, argc, argv);
+        tmp = (char*)kmalloc(bin_len + cmd_len + 1);
+        if (tmp) {
+            memcpy(tmp, bin, bin_len);
+            memcpy(tmp + bin_len, cmd, cmd_len + 1);
+            child = proc_spawn_elf(tmp, argc, argv);
+            if (child) { kfree(tmp); return child; }
+
+            char* tmp_exe = (char*)kmalloc(bin_len + cmd_len + 5);
+            if (tmp_exe) {
+                memcpy(tmp_exe, bin, bin_len);
+                memcpy(tmp_exe + bin_len, cmd, cmd_len);
+                memcpy(tmp_exe + bin_len + cmd_len, ".exe", 5);
+                child = proc_spawn_elf(tmp_exe, argc, argv);
+                kfree(tmp_exe);
+            }
+            kfree(tmp);
+        }
     }
     return child;
+}
+
+static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args, int arg_count) {
+    if (!term || !win || !args || arg_count <= 0) return 0;
+
+    int cmd_count = 1;
+    for (int i = 0; i < arg_count; i++) {
+        if (strcmp(args[i], "|") == 0) cmd_count++;
+    }
+    if (cmd_count <= 1) return 0;
+
+    for (int i = 0; i < arg_count; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            if (i == 0 || i == arg_count - 1) {
+                term_print(term, "Invalid pipeline\n");
+                return 1;
+            }
+            if (i > 0 && strcmp(args[i - 1], "|") == 0) {
+                term_print(term, "Invalid pipeline\n");
+                return 1;
+            }
+        }
+    }
+
+    int* cmd_start = (int*)kmalloc(sizeof(int) * cmd_count);
+    int* cmd_argc = (int*)kmalloc(sizeof(int) * cmd_count);
+    task_t** tasks = (task_t**)kzalloc(sizeof(task_t*) * cmd_count);
+    if (!cmd_start || !cmd_argc || !tasks) {
+        if (cmd_start) kfree(cmd_start);
+        if (cmd_argc) kfree(cmd_argc);
+        if (tasks) kfree(tasks);
+        term_print(term, "Out of memory\n");
+        return 1;
+    }
+
+    int cmd_idx = 0;
+    int start = 0;
+    cmd_start[0] = 0;
+    for (int i = 0; i < arg_count; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            args[i] = 0;
+            cmd_argc[cmd_idx] = i - start;
+            cmd_idx++;
+            start = i + 1;
+            cmd_start[cmd_idx] = start;
+        }
+    }
+    cmd_argc[cmd_idx] = arg_count - start;
+
+    for (int i = 0; i < cmd_count; i++) {
+        if (cmd_argc[i] <= 0 || !args[cmd_start[i]]) {
+            term_print(term, "Invalid pipeline\n");
+            kfree(cmd_start);
+            kfree(cmd_argc);
+            kfree(tasks);
+            return 1;
+        }
+    }
+
+    int saved_stdout = shell_dup(1);
+    int saved_stdin = shell_dup(0);
+    if (saved_stdout < 0 || saved_stdin < 0) {
+        term_print(term, "Pipe setup failed\n");
+        if (saved_stdout >= 0) vfs_close(saved_stdout);
+        if (saved_stdin >= 0) vfs_close(saved_stdin);
+        kfree(cmd_start);
+        kfree(cmd_argc);
+        kfree(tasks);
+        return 1;
+    }
+
+    int prev_read = -1;
+
+    for (int i = 0; i < cmd_count; i++) {
+        int next_read = -1;
+        int write_end = -1;
+
+        if (i < cmd_count - 1) {
+            int pfds[2];
+            if (shell_create_pipe(pfds) != 0) {
+                term_print(term, "Pipe creation failed\n");
+                break;
+            }
+            next_read = pfds[0];
+            write_end = pfds[1];
+        }
+
+        int in_fd = (prev_read >= 0) ? prev_read : saved_stdin;
+        int out_fd = (i == cmd_count - 1) ? saved_stdout : write_end;
+
+        shell_dup2(in_fd, 0);
+        shell_dup2(out_fd, 1);
+
+        task_t* t = spawn_command(args[cmd_start[i]], cmd_argc[i], &args[cmd_start[i]]);
+        tasks[i] = t;
+        if (!t) {
+            term_print(term, "Command not found: ");
+            term_print(term, args[cmd_start[i]]);
+            term_print(term, "\n");
+        }
+
+        shell_dup2(saved_stdin, 0);
+        shell_dup2(saved_stdout, 1);
+
+        if (prev_read >= 0) {
+            vfs_close(prev_read);
+            prev_read = -1;
+        }
+
+        if (i < cmd_count - 1) {
+            vfs_close(write_end);
+            prev_read = next_read;
+        }
+
+        if (!t) break;
+    }
+
+    if (prev_read >= 0) vfs_close(prev_read);
+
+    task_t* last_task = 0;
+    for (int i = 0; i < cmd_count; i++) if (tasks[i]) last_task = tasks[i];
+
+    if (last_task) {
+        win->focused_pid = last_task->pid;
+        focused_window_pid = last_task->pid;
+    }
+
+    for (int i = 0; i < cmd_count; i++) {
+        if (tasks[i]) proc_wait(tasks[i]->pid);
+    }
+
+    if (last_task) {
+        win->focused_pid = win->owner_pid;
+        focused_window_pid = win->owner_pid;
+        win->is_dirty = 1;
+        wake_up_gui();
+    }
+
+    vfs_close(saved_stdout);
+    vfs_close(saved_stdin);
+    kfree(cmd_start);
+    kfree(cmd_argc);
+    kfree(tasks);
+    return 1;
 }
 
 static void shell_ps(term_instance_t* term) {
@@ -488,21 +793,56 @@ void shell_task(void* arg) {
 
     term_putc(my_term, 0x0C);
 
-    char line[LINE_MAX]; memset(line, 0, LINE_MAX);
+    size_t line_cap = LINE_INIT_CAP;
+    char* line = (char*)kzalloc(line_cap);
     int line_len = 0; int cursor_pos = 0;
-    char path[64] = "/home";
+    if (!line) {
+        term_destroy(my_term);
+        hist_destroy(my_hist);
+        kfree(my_term);
+        kfree(my_hist);
+        kfree(ctx);
+        return;
+    }
+    ctx->line = line;
+
+    size_t cwd_path_cap = PATH_INIT_CAP;
+    ctx->cwd_path = (char*)kzalloc(cwd_path_cap);
+    if (!ctx->cwd_path) {
+        term_destroy(my_term);
+        hist_destroy(my_hist);
+        kfree(line);
+        kfree(my_term);
+        kfree(my_hist);
+        kfree(ctx);
+        return;
+    }
+
+    path_set(&ctx->cwd_path, &cwd_path_cap, "/home");
     uint32_t cwd_inode = yulafs_lookup("/home");
-    if ((int)cwd_inode == -1) { cwd_inode = 1; strlcpy(path, "/", 64); }
+    if ((int)cwd_inode == -1) {
+        cwd_inode = 1;
+        path_set(&ctx->cwd_path, &cwd_path_cap, "/");
+    }
 
     window_t* win = window_create(100, 100, 652, 265, "shell", shell_window_draw_handler);
-    if (!win) { term_destroy(my_term); kfree(my_term); kfree(my_hist); return; }
+    if (!win) {
+        term_destroy(my_term);
+        hist_destroy(my_hist);
+        kfree(line);
+        kfree(ctx->cwd_path);
+        kfree(my_term);
+        kfree(my_hist);
+        kfree(ctx);
+        return;
+    }
     win->user_data = ctx; win->on_close = shell_cleanup_handler;
 
     int kbd_fd = vfs_open("/dev/kbd", 0);
     vfs_open("/dev/console", 1); 
     vfs_open("/dev/console", 1); 
 
-    print_prompt_text(my_term, path);
+    print_prompt_text(my_term, ctx->cwd_path);
     int input_start_row = my_term->row;
     int input_rows = 1;
     if (yulafs_lookup("/bin") == -1) yulafs_mkdir("/bin");
@@ -519,7 +859,7 @@ void shell_task(void* arg) {
 
             if (c == '\n') {
                 
-                int visual_end = get_prompt_len(path) + line_len;
+                int visual_end = get_prompt_len(ctx->cwd_path) + line_len;
                 my_term->row = input_start_row + (visual_end / TERM_W);
                 my_term->col = visual_end % TERM_W;
 
@@ -527,14 +867,15 @@ void shell_task(void* arg) {
 
                 line[line_len] = '\0';
                 hist_add(my_hist, line);
-                
-                char* args[TOK_MAX];
-                int arg_count = parse_args(line, args);
+
+                char** args = 0;
+                int arg_count = parse_args(line, &args);
 
                 spinlock_release_safe(&ctx->lock, flags);
 
                 int measure_time = 0;
                 uint32_t start_ticks = 0;
+                int should_exit = 0;
 
                 if (arg_count > 0 && strcmp(args[0], "time") == 0) {
                     if (arg_count < 2) {
@@ -553,60 +894,16 @@ void shell_task(void* arg) {
                 }
 
                 if (arg_count > 0) {
-                    int pipe_idx = -1;
-                    for(int i=0; i<arg_count; i++) {
-                        if(strcmp(args[i], "|") == 0) { pipe_idx = i; break; }
-                    }
-
-                    if (pipe_idx != -1 && pipe_idx < arg_count - 1) {
-                        args[pipe_idx] = 0;
-                        
-                        int pfds[2];
-                        if (shell_create_pipe(pfds) == 0) {
-                            int saved_stdout = shell_dup(1);
-                            int saved_stdin  = shell_dup(0);
-
-                            shell_dup2(pfds[1], 1); 
-                            task_t* left_task = spawn_command(args[0], pipe_idx, args);
-                            
-                            shell_dup2(saved_stdout, 1);
-                            vfs_close(pfds[1]); 
-
-                            shell_dup2(pfds[0], 0);
-                            task_t* right_task = spawn_command(args[pipe_idx+1], arg_count - pipe_idx - 1, &args[pipe_idx+1]);
-                            
-                            shell_dup2(saved_stdin, 0);
-                            vfs_close(pfds[0]);
-
-                            vfs_close(saved_stdout);
-                            vfs_close(saved_stdin);
-
-                            if (left_task) {
-                                proc_wait(left_task->pid);
-                            }
-                            if (right_task) {
-                                win->focused_pid = right_task->pid;
-                                focused_window_pid = right_task->pid;
-                                proc_wait(right_task->pid);
-                                win->focused_pid = win->owner_pid;
-                                focused_window_pid = win->owner_pid;
-                                win->is_dirty = 1;
-                                wake_up_gui();
-                            }
-                        } else {
-                            term_print(my_term, "Pipe creation failed\n");
-                        }
-                    } 
-                    else {
+                    if (!shell_run_pipeline(my_term, win, args, arg_count)) {
                         if (strcmp(args[0], "help") == 0) term_print(my_term, "Commands: ls, cd, pwd, mkdir, run, clear, exit, ps, kill\n");
                         else if (strcmp(args[0], "ls") == 0) shell_ls(my_term, (arg_count > 1) ? args[1] : 0, cwd_inode);
-                        else if (strcmp(args[0], "cd") == 0) shell_cd(my_term, (arg_count > 1) ? args[1] : "/", &cwd_inode, path);
-                        else if (strcmp(args[0], "pwd") == 0) { term_print(my_term, path); term_print(my_term, "\n"); }
-                        else if (strcmp(args[0], "clear") == 0) { 
-                            term_putc(my_term, 0x0C); 
+                        else if (strcmp(args[0], "cd") == 0) shell_cd(my_term, (arg_count > 1) ? args[1] : "/", &cwd_inode, &ctx->cwd_path, &cwd_path_cap);
+                        else if (strcmp(args[0], "pwd") == 0) { term_print(my_term, ctx->cwd_path); term_print(my_term, "\n"); }
+                        else if (strcmp(args[0], "clear") == 0) {
+                            term_putc(my_term, 0x0C);
                         }
                         else if (strcmp(args[0], "mkdir") == 0 && arg_count > 1) yulafs_mkdir(args[1]);
-                        else if (strcmp(args[0], "exit") == 0) break;
+                        else if (strcmp(args[0], "exit") == 0) { should_exit = 1; goto loop_end; }
                         else if (strcmp(args[0], "ps") == 0) shell_ps(my_term);
                         else if (strcmp(args[0], "kill") == 0 && arg_count > 1) {
                             int ret; int pid = atoi(args[1]);
@@ -616,7 +913,7 @@ void shell_task(void* arg) {
                         else if (strcmp(args[0], "rm") == 0 && arg_count > 1) {
                             int ret;
                             ret = yulafs_unlink(args[1]);
-                            
+
                             if (ret == 0) term_print(my_term, "Deleted\n");
                             else term_print(my_term, "Fail\n");
                         }
@@ -674,6 +971,9 @@ void shell_task(void* arg) {
 
                 loop_end: 
 
+                if (args) kfree(args);
+                if (should_exit) break;
+
                 flags = spinlock_acquire_safe(&ctx->lock);
 
                 my_term->curr_fg = C_TEXT; 
@@ -685,9 +985,9 @@ void shell_task(void* arg) {
                 
                 line_len = 0; 
                 cursor_pos = 0; 
-                memset(line, 0, LINE_MAX);
+                line[0] = 0;
                 
-                print_prompt_text(my_term, path);
+                print_prompt_text(my_term, ctx->cwd_path);
                 input_start_row = my_term->row;
                 input_rows = 1;
                 
@@ -696,23 +996,34 @@ void shell_task(void* arg) {
             else if (c == 0x13) { 
                 const char* h_str = hist_get_prev(my_hist);
                 if (h_str) {
-                    if (my_hist->view_idx == (my_hist->head - 1 + HIST_MAX) % HIST_MAX) strlcpy(my_hist->temp_line, line, LINE_MAX);
-                    strlcpy(line, h_str, LINE_MAX);
-                    line_len = strlen(line); cursor_pos = line_len;
-                    refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
+                    if (my_hist->view_idx == my_hist->count - 1) hist_save_temp_line(my_hist, line);
+                    size_t n = strlen(h_str);
+                    if (line_ensure_cap(&line, &line_cap, n + 1)) {
+                        ctx->line = line;
+                        memcpy(line, h_str, n + 1);
+                        line_len = (int)n;
+                        cursor_pos = line_len;
+                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                    }
                 }
             }
             else if (c == 0x14) { 
                 const char* h_str = hist_get_next(my_hist);
                 if (h_str) {
-                    if (strlen(h_str) == 0 && my_hist->view_idx == -1) strlcpy(line, my_hist->temp_line, LINE_MAX);
-                    else strlcpy(line, h_str, LINE_MAX);
-                    line_len = strlen(line); cursor_pos = line_len;
-                    refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
+                    const char* src = h_str;
+                    if (h_str[0] == 0 && my_hist->view_idx == -1) src = my_hist->temp_line;
+                    size_t n = strlen(src);
+                    if (line_ensure_cap(&line, &line_cap, n + 1)) {
+                        ctx->line = line;
+                        memcpy(line, src, n + 1);
+                        line_len = (int)n;
+                        cursor_pos = line_len;
+                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                    }
                 }
             }
-            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows); } }
-            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows); } }
+            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows); } }
+            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows); } }
             else if (c == (char)0x80) { if (my_term->view_row > 0) { my_term->view_row--; win->is_dirty = 1; } }
             else if (c == (char)0x81) { 
                 int visible_rows = (win->target_h - 44 - 22) / 16;
@@ -722,14 +1033,17 @@ void shell_task(void* arg) {
                 if (cursor_pos > 0) {
                     for (int i = cursor_pos; i < line_len; i++) line[i-1] = line[i];
                     line_len--; cursor_pos--; line[line_len] = 0;
-                    refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
                 }
             } 
-            else if (line_len < LINE_MAX - 1 && (uint8_t)c >= 32) {
-                for (int i = line_len; i > cursor_pos; i--) line[i] = line[i-1];
-                line[cursor_pos] = c;
-                line_len++; cursor_pos++; line[line_len] = 0;
-                refresh_line(my_term, path, line, cursor_pos, &input_start_row, &input_rows);
+            else if ((uint8_t)c >= 32) {
+                if (line_ensure_cap(&line, &line_cap, (size_t)line_len + 2)) {
+                    ctx->line = line;
+                    for (int i = line_len; i > cursor_pos; i--) line[i] = line[i-1];
+                    line[cursor_pos] = c;
+                    line_len++; cursor_pos++; line[line_len] = 0;
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                }
             }
             spinlock_release_safe(&ctx->lock, flags);
             win->is_dirty = 1;
@@ -738,7 +1052,10 @@ void shell_task(void* arg) {
     }
 
     win->on_close = 0; win->on_draw = 0; win->user_data = 0;
+    hist_destroy(my_hist);
     kfree(my_hist);
+    kfree(line);
+    kfree(ctx->cwd_path);
     term_destroy(my_term);
     kfree(my_term);
     kfree(ctx);
