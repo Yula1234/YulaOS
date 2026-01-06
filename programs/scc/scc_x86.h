@@ -3,6 +3,149 @@
 
 #include "scc_buffer.h"
 
+typedef enum {
+    X86_REG_EAX = 0,
+    X86_REG_ECX = 1,
+    X86_REG_EDX = 2,
+    X86_REG_EBX = 3,
+    X86_REG_ESP = 4,
+    X86_REG_EBP = 5,
+    X86_REG_ESI = 6,
+    X86_REG_EDI = 7,
+} X86Reg;
+
+static void emit_x86_modrm(Buffer* text, uint8_t mod, uint8_t reg, uint8_t rm) {
+    buf_push_u8(text, (uint8_t)(((mod & 3u) << 6) | ((reg & 7u) << 3) | (rm & 7u)));
+}
+
+static void emit_x86_op_r32_r32(Buffer* text, uint8_t opcode, X86Reg rm_dst, X86Reg reg_src) {
+    buf_push_u8(text, opcode);
+    emit_x86_modrm(text, 3u, (uint8_t)reg_src, (uint8_t)rm_dst);
+}
+
+static void emit_x86_op_r32_membase_disp(Buffer* text, uint8_t opcode, X86Reg reg, X86Reg base, int32_t disp) {
+    buf_push_u8(text, opcode);
+
+    if (disp == 0 && base != X86_REG_EBP) {
+        emit_x86_modrm(text, 0u, (uint8_t)reg, (uint8_t)base);
+        return;
+    }
+    if (disp >= -128 && disp <= 127) {
+        emit_x86_modrm(text, 1u, (uint8_t)reg, (uint8_t)base);
+        buf_push_u8(text, (uint8_t)(disp & 0xFF));
+        return;
+    }
+    emit_x86_modrm(text, 2u, (uint8_t)reg, (uint8_t)base);
+    buf_push_u32(text, (uint32_t)disp);
+}
+
+static void emit_x86_mov_r32_imm32(Buffer* text, X86Reg dst, uint32_t imm) {
+    buf_push_u8(text, (uint8_t)(0xB8u + (uint8_t)dst));
+    buf_push_u32(text, imm);
+}
+
+static void emit_x86_push_r32(Buffer* text, X86Reg r) {
+    buf_push_u8(text, (uint8_t)(0x50u + (uint8_t)r));
+}
+
+static void emit_x86_pop_r32(Buffer* text, X86Reg r) {
+    buf_push_u8(text, (uint8_t)(0x58u + (uint8_t)r));
+}
+
+static void emit_x86_mov_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    emit_x86_op_r32_r32(text, 0x89, dst, src);
+}
+
+static void emit_x86_mov_r32_membp_disp(Buffer* text, X86Reg dst, int32_t disp) {
+    emit_x86_op_r32_membase_disp(text, 0x8B, dst, X86_REG_EBP, disp);
+}
+
+static void emit_x86_mov_membp_disp_r32(Buffer* text, int32_t disp, X86Reg src) {
+    emit_x86_op_r32_membase_disp(text, 0x89, src, X86_REG_EBP, disp);
+}
+
+static void emit_x86_movzx_r32_membp_disp_u8(Buffer* text, X86Reg dst, int32_t disp) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, 0xB6);
+    if (disp == 0) {
+        emit_x86_modrm(text, 1u, (uint8_t)dst, (uint8_t)X86_REG_EBP);
+        buf_push_u8(text, 0);
+        return;
+    }
+    if (disp >= -128 && disp <= 127) {
+        emit_x86_modrm(text, 1u, (uint8_t)dst, (uint8_t)X86_REG_EBP);
+        buf_push_u8(text, (uint8_t)(disp & 0xFF));
+        return;
+    }
+    emit_x86_modrm(text, 2u, (uint8_t)dst, (uint8_t)X86_REG_EBP);
+    buf_push_u32(text, (uint32_t)disp);
+}
+
+static void emit_x86_mov_r32_memr32_u32(Buffer* text, X86Reg dst, X86Reg addr) {
+    emit_x86_op_r32_membase_disp(text, 0x8B, dst, addr, 0);
+}
+
+static void emit_x86_movzx_r32_memr32_u8(Buffer* text, X86Reg dst, X86Reg addr) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, 0xB6);
+    emit_x86_modrm(text, 0u, (uint8_t)dst, (uint8_t)addr);
+}
+
+static void emit_x86_mov_memr32_u32_r32(Buffer* text, X86Reg addr, X86Reg src) {
+    buf_push_u8(text, 0x89);
+    emit_x86_modrm(text, 0u, (uint8_t)src, (uint8_t)addr);
+}
+
+static void emit_x86_add_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    emit_x86_op_r32_r32(text, 0x01, dst, src);
+}
+
+static void emit_x86_sub_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    emit_x86_op_r32_r32(text, 0x29, dst, src);
+}
+
+static void emit_x86_imul_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, 0xAF);
+    emit_x86_modrm(text, 3u, (uint8_t)dst, (uint8_t)src);
+}
+
+static void emit_x86_cmp_r32_r32(Buffer* text, X86Reg left, X86Reg right) {
+    emit_x86_op_r32_r32(text, 0x39, left, right);
+}
+
+static void emit_x86_test_r32_r32(Buffer* text, X86Reg a, X86Reg b) {
+    emit_x86_op_r32_r32(text, 0x85, a, b);
+}
+
+static void emit_x86_and_r32_imm32(Buffer* text, X86Reg r, uint32_t imm) {
+    buf_push_u8(text, 0x81);
+    emit_x86_modrm(text, 3u, 4u, (uint8_t)r);
+    buf_push_u32(text, imm);
+}
+
+static void emit_x86_neg_r32(Buffer* text, X86Reg r) {
+    buf_push_u8(text, 0xF7);
+    emit_x86_modrm(text, 3u, 3u, (uint8_t)r);
+}
+
+static void emit_x86_shl_r32_imm8(Buffer* text, X86Reg r, uint8_t imm) {
+    buf_push_u8(text, 0xC1);
+    emit_x86_modrm(text, 3u, 4u, (uint8_t)r);
+    buf_push_u8(text, imm);
+}
+
+static void emit_x86_sar_r32_imm8(Buffer* text, X86Reg r, uint8_t imm) {
+    buf_push_u8(text, 0xC1);
+    emit_x86_modrm(text, 3u, 7u, (uint8_t)r);
+    buf_push_u8(text, imm);
+}
+
+static void emit_x86_idiv_r32(Buffer* text, X86Reg r) {
+    buf_push_u8(text, 0xF7);
+    emit_x86_modrm(text, 3u, 7u, (uint8_t)r);
+}
+
 static void emit_x86_sub_esp_imm32(Buffer* text, uint32_t imm) {
     if (imm <= 0x7F) {
         buf_push_u8(text, 0x83);

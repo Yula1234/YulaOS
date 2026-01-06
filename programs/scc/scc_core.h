@@ -3,47 +3,73 @@
 
 #include "scc_elf.h"
 
-typedef struct {
+typedef struct ArenaBlock {
     uint8_t* base;
     uint32_t used;
     uint32_t cap;
+    struct ArenaBlock* next;
+} ArenaBlock;
+
+typedef struct {
+    ArenaBlock* first;
+    ArenaBlock* cur;
 } Arena;
+
+static ArenaBlock* arena_new_block(uint32_t cap) {
+    ArenaBlock* b = (ArenaBlock*)malloc(sizeof(ArenaBlock));
+    if (!b) exit(1);
+    b->base = (uint8_t*)malloc(cap);
+    if (!b->base) exit(1);
+    b->used = 0;
+    b->cap = cap;
+    b->next = 0;
+    return b;
+}
 
 static void arena_init(Arena* a, uint32_t cap) {
     if (cap < 4096) cap = 4096;
-    a->base = (uint8_t*)malloc(cap);
-    if (!a->base) exit(1);
-    a->used = 0;
-    a->cap = cap;
+    a->first = arena_new_block(cap);
+    a->cur = a->first;
 }
 
 static void arena_free(Arena* a) {
-    if (a->base) free(a->base);
-    a->base = 0;
-    a->used = 0;
-    a->cap = 0;
+    ArenaBlock* b = a->first;
+    while (b) {
+        ArenaBlock* next = b->next;
+        if (b->base) free(b->base);
+        free(b);
+        b = next;
+    }
+    a->first = 0;
+    a->cur = 0;
 }
 
 static void* arena_alloc(Arena* a, uint32_t size, uint32_t align) {
+    if (!a || !a->cur) return 0;
     if (align == 0) align = 1;
-    uint32_t p = a->used;
+
+    uint32_t p = a->cur->used;
     uint32_t mask = align - 1;
     if ((p & mask) != 0) p = (p + mask) & ~mask;
-
     uint32_t need = p + size;
-    if (need > a->cap) {
-        uint32_t ncap = a->cap;
-        while (ncap < need) ncap *= 2;
-        uint8_t* nb = (uint8_t*)malloc(ncap);
-        if (!nb) exit(1);
-        if (a->used) memcpy(nb, a->base, a->used);
-        free(a->base);
-        a->base = nb;
-        a->cap = ncap;
+
+    if (need > a->cur->cap) {
+        uint32_t ncap = a->cur->cap;
+        uint32_t mincap = size + align;
+        while (ncap < mincap) ncap *= 2;
+        if (ncap < 4096) ncap = 4096;
+
+        ArenaBlock* nb = arena_new_block(ncap);
+        a->cur->next = nb;
+        a->cur = nb;
+
+        p = 0;
+        if ((p & mask) != 0) p = (p + mask) & ~mask;
+        need = p + size;
     }
 
-    void* out = a->base + p;
-    a->used = need;
+    void* out = a->cur->base + p;
+    a->cur->used = need;
     memset(out, 0, size);
     return out;
 }
