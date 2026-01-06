@@ -162,13 +162,8 @@ static void refresh_line(term_instance_t* term, const char* path, char* line, in
 
     for (int r = 0; r < clear_rows; r++) {
         int row = start_row + r;
-        if (row < 0 || row >= TERM_HISTORY) break;
-        for (int i = 0; i < TERM_W; i++) {
-            int idx = row * TERM_W + i;
-            term->buffer[idx] = ' ';
-            term->fg_colors[idx] = term->curr_fg;
-            term->bg_colors[idx] = term->curr_bg;
-        }
+        if (row < 0) break;
+        term_clear_row(term, row);
     }
 
     term->row = start_row;
@@ -196,7 +191,10 @@ static void refresh_line(term_instance_t* term, const char* path, char* line, in
 static void shell_cleanup_handler(window_t* win) {
     if (win->user_data) {
         shell_context_t* ctx = (shell_context_t*)win->user_data;
-        if (ctx->term) kfree(ctx->term);
+        if (ctx->term) {
+            term_destroy(ctx->term);
+            kfree(ctx->term);
+        }
         if (ctx->hist) kfree(ctx->hist);
         kfree(ctx);
     }
@@ -221,13 +219,12 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
 
     for (int r = 0; r < visible_rows; r++) {
         int buf_row = term->view_row + r;
-        if (buf_row >= TERM_HISTORY) break;
 
         for (int c = 0; c < TERM_W; c++) {
-            int idx = buf_row * TERM_W + c;
-            char ch = term->buffer[idx];
-            uint32_t fg = term->fg_colors[idx];
-            uint32_t bg = term->bg_colors[idx];
+            char ch;
+            uint32_t fg;
+            uint32_t bg;
+            term_get_cell(term, buf_row, c, &ch, &fg, &bg);
 
             if (bg != C_BG) vga_draw_rect(x + c * 8, y + r * 16, 8, 16, bg);
             if (ch != ' ') vga_draw_char_sse(x + c * 8, y + r * 16, ch, fg);
@@ -482,18 +479,14 @@ void shell_task(void* arg) {
     ctx->term = my_term; ctx->hist = my_hist;
     hist_init(my_hist);
 
+    term_init(my_term);
+
     task_t* self = proc_current();
     self->terminal = my_term;
     self->term_mode = 1;
-    memset(my_term->buffer, ' ', TERM_W * TERM_H);
     my_term->curr_fg = C_TEXT; my_term->curr_bg = C_BG;
-    for(int i=0; i<TERM_W * TERM_HISTORY; i++) {
-        my_term->buffer[i] = ' '; my_term->fg_colors[i] = my_term->curr_fg; my_term->bg_colors[i] = my_term->curr_bg;
-    }
-    my_term->col = 0; 
-    my_term->row = 0;
-    my_term->view_row = 0;
-    my_term->max_row = 0;
+
+    term_putc(my_term, 0x0C);
 
     char line[LINE_MAX]; memset(line, 0, LINE_MAX);
     int line_len = 0; int cursor_pos = 0;
@@ -502,7 +495,7 @@ void shell_task(void* arg) {
     if ((int)cwd_inode == -1) { cwd_inode = 1; strlcpy(path, "/", 64); }
 
     window_t* win = window_create(100, 100, 652, 265, "shell", shell_window_draw_handler);
-    if (!win) { kfree(my_term); kfree(my_hist); return; }
+    if (!win) { term_destroy(my_term); kfree(my_term); kfree(my_hist); return; }
     win->user_data = ctx; win->on_close = shell_cleanup_handler;
 
     int kbd_fd = vfs_open("/dev/kbd", 0);
@@ -745,6 +738,9 @@ void shell_task(void* arg) {
     }
 
     win->on_close = 0; win->on_draw = 0; win->user_data = 0;
-    kfree(my_hist); kfree(my_term); kfree(ctx);
+    kfree(my_hist);
+    term_destroy(my_term);
+    kfree(my_term);
+    kfree(ctx);
     sys_exit();
 }

@@ -19,17 +19,18 @@ enum VgaColor {
 
     
 #define TERM_W 80
-#define TERM_HISTORY 128 
-
 #define TERM_H 12
 
 
 typedef struct {
-    char buffer[TERM_W * TERM_HISTORY];
+    char* buffer;
     
-    uint32_t fg_colors[TERM_W * TERM_HISTORY];
-    uint32_t bg_colors[TERM_W * TERM_HISTORY];
-    
+    uint32_t* fg_colors;
+    uint32_t* bg_colors;
+
+    int history_cap_rows;
+    int history_rows;
+
     uint32_t curr_fg;
     uint32_t curr_bg;
 
@@ -42,8 +43,13 @@ typedef struct {
 } term_instance_t;
 
 void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y);
+void term_init(term_instance_t* term);
+void term_destroy(term_instance_t* term);
 void term_putc(term_instance_t* term, char c);
 void term_print(term_instance_t* term, const char* s);
+void term_clear_row(term_instance_t* term, int row);
+void term_get_cell(term_instance_t* term, int row, int col, char* out_ch, uint32_t* out_fg, uint32_t* out_bg);
+void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg, uint32_t bg);
 
 void vga_init(void);
 void vga_init_graphics(void);

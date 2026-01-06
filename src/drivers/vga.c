@@ -206,52 +206,149 @@ void vga_set_color(uint32_t fg, uint32_t bg) {
     bg_color = bg;
 }
 
-static void term_fill_colors(term_instance_t* term, uint32_t fg, uint32_t bg) {
-    for (int i = 0; i < TERM_W * TERM_HISTORY; i++) {
-        term->fg_colors[i] = fg;
-        term->bg_colors[i] = bg;
+static int term_ensure_rows(term_instance_t* term, int rows_needed) {
+    if (!term) return -1;
+    if (rows_needed <= 0) rows_needed = 1;
+    if (term->history_cap_rows >= rows_needed) return 0;
+
+    int old_cap = term->history_cap_rows;
+    int new_cap = (old_cap > 0) ? old_cap : 128;
+    while (new_cap < rows_needed) {
+        if (new_cap > (1 << 28)) return -1;
+        new_cap *= 2;
     }
+
+    size_t old_cells = (size_t)old_cap * (size_t)TERM_W;
+    size_t new_cells = (size_t)new_cap * (size_t)TERM_W;
+
+    term->buffer = (char*)krealloc(term->buffer, new_cells);
+    term->fg_colors = (uint32_t*)krealloc(term->fg_colors, new_cells * sizeof(uint32_t));
+    term->bg_colors = (uint32_t*)krealloc(term->bg_colors, new_cells * sizeof(uint32_t));
+
+    if (!term->buffer || !term->fg_colors || !term->bg_colors) return -1;
+
+    for (size_t i = old_cells; i < new_cells; i++) {
+        term->buffer[i] = ' ';
+        term->fg_colors[i] = term->curr_fg;
+        term->bg_colors[i] = term->curr_bg;
+    }
+
+    term->history_cap_rows = new_cap;
+    return 0;
+}
+
+void term_init(term_instance_t* term) {
+    if (!term) return;
+
+    spinlock_init(&term->lock);
+
+    term->history_cap_rows = 0;
+    term->history_rows = 1;
+
+    if (term->curr_fg == 0) term->curr_fg = COLOR_WHITE;
+    if (term->curr_bg == 0) term->curr_bg = COLOR_BLACK;
+
+    term->buffer = 0;
+    term->fg_colors = 0;
+    term->bg_colors = 0;
+
+    term_ensure_rows(term, 1);
+
+    term->col = 0;
+    term->row = 0;
+    term->view_row = 0;
+    term->max_row = 0;
+}
+
+void term_destroy(term_instance_t* term) {
+    if (!term) return;
+    if (term->buffer) kfree(term->buffer);
+    if (term->fg_colors) kfree(term->fg_colors);
+    if (term->bg_colors) kfree(term->bg_colors);
+    term->buffer = 0;
+    term->fg_colors = 0;
+    term->bg_colors = 0;
+    term->history_cap_rows = 0;
+    term->history_rows = 0;
+}
+
+void term_clear_row(term_instance_t* term, int row) {
+    if (!term || row < 0) return;
+    if (term_ensure_rows(term, row + 1) != 0) return;
+
+    size_t start = (size_t)row * (size_t)TERM_W;
+    for (int i = 0; i < TERM_W; i++) {
+        term->buffer[start + (size_t)i] = ' ';
+        term->fg_colors[start + (size_t)i] = term->curr_fg;
+        term->bg_colors[start + (size_t)i] = term->curr_bg;
+    }
+
+    if (row >= term->history_rows) term->history_rows = row + 1;
+}
+
+void term_get_cell(term_instance_t* term, int row, int col, char* out_ch, uint32_t* out_fg, uint32_t* out_bg) {
+    if (out_ch) *out_ch = ' ';
+    if (out_fg) *out_fg = term ? term->curr_fg : 0;
+    if (out_bg) *out_bg = term ? term->curr_bg : 0;
+    if (!term || row < 0 || col < 0 || col >= TERM_W) return;
+    if (row >= term->history_rows) return;
+
+    size_t idx = (size_t)row * (size_t)TERM_W + (size_t)col;
+    if (out_ch) *out_ch = term->buffer[idx];
+    if (out_fg) *out_fg = term->fg_colors[idx];
+    if (out_bg) *out_bg = term->bg_colors[idx];
+}
+
+void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg, uint32_t bg) {
+    if (!term || row < 0 || col < 0 || col >= TERM_W) return;
+    if (term_ensure_rows(term, row + 1) != 0) return;
+
+    size_t idx = (size_t)row * (size_t)TERM_W + (size_t)col;
+    term->buffer[idx] = ch;
+    term->fg_colors[idx] = fg;
+    term->bg_colors[idx] = bg;
+
+    if (row >= term->history_rows) term->history_rows = row + 1;
+    if (row > term->max_row) term->max_row = row;
 }
 
 void term_putc(term_instance_t* term, char c) {
-    if (c == 0x0C) { 
-        memset(term->buffer, ' ', TERM_W * TERM_HISTORY);
-        term_fill_colors(term, term->curr_fg, term->curr_bg);
-        
+    if (!term) return;
+
+    if (c == 0x0C) {
         term->col = 0;
         term->row = 0;
         term->view_row = 0;
         term->max_row = 0;
+        term->history_rows = 1;
+        term_clear_row(term, 0);
         return;
     }
 
     if (c == '\n') {
+        if (term_ensure_rows(term, term->row + 1) != 0) return;
+
         int idx = term->row * TERM_W + term->col;
         int remaining = TERM_W - term->col;
-        for(int k=0; k<remaining; k++) {
-            term->bg_colors[idx+k] = term->curr_bg;
-            term->fg_colors[idx+k] = term->curr_fg;
-            term->buffer[idx+k] = ' ';
+        for (int k = 0; k < remaining; k++) {
+            term->bg_colors[idx + k] = term->curr_bg;
+            term->fg_colors[idx + k] = term->curr_fg;
+            term->buffer[idx + k] = ' ';
         }
 
         term->col = 0; 
         term->row++;
-        
-        if (term->row < TERM_HISTORY) {
-            int new_row_start = term->row * TERM_W;
-            for(int i=0; i<TERM_W; i++) {
-                term->buffer[new_row_start + i] = ' ';
-                term->fg_colors[new_row_start + i] = term->curr_fg;
-                term->bg_colors[new_row_start + i] = term->curr_bg;
-            }
-        }
+
+        term_clear_row(term, term->row);
     } else if (c == '\b') {
         if (term->col > 0) term->col--;
+        if (term_ensure_rows(term, term->row + 1) != 0) return;
         int idx = term->row * TERM_W + term->col;
         term->buffer[idx] = ' ';
         term->fg_colors[idx] = term->curr_fg;
         term->bg_colors[idx] = term->curr_bg;
     } else {
+        if (term_ensure_rows(term, term->row + 1) != 0) return;
         int idx = term->row * TERM_W + term->col;
         term->buffer[idx] = c;
         term->fg_colors[idx] = term->curr_fg;
@@ -262,25 +359,10 @@ void term_putc(term_instance_t* term, char c) {
     if (term->col >= TERM_W) { 
         term->col = 0; 
         term->row++; 
+        term_clear_row(term, term->row);
     }
 
-    if (term->row >= TERM_HISTORY) {
-        memcpy(term->buffer, term->buffer + TERM_W, TERM_W * (TERM_HISTORY - 1));
-        
-        memcpy(term->fg_colors, term->fg_colors + TERM_W, TERM_W * (TERM_HISTORY - 1) * 4);
-        memcpy(term->bg_colors, term->bg_colors + TERM_W, TERM_W * (TERM_HISTORY - 1) * 4);
-        memset(term->buffer + TERM_W * (TERM_HISTORY - 1), ' ', TERM_W);
-        
-        int start_fill = TERM_W * (TERM_HISTORY - 1);
-        for(int i=0; i<TERM_W; i++) {
-            term->fg_colors[start_fill + i] = term->curr_fg;
-            term->bg_colors[start_fill + i] = term->curr_bg;
-        }
-        
-        term->row = TERM_HISTORY - 1;
-        if (term->view_row > 0) term->view_row--;
-    }
-
+    if (term->row >= term->history_rows) term->history_rows = term->row + 1;
     if (term->row > term->max_row) term->max_row = term->row;
 
     int at_bottom = (term->view_row + TERM_H) >= term->row;
@@ -297,10 +379,11 @@ void term_print(term_instance_t* term, const char* s) {
 void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y) {
     for (int y = 0; y < TERM_H; y++) {
         for (int x = 0; x < TERM_W; x++) {
-            char c = term->buffer[y * TERM_W + x];
-            if (c != ' ') {
-                vga_draw_char_sse(c, win_x + x * 8, win_y + y * 16, 0x1E1E1E);
-            }
+            char ch;
+            uint32_t fg, bg;
+            term_get_cell(term, term->view_row + y, x, &ch, &fg, &bg);
+            if (bg != COLOR_BLACK) vga_draw_rect(win_x + x * 8, win_y + y * 16, 8, 16, bg);
+            if (ch != ' ') vga_draw_char_sse(win_x + x * 8, win_y + y * 16, ch, fg);
         }
     }
 }
@@ -389,11 +472,11 @@ void vga_draw_rect(int x, int y, int w, int h, uint32_t color) {
             uint32_t tmp_count = sse_width;
             uint32_t* tmp_dest = dest;
             __asm__ volatile (
-                ".loop_rect:\n\t"
+                "1:\n\t"
                 "movups %%xmm0, (%0)\n\t"
                 "add $16, %0\n\t"
                 "dec %1\n\t"
-                "jnz .loop_rect\n\t"
+                "jnz 1b\n\t"
                 : "+r"(tmp_dest), "+r"(tmp_count)
                 :
                 : "memory"
