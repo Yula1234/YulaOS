@@ -12,7 +12,11 @@ typedef uint32_t IrFuncId;
 typedef enum {
     IR_TY_VOID = 1,
     IR_TY_I32,
+    IR_TY_U32,
+    IR_TY_I16,
+    IR_TY_U16,
     IR_TY_I8,
+    IR_TY_U8,
     IR_TY_BOOL,
     IR_TY_PTR,
 } IrTypeKind;
@@ -30,6 +34,10 @@ typedef enum {
     IR_ICMP_SLE,
     IR_ICMP_SGT,
     IR_ICMP_SGE,
+    IR_ICMP_ULT,
+    IR_ICMP_ULE,
+    IR_ICMP_UGT,
+    IR_ICMP_UGE,
 } IrIcmpPred;
 
 typedef enum {
@@ -42,7 +50,9 @@ typedef enum {
     IR_INSTR_PTR_NULL,
 
     IR_INSTR_ZEXT,
+    IR_INSTR_SEXT,
     IR_INSTR_TRUNC,
+    IR_INSTR_BITCAST,
 
     IR_INSTR_PTRTOINT,
     IR_INSTR_INTTOPTR,
@@ -52,6 +62,8 @@ typedef enum {
     IR_INSTR_MUL,
     IR_INSTR_SDIV,
     IR_INSTR_SREM,
+    IR_INSTR_UDIV,
+    IR_INSTR_UREM,
 
     IR_INSTR_ICMP,
 
@@ -186,7 +198,11 @@ typedef struct {
 
     IrType* ty_void;
     IrType* ty_i32;
+    IrType* ty_u32;
+    IrType* ty_i16;
+    IrType* ty_u16;
     IrType* ty_i8;
+    IrType* ty_u8;
     IrType* ty_bool;
 
     IrType** ptr_types;
@@ -253,30 +269,35 @@ static IrType* ir_type_ptr(IrFunc* f, IrType* base) {
         f->ptr_types = (IrType**)ir_grow_array(f->ptr_types, sizeof(IrType*), &f->ptr_type_cap, need);
     }
 
-    IrType* t = ir_type_new(f->arena, IR_TY_PTR, base);
-    f->ptr_types[f->ptr_type_count++] = t;
-    return t;
+    IrType* pt = ir_type_new(f->arena, IR_TY_PTR, base);
+    f->ptr_types[f->ptr_type_count++] = pt;
+    return pt;
 }
 
 static IrFunc* ir_func_new(IrModule* m, Symbol* sym) {
+    if (!m) return 0;
+
     uint32_t need = m->func_count + 1;
     if (need > m->func_cap) {
         m->funcs = (IrFunc*)ir_grow_array(m->funcs, sizeof(IrFunc), &m->func_cap, need);
     }
 
-    IrFunc* f = &m->funcs[m->func_count];
+    IrFunc* f = &m->funcs[m->func_count++];
     memset(f, 0, sizeof(*f));
 
-    f->id = m->func_count + 1;
+    f->id = m->func_count;
     f->sym = sym;
     f->arena = m->arena;
 
     f->ty_void = ir_type_new(f->arena, IR_TY_VOID, 0);
     f->ty_i32 = ir_type_new(f->arena, IR_TY_I32, 0);
+    f->ty_u32 = ir_type_new(f->arena, IR_TY_U32, 0);
+    f->ty_i16 = ir_type_new(f->arena, IR_TY_I16, 0);
+    f->ty_u16 = ir_type_new(f->arena, IR_TY_U16, 0);
     f->ty_i8 = ir_type_new(f->arena, IR_TY_I8, 0);
+    f->ty_u8 = ir_type_new(f->arena, IR_TY_U8, 0);
     f->ty_bool = ir_type_new(f->arena, IR_TY_BOOL, 0);
 
-    m->func_count++;
     return f;
 }
 
@@ -364,6 +385,51 @@ static IrValueId ir_emit_iconst(IrFunc* f, IrBlockId b, int32_t imm) {
     IrInstr* i = &f->instrs[ins - 1];
     i->result = res;
     i->v.iconst.imm = imm;
+
+    f->values[res - 1].def_block = b;
+    f->values[res - 1].def_instr = ins;
+
+    ir_block_append_instr(f, b, ins);
+    return res;
+}
+
+static IrValueId ir_emit_uconst(IrFunc* f, IrBlockId b, uint32_t imm) {
+    IrInstrId ins = ir_instr_new(f, IR_INSTR_ICONST, f->ty_u32);
+    IrValueId res = ir_value_new(f, f->ty_u32);
+
+    IrInstr* i = &f->instrs[ins - 1];
+    i->result = res;
+    i->v.iconst.imm = (int32_t)imm;
+
+    f->values[res - 1].def_block = b;
+    f->values[res - 1].def_instr = ins;
+
+    ir_block_append_instr(f, b, ins);
+    return res;
+}
+
+static IrValueId ir_emit_bitcast(IrFunc* f, IrBlockId b, IrType* dst_ty, IrValueId src) {
+    IrInstrId ins = ir_instr_new(f, IR_INSTR_BITCAST, dst_ty);
+    IrValueId res = ir_value_new(f, dst_ty);
+
+    IrInstr* i = &f->instrs[ins - 1];
+    i->result = res;
+    i->v.cast.src = src;
+
+    f->values[res - 1].def_block = b;
+    f->values[res - 1].def_instr = ins;
+
+    ir_block_append_instr(f, b, ins);
+    return res;
+}
+
+static IrValueId ir_emit_sext(IrFunc* f, IrBlockId b, IrType* dst_ty, IrValueId src) {
+    IrInstrId ins = ir_instr_new(f, IR_INSTR_SEXT, dst_ty);
+    IrValueId res = ir_value_new(f, dst_ty);
+
+    IrInstr* i = &f->instrs[ins - 1];
+    i->result = res;
+    i->v.cast.src = src;
 
     f->values[res - 1].def_block = b;
     f->values[res - 1].def_instr = ins;
@@ -684,7 +750,11 @@ static uint32_t ir_type_size(IrType* t) {
     if (!t) return 4;
     if (t->kind == IR_TY_BOOL) return 1;
     if (t->kind == IR_TY_I8) return 1;
+    if (t->kind == IR_TY_U8) return 1;
+    if (t->kind == IR_TY_I16) return 2;
+    if (t->kind == IR_TY_U16) return 2;
     if (t->kind == IR_TY_I32) return 4;
+    if (t->kind == IR_TY_U32) return 4;
     if (t->kind == IR_TY_PTR) return 4;
     return 0;
 }
@@ -697,7 +767,11 @@ static void ir_print_type(Buffer* out, IrType* t) {
 
     if (t->kind == IR_TY_VOID) { buf_add_cstr(out, "void"); return; }
     if (t->kind == IR_TY_I32) { buf_add_cstr(out, "i32"); return; }
+    if (t->kind == IR_TY_U32) { buf_add_cstr(out, "u32"); return; }
+    if (t->kind == IR_TY_I16) { buf_add_cstr(out, "i16"); return; }
+    if (t->kind == IR_TY_U16) { buf_add_cstr(out, "u16"); return; }
     if (t->kind == IR_TY_I8) { buf_add_cstr(out, "i8"); return; }
+    if (t->kind == IR_TY_U8) { buf_add_cstr(out, "u8"); return; }
     if (t->kind == IR_TY_BOOL) { buf_add_cstr(out, "bool"); return; }
     if (t->kind == IR_TY_PTR) {
         buf_add_cstr(out, "ptr(");

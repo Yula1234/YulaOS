@@ -107,12 +107,13 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
     ce.str_id = cg.str_id;
 
     uint32_t bss_size = 0;
+
     for (AstGlobal* g = u->first_global; g; g = g->next) {
         if (!g->sym) continue;
         if (g->sym->shndx == SHN_UNDEF) continue;
 
         uint32_t sz = type_size(g->ty);
-        uint32_t al = (sz == 1) ? 1u : 4u;
+        uint32_t al = type_align(g->ty);
 
         if (g->init) {
             uint32_t aligned = align_up_u32(data.size, al);
@@ -131,6 +132,9 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
                 if (rs) scc_fatal_at(p.file, p.src, g->init->tok.line, g->init->tok.col, "Relocation is not supported for 1-byte global initializer");
                 if (g->ty && g->ty->kind == TYPE_BOOL) buf_push_u8(&data, (v != 0) ? 1u : 0u);
                 else buf_push_u8(&data, (uint8_t)v);
+            } else if (sz == 2) {
+                if (rs) scc_fatal_at(p.file, p.src, g->init->tok.line, g->init->tok.col, "Relocation is not supported for 2-byte global initializer");
+                buf_push_u16(&data, (uint16_t)(v & 0xFFFFu));
             } else if (sz == 4) {
                 uint32_t off = data.size;
                 buf_push_u32(&data, v);

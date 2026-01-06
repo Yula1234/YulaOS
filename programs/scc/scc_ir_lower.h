@@ -89,7 +89,13 @@ static IrType* ir_type_from_scc(IrFunc* f, Type* t) {
 
     if (t->kind == TYPE_VOID) return f->ty_void;
     if (t->kind == TYPE_INT) return f->ty_i32;
+    if (t->kind == TYPE_UINT) return f->ty_u32;
+    if (t->kind == TYPE_LONG) return f->ty_i32;
+    if (t->kind == TYPE_ULONG) return f->ty_u32;
+    if (t->kind == TYPE_SHORT) return f->ty_i16;
+    if (t->kind == TYPE_USHORT) return f->ty_u16;
     if (t->kind == TYPE_CHAR) return f->ty_i8;
+    if (t->kind == TYPE_UCHAR) return f->ty_u8;
     if (t->kind == TYPE_BOOL) return f->ty_bool;
 
     if (t->kind == TYPE_PTR) {
@@ -127,6 +133,9 @@ static IrValueId ir_lower_addr(IrLowerFuncCtx* fc, AstExpr* e) {
         if (!base) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot dereference non-pointer");
         }
+        if (base->kind == TYPE_VOID) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot dereference void*");
+        }
 
         IrType* base_ir = ir_type_from_scc(fc->f, base);
         IrType* pty = ir_type_ptr(fc->f, base_ir);
@@ -158,6 +167,10 @@ static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* ds
     if (dst_ty->kind == IR_TY_VOID) return 0;
     if (v == 0) return ir_emit_undef(fc->f, fc->cur, dst_ty);
 
+    if (v > fc->f->value_count) {
+        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, tok.line, tok.col, "Internal error: invalid IR value id in cast");
+    }
+
     IrType* src_ty = fc->f->values[v - 1].type;
     if (src_ty == dst_ty) return v;
 
@@ -166,6 +179,7 @@ static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* ds
 
         IrValueId vi32 = v;
         if (src_ty && src_ty->kind == IR_TY_PTR) vi32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+        else if (src_ty && (src_ty->kind == IR_TY_I16 || src_ty->kind == IR_TY_U16)) vi32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
         else if (src_ty && src_ty->kind == IR_TY_I8) vi32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
         else if (src_ty && src_ty->kind == IR_TY_BOOL) vi32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
 
@@ -175,17 +189,99 @@ static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* ds
 
     if (dst_ty->kind == IR_TY_I32) {
         if (src_ty && src_ty->kind == IR_TY_PTR) return ir_emit_ptrtoint(fc->f, fc->cur, v);
-        if (src_ty && (src_ty->kind == IR_TY_I8 || src_ty->kind == IR_TY_BOOL)) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        if (src_ty && src_ty->kind == IR_TY_I16) return ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+        if (src_ty && src_ty->kind == IR_TY_U16) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        if (src_ty && src_ty->kind == IR_TY_I8) return ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+        if (src_ty && (src_ty->kind == IR_TY_U8 || src_ty->kind == IR_TY_BOOL)) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        if (src_ty && src_ty->kind == IR_TY_U32) return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i32, v);
+        return v;
+    }
+
+    if (dst_ty->kind == IR_TY_U32) {
+        if (src_ty && src_ty->kind == IR_TY_PTR) {
+            IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+            return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_u32, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_I32) return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_u32, v);
+        if (src_ty && src_ty->kind == IR_TY_I16) {
+            IrValueId i32 = ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_u32, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_U16) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_u32, v);
+        if (src_ty && src_ty->kind == IR_TY_I8) {
+            IrValueId i32 = ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_u32, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_U8) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_u32, v);
+        if (src_ty && src_ty->kind == IR_TY_BOOL) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_u32, v);
+        return v;
+    }
+
+    if (dst_ty->kind == IR_TY_I16) {
+        if (src_ty && src_ty->kind == IR_TY_PTR) {
+            IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i16, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_I32) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i16, v);
+        if (src_ty && src_ty->kind == IR_TY_U32) {
+            IrValueId i32 = ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i16, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_I8) return ir_emit_sext(fc->f, fc->cur, fc->f->ty_i16, v);
+        if (src_ty && (src_ty->kind == IR_TY_U8 || src_ty->kind == IR_TY_BOOL)) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i16, v);
+        if (src_ty && src_ty->kind == IR_TY_U16) return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i16, v);
+        return v;
+    }
+
+    if (dst_ty->kind == IR_TY_U16) {
+        if (src_ty && src_ty->kind == IR_TY_PTR) {
+            IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u16, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_I32) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u16, v);
+        if (src_ty && src_ty->kind == IR_TY_U32) {
+            IrValueId i32 = ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u16, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_I8) {
+            IrValueId i32 = ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u16, i32);
+        }
+        if (src_ty && (src_ty->kind == IR_TY_U8 || src_ty->kind == IR_TY_BOOL)) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_u16, v);
+        if (src_ty && src_ty->kind == IR_TY_I16) return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_u16, v);
         return v;
     }
 
     if (dst_ty->kind == IR_TY_I8) {
         if (src_ty && src_ty->kind == IR_TY_I32) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, v);
+        if (src_ty && src_ty->kind == IR_TY_I16) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, v);
+        if (src_ty && src_ty->kind == IR_TY_U16) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, v);
+        if (src_ty && src_ty->kind == IR_TY_U32) {
+            IrValueId i32 = ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, i32);
+        }
         if (src_ty && src_ty->kind == IR_TY_PTR) {
             IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
             return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_i8, i32);
         }
         if (src_ty && src_ty->kind == IR_TY_BOOL) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_i8, v);
+        return v;
+    }
+
+    if (dst_ty->kind == IR_TY_U8) {
+        if (src_ty && src_ty->kind == IR_TY_I32) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u8, v);
+        if (src_ty && src_ty->kind == IR_TY_U32) {
+            IrValueId i32 = ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i32, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u8, i32);
+        }
+        if (src_ty && src_ty->kind == IR_TY_I16) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u8, v);
+        if (src_ty && src_ty->kind == IR_TY_U16) return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u8, v);
+        if (src_ty && src_ty->kind == IR_TY_I8) return ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_u8, v);
+        if (src_ty && src_ty->kind == IR_TY_BOOL) return ir_emit_zext(fc->f, fc->cur, fc->f->ty_u8, v);
+        if (src_ty && src_ty->kind == IR_TY_PTR) {
+            IrValueId i32 = ir_emit_ptrtoint(fc->f, fc->cur, v);
+            return ir_emit_trunc(fc->f, fc->cur, fc->f->ty_u8, i32);
+        }
         return v;
     }
 
@@ -196,7 +292,11 @@ static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* ds
         }
 
         IrValueId i32 = v;
-        if (src_ty && (src_ty->kind == IR_TY_I8 || src_ty->kind == IR_TY_BOOL)) i32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        if (src_ty && src_ty->kind == IR_TY_I16) i32 = ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+        else if (src_ty && src_ty->kind == IR_TY_U16) i32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        else if (src_ty && src_ty->kind == IR_TY_I8) i32 = ir_emit_sext(fc->f, fc->cur, fc->f->ty_i32, v);
+        else if (src_ty && (src_ty->kind == IR_TY_U8 || src_ty->kind == IR_TY_BOOL)) i32 = ir_emit_zext(fc->f, fc->cur, fc->f->ty_i32, v);
+        else if (src_ty && src_ty->kind == IR_TY_U32) i32 = ir_emit_bitcast(fc->f, fc->cur, fc->f->ty_i32, v);
         return ir_emit_inttoptr(fc->f, fc->cur, dst_ty, i32);
     }
 
@@ -205,9 +305,7 @@ static IrValueId ir_lower_cast_value(IrLowerFuncCtx* fc, IrValueId v, IrType* ds
 }
 
 static uint32_t ir_lower_align_for_type(Type* t) {
-    uint32_t sz = type_size(t);
-    if (sz == 1) return 1;
-    return 4;
+    return type_align(t);
 }
 
 static IrValueId ir_lower_get_var_addr(IrLowerFuncCtx* fc, Var* v) {
@@ -324,6 +422,49 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
     return 0;
 }
 
+static int ir_lower_is_unsigned_int_type(Type* t) {
+    if (!t) return 0;
+    if (t->kind == TYPE_UINT) return 1;
+    if (t->kind == TYPE_ULONG) return 1;
+    if (t->kind == TYPE_USHORT) return 1;
+    if (t->kind == TYPE_UCHAR) return 1;
+    return 0;
+}
+
+static int ir_lower_expr_is_unsigned(IrLowerCtx* lc, AstExpr* e) {
+    if (!lc || !e) return 0;
+
+    if (e->kind == AST_EXPR_CAST) return ir_lower_is_unsigned_int_type(e->v.cast.ty);
+
+    if (e->kind == AST_EXPR_NAME) {
+        if (e->v.name.var) return ir_lower_is_unsigned_int_type(e->v.name.var->ty);
+        Symbol* s = e->v.name.sym;
+        if (!s) s = symtab_find(lc->syms, e->v.name.name);
+        return s ? ir_lower_is_unsigned_int_type(s->ty) : 0;
+    }
+
+    if (e->kind == AST_EXPR_CALL) {
+        Symbol* s = symtab_find(lc->syms, e->v.call.callee);
+        if (!s) return 0;
+        return ir_lower_is_unsigned_int_type(s->ftype.ret);
+    }
+
+    if (e->kind == AST_EXPR_UNARY) {
+        return ir_lower_expr_is_unsigned(lc, e->v.unary.expr);
+    }
+
+    if (e->kind == AST_EXPR_ASSIGN) {
+        Type* t = ir_lower_lvalue_type(lc, e->v.assign.left);
+        return ir_lower_is_unsigned_int_type(t);
+    }
+
+    if (e->kind == AST_EXPR_BINARY) {
+        return ir_lower_expr_is_unsigned(lc, e->v.binary.left) || ir_lower_expr_is_unsigned(lc, e->v.binary.right);
+    }
+
+    return 0;
+}
+
 static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e);
 
 static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
@@ -381,6 +522,7 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         }
 
         Symbol* s = symtab_find(fc->lc->syms, e->v.call.callee);
+
         if (!s || s->kind != SYM_FUNC) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Call to undeclared function");
         }
@@ -407,12 +549,14 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         if (e->v.unary.op == AST_UNOP_ADDR) {
             return ir_lower_addr(fc, e->v.unary.expr);
         }
-
         if (e->v.unary.op == AST_UNOP_DEREF) {
             Type* pt = ir_lower_expr_type(fc->lc, e->v.unary.expr);
             Type* base = (pt && pt->kind == TYPE_PTR) ? pt->base : 0;
             if (!base) {
                 scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot dereference non-pointer");
+            }
+            if (base->kind == TYPE_VOID) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot dereference void*");
             }
 
             IrType* base_ir = ir_type_from_scc(fc->f, base);
@@ -549,6 +693,10 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
                 IrValueId diff = ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, fc->f->ty_i32, li, ri);
 
                 if (scale == 1) return diff;
+                if (scale == 2) {
+                    IrValueId sc = ir_emit_iconst(fc->f, fc->cur, 2);
+                    return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SDIV, fc->f->ty_i32, diff, sc);
+                }
                 if (scale == 4) {
                     IrValueId sc = ir_emit_iconst(fc->f, fc->cur, 4);
                     return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SDIV, fc->f->ty_i32, diff, sc);
@@ -559,35 +707,47 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         }
 
         if (e->v.binary.op == AST_BINOP_MUL || e->v.binary.op == AST_BINOP_DIV || e->v.binary.op == AST_BINOP_MOD) {
-            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
-            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+            int is_unsigned = ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
+            IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
 
             IrInstrKind k = IR_INSTR_INVALID;
             if (e->v.binary.op == AST_BINOP_MUL) k = IR_INSTR_MUL;
-            else if (e->v.binary.op == AST_BINOP_DIV) k = IR_INSTR_SDIV;
-            else if (e->v.binary.op == AST_BINOP_MOD) k = IR_INSTR_SREM;
-            return ir_emit_bin(fc->f, fc->cur, k, fc->f->ty_i32, lv, rv);
+            else if (e->v.binary.op == AST_BINOP_DIV) k = is_unsigned ? IR_INSTR_UDIV : IR_INSTR_SDIV;
+            else if (e->v.binary.op == AST_BINOP_MOD) k = is_unsigned ? IR_INSTR_UREM : IR_INSTR_SREM;
+            return ir_emit_bin(fc->f, fc->cur, k, ity, lv, rv);
         }
 
         if (e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE || e->v.binary.op == AST_BINOP_LT || e->v.binary.op == AST_BINOP_LE || e->v.binary.op == AST_BINOP_GT || e->v.binary.op == AST_BINOP_GE) {
-            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
-            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+            Type* lt = ir_lower_expr_type(fc->lc, e->v.binary.left);
+            Type* rt = ir_lower_expr_type(fc->lc, e->v.binary.right);
+            int is_ptr = (lt && lt->kind == TYPE_PTR) || (rt && rt->kind == TYPE_PTR);
+            int is_unsigned = is_ptr || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
+            IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
 
             IrIcmpPred p = IR_ICMP_EQ;
             if (e->v.binary.op == AST_BINOP_EQ) p = IR_ICMP_EQ;
             else if (e->v.binary.op == AST_BINOP_NE) p = IR_ICMP_NE;
-            else if (e->v.binary.op == AST_BINOP_LT) p = IR_ICMP_SLT;
-            else if (e->v.binary.op == AST_BINOP_LE) p = IR_ICMP_SLE;
-            else if (e->v.binary.op == AST_BINOP_GT) p = IR_ICMP_SGT;
-            else if (e->v.binary.op == AST_BINOP_GE) p = IR_ICMP_SGE;
+            else if (e->v.binary.op == AST_BINOP_LT) p = is_unsigned ? IR_ICMP_ULT : IR_ICMP_SLT;
+            else if (e->v.binary.op == AST_BINOP_LE) p = is_unsigned ? IR_ICMP_ULE : IR_ICMP_SLE;
+            else if (e->v.binary.op == AST_BINOP_GT) p = is_unsigned ? IR_ICMP_UGT : IR_ICMP_SGT;
+            else if (e->v.binary.op == AST_BINOP_GE) p = is_unsigned ? IR_ICMP_UGE : IR_ICMP_SGE;
             return ir_emit_icmp(fc->f, fc->cur, p, lv, rv);
         }
 
         if (e->v.binary.op == AST_BINOP_ADD || e->v.binary.op == AST_BINOP_SUB) {
-            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), fc->f->ty_i32, e->tok);
-            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), fc->f->ty_i32, e->tok);
+            int is_unsigned = ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
+            IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
             IrInstrKind k = (e->v.binary.op == AST_BINOP_ADD) ? IR_INSTR_ADD : IR_INSTR_SUB;
-            return ir_emit_bin(fc->f, fc->cur, k, fc->f->ty_i32, lv, rv);
+            return ir_emit_bin(fc->f, fc->cur, k, ity, lv, rv);
         }
 
         scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Binary operator not lowered to IR yet");
@@ -607,6 +767,7 @@ static void ir_lower_stmt_list(IrLowerFuncCtx* fc, AstStmt* first);
 
 static void ir_lower_stmt_list(IrLowerFuncCtx* fc, AstStmt* first) {
     if (!fc) return;
+    int i = 0;
     for (AstStmt* it = first; it; it = it->next) {
         if (ir_block_is_terminated(fc->f, fc->cur)) return;
         ir_lower_stmt(fc, it);

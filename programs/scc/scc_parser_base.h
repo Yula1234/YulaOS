@@ -84,6 +84,46 @@ static Type* type_int(Parser* p) {
     return t;
 }
 
+static Type* type_uint(Parser* p) {
+    Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+    t->kind = TYPE_UINT;
+    t->base = 0;
+    t->is_const = 0;
+    return t;
+}
+
+static Type* type_short(Parser* p) {
+    Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+    t->kind = TYPE_SHORT;
+    t->base = 0;
+    t->is_const = 0;
+    return t;
+}
+
+static Type* type_ushort(Parser* p) {
+    Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+    t->kind = TYPE_USHORT;
+    t->base = 0;
+    t->is_const = 0;
+    return t;
+}
+
+static Type* type_long(Parser* p) {
+    Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+    t->kind = TYPE_LONG;
+    t->base = 0;
+    t->is_const = 0;
+    return t;
+}
+
+static Type* type_ulong(Parser* p) {
+    Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+    t->kind = TYPE_ULONG;
+    t->base = 0;
+    t->is_const = 0;
+    return t;
+}
+
 static Type* type_char(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_CHAR;
@@ -91,6 +131,14 @@ static Type* type_char(Parser* p) {
     t->is_const = 0;
     return t;
 }
+
+ static Type* type_uchar(Parser* p) {
+     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
+     t->kind = TYPE_UCHAR;
+     t->base = 0;
+     t->is_const = 0;
+     return t;
+ }
 
 static Type* type_bool(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
@@ -120,20 +168,110 @@ static Type* parse_type(Parser* p) {
     int saw_const = 0;
     while (parser_match(p, TOK_KW_CONST)) saw_const = 1;
 
+    int saw_any = 0;
+    int saw_signed = 0;
+    int saw_unsigned = 0;
+    int short_count = 0;
+    int long_count = 0;
+    int saw_int = 0;
+    int saw_char = 0;
+    int saw_bool = 0;
+    int saw_void = 0;
+
+    while (1) {
+        if (p->tok.kind == TOK_KW_SIGNED) {
+            saw_signed = 1;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_UNSIGNED) {
+            saw_unsigned = 1;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_SHORT) {
+            short_count++;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_LONG) {
+            long_count++;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_INT) {
+            saw_int = 1;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_CHAR) {
+            saw_char = 1;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_BOOL) {
+            saw_bool = 1;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        if (p->tok.kind == TOK_KW_VOID) {
+            saw_void = 1;
+            saw_any = 1;
+            parser_next(p);
+            continue;
+        }
+        break;
+    }
+
+    if (!saw_any) {
+        scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Expected type name");
+    }
+
+    if (saw_signed && saw_unsigned) {
+        scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: both signed and unsigned");
+    }
+    if (short_count > 1) {
+        scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: repeated short");
+    }
+    if (long_count > 1) {
+        scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: long long is not supported");
+    }
+
     Type* base = 0;
-    if (p->tok.kind == TOK_KW_INT) {
-        base = type_int(p);
-        parser_next(p);
-    } else if (p->tok.kind == TOK_KW_CHAR) {
-        base = type_char(p);
-        parser_next(p);
-    } else if (p->tok.kind == TOK_KW_BOOL) {
-        base = type_bool(p);
-        parser_next(p);
-    } else if (p->tok.kind == TOK_KW_VOID) {
+    if (saw_void) {
+        if (saw_char || saw_bool || saw_int || short_count || long_count || saw_signed || saw_unsigned) {
+            scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: void with other specifiers");
+        }
         base = type_void(p);
-        parser_next(p);
+    } else if (saw_bool) {
+        if (saw_char || saw_int || short_count || long_count || saw_signed || saw_unsigned) {
+            scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: _Bool with other specifiers");
+        }
+        base = type_bool(p);
+    } else if (saw_char) {
+        if (saw_int || short_count || long_count) {
+            scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: char with integer width specifiers");
+        }
+        if (saw_unsigned) base = type_uchar(p);
+        else base = type_char(p);
     } else {
+        if (short_count && long_count) {
+            scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Invalid type: short with long");
+        }
+
+        if (short_count) base = saw_unsigned ? type_ushort(p) : type_short(p);
+        else if (long_count) base = saw_unsigned ? type_ulong(p) : type_long(p);
+        else base = saw_unsigned ? type_uint(p) : type_int(p);
+    }
+
+    if (!base) {
         scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Expected type name");
     }
 

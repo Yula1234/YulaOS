@@ -55,6 +55,10 @@ typedef enum {
     TOK_BANG,
 
     TOK_KW_INT,
+    TOK_KW_SHORT,
+    TOK_KW_LONG,
+    TOK_KW_SIGNED,
+    TOK_KW_UNSIGNED,
     TOK_KW_CHAR,
     TOK_KW_BOOL,
     TOK_KW_CONST,
@@ -168,6 +172,10 @@ static Token lx_next(Lexer* lx) {
         t.kind = TOK_IDENT;
 
         if (tok_text_eq(&t, "int")) t.kind = TOK_KW_INT;
+        else if (tok_text_eq(&t, "short")) t.kind = TOK_KW_SHORT;
+        else if (tok_text_eq(&t, "long")) t.kind = TOK_KW_LONG;
+        else if (tok_text_eq(&t, "signed")) t.kind = TOK_KW_SIGNED;
+        else if (tok_text_eq(&t, "unsigned")) t.kind = TOK_KW_UNSIGNED;
         else if (tok_text_eq(&t, "char")) t.kind = TOK_KW_CHAR;
         else if (tok_text_eq(&t, "bool") || tok_text_eq(&t, "_Bool")) t.kind = TOK_KW_BOOL;
         else if (tok_text_eq(&t, "const")) t.kind = TOK_KW_CONST;

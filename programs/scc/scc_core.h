@@ -83,7 +83,13 @@ static char* arena_strndup(Arena* a, const char* s, int len) {
 
 typedef enum {
     TYPE_INT = 1,
+    TYPE_UINT,
+    TYPE_SHORT,
+    TYPE_USHORT,
+    TYPE_LONG,
+    TYPE_ULONG,
     TYPE_CHAR,
+    TYPE_UCHAR,
     TYPE_BOOL,
     TYPE_VOID,
     TYPE_PTR,
@@ -98,10 +104,23 @@ typedef struct Type {
 static uint32_t type_size(Type* ty) {
     if (!ty) return 4;
     if (ty->kind == TYPE_CHAR) return 1;
+    if (ty->kind == TYPE_UCHAR) return 1;
     if (ty->kind == TYPE_BOOL) return 1;
+    if (ty->kind == TYPE_SHORT) return 2;
+    if (ty->kind == TYPE_USHORT) return 2;
     if (ty->kind == TYPE_INT) return 4;
+    if (ty->kind == TYPE_UINT) return 4;
+    if (ty->kind == TYPE_LONG) return 4;
+    if (ty->kind == TYPE_ULONG) return 4;
     if (ty->kind == TYPE_PTR) return 4;
     return 0;
+}
+
+static uint32_t type_align(Type* ty) {
+    uint32_t sz = type_size(ty);
+    if (sz == 1) return 1;
+    if (sz == 2) return 2;
+    return 4;
 }
 
 static uint32_t align_up_u32(uint32_t v, uint32_t align) {
@@ -134,7 +153,7 @@ typedef struct {
 } Symbol;
 
 typedef struct {
-    Symbol* data;
+    Symbol** data;
     int count;
     int cap;
 } SymTable;
@@ -142,9 +161,9 @@ typedef struct {
 static void symtab_init(SymTable* st) {
     st->count = 0;
     st->cap = 32;
-    st->data = (Symbol*)malloc((uint32_t)st->cap * sizeof(Symbol));
+    st->data = (Symbol**)malloc((uint32_t)st->cap * sizeof(Symbol*));
     if (!st->data) exit(1);
-    memset(st->data, 0, (uint32_t)st->cap * sizeof(Symbol));
+    memset(st->data, 0, (uint32_t)st->cap * sizeof(Symbol*));
 }
 
 static void symtab_free(SymTable* st) {
@@ -156,7 +175,8 @@ static void symtab_free(SymTable* st) {
 
 static Symbol* symtab_find(SymTable* st, const char* name) {
     for (int i = 0; i < st->count; i++) {
-        if (strcmp(st->data[i].name, name) == 0) return &st->data[i];
+        Symbol* s = st->data[i];
+        if (s && strcmp(s->name, name) == 0) return s;
     }
     return 0;
 }
@@ -164,16 +184,16 @@ static Symbol* symtab_find(SymTable* st, const char* name) {
 static Symbol* symtab_add_func(SymTable* st, Arena* a, const char* name, FuncType ft) {
     if (st->count == st->cap) {
         int ncap = st->cap * 2;
-        Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
+        Symbol** nd = (Symbol**)malloc((uint32_t)ncap * sizeof(Symbol*));
         if (!nd) exit(1);
-        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
-        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
+        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol*));
+        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol*));
         free(st->data);
         st->data = nd;
         st->cap = ncap;
     }
 
-    Symbol* s = &st->data[st->count++];
+    Symbol* s = (Symbol*)arena_alloc(a, sizeof(Symbol), 8);
     memset(s, 0, sizeof(*s));
     s->name = arena_strndup(a, name, (int)strlen(name));
     s->kind = SYM_FUNC;
@@ -182,6 +202,7 @@ static Symbol* symtab_add_func(SymTable* st, Arena* a, const char* name, FuncTyp
     s->shndx = SHN_UNDEF;
     s->value = 0;
     s->size = 0;
+    st->data[st->count++] = s;
     s->elf_index = st->count;
     s->ftype = ft;
     return s;
@@ -190,16 +211,16 @@ static Symbol* symtab_add_func(SymTable* st, Arena* a, const char* name, FuncTyp
 static Symbol* symtab_add_global_data(SymTable* st, Arena* a, const char* name, Type* ty) {
     if (st->count == st->cap) {
         int ncap = st->cap * 2;
-        Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
+        Symbol** nd = (Symbol**)malloc((uint32_t)ncap * sizeof(Symbol*));
         if (!nd) exit(1);
-        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
-        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
+        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol*));
+        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol*));
         free(st->data);
         st->data = nd;
         st->cap = ncap;
     }
 
-    Symbol* s = &st->data[st->count++];
+    Symbol* s = (Symbol*)arena_alloc(a, sizeof(Symbol), 8);
     memset(s, 0, sizeof(*s));
     s->name = arena_strndup(a, name, (int)strlen(name));
     s->kind = SYM_DATA;
@@ -208,6 +229,7 @@ static Symbol* symtab_add_global_data(SymTable* st, Arena* a, const char* name, 
     s->shndx = SHN_UNDEF;
     s->value = 0;
     s->size = 4;
+    st->data[st->count++] = s;
     s->elf_index = st->count;
     return s;
 }
@@ -215,16 +237,16 @@ static Symbol* symtab_add_global_data(SymTable* st, Arena* a, const char* name, 
 static Symbol* symtab_add_local_data(SymTable* st, Arena* a, const char* name, uint32_t value, uint32_t size) {
     if (st->count == st->cap) {
         int ncap = st->cap * 2;
-        Symbol* nd = (Symbol*)malloc((uint32_t)ncap * sizeof(Symbol));
+        Symbol** nd = (Symbol**)malloc((uint32_t)ncap * sizeof(Symbol*));
         if (!nd) exit(1);
-        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol));
-        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol));
+        memcpy(nd, st->data, (uint32_t)st->count * sizeof(Symbol*));
+        memset(nd + st->count, 0, (uint32_t)(ncap - st->count) * sizeof(Symbol*));
         free(st->data);
         st->data = nd;
         st->cap = ncap;
     }
 
-    Symbol* s = &st->data[st->count++];
+    Symbol* s = (Symbol*)arena_alloc(a, sizeof(Symbol), 8);
     memset(s, 0, sizeof(*s));
     s->name = arena_strndup(a, name, (int)strlen(name));
     s->kind = SYM_DATA;
@@ -233,6 +255,7 @@ static Symbol* symtab_add_local_data(SymTable* st, Arena* a, const char* name, u
     s->shndx = 2;
     s->value = value;
     s->size = size;
+    st->data[st->count++] = s;
     s->elf_index = st->count;
     return s;
 }

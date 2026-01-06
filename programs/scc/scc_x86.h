@@ -237,6 +237,18 @@ static void emit_x86_movzx_eax_membp_disp(Buffer* text, int32_t disp) {
     buf_push_u32(text, (uint32_t)disp);
 }
 
+static void emit_x86_movzx_eax_membp_disp_u16(Buffer* text, int32_t disp) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, 0xB7);
+    if (disp >= -128 && disp <= 127) {
+        buf_push_u8(text, 0x45);
+        buf_push_u8(text, (uint8_t)(disp & 0xFF));
+        return;
+    }
+    buf_push_u8(text, 0x85);
+    buf_push_u32(text, (uint32_t)disp);
+}
+
 static void emit_x86_mov_membp_disp_al(Buffer* text, int32_t disp) {
     if (disp >= -128 && disp <= 127) {
         buf_push_u8(text, 0x88);
@@ -245,6 +257,19 @@ static void emit_x86_mov_membp_disp_al(Buffer* text, int32_t disp) {
         return;
     }
     buf_push_u8(text, 0x88);
+    buf_push_u8(text, 0x85);
+    buf_push_u32(text, (uint32_t)disp);
+}
+
+static void emit_x86_mov_membp_disp_ax(Buffer* text, int32_t disp) {
+    buf_push_u8(text, 0x66);
+    if (disp >= -128 && disp <= 127) {
+        buf_push_u8(text, 0x89);
+        buf_push_u8(text, 0x45);
+        buf_push_u8(text, (uint8_t)(disp & 0xFF));
+        return;
+    }
+    buf_push_u8(text, 0x89);
     buf_push_u8(text, 0x85);
     buf_push_u32(text, (uint32_t)disp);
 }
@@ -331,9 +356,19 @@ static void emit_x86_cdq(Buffer* text) {
     buf_push_u8(text, 0x99);
 }
 
+static void emit_x86_xor_edx_edx(Buffer* text) {
+    buf_push_u8(text, 0x31);
+    buf_push_u8(text, 0xD2);
+}
+
 static void emit_x86_idiv_ebx(Buffer* text) {
     buf_push_u8(text, 0xF7);
     buf_push_u8(text, 0xFB);
+}
+
+static void emit_x86_div_ebx(Buffer* text) {
+    buf_push_u8(text, 0xF7);
+    buf_push_u8(text, 0xF3);
 }
 
 static void emit_x86_test_eax_eax(Buffer* text) {
@@ -357,6 +392,12 @@ static void emit_x86_movzx_eax_memecx_u8(Buffer* text) {
     buf_push_u8(text, 0x01);
 }
 
+static void emit_x86_movzx_eax_memecx_u16(Buffer* text) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, 0xB7);
+    buf_push_u8(text, 0x01);
+}
+
 static void emit_x86_mov_memecx_u32_eax(Buffer* text) {
     buf_push_u8(text, 0x89);
     buf_push_u8(text, 0x01);
@@ -364,6 +405,12 @@ static void emit_x86_mov_memecx_u32_eax(Buffer* text) {
 
 static void emit_x86_mov_memecx_u8_al(Buffer* text) {
     buf_push_u8(text, 0x88);
+    buf_push_u8(text, 0x01);
+}
+
+static void emit_x86_mov_memecx_u16_ax(Buffer* text) {
+    buf_push_u8(text, 0x66);
+    buf_push_u8(text, 0x89);
     buf_push_u8(text, 0x01);
 }
 
@@ -378,6 +425,12 @@ static void emit_x86_movzx_eax_memeax_u8(Buffer* text) {
     buf_push_u8(text, 0x00);
 }
 
+static void emit_x86_movzx_eax_memeax_u16(Buffer* text) {
+    buf_push_u8(text, 0x0F);
+    buf_push_u8(text, 0xB7);
+    buf_push_u8(text, 0x00);
+}
+
 static void emit_x86_mov_memeax_u32_eax(Buffer* text) {
     buf_push_u8(text, 0x89);
     buf_push_u8(text, 0x00);
@@ -385,6 +438,12 @@ static void emit_x86_mov_memeax_u32_eax(Buffer* text) {
 
 static void emit_x86_mov_memeax_u8_al(Buffer* text) {
     buf_push_u8(text, 0x88);
+    buf_push_u8(text, 0x00);
+}
+
+static void emit_x86_mov_memeax_u16_ax(Buffer* text) {
+    buf_push_u8(text, 0x66);
+    buf_push_u8(text, 0x89);
     buf_push_u8(text, 0x00);
 }
 

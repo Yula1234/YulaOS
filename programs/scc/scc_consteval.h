@@ -79,11 +79,18 @@ static void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, 
             return;
         }
 
-        if (e->v.cast.ty && e->v.cast.ty->kind == TYPE_CHAR) {
+        if (e->v.cast.ty && (e->v.cast.ty->kind == TYPE_CHAR || e->v.cast.ty->kind == TYPE_UCHAR)) {
             if (rs) {
                 scc_fatal_at(ce->p->file, ce->p->src, e->tok.line, e->tok.col, "Cannot cast relocatable address to char in global initializer");
             }
             v &= 0xFFu;
+        }
+
+        if (e->v.cast.ty && (e->v.cast.ty->kind == TYPE_SHORT || e->v.cast.ty->kind == TYPE_USHORT)) {
+            if (rs) {
+                scc_fatal_at(ce->p->file, ce->p->src, e->tok.line, e->tok.col, "Cannot cast relocatable address to short in global initializer");
+            }
+            v &= 0xFFFFu;
         }
 
         if (e->v.cast.ty && e->v.cast.ty->kind == TYPE_BOOL) {

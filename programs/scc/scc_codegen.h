@@ -56,6 +56,11 @@ static void cg_gen_addr(Codegen* cg, AstExpr* e);
 static void cg_scale_eax_u32(Codegen* cg, uint32_t scale, Token tok) {
     if (scale == 1) return;
 
+    if (scale == 2) {
+        emit_x86_shl_eax_imm8(cg->text, 1);
+        return;
+    }
+
     if (scale == 4) {
         emit_x86_shl_eax_imm8(cg->text, 2);
         return;
@@ -70,6 +75,11 @@ static void cg_scale_eax_u32(Codegen* cg, uint32_t scale, Token tok) {
 
 static void cg_scale_ecx_u32(Codegen* cg, uint32_t scale, Token tok) {
     if (scale == 1) return;
+
+    if (scale == 2) {
+        emit_x86_shl_ecx_imm8(cg->text, 1);
+        return;
+    }
 
     if (scale == 4) {
         emit_x86_shl_ecx_imm8(cg->text, 2);
@@ -93,8 +103,13 @@ static void cg_load_from_addr(Codegen* cg, Type* ty, Token tok) {
         scc_fatal_at(cg->p->file, cg->p->src, tok.line, tok.col, "Cannot load a value of type void");
     }
 
-    if (ty->kind == TYPE_CHAR || ty->kind == TYPE_BOOL) {
+    if (ty->kind == TYPE_CHAR || ty->kind == TYPE_UCHAR || ty->kind == TYPE_BOOL) {
         emit_x86_movzx_eax_memeax_u8(cg->text);
+        return;
+    }
+
+    if (ty->kind == TYPE_SHORT || ty->kind == TYPE_USHORT) {
+        emit_x86_movzx_eax_memeax_u16(cg->text);
         return;
     }
 
@@ -114,8 +129,13 @@ static void cg_store_to_addr_ecx(Codegen* cg, Type* ty, Token tok) {
         return;
     }
 
-    if (ty && ty->kind == TYPE_CHAR) {
+    if (ty && (ty->kind == TYPE_CHAR || ty->kind == TYPE_UCHAR)) {
         emit_x86_mov_memecx_u8_al(cg->text);
+        return;
+    }
+
+    if (ty && (ty->kind == TYPE_SHORT || ty->kind == TYPE_USHORT)) {
+        emit_x86_mov_memecx_u16_ax(cg->text);
         return;
     }
 
@@ -540,7 +560,7 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
     if (e->kind == AST_EXPR_NAME) {
         Var* v = e->v.name.var;
         if (v) {
-            if (v->ty && (v->ty->kind == TYPE_CHAR || v->ty->kind == TYPE_BOOL)) {
+            if (v->ty && (v->ty->kind == TYPE_CHAR || v->ty->kind == TYPE_UCHAR || v->ty->kind == TYPE_BOOL)) {
                 emit_x86_movzx_eax_membp_disp(cg->text, v->ebp_offset);
             } else {
                 emit_x86_mov_eax_membp_disp(cg->text, v->ebp_offset);
@@ -555,7 +575,7 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
         }
 
         uint32_t off = cg->text->size;
-        if (s->ty && (s->ty->kind == TYPE_CHAR || s->ty->kind == TYPE_BOOL)) {
+        if (s->ty && (s->ty->kind == TYPE_CHAR || s->ty->kind == TYPE_UCHAR || s->ty->kind == TYPE_BOOL)) {
             emit_x86_movzx_eax_memabs_u8(cg->text, 0);
             emit_reloc_text(cg, off + 3, s->elf_index, R_386_32);
         } else {
@@ -575,7 +595,7 @@ static void gen_expr(Codegen* cg, AstExpr* e) {
 
     if (e->kind == AST_EXPR_CAST) {
         gen_expr(cg, e->v.cast.expr);
-        if (e->v.cast.ty && e->v.cast.ty->kind == TYPE_CHAR) {
+        if (e->v.cast.ty && (e->v.cast.ty->kind == TYPE_CHAR || e->v.cast.ty->kind == TYPE_UCHAR)) {
             emit_x86_and_eax_imm32(cg->text, 0xFF);
         } else if (e->v.cast.ty && e->v.cast.ty->kind == TYPE_BOOL) {
             emit_x86_test_eax_eax(cg->text);

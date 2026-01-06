@@ -15,7 +15,8 @@ static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, u
     buf_write(&symtab, &null_sym, sizeof(null_sym));
 
     for (int i = 0; i < syms->count; i++) {
-        Symbol* ss = &syms->data[i];
+        Symbol* ss = syms->data[i];
+        if (!ss) continue;
         uint32_t name_off = buf_add_cstr(&strtab, ss->name);
 
         Elf32_Sym es;
@@ -117,7 +118,8 @@ static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, u
     sh[4].sh_link = 5;
     int local_count = 0;
     for (int i = 0; i < syms->count; i++) {
-        if (syms->data[i].bind == STB_LOCAL) local_count++;
+        Symbol* s = syms->data[i];
+        if (s && s->bind == STB_LOCAL) local_count++;
     }
     sh[4].sh_info = (Elf32_Word)(1 + local_count);
     sh[4].sh_entsize = sizeof(Elf32_Sym);

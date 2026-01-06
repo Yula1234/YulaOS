@@ -2,6 +2,7 @@
 #define SCC_IR_X86_H_INCLUDED
 
 #include "scc_ir.h"
+#include "scc_diag.h"
 #include "scc_x86.h"
 
 typedef struct {
@@ -37,16 +38,24 @@ static void ir_x86_emit_reloc_text(IrX86Ctx* cx, uint32_t offset, int sym_index,
 }
 
 static void ir_x86_store_eax_to_slot(Buffer* text, IrType* ty, int32_t disp) {
-    if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_BOOL)) {
+    if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_U8 || ty->kind == IR_TY_BOOL)) {
         emit_x86_mov_membp_disp_al(text, disp);
+        return;
+    }
+    if (ty && (ty->kind == IR_TY_I16 || ty->kind == IR_TY_U16)) {
+        emit_x86_mov_membp_disp_ax(text, disp);
         return;
     }
     emit_x86_mov_membp_disp_eax(text, disp);
 }
 
 static void ir_x86_load_slot_to_eax(Buffer* text, IrType* ty, int32_t disp) {
-    if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_BOOL)) {
+    if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_U8 || ty->kind == IR_TY_BOOL)) {
         emit_x86_movzx_eax_membp_disp(text, disp);
+        return;
+    }
+    if (ty && (ty->kind == IR_TY_I16 || ty->kind == IR_TY_U16)) {
+        emit_x86_movzx_eax_membp_disp_u16(text, disp);
         return;
     }
     emit_x86_mov_eax_membp_disp(text, disp);
@@ -59,6 +68,10 @@ static uint8_t ir_x86_icmp_cc(IrIcmpPred p) {
     if (p == IR_ICMP_SLE) return 0xE;
     if (p == IR_ICMP_SGT) return 0xF;
     if (p == IR_ICMP_SGE) return 0xD;
+    if (p == IR_ICMP_ULT) return 0x2;
+    if (p == IR_ICMP_ULE) return 0x6;
+    if (p == IR_ICMP_UGT) return 0x7;
+    if (p == IR_ICMP_UGE) return 0x3;
     return 0x4;
 }
 
@@ -69,6 +82,10 @@ static void ir_x86_load_value_to_eax(IrFunc* f, Buffer* text, IrValueId v, int32
         return;
     }
 
+    if (v > f->value_count) {
+        scc_fatal_at(0, 0, 0, 0, "Internal error: invalid IR value id in x86 load");
+    }
+
     IrType* ty = f->values[v - 1].type;
 
     if (value_loc && value_loc[v].kind == IR_X86_LOC_REG) {
@@ -76,7 +93,8 @@ static void ir_x86_load_value_to_eax(IrFunc* f, Buffer* text, IrValueId v, int32
         if (r != X86_REG_EAX) emit_x86_mov_r32_r32(text, X86_REG_EAX, r);
 
         if (ty && ty->kind == IR_TY_BOOL) emit_x86_and_eax_imm32(text, 1u);
-        else if (ty && ty->kind == IR_TY_I8) emit_x86_and_eax_imm32(text, 0xFFu);
+        else if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_U8)) emit_x86_and_eax_imm32(text, 0xFFu);
+        else if (ty && (ty->kind == IR_TY_I16 || ty->kind == IR_TY_U16)) emit_x86_and_eax_imm32(text, 0xFFFFu);
         return;
     }
     ir_x86_load_slot_to_eax(text, ty, value_disp[v]);
@@ -86,12 +104,17 @@ static void ir_x86_store_value_from_eax(IrFunc* f, Buffer* text, IrValueId v, in
     if (!f || !text) return;
     if (v == 0) return;
 
+    if (v > f->value_count) {
+        scc_fatal_at(0, 0, 0, 0, "Internal error: invalid IR value id in x86 store");
+    }
+
     IrType* ty = f->values[v - 1].type;
 
     if (value_loc && value_loc[v].kind == IR_X86_LOC_REG) {
         X86Reg r = value_loc[v].reg;
         if (ty && ty->kind == IR_TY_BOOL) emit_x86_and_eax_imm32(text, 1u);
-        else if (ty && ty->kind == IR_TY_I8) emit_x86_and_eax_imm32(text, 0xFFu);
+        else if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_U8)) emit_x86_and_eax_imm32(text, 0xFFu);
+        else if (ty && (ty->kind == IR_TY_I16 || ty->kind == IR_TY_U16)) emit_x86_and_eax_imm32(text, 0xFFFFu);
         if (r != X86_REG_EAX) emit_x86_mov_r32_r32(text, r, X86_REG_EAX);
         return;
     }
@@ -186,8 +209,28 @@ static void ir_x86_emit_instr_simple(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int3
         return;
     }
 
-    if (ins->kind == IR_INSTR_ZEXT || ins->kind == IR_INSTR_PTRTOINT || ins->kind == IR_INSTR_INTTOPTR) {
+    if (ins->kind == IR_INSTR_ZEXT || ins->kind == IR_INSTR_BITCAST || ins->kind == IR_INSTR_PTRTOINT || ins->kind == IR_INSTR_INTTOPTR) {
         ir_x86_load_value_to_eax(f, text, ins->v.cast.src, value_disp, value_loc);
+        ir_x86_store_value_from_eax(f, text, ins->result, value_disp, value_loc);
+        return;
+    }
+
+    if (ins->kind == IR_INSTR_SEXT) {
+        IrValueId srcv = ins->v.cast.src;
+        if (srcv != 0 && srcv > f->value_count) {
+            scc_fatal_at(0, 0, 0, 0, "Internal error: invalid IR value id in x86 sext");
+        }
+        IrType* st = (srcv != 0) ? f->values[srcv - 1].type : 0;
+        ir_x86_load_value_to_eax(f, text, srcv, value_disp, value_loc);
+
+        if (st && st->kind == IR_TY_I16) {
+            emit_x86_shl_eax_imm8(text, 16);
+            emit_x86_sar_eax_imm8(text, 16);
+        } else if (st && st->kind == IR_TY_I8) {
+            emit_x86_shl_eax_imm8(text, 24);
+            emit_x86_sar_eax_imm8(text, 24);
+        }
+
         ir_x86_store_value_from_eax(f, text, ins->result, value_disp, value_loc);
         return;
     }
@@ -196,7 +239,9 @@ static void ir_x86_emit_instr_simple(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int3
         ir_x86_load_value_to_eax(f, text, ins->v.cast.src, value_disp, value_loc);
         if (ins->type && ins->type->kind == IR_TY_BOOL) {
             emit_x86_and_eax_imm32(text, 1u);
-        } else if (ins->type && ins->type->kind == IR_TY_I8) {
+        } else if (ins->type && (ins->type->kind == IR_TY_I16 || ins->type->kind == IR_TY_U16)) {
+            emit_x86_and_eax_imm32(text, 0xFFFFu);
+        } else if (ins->type && (ins->type->kind == IR_TY_I8 || ins->type->kind == IR_TY_U8)) {
             emit_x86_and_eax_imm32(text, 0xFFu);
         }
         ir_x86_store_value_from_eax(f, text, ins->result, value_disp, value_loc);
@@ -212,8 +257,10 @@ static void ir_x86_emit_instr_simple(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int3
 
     if (ins->kind == IR_INSTR_LOAD) {
         ir_x86_load_value_to_eax(f, text, ins->v.load.addr, value_disp, value_loc);
-        if (ins->type && (ins->type->kind == IR_TY_I8 || ins->type->kind == IR_TY_BOOL)) {
+        if (ins->type && (ins->type->kind == IR_TY_I8 || ins->type->kind == IR_TY_U8 || ins->type->kind == IR_TY_BOOL)) {
             emit_x86_movzx_eax_memeax_u8(text);
+        } else if (ins->type && (ins->type->kind == IR_TY_I16 || ins->type->kind == IR_TY_U16)) {
+            emit_x86_movzx_eax_memeax_u16(text);
         } else {
             emit_x86_mov_eax_memeax_u32(text);
         }
@@ -230,9 +277,15 @@ static void ir_x86_emit_instr_simple(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int3
         emit_x86_mov_ecx_eax(text);
 
         emit_x86_pop_eax(text);
-        IrType* ty = (ins->v.store.value != 0) ? f->values[ins->v.store.value - 1].type : 0;
-        if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_BOOL)) {
+        IrValueId sv = ins->v.store.value;
+        if (sv != 0 && sv > f->value_count) {
+            scc_fatal_at(0, 0, 0, 0, "Internal error: invalid IR value id in x86 store (value)");
+        }
+        IrType* ty = (sv != 0) ? f->values[sv - 1].type : 0;
+        if (ty && (ty->kind == IR_TY_I8 || ty->kind == IR_TY_U8 || ty->kind == IR_TY_BOOL)) {
             emit_x86_mov_memecx_u8_al(text);
+        } else if (ty && (ty->kind == IR_TY_I16 || ty->kind == IR_TY_U16)) {
+            emit_x86_mov_memecx_u16_ax(text);
         } else {
             emit_x86_mov_memecx_u32_eax(text);
         }
@@ -363,9 +416,9 @@ static void ir_x86_compute_liveness(IrFunc* f, IrX86Liveness* out_lv) {
             IrInstr* ins = &f->instrs[iid - 1];
             pos++;
 
-            if (ins->kind == IR_INSTR_ZEXT || ins->kind == IR_INSTR_TRUNC || ins->kind == IR_INSTR_PTRTOINT || ins->kind == IR_INSTR_INTTOPTR) {
+            if (ins->kind == IR_INSTR_ZEXT || ins->kind == IR_INSTR_SEXT || ins->kind == IR_INSTR_TRUNC || ins->kind == IR_INSTR_BITCAST || ins->kind == IR_INSTR_PTRTOINT || ins->kind == IR_INSTR_INTTOPTR) {
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.cast.src, pos);
-            } else if (ins->kind == IR_INSTR_ADD || ins->kind == IR_INSTR_SUB || ins->kind == IR_INSTR_MUL || ins->kind == IR_INSTR_SDIV || ins->kind == IR_INSTR_SREM) {
+            } else if (ins->kind == IR_INSTR_ADD || ins->kind == IR_INSTR_SUB || ins->kind == IR_INSTR_MUL || ins->kind == IR_INSTR_SDIV || ins->kind == IR_INSTR_SREM || ins->kind == IR_INSTR_UDIV || ins->kind == IR_INSTR_UREM) {
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.bin.left, pos);
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.bin.right, pos);
             } else if (ins->kind == IR_INSTR_ICMP) {
@@ -380,8 +433,15 @@ static void ir_x86_compute_liveness(IrFunc* f, IrX86Liveness* out_lv) {
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.ptr_add.base, pos);
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.ptr_add.offset_bytes, pos);
             } else if (ins->kind == IR_INSTR_CALL) {
+                if (ins->v.call.arg_count && !ins->v.call.args) {
+                    scc_fatal_at(0, 0, 0, 0, "Internal error: missing call args array in liveness");
+                }
                 for (uint32_t ai = 0; ai < ins->v.call.arg_count; ai++) {
-                    ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.call.args ? ins->v.call.args[ai] : 0, pos);
+                    IrValueId av = ins->v.call.args ? ins->v.call.args[ai] : 0;
+                    if (av != 0 && av > f->value_count) {
+                        scc_fatal_at(0, 0, 0, 0, "Internal error: invalid call arg value id in liveness");
+                    }
+                    ir_x86_lv_record_use(f, &lv, use_b, local_defs, av, pos);
                 }
             } else if (ins->kind == IR_INSTR_SYSCALL) {
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.syscall.n, pos);
@@ -710,7 +770,7 @@ static void ir_x86_emit_instr_arith(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32
     if (!cx || !f || !ins || !value_disp) return;
     Buffer* text = cx->text;
 
-    if (ins->kind != IR_INSTR_ADD && ins->kind != IR_INSTR_SUB && ins->kind != IR_INSTR_MUL && ins->kind != IR_INSTR_SDIV && ins->kind != IR_INSTR_SREM) {
+    if (ins->kind != IR_INSTR_ADD && ins->kind != IR_INSTR_SUB && ins->kind != IR_INSTR_MUL && ins->kind != IR_INSTR_SDIV && ins->kind != IR_INSTR_SREM && ins->kind != IR_INSTR_UDIV && ins->kind != IR_INSTR_UREM) {
         return;
     }
 
@@ -727,7 +787,7 @@ static void ir_x86_emit_instr_arith(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32
         emit_x86_mov_eax_ecx(text);
     } else if (ins->kind == IR_INSTR_MUL) {
         emit_x86_imul_eax_ecx(text);
-    } else {
+    } else if (ins->kind == IR_INSTR_SDIV || ins->kind == IR_INSTR_SREM) {
         emit_x86_push_r32(text, X86_REG_EBX);
         emit_x86_push_r32(text, X86_REG_EDX);
         emit_x86_mov_ebx_eax(text);
@@ -735,6 +795,18 @@ static void ir_x86_emit_instr_arith(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32
         emit_x86_cdq(text);
         emit_x86_idiv_ebx(text);
         if (ins->kind == IR_INSTR_SREM) {
+            emit_x86_mov_eax_edx(text);
+        }
+        emit_x86_pop_r32(text, X86_REG_EDX);
+        emit_x86_pop_r32(text, X86_REG_EBX);
+    } else {
+        emit_x86_push_r32(text, X86_REG_EBX);
+        emit_x86_push_r32(text, X86_REG_EDX);
+        emit_x86_mov_ebx_eax(text);
+        emit_x86_mov_eax_ecx(text);
+        emit_x86_xor_edx_edx(text);
+        emit_x86_div_ebx(text);
+        if (ins->kind == IR_INSTR_UREM) {
             emit_x86_mov_eax_edx(text);
         }
         emit_x86_pop_r32(text, X86_REG_EDX);
@@ -780,8 +852,16 @@ static void ir_x86_emit_instr_misc(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32_
     if (ins->kind == IR_INSTR_CALL) {
         Symbol* s = ins->v.call.callee;
 
+        if (ins->v.call.arg_count && !ins->v.call.args) {
+            scc_fatal_at(0, 0, 0, 0, "Internal error: missing call args array in x86 call emission");
+        }
+
         for (int i = (int)ins->v.call.arg_count - 1; i >= 0; i--) {
-            ir_x86_load_value_to_eax(f, text, ins->v.call.args ? ins->v.call.args[i] : 0, value_disp, value_loc);
+            IrValueId av = ins->v.call.args ? ins->v.call.args[i] : 0;
+            if (av != 0 && av > f->value_count) {
+                scc_fatal_at(0, 0, 0, 0, "Internal error: invalid call arg value id in x86 call emission");
+            }
+            ir_x86_load_value_to_eax(f, text, av, value_disp, value_loc);
             emit_x86_push_eax(text);
         }
 
@@ -924,8 +1004,12 @@ static uint32_t ir_x86_codegen_func(IrX86Ctx* cx, IrFunc* f) {
         for (uint32_t i = 0; i < entry->param_count; i++) {
             int32_t disp = (int32_t)(8 + i * 4);
             IrValueId pv = entry->params[i];
-            IrType* pty = (pv != 0) ? f->values[pv - 1].type : 0;
-            if (pty && (pty->kind == IR_TY_I8 || pty->kind == IR_TY_BOOL)) emit_x86_movzx_eax_membp_disp(text, disp);
+            if (pv == 0 || pv > f->value_count) {
+                scc_fatal_at(0, 0, 0, 0, "Internal error: invalid IR value id in x86 prologue param load");
+            }
+            IrType* pty = f->values[pv - 1].type;
+            if (pty && (pty->kind == IR_TY_I8 || pty->kind == IR_TY_U8 || pty->kind == IR_TY_BOOL)) emit_x86_movzx_eax_membp_disp(text, disp);
+            else if (pty && (pty->kind == IR_TY_I16 || pty->kind == IR_TY_U16)) emit_x86_movzx_eax_membp_disp_u16(text, disp);
             else emit_x86_mov_eax_membp_disp(text, disp);
             ir_x86_store_value_from_eax(f, text, pv, value_disp, value_loc);
         }
