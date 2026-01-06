@@ -47,7 +47,7 @@ static inline void* sbrk(int incr) {
     return (void*)syscall(8, incr, 0, 0);
 }
 
-void* malloc(uint32_t size);
+void* malloc(size_t size);
 void free(void* ptr);
 void* calloc(size_t nelem, size_t elsize);
 void* realloc(void* ptr, size_t size);
