@@ -81,24 +81,32 @@ static inline void sys_exit() { __asm__ volatile("int $0x80" : : "a"(0), "b"(0))
 
 static int shell_dup(int oldfd) {
     task_t* curr = proc_current();
-    int newfd = -1;
-    for(int i=0; i<MAX_PROCESS_FDS; i++) {
-        if(!curr->fds[i].used) { newfd = i; break; }
-    }
-    if (newfd == -1) return -1;
-    
-    curr->fds[newfd] = curr->fds[oldfd];
-    if (curr->fds[newfd].node) __sync_fetch_and_add(&curr->fds[newfd].node->refs, 1);
+    file_t* of = proc_fd_get(curr, oldfd);
+    if (!of || !of->used) return -1;
+
+    file_t* nf = 0;
+    int newfd = proc_fd_alloc(curr, &nf);
+    if (newfd < 0 || !nf) return -1;
+
+    *nf = *of;
+    if (nf->node) __sync_fetch_and_add(&nf->node->refs, 1);
     return newfd;
 }
 
 static int shell_dup2(int oldfd, int newfd) {
     task_t* curr = proc_current();
-    if (curr->fds[newfd].used) {
+    if (newfd < 0) return -1;
+    file_t* of = proc_fd_get(curr, oldfd);
+    if (!of || !of->used) return -1;
+
+    if (proc_fd_get(curr, newfd)) {
         vfs_close(newfd);
     }
-    curr->fds[newfd] = curr->fds[oldfd];
-    if (curr->fds[newfd].node) __sync_fetch_and_add(&curr->fds[newfd].node->refs, 1);
+
+    file_t* nf = 0;
+    if (proc_fd_add_at(curr, newfd, &nf) < 0 || !nf) return -1;
+    *nf = *of;
+    if (nf->node) __sync_fetch_and_add(&nf->node->refs, 1);
     return newfd;
 }
 
@@ -107,18 +115,22 @@ static int shell_create_pipe(int fds[2]) {
     if (vfs_create_pipe(&r, &w) != 0) return -1;
     
     task_t* curr = proc_current();
-    int r_fd = -1, w_fd = -1;
-    
-    for(int i=0; i<MAX_PROCESS_FDS; i++) if(!curr->fds[i].used) { r_fd = i; break; }
-    for(int i=0; i<MAX_PROCESS_FDS; i++) if(!curr->fds[i].used && i != r_fd) { w_fd = i; break; }
-    
-    if (r_fd == -1 || w_fd == -1) {
-        return -1; 
+    file_t* fr = 0;
+    file_t* fw = 0;
+
+    int r_fd = proc_fd_alloc(curr, &fr);
+    if (r_fd < 0 || !fr) return -1;
+    int w_fd = proc_fd_alloc(curr, &fw);
+    if (w_fd < 0 || !fw) {
+        file_t tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        proc_fd_remove(curr, r_fd, &tmp);
+        return -1;
     }
-    
-    curr->fds[r_fd].node = r; curr->fds[r_fd].offset = 0; curr->fds[r_fd].used = 1;
-    curr->fds[w_fd].node = w; curr->fds[w_fd].offset = 0; curr->fds[w_fd].used = 1;
-    
+
+    fr->node = r; fr->offset = 0; fr->used = 1;
+    fw->node = w; fw->offset = 0; fw->used = 1;
+
     fds[0] = r_fd;
     fds[1] = w_fd;
     return 0;

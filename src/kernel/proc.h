@@ -51,6 +51,12 @@ typedef enum {
     PRIO_SUPER = 30,
 } task_prio_t;
 
+typedef struct proc_fd_entry {
+    int fd;
+    file_t file;
+    dlist_head_t list;
+} proc_fd_entry_t;
+
 typedef struct task {
     uint32_t pid;
     int is_queued;
@@ -87,7 +93,8 @@ typedef struct task {
     uint32_t kstack_size;
     uint32_t stack_bottom;
     uint32_t stack_top;
-    file_t fds[MAX_PROCESS_FDS];
+    dlist_head_t fd_list;
+    int fd_next;
     uint32_t cwd_inode;
 
     void* terminal;
@@ -120,6 +127,12 @@ typedef struct task {
     semaphore_t exit_sem; 
   
 } task_t;
+
+void proc_fd_table_init(task_t* t);
+file_t* proc_fd_get(task_t* t, int fd);
+int proc_fd_alloc(task_t* t, file_t** out_file);
+int proc_fd_add_at(task_t* t, int fd, file_t** out_file);
+int proc_fd_remove(task_t* t, int fd, file_t* out_file);
 
 void proc_init(void);
 task_t* proc_current(void);

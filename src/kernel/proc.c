@@ -103,6 +103,89 @@ task_t* proc_current() {
     return cpu->current_task; 
 }
 
+void proc_fd_table_init(task_t* t) {
+    if (!t) return;
+    dlist_init(&t->fd_list);
+    t->fd_next = 0;
+}
+
+static proc_fd_entry_t* proc_fd_find_entry(task_t* t, int fd) {
+    if (!t || fd < 0) return 0;
+    proc_fd_entry_t* e;
+    dlist_for_each_entry(e, &t->fd_list, list) {
+        if (e->fd == fd) return e;
+    }
+    return 0;
+}
+
+file_t* proc_fd_get(task_t* t, int fd) {
+    proc_fd_entry_t* e = proc_fd_find_entry(t, fd);
+    return e ? &e->file : 0;
+}
+
+int proc_fd_add_at(task_t* t, int fd, file_t** out_file) {
+    if (!t || fd < 0) return -1;
+    if (proc_fd_find_entry(t, fd)) return -1;
+
+    proc_fd_entry_t* e = (proc_fd_entry_t*)kmalloc(sizeof(proc_fd_entry_t));
+    if (!e) return -1;
+    memset(e, 0, sizeof(*e));
+    e->fd = fd;
+
+    proc_fd_entry_t* pos;
+    dlist_for_each_entry(pos, &t->fd_list, list) {
+        if (pos->fd > fd) {
+            dlist_add_tail(&e->list, &pos->list);
+            if (fd == t->fd_next) t->fd_next = fd + 1;
+            if (out_file) *out_file = &e->file;
+            return fd;
+        }
+    }
+
+    dlist_add_tail(&e->list, &t->fd_list);
+
+    if (fd == t->fd_next) t->fd_next = fd + 1;
+    if (out_file) *out_file = &e->file;
+    return fd;
+}
+
+int proc_fd_alloc(task_t* t, file_t** out_file) {
+    if (!t) return -1;
+
+    int expected = t->fd_next;
+    if (expected < 0) expected = 0;
+
+    proc_fd_entry_t* e;
+    dlist_for_each_entry(e, &t->fd_list, list) {
+        if (e->fd < expected) continue;
+        if (e->fd == expected) {
+            expected++;
+            continue;
+        }
+        if (e->fd > expected) {
+            break;
+        }
+    }
+
+    int fd = proc_fd_add_at(t, expected, out_file);
+    if (fd >= 0 && fd == t->fd_next) t->fd_next = fd + 1;
+    return fd;
+}
+
+int proc_fd_remove(task_t* t, int fd, file_t* out_file) {
+    if (!t || fd < 0) return -1;
+
+    proc_fd_entry_t* e = proc_fd_find_entry(t, fd);
+    if (!e) return -1;
+
+    if (out_file) *out_file = e->file;
+    dlist_del(&e->list);
+    kfree(e);
+
+    if (fd < t->fd_next) t->fd_next = fd;
+    return 0;
+}
+
 static void list_append(task_t* t) {
     t->next = 0;
     t->prev = 0;
@@ -160,6 +243,7 @@ static task_t* alloc_task(void) {
     }
     
     memset(t, 0, sizeof(task_t));
+    proc_fd_table_init(t);
 
     memcpy(t->fpu_state, initial_fpu_state, 512);
     
@@ -185,12 +269,16 @@ static task_t* alloc_task(void) {
 
 void proc_free_resources(task_t* t) {
     if (!t) return;
-    
-    for (int i = 0; i < MAX_PROCESS_FDS; i++) {
-        if (t->fds[i].used) {
-            file_t* f = &t->fds[i];
-            vfs_node_t* node = f->node;
-            
+
+    proc_fd_entry_t* e;
+    proc_fd_entry_t* n;
+    dlist_for_each_entry_safe(e, n, &t->fd_list, list) {
+        file_t f = e->file;
+        dlist_del(&e->list);
+        kfree(e);
+
+        if (f.used) {
+            vfs_node_t* node = f.node;
             if (node) {
                 if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
                     if (node->ops && node->ops->close) {
@@ -200,8 +288,6 @@ void proc_free_resources(task_t* t) {
                     }
                 }
             }
-            f->used = 0; 
-            f->node = 0;
         }
     }
 
@@ -449,18 +535,56 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
      if (proc_current()) {
         task_t* parent = proc_current();
-        for (int i = 0; i < MAX_PROCESS_FDS; i++) {
-            if (parent->fds[i].used) {
-                t->fds[i] = parent->fds[i];
-                if (t->fds[i].node) {
-                    __sync_fetch_and_add(&t->fds[i].node->refs, 1);
+        proc_fd_entry_t* pe;
+        dlist_for_each_entry(pe, &parent->fd_list, list) {
+            file_t* nf = 0;
+            if (proc_fd_add_at(t, pe->fd, &nf) < 0) continue;
+            if (nf) {
+                *nf = pe->file;
+                if (nf->node) {
+                    __sync_fetch_and_add(&nf->node->refs, 1);
                 }
             }
         }
     } else {
-        t->fds[0].node = devfs_fetch("kbd");     t->fds[0].used = 1;
-        t->fds[1].node = devfs_fetch("console"); t->fds[1].used = 1;
-        t->fds[2] = t->fds[1]; 
+        file_t* f0 = 0;
+        file_t* f1 = 0;
+        file_t* f2 = 0;
+        if (proc_fd_add_at(t, 0, &f0) >= 0 && f0) {
+            vfs_node_t* dev = devfs_fetch("kbd");
+            if (dev) {
+                vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+                if (node) {
+                    memcpy(node, dev, sizeof(vfs_node_t));
+                    node->refs = 1;
+                    f0->node = node;
+                }
+            }
+            f0->offset = 0;
+            f0->used = (f0->node != 0);
+        }
+        if (proc_fd_add_at(t, 1, &f1) >= 0 && f1) {
+            vfs_node_t* dev = devfs_fetch("console");
+            if (dev) {
+                vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+                if (node) {
+                    memcpy(node, dev, sizeof(vfs_node_t));
+                    node->refs = 1;
+                    f1->node = node;
+                }
+            }
+            f1->offset = 0;
+            f1->used = (f1->node != 0);
+        }
+        if (proc_fd_add_at(t, 2, &f2) >= 0 && f2 && f1 && f1->used) {
+            *f2 = *f1;
+            if (f2->node) {
+                __sync_fetch_and_add(&f2->node->refs, 1);
+            }
+        } else if (f2) {
+            f2->used = 0;
+            f2->node = 0;
+        }
     }
     
     t->priority = PRIO_USER;

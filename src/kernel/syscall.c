@@ -424,31 +424,40 @@ void syscall_handler(registers_t* regs) {
                 regs->eax = -1; break;
             }
 
-            int fd_r = -1, fd_w = -1;
-            for (int i = 0; i < MAX_PROCESS_FDS; i++) {
-                if (!curr->fds[i].used) {
-                    if (fd_r == -1) fd_r = i;
-                    else { fd_w = i; break; }
-                }
+            file_t* fr = 0;
+            file_t* fw = 0;
+
+            int fd_r = proc_fd_alloc(curr, &fr);
+            if (fd_r < 0 || !fr) {
+                regs->eax = -1;
+                break;
             }
 
-            if (fd_r == -1 || fd_w == -1) {
+            int fd_w = proc_fd_alloc(curr, &fw);
+            if (fd_w < 0 || !fw) {
+                file_t tmp;
+                memset(&tmp, 0, sizeof(tmp));
+                proc_fd_remove(curr, fd_r, &tmp);
                 regs->eax = -1;
                 break;
             }
 
             vfs_node_t *r_node, *w_node;
             if (vfs_create_pipe(&r_node, &w_node) != 0) {
+                file_t tmp;
+                memset(&tmp, 0, sizeof(tmp));
+                proc_fd_remove(curr, fd_r, &tmp);
+                proc_fd_remove(curr, fd_w, &tmp);
                 regs->eax = -1; break;
             }
 
-            curr->fds[fd_r].node = r_node;
-            curr->fds[fd_r].offset = 0;
-            curr->fds[fd_r].used = 1;
+            fr->node = r_node;
+            fr->offset = 0;
+            fr->used = 1;
 
-            curr->fds[fd_w].node = w_node;
-            curr->fds[fd_w].offset = 0;
-            curr->fds[fd_w].used = 1;
+            fw->node = w_node;
+            fw->offset = 0;
+            fw->used = 1;
 
             user_fds[0] = fd_r;
             user_fds[1] = fd_w;
@@ -461,10 +470,12 @@ void syscall_handler(registers_t* regs) {
             int oldfd = (int)regs->ebx;
             int newfd = (int)regs->ecx;
 
-            if (oldfd < 0 || oldfd >= MAX_PROCESS_FDS || !curr->fds[oldfd].used) {
+            if (oldfd < 0 || newfd < 0) {
                 regs->eax = -1; break;
             }
-            if (newfd < 0 || newfd >= MAX_PROCESS_FDS) {
+
+            file_t* of = proc_fd_get(curr, oldfd);
+            if (!of || !of->used) {
                 regs->eax = -1; break;
             }
 
@@ -472,16 +483,20 @@ void syscall_handler(registers_t* regs) {
                 regs->eax = newfd; break;
             }
 
-            if (curr->fds[newfd].used) {
+            if (proc_fd_get(curr, newfd)) {
                 vfs_close(newfd);
             }
 
-            curr->fds[newfd] = curr->fds[oldfd];
-            
-            if (curr->fds[newfd].node) {
-                curr->fds[newfd].node->refs++;
+            file_t* nf = 0;
+            if (proc_fd_add_at(curr, newfd, &nf) < 0 || !nf) {
+                regs->eax = -1;
+                break;
             }
-            
+            *nf = *of;
+            if (nf->node) {
+                __sync_fetch_and_add(&nf->node->refs, 1);
+            }
+
             regs->eax = newfd;
         }
         break;
@@ -499,7 +514,8 @@ void syscall_handler(registers_t* regs) {
 
             if (size == 0) { regs->eax = 0; break; }
 
-            if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used || !curr->fds[fd].node) {
+            file_t* f = proc_fd_get(curr, fd);
+            if (fd < 0 || !f || !f->used || !f->node) {
                 regs->eax = 0; 
                 break;
             }
@@ -515,10 +531,10 @@ void syscall_handler(registers_t* regs) {
             area->vaddr_end = vaddr + size_aligned;
             area->file_offset = 0;
             area->length = size;
-            area->file = curr->fds[fd].node;
+            area->file = f->node;
             area->file_size = size;
             
-            area->file->refs++;
+            __sync_fetch_and_add(&area->file->refs, 1);
 
             area->next = curr->mmap_list;
             curr->mmap_list = area;

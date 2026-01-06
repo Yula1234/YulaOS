@@ -39,15 +39,6 @@ int vfs_open(const char* path, int flags) {
     task_t* curr = proc_current();
     if (!curr) return -1;
 
-    int fd = -1;
-    for (int i = 0; i < MAX_PROCESS_FDS; i++) {
-        if (!curr->fds[i].used) {
-            fd = i;
-            break;
-        }
-    }
-    if (fd == -1) return -1;
-
     vfs_node_t* node = 0;
 
     const char* target_path = path;
@@ -103,17 +94,27 @@ int vfs_open(const char* path, int flags) {
         node->ops->open(node);
     }
 
-    curr->fds[fd].node = node;
-    curr->fds[fd].offset = 0;
-    curr->fds[fd].used = 1;
+    file_t* f = 0;
+    int fd = proc_fd_alloc(curr, &f);
+    if (fd < 0 || !f) {
+        if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
+            if (node->ops && node->ops->close) node->ops->close(node);
+            else kfree(node);
+        }
+        return -1;
+    }
+
+    f->node = node;
+    f->offset = 0;
+    f->used = 1;
 
     return fd;
 }
 
 int vfs_read(int fd, void* buf, uint32_t size) {
     task_t* curr = proc_current();
-    if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used) return -1;
-    file_t* f = &curr->fds[fd];
+    file_t* f = proc_fd_get(curr, fd);
+    if (!f || !f->used) return -1;
     if (!f->node->ops->read) return -1;
 
     int res = f->node->ops->read(f->node, f->offset, size, buf);
@@ -123,8 +124,8 @@ int vfs_read(int fd, void* buf, uint32_t size) {
 
 int vfs_write(int fd, const void* buf, uint32_t size) {
     task_t* curr = proc_current();
-    if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used) return -1;
-    file_t* f = &curr->fds[fd];
+    file_t* f = proc_fd_get(curr, fd);
+    if (!f || !f->used) return -1;
     if (!f->node->ops->write) return -1;
 
     int res = f->node->ops->write(f->node, f->offset, size, buf);
@@ -134,10 +135,12 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
 
 int vfs_close(int fd) {
     task_t* curr = proc_current();
-    if (fd < 0 || fd >= MAX_PROCESS_FDS || !curr->fds[fd].used) return -1;
-    
-    file_t* f = &curr->fds[fd];
-    vfs_node_t* node = f->node;
+
+    file_t f;
+    memset(&f, 0, sizeof(f));
+    if (proc_fd_remove(curr, fd, &f) < 0) return -1;
+
+    vfs_node_t* node = f.node;
 
     if (node) {
         if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
@@ -149,9 +152,6 @@ int vfs_close(int fd) {
             }
         }
     }
-    
-    f->node = 0;
-    f->used = 0;
     return 0;
 }
 
