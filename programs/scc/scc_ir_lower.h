@@ -359,6 +359,11 @@ static Type* ir_lower_lvalue_type(IrLowerCtx* lc, AstExpr* e) {
     return 0;
 }
 
+static TypeKind ir_tc_uac_common_int_kind(TypeKind ak, TypeKind bk);
+static Type* ir_tc_uac_type_from_kind(IrLowerCtx* lc, TypeKind k);
+static Type* ir_tc_uac_common_int_type(IrLowerCtx* lc, Type* a, Type* b);
+static Type* ir_tc_uac_promote_int_type(IrLowerCtx* lc, Type* a);
+
 static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
     if (!lc || !e) return 0;
 
@@ -394,6 +399,13 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
             if (pt && pt->kind == TYPE_PTR) return pt->base;
             return 0;
         }
+        if (e->v.unary.op == AST_UNOP_POS || e->v.unary.op == AST_UNOP_NEG) {
+            Type* ot = ir_lower_expr_type(lc, e->v.unary.expr);
+            return ir_tc_uac_promote_int_type(lc, ot);
+        }
+        if (e->v.unary.op == AST_UNOP_NOT) {
+            return type_bool(lc->p);
+        }
         return 0;
     }
 
@@ -405,10 +417,18 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
         Type* lt = ir_lower_expr_type(lc, e->v.binary.left);
         Type* rt = ir_lower_expr_type(lc, e->v.binary.right);
 
+        if (e->v.binary.op == AST_BINOP_ANDAND || e->v.binary.op == AST_BINOP_OROR) {
+            return type_bool(lc->p);
+        }
+
+        if (e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE || e->v.binary.op == AST_BINOP_LT || e->v.binary.op == AST_BINOP_LE || e->v.binary.op == AST_BINOP_GT || e->v.binary.op == AST_BINOP_GE) {
+            return type_bool(lc->p);
+        }
+
         if (e->v.binary.op == AST_BINOP_ADD) {
             if (lt && lt->kind == TYPE_PTR && (!rt || rt->kind != TYPE_PTR)) return lt;
             if (rt && rt->kind == TYPE_PTR && (!lt || lt->kind != TYPE_PTR)) return rt;
-            return 0;
+            return ir_tc_uac_common_int_type(lc, lt, rt);
         }
 
         if (e->v.binary.op == AST_BINOP_SUB) {
@@ -416,7 +436,11 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
                 if (rt && rt->kind == TYPE_PTR) return 0;
                 return lt;
             }
-            return 0;
+            return ir_tc_uac_common_int_type(lc, lt, rt);
+        }
+
+        if (e->v.binary.op == AST_BINOP_MUL || e->v.binary.op == AST_BINOP_DIV || e->v.binary.op == AST_BINOP_MOD) {
+            return ir_tc_uac_common_int_type(lc, lt, rt);
         }
 
         return 0;
@@ -433,6 +457,111 @@ static int ir_tc_is_int_type(Type* t) {
 static int ir_tc_is_scalar_type(Type* t) {
     if (!t) return 1;
     return type_is_scalar(t);
+}
+
+static int ir_tc_uac_is_unsigned_kind(TypeKind k) {
+    return k == TYPE_UINT || k == TYPE_ULONG || k == TYPE_USHORT || k == TYPE_UCHAR;
+}
+
+static TypeKind ir_tc_uac_promote_kind(TypeKind k) {
+    if (k == TYPE_BOOL || k == TYPE_CHAR || k == TYPE_UCHAR || k == TYPE_SHORT || k == TYPE_USHORT) {
+        return TYPE_INT;
+    }
+    return k;
+}
+
+static uint32_t ir_tc_uac_size_kind(TypeKind k) {
+    if (k == TYPE_BOOL) return 1;
+    if (k == TYPE_CHAR) return 1;
+    if (k == TYPE_UCHAR) return 1;
+    if (k == TYPE_SHORT) return 2;
+    if (k == TYPE_USHORT) return 2;
+    if (k == TYPE_INT) return 4;
+    if (k == TYPE_UINT) return 4;
+    if (k == TYPE_LONG) return 4;
+    if (k == TYPE_ULONG) return 4;
+    return 0;
+}
+
+static int ir_tc_uac_rank_kind(TypeKind k) {
+    if (k == TYPE_UINT) k = TYPE_INT;
+    if (k == TYPE_ULONG) k = TYPE_LONG;
+    if (k == TYPE_USHORT) k = TYPE_SHORT;
+    if (k == TYPE_UCHAR) k = TYPE_CHAR;
+
+    if (k == TYPE_BOOL) return 1;
+    if (k == TYPE_CHAR) return 2;
+    if (k == TYPE_SHORT) return 3;
+    if (k == TYPE_INT) return 4;
+    if (k == TYPE_LONG) return 5;
+    return 0;
+}
+
+static TypeKind ir_tc_uac_unsigned_of_signed_kind(TypeKind k) {
+    if (k == TYPE_INT) return TYPE_UINT;
+    if (k == TYPE_LONG) return TYPE_ULONG;
+    if (k == TYPE_SHORT) return TYPE_USHORT;
+    if (k == TYPE_CHAR) return TYPE_UCHAR;
+    return k;
+}
+
+static TypeKind ir_tc_uac_common_int_kind(TypeKind ak, TypeKind bk) {
+    if (ak == 0) ak = TYPE_INT;
+    if (bk == 0) bk = TYPE_INT;
+
+    ak = ir_tc_uac_promote_kind(ak);
+    bk = ir_tc_uac_promote_kind(bk);
+
+    if (ak == bk) return ak;
+
+    int au = ir_tc_uac_is_unsigned_kind(ak);
+    int bu = ir_tc_uac_is_unsigned_kind(bk);
+    int ar = ir_tc_uac_rank_kind(ak);
+    int br = ir_tc_uac_rank_kind(bk);
+
+    if (au == bu) return (ar >= br) ? ak : bk;
+
+    TypeKind uk = au ? ak : bk;
+    TypeKind sk = au ? bk : ak;
+    int ur = au ? ar : br;
+    int sr = au ? br : ar;
+
+    if (ur >= sr) return uk;
+
+    uint32_t usz = ir_tc_uac_size_kind(uk);
+    uint32_t ssz = ir_tc_uac_size_kind(sk);
+    if (ssz > usz) return sk;
+    return ir_tc_uac_unsigned_of_signed_kind(sk);
+}
+
+static Type* ir_tc_uac_type_from_kind(IrLowerCtx* lc, TypeKind k) {
+    if (!lc || !lc->p) return 0;
+    if (k == TYPE_INT) return type_int(lc->p);
+    if (k == TYPE_UINT) return type_uint(lc->p);
+    if (k == TYPE_LONG) return type_long(lc->p);
+    if (k == TYPE_ULONG) return type_ulong(lc->p);
+    if (k == TYPE_SHORT) return type_short(lc->p);
+    if (k == TYPE_USHORT) return type_ushort(lc->p);
+    if (k == TYPE_CHAR) return type_char(lc->p);
+    if (k == TYPE_UCHAR) return type_uchar(lc->p);
+    if (k == TYPE_BOOL) return type_bool(lc->p);
+    return 0;
+}
+
+static Type* ir_tc_uac_common_int_type(IrLowerCtx* lc, Type* a, Type* b) {
+    TypeKind ak = a ? a->kind : TYPE_INT;
+    TypeKind bk = b ? b->kind : TYPE_INT;
+    if (!type_is_integer(a) && a) return 0;
+    if (!type_is_integer(b) && b) return 0;
+    TypeKind ck = ir_tc_uac_common_int_kind(ak, bk);
+    return ir_tc_uac_type_from_kind(lc, ck);
+}
+
+static Type* ir_tc_uac_promote_int_type(IrLowerCtx* lc, Type* a) {
+    TypeKind ak = a ? a->kind : TYPE_INT;
+    if (!type_is_integer(a) && a) return 0;
+    TypeKind pk = ir_tc_uac_promote_kind(ak);
+    return ir_tc_uac_type_from_kind(lc, pk);
 }
 
 static int ir_tc_is_null_ptr_const(AstExpr* e) {
@@ -656,16 +785,24 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unary ! requires scalar operand");
         }
 
-        IrValueId v = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.unary.expr), fc->f->ty_i32, e->tok);
+        if (e->v.unary.op == AST_UNOP_NOT) {
+            IrValueId v = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.unary.expr), fc->f->ty_i32, e->tok);
+            IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
+            return ir_emit_icmp(fc->f, fc->cur, IR_ICMP_EQ, v, z);
+        }
+
+        IrType* ity = fc->f->ty_i32;
+        if (e->v.unary.op == AST_UNOP_POS || e->v.unary.op == AST_UNOP_NEG) {
+            Type* pt = ir_tc_uac_promote_int_type(fc->lc, ut);
+            if (pt && ir_tc_uac_is_unsigned_kind(pt->kind)) ity = fc->f->ty_u32;
+        }
+
+        IrValueId v = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.unary.expr), ity, e->tok);
 
         if (e->v.unary.op == AST_UNOP_POS) return v;
         if (e->v.unary.op == AST_UNOP_NEG) {
-            IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
-            return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, fc->f->ty_i32, z, v);
-        }
-        if (e->v.unary.op == AST_UNOP_NOT) {
-            IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
-            return ir_emit_icmp(fc->f, fc->cur, IR_ICMP_EQ, v, z);
+            IrValueId z = ir_lower_cast_value(fc, ir_emit_iconst(fc->f, fc->cur, 0), ity, e->tok);
+            return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, ity, z, v);
         }
     }
 
@@ -814,7 +951,11 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             if (!ir_tc_is_int_type(lt) || !ir_tc_is_int_type(rt)) {
                 scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Arithmetic operator requires integer operands");
             }
-            int is_unsigned = ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
+            Type* ct = ir_tc_uac_common_int_type(fc->lc, lt, rt);
+            if (!ct) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid arithmetic type");
+            }
+            int is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
             IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
 
             IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
@@ -842,20 +983,33 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
                 int l_null = ir_tc_is_null_ptr_const(e->v.binary.left);
                 int r_null = ir_tc_is_null_ptr_const(e->v.binary.right);
 
-                if ((e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE) && ((l_is_ptr && r_null) || (r_is_ptr && l_null))) {
-                    /* ok */
-                } else {
-                    if (!l_is_ptr || !r_is_ptr) {
+                int is_rel = !(e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE);
+
+                if (!l_is_ptr || !r_is_ptr) {
+                    if (!is_rel && ((l_is_ptr && r_null) || (r_is_ptr && l_null))) {} else {
                         scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Invalid comparison between pointer and non-pointer");
                     }
-
+                } else {
                     Type* lb = clt ? clt->base : 0;
                     Type* rb = crt ? crt->base : 0;
                     if (!lb || !rb) {
                         scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid pointer type");
                     }
-                    if (!(lb->kind == TYPE_VOID || rb->kind == TYPE_VOID || type_compatible_unqualified(lb, rb))) {
-                        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Comparison requires compatible pointer types");
+
+                    if (is_rel) {
+                        if (l_null || r_null) {
+                            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Relational comparison with null pointer constant is not allowed");
+                        }
+                        if (lb->kind == TYPE_VOID || rb->kind == TYPE_VOID) {
+                            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Relational comparison on void* is not allowed");
+                        }
+                        if (!type_compatible_unqualified(lb, rb)) {
+                            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Relational comparison requires compatible pointer types");
+                        }
+                    } else {
+                        if (!(lb->kind == TYPE_VOID || rb->kind == TYPE_VOID || type_compatible_unqualified(lb, rb))) {
+                            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Comparison requires compatible pointer types");
+                        }
                     }
                 }
             } else {
@@ -864,7 +1018,16 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
                 }
             }
 
-            int is_unsigned = is_ptr || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
+            int is_unsigned = 0;
+            if (!is_ptr) {
+                Type* ct = ir_tc_uac_common_int_type(fc->lc, clt, crt);
+                if (!ct) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid comparison type");
+                }
+                is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
+            } else {
+                is_unsigned = 1;
+            }
             IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
 
             IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
@@ -884,13 +1047,20 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             if ((lt && lt->kind == TYPE_VOID) || (rt && rt->kind == TYPE_VOID)) {
                 scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
             }
-            int is_unsigned = ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
-            IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+            int is_unsigned = 0;
+            IrType* ity = fc->f->ty_i32;
 
             if (!lptr && !rptr) {
                 if (!ir_tc_is_int_type(lt) || !ir_tc_is_int_type(rt)) {
                     scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Arithmetic operator requires integer operands");
                 }
+
+                Type* ct = ir_tc_uac_common_int_type(fc->lc, lt, rt);
+                if (!ct) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid arithmetic type");
+                }
+                is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
+                ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
             }
 
             IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
