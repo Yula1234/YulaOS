@@ -7,18 +7,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-size_t strlen(const char* s);
+__attribute__((target("sse2"))) size_t strlen(const char* s);
 int strcmp(const char* a, const char* b);
 int strncmp(const char* a, const char* b, size_t n);
 
-void* memset(void* dst, int v, size_t n);
-void* memcpy(void* dst, const void* src, size_t n);
+__attribute__((target("sse2"))) void* memset(void* dst, int v, size_t n);
+__attribute__((target("sse2"))) void* memcpy(void* restrict dst, const void* restrict src, size_t n);
 
-size_t strlcpy(char* dst, const char* src, size_t dstsz);
-size_t strlcat(char* dst, const char* src, size_t dstsz);
-
-void* memcpy_sse(void* dest, const void* src, size_t n);
-void* memset_sse(void* dest, int val, size_t n);
+size_t strlcpy(char* restrict dst, const char* restrict src, size_t dstsz);
+size_t strlcat(char* restrict dst, const char* restrict src, size_t dstsz);
 
 static inline int memcpy_safe(void* dst, size_t dst_size, const void* src, size_t src_size) {
     if (!dst || !src || dst_size == 0 || src_size == 0) return 0;

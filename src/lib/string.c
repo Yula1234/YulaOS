@@ -5,6 +5,17 @@
 
 #include "string.h"
 
+    
+#if defined(__GNUC__) || defined(__clang__)
+    #define likely(x)       __builtin_expect(!!(x), 1)
+    #define unlikely(x)     __builtin_expect(!!(x), 0)
+#else
+    #define likely(x)       (x)
+    #define unlikely(x)     (x)
+#endif
+
+
+
 __attribute__((target("sse2")))
 size_t strlen(const char* s) {
     const char* start = s;
@@ -24,19 +35,19 @@ size_t strlen(const char* s) {
         "pcmpeqb %%xmm0, %%xmm1 \n\t"
         "pmovmskb %%xmm1, %%eax \n\t"
         "test    %%eax, %%eax \n\t"
-        "jnz     2f \n\t"
+        "jnz     2f \n\t" 
         
         "add     $16, %1 \n\t"
         "jmp     1b \n\t"
         
         "2: \n\t"
-        "bsf     %%eax, %%eax \n\t"
-        "add     %%eax, %1 \n\t"
-        "mov     %1, %0 \n\t"
+        "bsf     %%eax, %%eax \n\t"  
+        "add     %%eax, %1 \n\t" 
+        "mov     %1, %0 \n\t"  
         
-        : "=r"(res), "+r"(s)
-        : 
-        : "eax", "xmm0", "xmm1"
+        : "=r"(res), "+r"(s)   
+        :      
+        : "eax", "xmm0", "xmm1", "cc" 
     );
     
     return res - (size_t)start;
@@ -57,7 +68,7 @@ int strncmp(const char* a, const char* b, size_t n) {
     return 0;
 }
 
-size_t strlcpy(char* dst, const char* src, size_t dstsz) {
+size_t strlcpy(char* restrict dst, const char* restrict src, size_t dstsz) {
     size_t i = 0;
     if (dstsz) {
         for (; i + 1 < dstsz && src[i]; i++) dst[i] = src[i];
@@ -67,7 +78,7 @@ size_t strlcpy(char* dst, const char* src, size_t dstsz) {
     return i;
 }
 
-size_t strlcat(char* dst, const char* src, size_t dstsz) {
+size_t strlcat(char* restrict dst, const char* restrict src, size_t dstsz) {
     size_t dlen = strlen(dst);
     size_t slen = strlen(src);
 
@@ -82,32 +93,32 @@ size_t strlcat(char* dst, const char* src, size_t dstsz) {
     return dlen + slen;
 }
 
-__attribute__((target("sse2")))
-void* memcpy_sse(void* dest, const void* src, size_t n) {
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void* memcpy_sse(void *restrict dest, const void *restrict src, size_t n) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
 
     while (n >= 64) {
         __asm__ volatile (
-            "movups (%0), %%xmm0\n"
-            "movups 16(%0), %%xmm1\n"
-            "movups 32(%0), %%xmm2\n"
-            "movups 48(%0), %%xmm3\n"
-            "movups %%xmm0, (%1)\n"
-            "movups %%xmm1, 16(%1)\n"
-            "movups %%xmm2, 32(%1)\n"
-            "movups %%xmm3, 48(%1)\n"
-            : : "r"(s), "r"(d) : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+            "movups (%0), %%xmm0 \n\t"
+            "movups 16(%0), %%xmm1 \n\t"
+            "movups 32(%0), %%xmm2 \n\t"
+            "movups 48(%0), %%xmm3 \n\t"
+            "movups %%xmm0, (%1) \n\t"
+            "movups %%xmm1, 16(%1) \n\t"
+            "movups %%xmm2, 32(%1) \n\t"
+            "movups %%xmm3, 48(%1) \n\t"
+            : : "r"(s), "r"(d) 
+            : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
         );
         s += 64; d += 64; n -= 64;
     }
-
-    while (n--) *d++ = *s++;
-    return dest;
+    
+    return d; 
 }
 
-__attribute__((target("sse2")))
-void* memset_sse(void* dest, int val, size_t n) {
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void* memset_sse(void* dest, int val, size_t n) {
     uint8_t* d = (uint8_t*)dest;
     uint32_t v = (uint8_t)val;
     v |= (v << 8) | (v << 16) | (v << 24);
@@ -133,16 +144,34 @@ void* memset_sse(void* dest, int val, size_t n) {
     return dest;
 }
 
-void* memcpy(void* dst, const void* src, size_t n) {
-    if (n < 64) {
-        uint8_t* d = (uint8_t*)dst;
-        const uint8_t* s = (const uint8_t*)src;
-        while (n--) *d++ = *s++;
-        return dst;
+__attribute__((target("sse2")))
+void* memcpy(void *restrict dst, const void *restrict src, size_t n) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+
+    if (unlikely(n >= 64)) {
+        (void)memcpy_sse(d, s, n);
+
+        s += (n - (n % 64));
+        d += (n - (n % 64));
+        n %= 64;
     }
-    return memcpy_sse(dst, src, n);
+
+    while (n >= 4) {
+        *(uint32_t *)d = *(const uint32_t *)s;
+        d += 4;
+        s += 4;
+        n -= 4;
+    }
+
+    while (n--) {
+        *d++ = *s++;
+    }
+
+    return dst;
 }
 
+__attribute__((target("sse2")))
 void* memset(void* dst, int v, size_t n) {
     if (n < 64) {
         uint8_t* p = (uint8_t*)dst;
