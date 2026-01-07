@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2025 Yula1234
+
 #ifndef SCC_CORE_H_INCLUDED
 #define SCC_CORE_H_INCLUDED
 
@@ -121,6 +124,44 @@ static uint32_t type_align(Type* ty) {
     if (sz == 1) return 1;
     if (sz == 2) return 2;
     return 4;
+}
+
+static int type_is_void(Type* t) {
+    return t && t->kind == TYPE_VOID;
+}
+
+static int type_is_ptr(Type* t) {
+    return t && t->kind == TYPE_PTR;
+}
+
+static int type_is_void_ptr(Type* t) {
+    return t && t->kind == TYPE_PTR && t->base && t->base->kind == TYPE_VOID;
+}
+
+static int type_is_integer(Type* t) {
+    if (!t) return 0;
+    if (t->kind == TYPE_INT) return 1;
+    if (t->kind == TYPE_UINT) return 1;
+    if (t->kind == TYPE_SHORT) return 1;
+    if (t->kind == TYPE_USHORT) return 1;
+    if (t->kind == TYPE_LONG) return 1;
+    if (t->kind == TYPE_ULONG) return 1;
+    if (t->kind == TYPE_CHAR) return 1;
+    if (t->kind == TYPE_UCHAR) return 1;
+    if (t->kind == TYPE_BOOL) return 1;
+    return 0;
+}
+
+static int type_is_scalar(Type* t) {
+    if (!t) return 0;
+    return type_is_integer(t) || type_is_ptr(t);
+}
+
+static int type_compatible_unqualified(Type* a, Type* b) {
+    if (!a || !b) return 0;
+    if (a->kind != b->kind) return 0;
+    if (a->kind == TYPE_PTR) return type_compatible_unqualified(a->base, b->base);
+    return 1;
 }
 
 static uint32_t align_up_u32(uint32_t v, uint32_t align) {

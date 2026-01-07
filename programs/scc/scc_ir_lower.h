@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2025 Yula1234
+
 #ifndef SCC_IR_LOWER_H_INCLUDED
 #define SCC_IR_LOWER_H_INCLUDED
 
@@ -422,6 +425,78 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
     return 0;
 }
 
+static int ir_tc_is_int_type(Type* t) {
+    if (!t) return 1;
+    return type_is_integer(t);
+}
+
+static int ir_tc_is_scalar_type(Type* t) {
+    if (!t) return 1;
+    return type_is_scalar(t);
+}
+
+static int ir_tc_is_null_ptr_const(AstExpr* e) {
+    return e && e->kind == AST_EXPR_INT_LIT && e->v.int_lit == 0;
+}
+
+static int ir_tc_ptr_qual_ok(Type* dst, Type* src) {
+    if (!dst || !src) return 0;
+    if (src->is_const && !dst->is_const) return 0;
+    if (dst->kind == TYPE_PTR && src->kind == TYPE_PTR) {
+        return ir_tc_ptr_qual_ok(dst->base, src->base);
+    }
+    return 1;
+}
+
+static void ir_tc_check_assign(IrLowerCtx* lc, Token tok, Type* dst, AstExpr* src_expr) {
+    if (!lc || !lc->p) return;
+
+    Type* src = ir_lower_expr_type(lc, src_expr);
+    int src_is_null = ir_tc_is_null_ptr_const(src_expr);
+
+    if (dst && dst->kind == TYPE_VOID) {
+        scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Cannot convert to void");
+    }
+    if (src && src->kind == TYPE_VOID) {
+        scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Void value is not allowed here");
+    }
+
+    if (dst && dst->kind == TYPE_PTR) {
+        if (src_is_null) return;
+        if (!src || src->kind != TYPE_PTR) {
+            scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Incompatible types in pointer conversion");
+        }
+
+        Type* db = dst->base;
+        Type* sb = src->base;
+        if (!db || !sb) {
+            scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Internal error: invalid pointer type");
+        }
+
+        if (db->kind == TYPE_VOID || sb->kind == TYPE_VOID) {
+            if (!ir_tc_ptr_qual_ok(db, sb)) {
+                scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Discards const qualifier in pointer conversion");
+            }
+            return;
+        }
+
+        if (!type_compatible_unqualified(db, sb)) {
+            scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Incompatible pointer types");
+        }
+        if (!ir_tc_ptr_qual_ok(db, sb)) {
+            scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Discards const qualifier in pointer conversion");
+        }
+        return;
+    }
+
+    if (ir_tc_is_int_type(dst)) {
+        if (!ir_tc_is_int_type(src)) {
+            scc_fatal_at(lc->p->file, lc->p->src, tok.line, tok.col, "Cannot implicitly convert pointer to integer");
+        }
+        return;
+    }
+}
+
 static int ir_lower_is_unsigned_int_type(Type* t) {
     if (!t) return 0;
     if (t->kind == TYPE_UINT) return 1;
@@ -536,9 +611,13 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         if (argc) args = (IrValueId*)arena_alloc(fc->f->arena, argc * sizeof(IrValueId), 8);
 
         for (int i = e->v.call.arg_count - 1; i >= 0; i--) {
-            IrValueId av = ir_lower_expr(fc, e->v.call.args[i]);
-            IrType* aty = ir_type_from_scc(fc->f, s->ftype.params ? s->ftype.params[i] : 0);
-            args[i] = ir_lower_cast_value(fc, av, aty, e->tok);
+            AstExpr* ae = e->v.call.args[i];
+            Type* pt = s->ftype.params ? s->ftype.params[i] : 0;
+            ir_tc_check_assign(fc->lc, ae ? ae->tok : e->tok, pt, ae);
+
+            IrValueId av = ir_lower_expr(fc, ae);
+            IrType* aty = ir_type_from_scc(fc->f, pt);
+            args[i] = ir_lower_cast_value(fc, av, aty, ae ? ae->tok : e->tok);
         }
 
         IrType* ret_ty = ir_type_from_scc(fc->f, s->ftype.ret);
@@ -566,6 +645,17 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             return ir_emit_load(fc->f, fc->cur, base_ir, pv);
         }
 
+        Type* ut = ir_lower_expr_type(fc->lc, e->v.unary.expr);
+        if (ut && ut->kind == TYPE_VOID) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
+        }
+        if ((e->v.unary.op == AST_UNOP_POS || e->v.unary.op == AST_UNOP_NEG) && !ir_tc_is_int_type(ut)) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unary + or - requires integer operand");
+        }
+        if (e->v.unary.op == AST_UNOP_NOT && !ir_tc_is_scalar_type(ut)) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unary ! requires scalar operand");
+        }
+
         IrValueId v = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.unary.expr), fc->f->ty_i32, e->tok);
 
         if (e->v.unary.op == AST_UNOP_POS) return v;
@@ -584,6 +674,12 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         if (!lvt) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Invalid assignment target");
         }
+
+        if (lvt->is_const) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Assignment to const lvalue");
+        }
+
+        ir_tc_check_assign(fc->lc, e->tok, lvt, e->v.assign.right);
 
         IrType* lvir = ir_type_from_scc(fc->f, lvt);
         if (lvir && lvir->kind == IR_TY_VOID) {
@@ -651,6 +747,14 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
                 AstExpr* base_e = lptr ? e->v.binary.left : e->v.binary.right;
                 AstExpr* off_e = lptr ? e->v.binary.right : e->v.binary.left;
 
+                Type* off_t = ir_lower_expr_type(fc->lc, off_e);
+                if (off_t && off_t->kind == TYPE_VOID) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
+                }
+                if (!ir_tc_is_int_type(off_t)) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer offset must be integer");
+                }
+
                 IrType* base_ir = ir_type_from_scc(fc->f, pty->base);
                 IrType* ptr_ir = ir_type_ptr(fc->f, base_ir);
 
@@ -679,7 +783,7 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             }
 
             if (e->v.binary.op == AST_BINOP_SUB && lptr && rptr) {
-                if (lt->base != rt->base) {
+                if (!type_compatible_unqualified(lt->base, rt->base)) {
                     scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer subtraction requires compatible pointer types");
                 }
 
@@ -707,6 +811,9 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         }
 
         if (e->v.binary.op == AST_BINOP_MUL || e->v.binary.op == AST_BINOP_DIV || e->v.binary.op == AST_BINOP_MOD) {
+            if (!ir_tc_is_int_type(lt) || !ir_tc_is_int_type(rt)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Arithmetic operator requires integer operands");
+            }
             int is_unsigned = ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
             IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
 
@@ -721,9 +828,42 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         }
 
         if (e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE || e->v.binary.op == AST_BINOP_LT || e->v.binary.op == AST_BINOP_LE || e->v.binary.op == AST_BINOP_GT || e->v.binary.op == AST_BINOP_GE) {
-            Type* lt = ir_lower_expr_type(fc->lc, e->v.binary.left);
-            Type* rt = ir_lower_expr_type(fc->lc, e->v.binary.right);
-            int is_ptr = (lt && lt->kind == TYPE_PTR) || (rt && rt->kind == TYPE_PTR);
+            Type* clt = ir_lower_expr_type(fc->lc, e->v.binary.left);
+            Type* crt = ir_lower_expr_type(fc->lc, e->v.binary.right);
+            int is_ptr = (clt && clt->kind == TYPE_PTR) || (crt && crt->kind == TYPE_PTR);
+            int l_is_ptr = (clt && clt->kind == TYPE_PTR);
+            int r_is_ptr = (crt && crt->kind == TYPE_PTR);
+
+            if ((clt && clt->kind == TYPE_VOID) || (crt && crt->kind == TYPE_VOID)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
+            }
+
+            if (is_ptr) {
+                int l_null = ir_tc_is_null_ptr_const(e->v.binary.left);
+                int r_null = ir_tc_is_null_ptr_const(e->v.binary.right);
+
+                if ((e->v.binary.op == AST_BINOP_EQ || e->v.binary.op == AST_BINOP_NE) && ((l_is_ptr && r_null) || (r_is_ptr && l_null))) {
+                    /* ok */
+                } else {
+                    if (!l_is_ptr || !r_is_ptr) {
+                        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Invalid comparison between pointer and non-pointer");
+                    }
+
+                    Type* lb = clt ? clt->base : 0;
+                    Type* rb = crt ? crt->base : 0;
+                    if (!lb || !rb) {
+                        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid pointer type");
+                    }
+                    if (!(lb->kind == TYPE_VOID || rb->kind == TYPE_VOID || type_compatible_unqualified(lb, rb))) {
+                        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Comparison requires compatible pointer types");
+                    }
+                }
+            } else {
+                if (!ir_tc_is_int_type(clt) || !ir_tc_is_int_type(crt)) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Comparison requires integer operands");
+                }
+            }
+
             int is_unsigned = is_ptr || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
             IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
 
@@ -741,8 +881,17 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         }
 
         if (e->v.binary.op == AST_BINOP_ADD || e->v.binary.op == AST_BINOP_SUB) {
+            if ((lt && lt->kind == TYPE_VOID) || (rt && rt->kind == TYPE_VOID)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
+            }
             int is_unsigned = ir_lower_expr_is_unsigned(fc->lc, e->v.binary.left) || ir_lower_expr_is_unsigned(fc->lc, e->v.binary.right);
             IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            if (!lptr && !rptr) {
+                if (!ir_tc_is_int_type(lt) || !ir_tc_is_int_type(rt)) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Arithmetic operator requires integer operands");
+                }
+            }
 
             IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
             IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
@@ -759,6 +908,15 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
 
 static IrValueId ir_lower_expr_bool(IrLowerFuncCtx* fc, AstExpr* e, Token tok) {
     if (!fc || !fc->f) return 0;
+
+    Type* t = ir_lower_expr_type(fc->lc, e);
+    if (t && t->kind == TYPE_VOID) {
+        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, tok.line, tok.col, "Void value is not allowed here");
+    }
+    if (!ir_tc_is_scalar_type(t)) {
+        scc_fatal_at(fc->lc->p->file, fc->lc->p->src, tok.line, tok.col, "Condition must have scalar type");
+    }
+
     IrValueId v = ir_lower_expr(fc, e);
     return ir_lower_cast_value(fc, v, fc->f->ty_bool, tok);
 }
@@ -767,7 +925,6 @@ static void ir_lower_stmt_list(IrLowerFuncCtx* fc, AstStmt* first);
 
 static void ir_lower_stmt_list(IrLowerFuncCtx* fc, AstStmt* first) {
     if (!fc) return;
-    int i = 0;
     for (AstStmt* it = first; it; it = it->next) {
         if (ir_block_is_terminated(fc->f, fc->cur)) return;
         ir_lower_stmt(fc, it);
@@ -787,6 +944,7 @@ static void ir_lower_stmt(IrLowerFuncCtx* fc, AstStmt* s) {
     if (s->kind == AST_STMT_DECL) {
         IrValueId addr = ir_lower_get_var_addr(fc, s->v.decl.decl_var);
         if (s->v.decl.init) {
+            ir_tc_check_assign(fc->lc, s->tok, s->v.decl.decl_type, s->v.decl.init);
             IrValueId iv = ir_lower_expr(fc, s->v.decl.init);
             IrType* ty = ir_type_from_scc(fc->f, s->v.decl.decl_type);
             IrValueId cv = ir_lower_cast_value(fc, iv, ty, s->tok);
@@ -805,6 +963,7 @@ static void ir_lower_stmt(IrLowerFuncCtx* fc, AstStmt* s) {
         IrValueId rv = 0;
         if (fc->f->ret_type && fc->f->ret_type->kind != IR_TY_VOID) {
             if (s->v.expr.expr) {
+                ir_tc_check_assign(fc->lc, s->tok, fc->af && fc->af->sym ? fc->af->sym->ftype.ret : 0, s->v.expr.expr);
                 rv = ir_lower_expr(fc, s->v.expr.expr);
             } else {
                 rv = ir_emit_iconst(fc->f, fc->cur, 0);
