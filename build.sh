@@ -36,6 +36,8 @@ gcc -O3 tools/yulafs_tool.c -o "$TOOL" &
 
 $ASM src/boot/smp_trampoline.asm bin/smp_trampoline.bin > /dev/null &
 
+wait
+
 echo "[kernel] compiling asm..."
 KERNEL_OBJ_FILES=""
 for FILE in $(find src -name "*.asm"); do
