@@ -34,6 +34,15 @@ typedef struct IrX86Loc {
 } IrX86Loc;
 
 static void ir_x86_emit_reloc_text(IrX86Ctx* cx, uint32_t offset, int sym_index, int type) {
+    if (!cx || !cx->rel_text) {
+        scc_fatal_at(0, 0, 0, 0, "Internal error: ir_x86_emit_reloc_text missing context");
+    }
+    if (type != R_386_32 && type != R_386_PC32) {
+        scc_fatal_at(0, 0, 0, 0, "Internal error: ir_x86_emit_reloc_text bad relocation type");
+    }
+    if (sym_index <= 0) {
+        scc_fatal_at(0, 0, 0, 0, "Internal error: ir_x86_emit_reloc_text bad symbol index");
+    }
     Elf32_Rel r;
     r.r_offset = (Elf32_Addr)offset;
     r.r_info = ELF32_R_INFO((Elf32_Word)sym_index, (Elf32_Word)type);
@@ -169,6 +178,9 @@ static void ir_x86_assign_frame(IrFunc* f, int32_t* value_disp, int32_t* alloca_
         IrInstr* ins = &f->instrs[iid - 1];
         if (ins->kind != IR_INSTR_ALLOCA) continue;
         if (ins->result == 0) continue;
+        if (ins->result > f->value_count) {
+            scc_fatal_at(0, 0, 0, 0, "Internal error: IR alloca result id out of range in frame assign");
+        }
 
         uint32_t al = ins->v.alloca.align;
         if (al == 0) al = 4;
@@ -253,6 +265,9 @@ static void ir_x86_emit_instr_simple(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int3
 
     if (ins->kind == IR_INSTR_ALLOCA) {
         if (ins->result == 0) return;
+        if (ins->result > f->value_count) {
+            scc_fatal_at(0, 0, 0, 0, "Internal error: IR alloca result id out of range in x86 emission");
+        }
         emit_x86_lea_eax_membp_disp(text, alloca_mem_disp[ins->result]);
         ir_x86_store_value_from_eax(f, text, ins->result, value_disp, value_loc);
         return;
@@ -847,7 +862,9 @@ static void ir_x86_emit_instr_misc(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32_
         Symbol* s = ins->v.global_addr.sym;
         uint32_t off = text->size;
         emit_x86_mov_eax_imm32(text, 0);
-        if (s) ir_x86_emit_reloc_text(cx, off + 1u, s->elf_index, R_386_32);
+        if (s) {
+            ir_x86_emit_reloc_text(cx, off + 1u, s->elf_index, R_386_32);
+        }
         ir_x86_store_value_from_eax(f, text, ins->result, value_disp, value_loc);
         return;
     }

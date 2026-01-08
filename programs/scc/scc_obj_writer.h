@@ -12,13 +12,130 @@ static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, u
     Buffer strtab; buf_init(&strtab, 128);
     buf_push_u8(&strtab, 0);
 
+    int local_count = 0;
+    for (int i = 0; i < syms->count; i++) {
+        Symbol* s = syms->data[i];
+        if (s && s->bind == STB_LOCAL) local_count++;
+    }
+
+    uint32_t ordered_cap = (syms->count > 0) ? (uint32_t)syms->count : 1u;
+    Symbol** ordered = (Symbol**)malloc(ordered_cap * sizeof(Symbol*));
+    if (!ordered) exit(1);
+    int outc = 0;
+    for (int i = 0; i < syms->count; i++) {
+        Symbol* s = syms->data[i];
+        if (s && s->bind == STB_LOCAL) ordered[outc++] = s;
+    }
+    for (int i = 0; i < syms->count; i++) {
+        Symbol* s = syms->data[i];
+        if (s && s->bind != STB_LOCAL) ordered[outc++] = s;
+    }
+
+    uint32_t map_cap = (uint32_t)(syms->count + 1);
+    if (map_cap == 0) map_cap = 1u;
+    int* old_to_new = (int*)malloc(map_cap * sizeof(int));
+    if (!old_to_new) exit(1);
+    memset(old_to_new, 0, map_cap * sizeof(int));
+    for (int i = 0; i < outc; i++) {
+        Symbol* s = ordered[i];
+        if (s && s->elf_index > 0 && s->elf_index <= syms->count) {
+            old_to_new[s->elf_index] = i + 1;
+        }
+    }
+
+    if ((rel_text->size % (uint32_t)sizeof(Elf32_Rel)) != 0) {
+        printf("Bad .rel.text size %u (not multiple of %u) in %s\n", (unsigned int)rel_text->size, (unsigned int)sizeof(Elf32_Rel), out_path);
+        exit(1);
+    }
+
+    for (uint32_t off = 0; off + sizeof(Elf32_Rel) <= rel_text->size; off += sizeof(Elf32_Rel)) {
+        Elf32_Rel* r = (Elf32_Rel*)(rel_text->data + off);
+        uint32_t type = (uint32_t)((unsigned char)(r->r_info & 0xFFu));
+        uint32_t sym = (uint32_t)(r->r_info >> 8);
+        if (type != R_386_32 && type != R_386_PC32) {
+            printf("Unsupported relocation type %u (r_info=0x%08x, r_offset=0x%08x, rel_index=%u, rel_size=%u) in %s (.rel.text)\n",
+                   (unsigned int)type,
+                   (unsigned int)r->r_info,
+                   (unsigned int)r->r_offset,
+                   (unsigned int)(off / (uint32_t)sizeof(Elf32_Rel)),
+                   (unsigned int)rel_text->size,
+                   out_path);
+            exit(1);
+        }
+        if (sym == 0 || sym > (uint32_t)syms->count) {
+            printf("Bad relocation symbol index %u (r_info=0x%08x, r_offset=0x%08x, rel_index=%u, rel_size=%u) in %s (.rel.text)\n",
+                   (unsigned int)sym,
+                   (unsigned int)r->r_info,
+                   (unsigned int)r->r_offset,
+                   (unsigned int)(off / (uint32_t)sizeof(Elf32_Rel)),
+                   (unsigned int)rel_text->size,
+                   out_path);
+            exit(1);
+        }
+        int nsym = old_to_new[sym];
+        if (nsym <= 0) {
+            printf("Bad relocation symbol index %u (r_info=0x%08x, r_offset=0x%08x, rel_index=%u, rel_size=%u) in %s (.rel.text)\n",
+                   (unsigned int)sym,
+                   (unsigned int)r->r_info,
+                   (unsigned int)r->r_offset,
+                   (unsigned int)(off / (uint32_t)sizeof(Elf32_Rel)),
+                   (unsigned int)rel_text->size,
+                   out_path);
+            exit(1);
+        }
+        r->r_info = ELF32_R_INFO((Elf32_Word)nsym, (Elf32_Word)type);
+    }
+
+    if ((rel_data->size % (uint32_t)sizeof(Elf32_Rel)) != 0) {
+        printf("Bad .rel.data size %u (not multiple of %u) in %s\n", (unsigned int)rel_data->size, (unsigned int)sizeof(Elf32_Rel), out_path);
+        exit(1);
+    }
+
+    for (uint32_t off = 0; off + sizeof(Elf32_Rel) <= rel_data->size; off += sizeof(Elf32_Rel)) {
+        Elf32_Rel* r = (Elf32_Rel*)(rel_data->data + off);
+        uint32_t type = (uint32_t)((unsigned char)(r->r_info & 0xFFu));
+        uint32_t sym = (uint32_t)(r->r_info >> 8);
+        if (type != R_386_32 && type != R_386_PC32) {
+            printf("Unsupported relocation type %u (r_info=0x%08x, r_offset=0x%08x, rel_index=%u, rel_size=%u) in %s (.rel.data)\n",
+                   (unsigned int)type,
+                   (unsigned int)r->r_info,
+                   (unsigned int)r->r_offset,
+                   (unsigned int)(off / (uint32_t)sizeof(Elf32_Rel)),
+                   (unsigned int)rel_data->size,
+                   out_path);
+            exit(1);
+        }
+        if (sym == 0 || sym > (uint32_t)syms->count) {
+            printf("Bad relocation symbol index %u (r_info=0x%08x, r_offset=0x%08x, rel_index=%u, rel_size=%u) in %s (.rel.data)\n",
+                   (unsigned int)sym,
+                   (unsigned int)r->r_info,
+                   (unsigned int)r->r_offset,
+                   (unsigned int)(off / (uint32_t)sizeof(Elf32_Rel)),
+                   (unsigned int)rel_data->size,
+                   out_path);
+            exit(1);
+        }
+        int nsym = old_to_new[sym];
+        if (nsym <= 0) {
+            printf("Bad relocation symbol index %u (r_info=0x%08x, r_offset=0x%08x, rel_index=%u, rel_size=%u) in %s (.rel.data)\n",
+                   (unsigned int)sym,
+                   (unsigned int)r->r_info,
+                   (unsigned int)r->r_offset,
+                   (unsigned int)(off / (uint32_t)sizeof(Elf32_Rel)),
+                   (unsigned int)rel_data->size,
+                   out_path);
+            exit(1);
+        }
+        r->r_info = ELF32_R_INFO((Elf32_Word)nsym, (Elf32_Word)type);
+    }
+
     Buffer symtab; buf_init(&symtab, 128);
     Elf32_Sym null_sym;
     memset(&null_sym, 0, sizeof(null_sym));
     buf_write(&symtab, &null_sym, sizeof(null_sym));
 
-    for (int i = 0; i < syms->count; i++) {
-        Symbol* ss = syms->data[i];
+    for (int i = 0; i < outc; i++) {
+        Symbol* ss = ordered[i];
         if (!ss) continue;
         uint32_t name_off = buf_add_cstr(&strtab, ss->name);
 
@@ -119,11 +236,6 @@ static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, u
     sh[4].sh_offset = off_sym;
     sh[4].sh_size = symtab.size;
     sh[4].sh_link = 5;
-    int local_count = 0;
-    for (int i = 0; i < syms->count; i++) {
-        Symbol* s = syms->data[i];
-        if (s && s->bind == STB_LOCAL) local_count++;
-    }
     sh[4].sh_info = (Elf32_Word)(1 + local_count);
     sh[4].sh_entsize = sizeof(Elf32_Sym);
     sh[4].sh_addralign = 4;
@@ -164,6 +276,9 @@ static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, u
     buf_free(&strtab);
     buf_free(&symtab);
     buf_free(&shstr);
+
+    free(ordered);
+    free(old_to_new);
 }
 
 #endif

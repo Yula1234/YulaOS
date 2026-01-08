@@ -495,6 +495,14 @@ static uint32_t emit_x86_jmp_rel32_fixup(Buffer* text) {
 }
 
 static void patch_rel32(Buffer* text, uint32_t imm_off, uint32_t target_off) {
+    if (!text || !text->data) {
+        printf("Internal error: patch_rel32 null text buffer\n");
+        exit(1);
+    }
+    if (imm_off > text->size || text->size - imm_off < 4u) {
+        printf("Internal error: patch_rel32 out of range (imm_off=%u, text_size=%u)\n", (unsigned int)imm_off, (unsigned int)text->size);
+        exit(1);
+    }
     int32_t rel = (int32_t)target_off - (int32_t)(imm_off + 4u);
     text->data[imm_off + 0] = (uint8_t)(rel & 0xFF);
     text->data[imm_off + 1] = (uint8_t)((rel >> 8) & 0xFF);

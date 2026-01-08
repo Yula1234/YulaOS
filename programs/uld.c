@@ -346,14 +346,45 @@ void apply_relocations(LinkerCtx* ctx, ObjectFile* obj, Elf32_Shdr* sh_rel) {
 
     if (!buffer_ptr) return;
 
+    if (sh_rel->sh_offset + sh_rel->sh_size > obj->raw_size) {
+        fatal("Corrupt relocation section (offset/size out of file) in %s", obj->name);
+    }
+    if (obj->sh_symtab->sh_offset + obj->sh_symtab->sh_size > obj->raw_size) {
+        fatal("Corrupt symtab section (offset/size out of file) in %s", obj->name);
+    }
+    if (obj->sh_strtab && (obj->sh_strtab->sh_offset + obj->sh_strtab->sh_size > obj->raw_size)) {
+        fatal("Corrupt strtab section (offset/size out of file) in %s", obj->name);
+    }
+
     Elf32_Rel* rels = (Elf32_Rel*)(obj->raw_data + sh_rel->sh_offset);
     int count = sh_rel->sh_size / sizeof(Elf32_Rel);
     Elf32_Sym* syms = (Elf32_Sym*)(obj->raw_data + obj->sh_symtab->sh_offset);
+    int sym_count = (int)(obj->sh_symtab->sh_size / sizeof(Elf32_Sym));
+
+    const char* rel_name = "<rel>";
+    if (obj->ehdr->e_shstrndx < obj->ehdr->e_shnum) {
+        Elf32_Shdr* sh_shstr = &obj->shdrs[obj->ehdr->e_shstrndx];
+        if (sh_shstr->sh_offset < obj->raw_size) {
+            const char* shstr = (const char*)(obj->raw_data + sh_shstr->sh_offset);
+            rel_name = shstr + sh_rel->sh_name;
+        }
+    }
 
     for (int i = 0; i < count; i++) {
         Elf32_Rel* r = &rels[i];
         int type = ELF32_R_TYPE(r->r_info);
         int sym_idx = ELF32_R_SYM(r->r_info);
+
+        if (type == 0) continue;
+        if (type != R_386_32 && type != R_386_PC32) {
+            fatal("Unsupported relocation type %d (r_info=0x%08x) in %s (%s)", type, r->r_info, obj->name, rel_name);
+        }
+        if (sym_idx < 0 || sym_idx >= sym_count) {
+            fatal("Bad relocation symbol index %d/%d (r_info=0x%08x) in %s (%s)", sym_idx, sym_count, r->r_info, obj->name, rel_name);
+        }
+        if (r->r_offset + sizeof(uint32_t) > target->sh_size) {
+            fatal("Relocation offset out of range (off=0x%08x, sec_size=0x%08x) in %s (%s)", r->r_offset, target->sh_size, obj->name, rel_name);
+        }
         
         Elf32_Sym* s = &syms[sym_idx];
         uint32_t sym_val = 0;
@@ -469,9 +500,6 @@ void build_image(LinkerCtx* ctx, const char* outfile) {
     write(fd, shstrtab, shstr_sz);
     
     close(fd);
-    
-    int check_fd = open(outfile, 0);
-    if (check_fd >= 0) { char tmp; read(check_fd, &tmp, 1); close(check_fd); }
 }
 
 int main(int argc, char** argv) {
