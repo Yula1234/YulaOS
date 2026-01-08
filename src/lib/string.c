@@ -14,107 +14,467 @@
     #define unlikely(x)     (x)
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+typedef uint32_t u32_alias __attribute__((__may_alias__));
+#else
+typedef uint32_t u32_alias;
+#endif
 
+#define PAGE_SIZE 4096u
+#define PAGE_MASK (PAGE_SIZE - 1u)
+
+__attribute__((always_inline))
+static inline uintptr_t page_off(const void* p) {
+    return (uintptr_t)p & (uintptr_t)PAGE_MASK;
+}
+
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline uint32_t sse2_diff_or_zero_mask_16(const char* a, const char* b) {
+    uint32_t m;
+    __asm__ volatile (
+        "pxor    %%xmm0, %%xmm0 \n\t"
+        "movdqu  (%1), %%xmm1 \n\t"
+        "movdqu  (%2), %%xmm2 \n\t"
+
+        "movdqa  %%xmm1, %%xmm3 \n\t"
+        "pcmpeqb %%xmm2, %%xmm3 \n\t"
+        "pmovmskb %%xmm3, %%eax \n\t"
+        "xor     $0xFFFF, %%eax \n\t"
+
+        "movdqa  %%xmm1, %%xmm4 \n\t"
+        "pcmpeqb %%xmm0, %%xmm4 \n\t"
+        "movdqa  %%xmm2, %%xmm5 \n\t"
+        "pcmpeqb %%xmm0, %%xmm5 \n\t"
+        "por     %%xmm5, %%xmm4 \n\t"
+        "pmovmskb %%xmm4, %%edx \n\t"
+
+        "or      %%edx, %%eax \n\t"
+        : "=a"(m)
+        : "r"(a), "r"(b)
+        : "edx", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "cc", "memory"
+    );
+    return m;
+}
+
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline uint32_t sse2_diff_or_zero_mask_16_aligned(const char* a, const char* b) {
+    uint32_t m;
+    __asm__ volatile (
+        "pxor    %%xmm0, %%xmm0 \n\t"
+        "movdqa  (%1), %%xmm1 \n\t"
+        "movdqa  (%2), %%xmm2 \n\t"
+
+        "movdqa  %%xmm1, %%xmm3 \n\t"
+        "pcmpeqb %%xmm2, %%xmm3 \n\t"
+        "pmovmskb %%xmm3, %%eax \n\t"
+        "xor     $0xFFFF, %%eax \n\t"
+
+        "movdqa  %%xmm1, %%xmm4 \n\t"
+        "pcmpeqb %%xmm0, %%xmm4 \n\t"
+        "movdqa  %%xmm2, %%xmm5 \n\t"
+        "pcmpeqb %%xmm0, %%xmm5 \n\t"
+        "por     %%xmm5, %%xmm4 \n\t"
+        "pmovmskb %%xmm4, %%edx \n\t"
+
+        "or      %%edx, %%eax \n\t"
+        : "=a"(m)
+        : "r"(a), "r"(b)
+        : "edx", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "cc", "memory"
+    );
+    return m;
+}
+
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline uint32_t sse2_zero_mask_16_aligned(const char* p) {
+    uint32_t m;
+    __asm__ volatile (
+        "pxor    %%xmm0, %%xmm0 \n\t"
+        "movdqa  (%1), %%xmm1 \n\t"
+        "pcmpeqb %%xmm0, %%xmm1 \n\t"
+        "pmovmskb %%xmm1, %%eax \n\t"
+        : "=a"(m)
+        : "r"(p)
+        : "xmm0", "xmm1", "cc", "memory"
+    );
+    return m;
+}
+
+__attribute__((target("sse2")))
+int strcmp(const char* a, const char* b) {
+    if ((((uintptr_t)a ^ (uintptr_t)b) & 0xFu) == 0u) {
+        while (((uintptr_t)a & 0xFu) != 0u) {
+            unsigned char ac = (unsigned char)*a;
+            unsigned char bc = (unsigned char)*b;
+            if (ac != bc) return (int)ac - (int)bc;
+            if (!ac) return 0;
+            a++;
+            b++;
+        }
+
+        for (;;) {
+            if (unlikely(page_off(a) > (PAGE_MASK - 32u) || page_off(b) > (PAGE_MASK - 32u))) {
+                size_t rem_a = PAGE_SIZE - (size_t)page_off(a);
+                size_t rem_b = PAGE_SIZE - (size_t)page_off(b);
+                size_t rem = (rem_a < rem_b) ? rem_a : rem_b;
+                for (size_t i = 0; i < rem; i++) {
+                    unsigned char ac = (unsigned char)a[i];
+                    unsigned char bc = (unsigned char)b[i];
+                    if (ac != bc) return (int)ac - (int)bc;
+                    if (!ac) return 0;
+                }
+                a += rem;
+                b += rem;
+                continue;
+            }
+
+            uint32_t m0 = sse2_diff_or_zero_mask_16_aligned(a, b);
+            if (!m0) {
+                uint32_t m1 = sse2_diff_or_zero_mask_16_aligned(a + 16, b + 16);
+                if (!m1) {
+                    a += 32;
+                    b += 32;
+                    continue;
+                }
+                uint32_t idx;
+                __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m1) : "cc");
+                idx += 16;
+                unsigned char ac = (unsigned char)a[idx];
+                unsigned char bc = (unsigned char)b[idx];
+                return (int)ac - (int)bc;
+            }
+
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m0) : "cc");
+            unsigned char ac = (unsigned char)a[idx];
+            unsigned char bc = (unsigned char)b[idx];
+            return (int)ac - (int)bc;
+        }
+    }
+
+    for (;;) {
+        if (unlikely(page_off(a) > (PAGE_MASK - 32u) || page_off(b) > (PAGE_MASK - 32u))) {
+            size_t rem_a = PAGE_SIZE - (size_t)page_off(a);
+            size_t rem_b = PAGE_SIZE - (size_t)page_off(b);
+            size_t rem = (rem_a < rem_b) ? rem_a : rem_b;
+            for (size_t i = 0; i < rem; i++) {
+                unsigned char ac = (unsigned char)a[i];
+                unsigned char bc = (unsigned char)b[i];
+                if (ac != bc) return (int)ac - (int)bc;
+                if (!ac) return 0;
+            }
+            a += rem;
+            b += rem;
+            continue;
+        }
+
+        uint32_t m0 = sse2_diff_or_zero_mask_16(a, b);
+        if (!m0) {
+            uint32_t m1 = sse2_diff_or_zero_mask_16(a + 16, b + 16);
+            if (!m1) {
+                a += 32;
+                b += 32;
+                continue;
+            }
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m1) : "cc");
+            idx += 16;
+            unsigned char ac = (unsigned char)a[idx];
+            unsigned char bc = (unsigned char)b[idx];
+            return (int)ac - (int)bc;
+        }
+
+        uint32_t idx;
+        __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m0) : "cc");
+        unsigned char ac = (unsigned char)a[idx];
+        unsigned char bc = (unsigned char)b[idx];
+        return (int)ac - (int)bc;
+    }
+}
 
 __attribute__((target("sse2")))
 size_t strlen(const char* s) {
     const char* start = s;
     
-    while (((uint32_t)s & 0xF) != 0) {
-        if (*s == 0) return s - start;
+    while (((uintptr_t)s & 0xFu) != 0u) {
+        if (*s == 0) return (size_t)(s - start);
         s++;
     }
-    
-    size_t res;
-    
-    __asm__ volatile (
-        "pxor    %%xmm0, %%xmm0 \n\t"
-        
-        "1: \n\t"
-        "movdqa  (%1), %%xmm1 \n\t"
-        "pcmpeqb %%xmm0, %%xmm1 \n\t"
-        "pmovmskb %%xmm1, %%eax \n\t"
-        "test    %%eax, %%eax \n\t"
-        "jnz     2f \n\t" 
-        
-        "add     $16, %1 \n\t"
-        "jmp     1b \n\t"
-        
-        "2: \n\t"
-        "bsf     %%eax, %%eax \n\t"  
-        "add     %%eax, %1 \n\t" 
-        "mov     %1, %0 \n\t"  
-        
-        : "=r"(res), "+r"(s)   
-        :      
-        : "eax", "xmm0", "xmm1", "cc" 
-    );
-    
-    return res - (size_t)start;
+
+    for (;;) {
+        if (unlikely(page_off(s) > (PAGE_MASK - 32u))) {
+            size_t rem = PAGE_SIZE - (size_t)page_off(s);
+            for (size_t i = 0; i < rem; i++) {
+                if (s[i] == 0) return (size_t)((s + i) - start);
+            }
+            s += rem;
+            continue;
+        }
+
+        uint32_t m0 = sse2_zero_mask_16_aligned(s);
+        if (m0) {
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m0) : "cc");
+            return (size_t)((s + idx) - start);
+        }
+
+        uint32_t m1 = sse2_zero_mask_16_aligned(s + 16);
+        if (m1) {
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m1) : "cc");
+            return (size_t)((s + 16 + idx) - start);
+        }
+
+        s += 32;
+    }
 }
 
-int strcmp(const char* a, const char* b) {
-    while (*a && (*a == *b)) { a++; b++; }
-    return *(const unsigned char*)a - *(const unsigned char*)b;
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline size_t strnlen_sse2(const char* s, size_t max) {
+    const char* p = s;
+    size_t n = max;
+
+    while (n && (((uintptr_t)p & 0xFu) != 0u)) {
+        if (!*p) return (size_t)(p - s);
+        p++;
+        n--;
+    }
+
+    if (!n) return max;
+
+    while (n) {
+        if (unlikely(page_off(p) > (PAGE_MASK - 16u))) {
+            size_t rem = PAGE_SIZE - (size_t)page_off(p);
+            if (rem > n) rem = n;
+            for (size_t i = 0; i < rem; i++) {
+                if (!p[i]) return (size_t)((p + i) - s);
+            }
+            p += rem;
+            n -= rem;
+            continue;
+        }
+
+        if (n >= 16) {
+            uint32_t m = sse2_zero_mask_16_aligned(p);
+            if (m) {
+                uint32_t idx;
+                __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m) : "cc");
+                return (size_t)((p + idx) - s);
+            }
+            p += 16;
+            n -= 16;
+            continue;
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            if (!p[i]) return (size_t)((p + i) - s);
+        }
+        return max;
+    }
+
+    return max;
 }
 
+__attribute__((target("sse2")))
 int strncmp(const char* a, const char* b, size_t n) {
+    if (!n) return 0;
+
+    if ((((uintptr_t)a ^ (uintptr_t)b) & 0xFu) == 0u) {
+        while (n && (((uintptr_t)a & 0xFu) != 0u)) {
+            unsigned char ac = (unsigned char)*a;
+            unsigned char bc = (unsigned char)*b;
+            if (ac != bc) return (int)ac - (int)bc;
+            if (!ac) return 0;
+            a++;
+            b++;
+            n--;
+        }
+
+        while (n >= 32) {
+            if (unlikely(page_off(a) > (PAGE_MASK - 32u) || page_off(b) > (PAGE_MASK - 32u))) break;
+
+            uint32_t m0 = sse2_diff_or_zero_mask_16_aligned(a, b);
+            if (!m0) {
+                uint32_t m1 = sse2_diff_or_zero_mask_16_aligned(a + 16, b + 16);
+                if (!m1) {
+                    a += 32;
+                    b += 32;
+                    n -= 32;
+                    continue;
+                }
+
+                uint32_t idx;
+                __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m1) : "cc");
+                idx += 16;
+                if ((size_t)idx >= n) return 0;
+
+                unsigned char ac = (unsigned char)a[idx];
+                unsigned char bc = (unsigned char)b[idx];
+                return (int)ac - (int)bc;
+            }
+
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m0) : "cc");
+            if ((size_t)idx >= n) return 0;
+
+            unsigned char ac = (unsigned char)a[idx];
+            unsigned char bc = (unsigned char)b[idx];
+            return (int)ac - (int)bc;
+        }
+
+        while (n >= 16) {
+            if (unlikely(page_off(a) > (PAGE_MASK - 16u) || page_off(b) > (PAGE_MASK - 16u))) break;
+
+            uint32_t m = sse2_diff_or_zero_mask_16_aligned(a, b);
+            if (!m) {
+                a += 16;
+                b += 16;
+                n -= 16;
+                continue;
+            }
+
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m) : "cc");
+            if ((size_t)idx >= n) return 0;
+
+            unsigned char ac = (unsigned char)a[idx];
+            unsigned char bc = (unsigned char)b[idx];
+            return (int)ac - (int)bc;
+        }
+    } else {
+        while (n >= 32) {
+            if (unlikely(page_off(a) > (PAGE_MASK - 32u) || page_off(b) > (PAGE_MASK - 32u))) break;
+
+            uint32_t m0 = sse2_diff_or_zero_mask_16(a, b);
+            if (!m0) {
+                uint32_t m1 = sse2_diff_or_zero_mask_16(a + 16, b + 16);
+                if (!m1) {
+                    a += 32;
+                    b += 32;
+                    n -= 32;
+                    continue;
+                }
+
+                uint32_t idx;
+                __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m1) : "cc");
+                idx += 16;
+                if ((size_t)idx >= n) return 0;
+
+                unsigned char ac = (unsigned char)a[idx];
+                unsigned char bc = (unsigned char)b[idx];
+                return (int)ac - (int)bc;
+            }
+
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m0) : "cc");
+            if ((size_t)idx >= n) return 0;
+
+            unsigned char ac = (unsigned char)a[idx];
+            unsigned char bc = (unsigned char)b[idx];
+            return (int)ac - (int)bc;
+        }
+
+        while (n >= 16) {
+            if (unlikely(page_off(a) > (PAGE_MASK - 16u) || page_off(b) > (PAGE_MASK - 16u))) break;
+
+            uint32_t m = sse2_diff_or_zero_mask_16(a, b);
+            if (!m) {
+                a += 16;
+                b += 16;
+                n -= 16;
+                continue;
+            }
+
+            uint32_t idx;
+            __asm__ volatile("bsf %1, %0" : "=r"(idx) : "r"(m) : "cc");
+            if ((size_t)idx >= n) return 0;
+
+            unsigned char ac = (unsigned char)a[idx];
+            unsigned char bc = (unsigned char)b[idx];
+            return (int)ac - (int)bc;
+        }
+    }
+
     for (size_t i = 0; i < n; i++) {
         unsigned char ac = (unsigned char)a[i];
         unsigned char bc = (unsigned char)b[i];
-        if (ac != bc) return ac - bc;
+        if (ac != bc) return (int)ac - (int)bc;
         if (!ac) return 0;
     }
     return 0;
 }
 
 size_t strlcpy(char* restrict dst, const char* restrict src, size_t dstsz) {
-    size_t i = 0;
-    if (dstsz) {
-        for (; i + 1 < dstsz && src[i]; i++) dst[i] = src[i];
-        dst[i] = 0;
-    }
-    while (src[i]) i++;
-    return i;
+    size_t slen = strlen(src);
+    if (!dstsz) return slen;
+
+    size_t to_copy = slen;
+    if (to_copy >= dstsz) to_copy = dstsz - 1;
+    if (to_copy) memcpy(dst, src, to_copy);
+    dst[to_copy] = 0;
+    return slen;
 }
 
+__attribute__((target("sse2")))
 size_t strlcat(char* restrict dst, const char* restrict src, size_t dstsz) {
-    size_t dlen = strlen(dst);
-    size_t slen = strlen(src);
+    if (!dstsz) return strlen(src);
 
-    if (dlen >= dstsz) return dstsz + slen;
+    size_t dlen = strnlen_sse2(dst, dstsz);
+
+    size_t slen = strlen(src);
+    if (dlen == dstsz) return dstsz + slen;
 
     size_t to_copy = dstsz - dlen - 1;
-    if (slen < to_copy) to_copy = slen;
-
-    memcpy(dst + dlen, src, to_copy);
-    dst[dlen + to_copy] = '\0';
+    if (to_copy) {
+        if (slen < to_copy) to_copy = slen;
+        if (to_copy) memcpy(dst + dlen, src, to_copy);
+        dst[dlen + to_copy] = '\0';
+    }
 
     return dlen + slen;
 }
 
 __attribute__((target("sse2"))) __attribute__((always_inline))
-static inline void* memcpy_sse(void *restrict dest, const void *restrict src, size_t n) {
+static inline void memcpy_sse_aligned(void* dest, const void* src, size_t n) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
 
     while (n >= 64) {
         __asm__ volatile (
-            "movups (%0), %%xmm0 \n\t"
-            "movups 16(%0), %%xmm1 \n\t"
-            "movups 32(%0), %%xmm2 \n\t"
-            "movups 48(%0), %%xmm3 \n\t"
-            "movups %%xmm0, (%1) \n\t"
-            "movups %%xmm1, 16(%1) \n\t"
-            "movups %%xmm2, 32(%1) \n\t"
-            "movups %%xmm3, 48(%1) \n\t"
+            "movdqa (%0), %%xmm0 \n\t"
+            "movdqa 16(%0), %%xmm1 \n\t"
+            "movdqa 32(%0), %%xmm2 \n\t"
+            "movdqa 48(%0), %%xmm3 \n\t"
+            "movdqa %%xmm0, (%1) \n\t"
+            "movdqa %%xmm1, 16(%1) \n\t"
+            "movdqa %%xmm2, 32(%1) \n\t"
+            "movdqa %%xmm3, 48(%1) \n\t"
             : : "r"(s), "r"(d) 
             : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
         );
         s += 64; d += 64; n -= 64;
     }
-    
-    return d; 
+}
+
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void memcpy_sse_unaligned_src(void* dest, const void* src, size_t n) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+
+    while (n >= 64) {
+        __asm__ volatile (
+            "movdqu (%0), %%xmm0 \n\t"
+            "movdqu 16(%0), %%xmm1 \n\t"
+            "movdqu 32(%0), %%xmm2 \n\t"
+            "movdqu 48(%0), %%xmm3 \n\t"
+            "movdqa %%xmm0, (%1) \n\t"
+            "movdqa %%xmm1, 16(%1) \n\t"
+            "movdqa %%xmm2, 32(%1) \n\t"
+            "movdqa %%xmm3, 48(%1) \n\t"
+            : : "r"(s), "r"(d)
+            : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+        );
+        s += 64; d += 64; n -= 64;
+    }
 }
 
 __attribute__((target("sse2"))) __attribute__((always_inline))
@@ -129,15 +489,26 @@ static inline void* memset_sse(void* dest, int val, size_t n) {
         : : "r"(v) : "xmm0"
     );
 
+    while (n && (((uintptr_t)d & 0xFu) != 0u)) {
+        *d++ = (uint8_t)val;
+        n--;
+    }
+
     while (n >= 64) {
         __asm__ volatile (
-            "movups %%xmm0, (%0)\n"
-            "movups %%xmm0, 16(%0)\n"
-            "movups %%xmm0, 32(%0)\n"
-            "movups %%xmm0, 48(%0)\n"
+            "movdqa %%xmm0, (%0)\n"
+            "movdqa %%xmm0, 16(%0)\n"
+            "movdqa %%xmm0, 32(%0)\n"
+            "movdqa %%xmm0, 48(%0)\n"
             : : "r"(d) : "memory"
         );
         d += 64; n -= 64;
+    }
+
+    while (n >= 4) {
+        *(u32_alias*)d = v;
+        d += 4;
+        n -= 4;
     }
 
     while (n--) *d++ = (uint8_t)val;
@@ -150,22 +521,42 @@ void* memcpy(void *restrict dst, const void *restrict src, size_t n) {
     const uint8_t *s = (const uint8_t *)src;
 
     if (unlikely(n >= 64)) {
-        (void)memcpy_sse(d, s, n);
+        while (n && (((uintptr_t)d & 0xFu) != 0u)) {
+            *d++ = *s++;
+            n--;
+        }
 
-        s += (n - (n % 64));
-        d += (n - (n % 64));
-        n %= 64;
+        size_t bulk = n & ~(size_t)63;
+        if (bulk) {
+            if ((((uintptr_t)s & 0xFu) == 0u)) memcpy_sse_aligned(d, s, bulk);
+            else memcpy_sse_unaligned_src(d, s, bulk);
+            s += bulk;
+            d += bulk;
+            n -= bulk;
+        }
     }
 
-    while (n >= 4) {
-        *(uint32_t *)d = *(const uint32_t *)s;
-        d += 4;
-        s += 4;
-        n -= 4;
-    }
-
-    while (n--) {
-        *d++ = *s++;
+    if (n) {
+        size_t dwords = n >> 2;
+        size_t bytes = n & 3u;
+        if (dwords) {
+            __asm__ volatile(
+                "cld\n\t"
+                "rep movsl"
+                : "+D"(d), "+S"(s), "+c"(dwords)
+                :
+                : "memory", "cc"
+            );
+        }
+        if (bytes) {
+            __asm__ volatile(
+                "cld\n\t"
+                "rep movsb"
+                : "+D"(d), "+S"(s), "+c"(bytes)
+                :
+                : "memory", "cc"
+            );
+        }
     }
 
     return dst;
@@ -175,7 +566,32 @@ __attribute__((target("sse2")))
 void* memset(void* dst, int v, size_t n) {
     if (n < 64) {
         uint8_t* p = (uint8_t*)dst;
-        while (n--) *p++ = (uint8_t)v;
+        uint8_t c = (uint8_t)v;
+
+        while (n && ((uintptr_t)p & 3u)) {
+            *p++ = c;
+            n--;
+        }
+
+        uint32_t vv = (uint32_t)c;
+        vv |= (vv << 8) | (vv << 16) | (vv << 24);
+        u32_alias* p32 = (u32_alias*)p;
+
+        while (n >= 16) {
+            p32[0] = vv;
+            p32[1] = vv;
+            p32[2] = vv;
+            p32[3] = vv;
+            p32 += 4;
+            n -= 16;
+        }
+        while (n >= 4) {
+            *p32++ = vv;
+            n -= 4;
+        }
+
+        p = (uint8_t*)p32;
+        while (n--) *p++ = c;
         return dst;
     }
     return memset_sse(dst, v, n);
