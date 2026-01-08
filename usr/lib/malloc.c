@@ -117,6 +117,7 @@ static void extend_heap(size_t min_size) {
     new_region->next_phys = NULL;
     
     if (top_chunk) {
+        if (!top_chunk->is_free) panic("Heap corruption (top_chunk used)", top_chunk);
         char* top_end = (char*)top_chunk + top_chunk->size;
         if (top_end == (char*)new_region) {
             top_chunk->size += new_region->size;
@@ -195,9 +196,9 @@ void* malloc(size_t size) {
         curr = next_node;
     }
 
-    if (!top_chunk || top_chunk->size < total_req) {
-        extend_heap(total_req);
-        if (!top_chunk || top_chunk->size < total_req) return NULL;
+    if (!top_chunk || top_chunk->size < total_req + MIN_BLOCK_SIZE) {
+        extend_heap(total_req + MIN_BLOCK_SIZE);
+        if (!top_chunk || top_chunk->size < total_req + MIN_BLOCK_SIZE) return NULL;
     }
 
     Block* block = top_chunk;
@@ -273,23 +274,31 @@ void* realloc(void* ptr, size_t size) {
     if (block->size >= new_total) return ptr;
 
     if (block->next_phys && block->next_phys->is_free) {
-        if (block->size + block->next_phys->size >= new_total) {
-            Block* next = block->next_phys;
-            
+        Block* next = block->next_phys;
+        size_t combined = block->size + next->size;
+        if (combined >= new_total) {
             if (next == top_chunk) {
-                top_chunk = block;
+                if (combined < new_total + MIN_BLOCK_SIZE) {
+                    size_t needed = (new_total + MIN_BLOCK_SIZE) - combined;
+                    size_t page_aligned = (needed + 4095) & ~4095;
+                    void* p = sbrk(page_aligned);
+                    if ((int)p == -1) goto slow;
+                    next->size += page_aligned;
+                    combined += page_aligned;
+                }
             } else {
                 remove_from_bin(next);
             }
-            
-            block->size += next->size;
+
+            block->size = combined;
             block->next_phys = next->next_phys;
             if (block->next_phys) block->next_phys->prev_phys = block;
-            
-            if (top_chunk == block) {
+
+            if (next == top_chunk) {
+                top_chunk = block;
                 block = split_chunk(block, new_total);
             }
-            
+
             return ptr;
         }
     }
@@ -304,6 +313,7 @@ void* realloc(void* ptr, size_t size) {
         }
     }
 
+slow:
     void* new_ptr = malloc(size);
     if (!new_ptr) return NULL;
     memcpy(new_ptr, ptr, block->size - HEADER_SIZE);
