@@ -25,7 +25,11 @@ LD="ld -m elf_i386 --gc-sections"
 ASM="fasm"
 
 CFLAGS_BASE="-ffreestanding -fno-pie -fno-stack-protector -fno-builtin -pipe -march=i686"
-CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O3 -Wall -Wextra -I src -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fomit-frame-pointer -fgraphite-identity -floop-nest-optimize"
+
+CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O2 -Wall -Wextra -I src -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fomit-frame-pointer
+-fno-strict-aliasing -fno-delete-null-pointer-checks -fno-strict-overflow -fwrapv -fno-common -Wstack-usage=16384"
+# -fanalyzer
+
 CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O3 -fomit-frame-pointer" 
 
 LDFLAGS_USER="--no-warn-rwx-segments -T usr/linker.ld"
