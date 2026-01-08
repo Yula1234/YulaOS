@@ -44,6 +44,10 @@
 #define C_WAITING   0xDCDCAA 
 #define C_ZOMBIE    0xF44747 
 
+#define SHELL_KEY_COPY 0x04
+#define C_SEL_BG 0x264F78
+#define C_SEL_FG 0xFFFFFF
+
 typedef struct {
     char** lines;
     int count;
@@ -58,6 +62,18 @@ typedef struct {
     shell_history_t* hist;
     char* line;
     char* cwd_path;
+
+    int cursor_pos;
+    int input_start_row;
+    int input_rows;
+
+    int sel_active;
+    int sel_selecting;
+    int sel_start_row;
+    int sel_start_col;
+    int sel_end_row;
+    int sel_end_col;
+
     spinlock_t lock;
 } shell_context_t;
 
@@ -65,6 +81,10 @@ extern void wake_up_gui();
 
 static void hist_init(shell_history_t* h);
 static void hist_destroy(shell_history_t* h);
+
+static void shell_sel_normalize(term_instance_t* term, int sr, int sc, int er, int ec, int* out_sr, int* out_sc, int* out_er, int* out_ec);
+static int  shell_sel_contains(int sr, int sc, int er, int ec, int row, int col);
+static int  shell_copy_selection(shell_context_t* ctx);
 
 extern volatile uint32_t timer_ticks;
 #define TICKS_PER_SEC 15000 
@@ -200,7 +220,11 @@ static void refresh_line(term_instance_t* term, const char* path, char* line, in
     int prompt_len = get_prompt_len(path);
     int line_len = strlen(line);
     int total_len = prompt_len + line_len;
-    int needed_rows = (total_len / TERM_W) + 1;
+
+    int cols = term ? term->cols : 0;
+    if (cols <= 0) cols = TERM_W;
+
+    int needed_rows = (total_len / cols) + 1;
 
     int start_row = *input_start_row;
     int prev_rows = *input_rows;
@@ -222,12 +246,13 @@ static void refresh_line(term_instance_t* term, const char* path, char* line, in
     *input_rows = needed_rows;
 
     int visual_cursor = prompt_len + cursor;
-    int cursor_row = visual_cursor / TERM_W;
-    int cursor_col = visual_cursor % TERM_W;
+    int cursor_row = visual_cursor / cols;
+    int cursor_col = visual_cursor % cols;
     term->row = start_row + cursor_row;
     term->col = cursor_col;
     
-    int visible_rows = TERM_H;
+    int visible_rows = term ? term->view_rows : 0;
+    if (visible_rows <= 0) visible_rows = TERM_H;
     if (term->row < term->view_row || term->row >= term->view_row + visible_rows) {
          if (term->row >= visible_rows) 
              term->view_row = term->row - visible_rows + 1;
@@ -256,28 +281,128 @@ static void shell_window_draw_handler(window_t* self, int x, int y) {
     term_instance_t* term = ctx->term;
     if(!term) return;
 
+    uint32_t ctx_flags = spinlock_acquire_safe(&ctx->lock);
     spinlock_acquire(&term->lock);
     
     int canvas_w = self->target_w - 12;
     int canvas_h = self->target_h - 44; 
     int status_bar_h = 22;              
     int text_area_h = canvas_h - status_bar_h;
+    int text_area_w = canvas_w - 6;
+    if (text_area_w < 8) text_area_w = 8;
     
     int visible_rows = text_area_h / 16; 
+    if (visible_rows < 1) visible_rows = 1;
+
+    int cols = text_area_w / 8;
+    if (cols < 1) cols = 1;
+
+    if (term->cols != cols) {
+        term_reflow(term, cols);
+
+        if (ctx->cwd_path && ctx->line) {
+            int prompt_len = get_prompt_len(ctx->cwd_path);
+            int cursor_row = (prompt_len + ctx->cursor_pos) / term->cols;
+            ctx->input_start_row = term->row - cursor_row;
+            if (ctx->input_start_row < 0) ctx->input_start_row = 0;
+            if (ctx->input_rows < 1) ctx->input_rows = 1;
+            refresh_line(term, ctx->cwd_path, ctx->line, ctx->cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+        }
+
+        ctx->sel_active = 0;
+        ctx->sel_selecting = 0;
+        ctx->sel_start_row = 0;
+        ctx->sel_start_col = 0;
+        ctx->sel_end_row = 0;
+        ctx->sel_end_col = 0;
+    }
+    term->view_rows = visible_rows;
+
+    yula_event_t ev;
+    while (window_pop_event(self, &ev)) {
+        if (ev.type == YULA_EVENT_MOUSE_DOWN && ev.arg3 == 1) {
+            if (ev.arg1 >= 0 && ev.arg2 >= 0 && ev.arg1 < (canvas_w - 6) && ev.arg2 < text_area_h) {
+                int col = ev.arg1 / 8;
+                int row = (ev.arg2 / 16) + term->view_row;
+                if (col < 0) col = 0;
+                if (col >= term->cols) col = term->cols - 1;
+                if (row < 0) row = 0;
+
+                if (ctx->sel_active) {
+                    int nsr = ctx->sel_start_row;
+                    int nsc = ctx->sel_start_col;
+                    int ner = ctx->sel_end_row;
+                    int nec = ctx->sel_end_col;
+                    shell_sel_normalize(term, nsr, nsc, ner, nec, &nsr, &nsc, &ner, &nec);
+
+                    if (!shell_sel_contains(nsr, nsc, ner, nec, row, col)) {
+                        ctx->sel_active = 0;
+                        ctx->sel_selecting = 0;
+                        ctx->sel_start_row = 0;
+                        ctx->sel_start_col = 0;
+                        ctx->sel_end_row = 0;
+                        ctx->sel_end_col = 0;
+                        continue;
+                    }
+                }
+
+                ctx->sel_active = 1;
+                ctx->sel_selecting = 1;
+                ctx->sel_start_row = row;
+                ctx->sel_start_col = col;
+                ctx->sel_end_row = row;
+                ctx->sel_end_col = col;
+            }
+        } else if (ev.type == YULA_EVENT_MOUSE_MOVE) {
+            if (ctx->sel_selecting && (ev.arg3 & 1)) {
+                if (ev.arg1 >= 0 && ev.arg2 >= 0 && ev.arg1 < (canvas_w - 6) && ev.arg2 < text_area_h) {
+                    int col = ev.arg1 / 8;
+                    int row = (ev.arg2 / 16) + term->view_row;
+                    if (col < 0) col = 0;
+                    if (col >= term->cols) col = term->cols - 1;
+                    if (row < 0) row = 0;
+                    ctx->sel_end_row = row;
+                    ctx->sel_end_col = col;
+                }
+            }
+            if (!(ev.arg3 & 1)) {
+                ctx->sel_selecting = 0;
+            }
+        } else if (ev.type == YULA_EVENT_MOUSE_UP && ev.arg3 == 1) {
+            ctx->sel_selecting = 0;
+        }
+    }
+
+    int sel_active = ctx->sel_active;
+    int sel_sr = ctx->sel_start_row;
+    int sel_sc = ctx->sel_start_col;
+    int sel_er = ctx->sel_end_row;
+    int sel_ec = ctx->sel_end_col;
+    spinlock_release_safe(&ctx->lock, ctx_flags);
+
+    if (sel_active) {
+        shell_sel_normalize(term, sel_sr, sel_sc, sel_er, sel_ec, &sel_sr, &sel_sc, &sel_er, &sel_ec);
+    }
 
     vga_draw_rect(x, y, canvas_w, text_area_h, C_BG);
 
     for (int r = 0; r < visible_rows; r++) {
         int buf_row = term->view_row + r;
 
-        for (int c = 0; c < TERM_W; c++) {
+        for (int c = 0; c < term->cols; c++) {
             char ch;
             uint32_t fg;
             uint32_t bg;
             term_get_cell(term, buf_row, c, &ch, &fg, &bg);
 
-            if (bg != C_BG) vga_draw_rect(x + c * 8, y + r * 16, 8, 16, bg);
-            if (ch != ' ') vga_draw_char_sse(x + c * 8, y + r * 16, ch, fg);
+            int is_sel = sel_active && shell_sel_contains(sel_sr, sel_sc, sel_er, sel_ec, buf_row, c);
+            if (is_sel) {
+                vga_draw_rect(x + c * 8, y + r * 16, 8, 16, C_SEL_BG);
+                if (ch != ' ') vga_draw_char_sse(x + c * 8, y + r * 16, ch, C_SEL_FG);
+            } else {
+                if (bg != C_BG) vga_draw_rect(x + c * 8, y + r * 16, 8, 16, bg);
+                if (ch != ' ') vga_draw_char_sse(x + c * 8, y + r * 16, ch, fg);
+            }
         }
     }
 
@@ -764,6 +889,195 @@ static void shell_ps(term_instance_t* term) {
     term->curr_fg = C_TEXT; term->curr_bg = C_BG;
 }
 
+static void shell_sel_normalize(term_instance_t* term, int sr, int sc, int er, int ec, int* out_sr, int* out_sc, int* out_er, int* out_ec) {
+     if (sr > er || (sr == er && sc > ec)) {
+         int tr = sr; sr = er; er = tr;
+         int tc = sc; sc = ec; ec = tc;
+     }
+     int cols = term ? term->cols : 0;
+     if (cols <= 0) cols = TERM_W;
+     int max_row = term ? term->max_row : 0;
+     if (max_row < 0) max_row = 0;
+     if (sr < 0) sr = 0;
+     if (er < 0) er = 0;
+     if (sr > max_row) sr = max_row;
+     if (er > max_row) er = max_row;
+     if (sc < 0) sc = 0;
+     if (sc >= cols) sc = cols - 1;
+     if (ec < 0) ec = 0;
+     if (ec >= cols) ec = cols - 1;
+     if (out_sr) *out_sr = sr;
+     if (out_sc) *out_sc = sc;
+     if (out_er) *out_er = er;
+     if (out_ec) *out_ec = ec;
+}
+
+static int shell_sel_contains(int sr, int sc, int er, int ec, int row, int col) {
+    if (row < sr || row > er) return 0;
+    if (sr == er) return (col >= sc && col <= ec);
+    if (row == sr) return col >= sc;
+    if (row == er) return col <= ec;
+    return 1;
+}
+
+static void shell_kbd_sel_step(shell_context_t* ctx, term_instance_t* term, int keycode) {
+    if (!ctx || !term) return;
+
+    spinlock_acquire(&term->lock);
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+    int view_rows = term->view_rows;
+    if (view_rows <= 0) view_rows = TERM_H;
+    if (view_rows < 1) view_rows = 1;
+
+    int max_row = term->max_row;
+    if (max_row < 0) max_row = 0;
+
+    int r;
+    int c;
+    if (ctx->sel_active) {
+        r = ctx->sel_end_row;
+        c = ctx->sel_end_col;
+    } else {
+        int at_bottom = (term->view_row + view_rows) >= term->row;
+        if (at_bottom) {
+            r = term->row;
+            c = term->col;
+        } else {
+            r = term->view_row + view_rows - 1;
+            c = 0;
+        }
+
+        if (r < 0) r = 0;
+        if (r > max_row) r = max_row;
+        if (c < 0) c = 0;
+        if (c >= cols) c = cols - 1;
+
+        ctx->sel_active = 1;
+        ctx->sel_selecting = 0;
+        ctx->sel_start_row = r;
+        ctx->sel_start_col = c;
+        ctx->sel_end_row = r;
+        ctx->sel_end_col = c;
+    }
+
+    if (r < 0) r = 0;
+    if (r > max_row) r = max_row;
+    if (c < 0) c = 0;
+    if (c >= cols) c = cols - 1;
+
+    if (keycode == 0x82) {
+        if (c > 0) c--;
+        else if (r > 0) { r--; c = cols - 1; }
+    } else if (keycode == 0x83) {
+        if (c < cols - 1) c++;
+        else if (r < max_row) { r++; c = 0; }
+    } else if (keycode == 0x80) {
+        if (r > 0) r--;
+    } else if (keycode == 0x81) {
+        if (r < max_row) r++;
+    } else if (keycode == 0x86) {
+        while (!(r == 0 && c == 0)) {
+            int pr = r;
+            int pc = c;
+            if (pc > 0) pc--; else { pr--; pc = cols - 1; }
+            char ch;
+            term_get_cell(term, pr, pc, &ch, 0, 0);
+            r = pr; c = pc;
+            if (ch != ' ') break;
+        }
+        while (!(r == 0 && c == 0)) {
+            int pr = r;
+            int pc = c;
+            if (pc > 0) pc--; else { pr--; pc = cols - 1; }
+            char ch;
+            term_get_cell(term, pr, pc, &ch, 0, 0);
+            if (ch == ' ') break;
+            r = pr; c = pc;
+        }
+    } else if (keycode == 0x87) {
+        while (!(r == max_row && c == cols - 1)) {
+            int pr = r;
+            int pc = c;
+            if (pc < cols - 1) pc++; else { if (pr >= max_row) break; pr++; pc = 0; }
+            char ch;
+            term_get_cell(term, pr, pc, &ch, 0, 0);
+            r = pr; c = pc;
+            if (ch != ' ') break;
+        }
+        while (!(r == max_row && c == cols - 1)) {
+            int pr = r;
+            int pc = c;
+            if (pc < cols - 1) pc++; else { if (pr >= max_row) break; pr++; pc = 0; }
+            char ch;
+            term_get_cell(term, pr, pc, &ch, 0, 0);
+            if (ch == ' ') break;
+            r = pr; c = pc;
+        }
+    }
+
+    if (r < 0) r = 0;
+    if (r > max_row) r = max_row;
+    if (c < 0) c = 0;
+    if (c >= cols) c = cols - 1;
+
+    ctx->sel_end_row = r;
+    ctx->sel_end_col = c;
+
+    if (ctx->sel_end_row < term->view_row) term->view_row = ctx->sel_end_row;
+    if (ctx->sel_end_row >= term->view_row + view_rows) term->view_row = ctx->sel_end_row - view_rows + 1;
+    if (term->view_row < 0) term->view_row = 0;
+    if (term->view_row > max_row) term->view_row = max_row;
+
+    spinlock_release(&term->lock);
+}
+
+static int shell_copy_selection(shell_context_t* ctx) {
+    if (!ctx || !ctx->term) return 0;
+
+     int active = 0;
+     int sr = 0, sc = 0, er = 0, ec = 0;
+     uint32_t flags = spinlock_acquire_safe(&ctx->lock);
+     active = ctx->sel_active;
+     sr = ctx->sel_start_row;
+     sc = ctx->sel_start_col;
+     er = ctx->sel_end_row;
+     ec = ctx->sel_end_col;
+     spinlock_release_safe(&ctx->lock, flags);
+
+     if (!active) return 0;
+
+     shell_sel_normalize(ctx->term, sr, sc, er, ec, &sr, &sc, &er, &ec);
+
+     const int cap = 4096;
+     char* out = (char*)kmalloc(cap);
+     if (!out) return 0;
+
+     int pos = 0;
+     spinlock_acquire(&ctx->term->lock);
+
+     int cols = ctx->term->cols;
+     if (cols <= 0) cols = TERM_W;
+
+     for (int r = sr; r <= er && pos < cap - 1; r++) {
+         int c0 = (r == sr) ? sc : 0;
+         int c1 = (r == er) ? ec : (cols - 1);
+         for (int c = c0; c <= c1 && pos < cap - 1; c++) {
+             char ch;
+             term_get_cell(ctx->term, r, c, &ch, 0, 0);
+             out[pos++] = ch;
+         }
+         if (r != er && pos < cap - 1) out[pos++] = '\n';
+     }
+
+     spinlock_release(&ctx->term->lock);
+
+     clipboard_set(out, pos);
+     kfree(out);
+     return 1;
+ }
+
 void shell_task(void* arg) {
     (void)arg;
     shell_context_t* ctx = kzalloc(sizeof(shell_context_t));
@@ -843,8 +1157,9 @@ void shell_task(void* arg) {
     vfs_open("/dev/console", 1); 
 
     print_prompt_text(my_term, ctx->cwd_path);
-    int input_start_row = my_term->row;
-    int input_rows = 1;
+    ctx->input_start_row = my_term->row;
+    ctx->input_rows = 1;
+    ctx->cursor_pos = 0;
     if (yulafs_lookup("/bin") == -1) yulafs_mkdir("/bin");
     if (yulafs_lookup("/home") == -1) yulafs_mkdir("/home");
 
@@ -855,13 +1170,32 @@ void shell_task(void* arg) {
 
         if (bytes_read > 0) {
 
+            if ((uint8_t)c == (uint8_t)SHELL_KEY_COPY) {
+                shell_copy_selection(ctx);
+
+                uint32_t sel_flags = spinlock_acquire_safe(&ctx->lock);
+                ctx->sel_active = 0;
+                ctx->sel_selecting = 0;
+                ctx->sel_start_row = 0;
+                ctx->sel_start_col = 0;
+                ctx->sel_end_row = 0;
+                ctx->sel_end_col = 0;
+                spinlock_release_safe(&ctx->lock, sel_flags);
+
+                win->is_dirty = 1;
+                wake_up_gui();
+                continue;
+            }
+
             uint32_t flags = spinlock_acquire_safe(&ctx->lock);
 
             if (c == '\n') {
                 
                 int visual_end = get_prompt_len(ctx->cwd_path) + line_len;
-                my_term->row = input_start_row + (visual_end / TERM_W);
-                my_term->col = visual_end % TERM_W;
+                int cols = my_term->cols;
+                if (cols <= 0) cols = TERM_W;
+                my_term->row = ctx->input_start_row + (visual_end / cols);
+                my_term->col = visual_end % cols;
 
                 term_putc(my_term, '\n');
 
@@ -988,8 +1322,9 @@ void shell_task(void* arg) {
                 line[0] = 0;
                 
                 print_prompt_text(my_term, ctx->cwd_path);
-                input_start_row = my_term->row;
-                input_rows = 1;
+                ctx->input_start_row = my_term->row;
+                ctx->input_rows = 1;
+                ctx->cursor_pos = 0;
                 
                 win->is_dirty = 1;
             } 
@@ -1003,7 +1338,8 @@ void shell_task(void* arg) {
                         memcpy(line, h_str, n + 1);
                         line_len = (int)n;
                         cursor_pos = line_len;
-                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                        ctx->cursor_pos = cursor_pos;
+                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
                     }
                 }
             }
@@ -1018,22 +1354,67 @@ void shell_task(void* arg) {
                         memcpy(line, src, n + 1);
                         line_len = (int)n;
                         cursor_pos = line_len;
-                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                        ctx->cursor_pos = cursor_pos;
+                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
                     }
                 }
             }
-            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows); } }
-            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows); } }
-            else if (c == (char)0x80) { if (my_term->view_row > 0) { my_term->view_row--; win->is_dirty = 1; } }
-            else if (c == (char)0x81) { 
-                int visible_rows = (win->target_h - 44 - 22) / 16;
-                if (my_term->view_row + visible_rows <= my_term->max_row) { my_term->view_row++; win->is_dirty = 1; }
+            else if ((uint8_t)c == 0x82 || (uint8_t)c == 0x83 || (uint8_t)c == 0x86 || (uint8_t)c == 0x87) {
+                shell_kbd_sel_step(ctx, my_term, (uint8_t)c);
+            }
+            else if ((uint8_t)c == 0x1B) {
+                ctx->sel_active = 0;
+                ctx->sel_selecting = 0;
+                ctx->sel_start_row = 0;
+                ctx->sel_start_col = 0;
+                ctx->sel_end_row = 0;
+                ctx->sel_end_col = 0;
+            }
+            else if ((uint8_t)c == 0x88) {
+                if (cursor_pos > 0) {
+                    for (int i = cursor_pos; i <= line_len; i++) {
+                        line[i - cursor_pos] = line[i];
+                    }
+                    line_len -= cursor_pos;
+                    cursor_pos = 0;
+                    ctx->cursor_pos = cursor_pos;
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                }
+            }
+            else if ((uint8_t)c == 0x89) {
+                if (cursor_pos < line_len) {
+                    line[cursor_pos] = 0;
+                    line_len = cursor_pos;
+                    ctx->cursor_pos = cursor_pos;
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                }
+            }
+            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; ctx->cursor_pos = cursor_pos; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows); } }
+            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; ctx->cursor_pos = cursor_pos; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows); } }
+            else if ((uint8_t)c == 0x80) {
+                if (ctx->sel_active) {
+                    shell_kbd_sel_step(ctx, my_term, 0x80);
+                } else if (my_term->view_row > 0) {
+                    my_term->view_row--;
+                    win->is_dirty = 1;
+                }
+            }
+            else if ((uint8_t)c == 0x81) { 
+                if (ctx->sel_active) {
+                    shell_kbd_sel_step(ctx, my_term, 0x81);
+                } else {
+                    int visible_rows = my_term->view_rows;
+                    if (visible_rows <= 0) visible_rows = (win->target_h - 44 - 22) / 16;
+                    if (visible_rows < 1) visible_rows = 1;
+                    if (my_term->view_row + visible_rows <= my_term->max_row) { my_term->view_row++; win->is_dirty = 1; }
+                }
             }
             else if (c == '\b') {
                 if (cursor_pos > 0) {
                     for (int i = cursor_pos; i < line_len; i++) line[i-1] = line[i];
                     line_len--; cursor_pos--; line[line_len] = 0;
-                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                    ctx->cursor_pos = cursor_pos;
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
                 }
             } 
             else if ((uint8_t)c >= 32) {
@@ -1042,7 +1423,8 @@ void shell_task(void* arg) {
                     for (int i = line_len; i > cursor_pos; i--) line[i] = line[i-1];
                     line[cursor_pos] = c;
                     line_len++; cursor_pos++; line[line_len] = 0;
-                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &input_start_row, &input_rows);
+                    ctx->cursor_pos = cursor_pos;
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
                 }
             }
             spinlock_release_safe(&ctx->lock, flags);

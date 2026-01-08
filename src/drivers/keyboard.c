@@ -115,6 +115,12 @@ void keyboard_irq_handler(registers_t* regs) {
     if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
     if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return; }
 
+    // Ctrl+Shift+C (copy)
+    if (ctrl_pressed && shift_pressed && scancode == 0x2E) {
+        send_key_to_focused(0x04);
+        return;
+    }
+
     // Ctrl+C
     if (ctrl_pressed && scancode == 0x2E) { 
         task_t* target_task = proc_find_by_pid(focused_window_pid);
@@ -147,6 +153,8 @@ void keyboard_irq_handler(registers_t* regs) {
             if (scancode == 0x1F) { send_key_to_focused(0x15); return; } // Ctrl+S
             if (scancode == 0x10) { send_key_to_focused(0x17); return; } // Ctrl+Q
             if (scancode == 0x2F) { send_key_to_focused(0x16); return; } // Ctrl+V
+            if (scancode == 0x16) { send_key_to_focused((char)0x88); return; }
+            if (scancode == 0x25) { send_key_to_focused((char)0x89); return; }
 
             task_t* target_task = proc_find_by_pid(focused_window_pid);
             if (target_task && target_task->term_mode == 0) {

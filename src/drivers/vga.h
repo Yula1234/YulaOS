@@ -34,6 +34,9 @@ typedef struct {
     uint32_t curr_fg;
     uint32_t curr_bg;
 
+    int cols;
+    int view_rows;
+ 
     int col;
     int row;
     int view_row;
@@ -47,6 +50,7 @@ void term_init(term_instance_t* term);
 void term_destroy(term_instance_t* term);
 void term_putc(term_instance_t* term, char c);
 void term_print(term_instance_t* term, const char* s);
+void term_reflow(term_instance_t* term, int new_cols);
 void term_clear_row(term_instance_t* term, int row);
 void term_get_cell(term_instance_t* term, int row, int col, char* out_ch, uint32_t* out_fg, uint32_t* out_bg);
 void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg, uint32_t bg);

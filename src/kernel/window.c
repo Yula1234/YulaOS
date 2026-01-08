@@ -9,6 +9,8 @@
 
 #include "window.h"
 
+extern void wake_up_gui();
+
 dlist_head_t window_list;
 int focused_window_pid = 0;
 int next_window_id = 1;
@@ -55,8 +57,12 @@ void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
         win->event_queue[win->evt_head].arg3 = a3;
         win->evt_head = next;
     }
+
+    win->is_dirty = 1;
     
     spinlock_release_safe(&win->event_lock, flags);
+
+    wake_up_gui();
 }
 
 int window_pop_event(window_t* win, yula_event_t* out_ev) {

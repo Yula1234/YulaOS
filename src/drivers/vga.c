@@ -211,6 +211,9 @@ static int term_ensure_rows(term_instance_t* term, int rows_needed) {
     if (rows_needed <= 0) rows_needed = 1;
     if (term->history_cap_rows >= rows_needed) return 0;
 
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
     int old_cap = term->history_cap_rows;
     int new_cap = (old_cap > 0) ? old_cap : 128;
     while (new_cap < rows_needed) {
@@ -218,8 +221,8 @@ static int term_ensure_rows(term_instance_t* term, int rows_needed) {
         new_cap *= 2;
     }
 
-    size_t old_cells = (size_t)old_cap * (size_t)TERM_W;
-    size_t new_cells = (size_t)new_cap * (size_t)TERM_W;
+    size_t old_cells = (size_t)old_cap * (size_t)cols;
+    size_t new_cells = (size_t)new_cap * (size_t)cols;
 
     term->buffer = (char*)krealloc(term->buffer, new_cells);
     term->fg_colors = (uint32_t*)krealloc(term->fg_colors, new_cells * sizeof(uint32_t));
@@ -247,6 +250,9 @@ void term_init(term_instance_t* term) {
 
     if (term->curr_fg == 0) term->curr_fg = COLOR_WHITE;
     if (term->curr_bg == 0) term->curr_bg = COLOR_BLACK;
+
+    if (term->cols <= 0) term->cols = TERM_W;
+    if (term->view_rows <= 0) term->view_rows = TERM_H;
 
     term->buffer = 0;
     term->fg_colors = 0;
@@ -276,8 +282,11 @@ void term_clear_row(term_instance_t* term, int row) {
     if (!term || row < 0) return;
     if (term_ensure_rows(term, row + 1) != 0) return;
 
-    size_t start = (size_t)row * (size_t)TERM_W;
-    for (int i = 0; i < TERM_W; i++) {
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    size_t start = (size_t)row * (size_t)cols;
+    for (int i = 0; i < cols; i++) {
         term->buffer[start + (size_t)i] = ' ';
         term->fg_colors[start + (size_t)i] = term->curr_fg;
         term->bg_colors[start + (size_t)i] = term->curr_bg;
@@ -290,20 +299,29 @@ void term_get_cell(term_instance_t* term, int row, int col, char* out_ch, uint32
     if (out_ch) *out_ch = ' ';
     if (out_fg) *out_fg = term ? term->curr_fg : 0;
     if (out_bg) *out_bg = term ? term->curr_bg : 0;
-    if (!term || row < 0 || col < 0 || col >= TERM_W) return;
+
+    int cols = term ? term->cols : 0;
+    if (cols <= 0) cols = TERM_W;
+
+    if (!term || row < 0 || col < 0 || col >= cols) return;
     if (row >= term->history_rows) return;
 
-    size_t idx = (size_t)row * (size_t)TERM_W + (size_t)col;
+    size_t idx = (size_t)row * (size_t)cols + (size_t)col;
     if (out_ch) *out_ch = term->buffer[idx];
     if (out_fg) *out_fg = term->fg_colors[idx];
     if (out_bg) *out_bg = term->bg_colors[idx];
 }
 
 void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg, uint32_t bg) {
-    if (!term || row < 0 || col < 0 || col >= TERM_W) return;
+    if (!term) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    if (row < 0 || col < 0 || col >= cols) return;
     if (term_ensure_rows(term, row + 1) != 0) return;
 
-    size_t idx = (size_t)row * (size_t)TERM_W + (size_t)col;
+    size_t idx = (size_t)row * (size_t)cols + (size_t)col;
     term->buffer[idx] = ch;
     term->fg_colors[idx] = fg;
     term->bg_colors[idx] = bg;
@@ -314,6 +332,12 @@ void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg
 
 void term_putc(term_instance_t* term, char c) {
     if (!term) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    int view_rows = term->view_rows;
+    if (view_rows <= 0) view_rows = TERM_H;
 
     if (c == 0x0C) {
         term->col = 0;
@@ -328,8 +352,8 @@ void term_putc(term_instance_t* term, char c) {
     if (c == '\n') {
         if (term_ensure_rows(term, term->row + 1) != 0) return;
 
-        int idx = term->row * TERM_W + term->col;
-        int remaining = TERM_W - term->col;
+        int idx = term->row * cols + term->col;
+        int remaining = cols - term->col;
         for (int k = 0; k < remaining; k++) {
             term->bg_colors[idx + k] = term->curr_bg;
             term->fg_colors[idx + k] = term->curr_fg;
@@ -343,20 +367,20 @@ void term_putc(term_instance_t* term, char c) {
     } else if (c == '\b') {
         if (term->col > 0) term->col--;
         if (term_ensure_rows(term, term->row + 1) != 0) return;
-        int idx = term->row * TERM_W + term->col;
+        int idx = term->row * cols + term->col;
         term->buffer[idx] = ' ';
         term->fg_colors[idx] = term->curr_fg;
         term->bg_colors[idx] = term->curr_bg;
     } else {
         if (term_ensure_rows(term, term->row + 1) != 0) return;
-        int idx = term->row * TERM_W + term->col;
+        int idx = term->row * cols + term->col;
         term->buffer[idx] = c;
         term->fg_colors[idx] = term->curr_fg;
         term->bg_colors[idx] = term->curr_bg;
         term->col++;
     }
 
-    if (term->col >= TERM_W) { 
+    if (term->col >= cols) { 
         term->col = 0; 
         term->row++; 
         term_clear_row(term, term->row);
@@ -365,9 +389,9 @@ void term_putc(term_instance_t* term, char c) {
     if (term->row >= term->history_rows) term->history_rows = term->row + 1;
     if (term->row > term->max_row) term->max_row = term->row;
 
-    int at_bottom = (term->view_row + TERM_H) >= term->row;
+    int at_bottom = (term->view_row + view_rows) >= term->row;
     if (at_bottom) {
-        if (term->row >= TERM_H) term->view_row = term->row - TERM_H + 1;
+        if (term->row >= view_rows) term->view_row = term->row - view_rows + 1;
         else term->view_row = 0;
     }
 }
@@ -376,9 +400,100 @@ void term_print(term_instance_t* term, const char* s) {
     while (*s) term_putc(term, *s++);
 }
 
+void term_reflow(term_instance_t* term, int new_cols) {
+    if (!term) return;
+    if (new_cols <= 0) new_cols = 1;
+
+    int old_cols = term->cols;
+    if (old_cols <= 0) old_cols = TERM_W;
+    if (new_cols == old_cols) { term->cols = new_cols; return; }
+
+    int old_last_row = term->max_row;
+    if (old_last_row < 0) old_last_row = 0;
+    if (old_last_row >= term->history_rows) old_last_row = term->history_rows - 1;
+    if (old_last_row < 0) old_last_row = 0;
+
+    size_t worst = ((size_t)(old_last_row + 1) * (size_t)old_cols) + (size_t)(old_last_row + 1);
+    int cap_rows = (int)(worst / (size_t)new_cols) + 2;
+    if (cap_rows < 1) cap_rows = 1;
+
+    size_t cells = (size_t)cap_rows * (size_t)new_cols;
+    char* nb = (char*)kmalloc(cells ? cells : 1);
+    uint32_t* nfg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
+    uint32_t* nbg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
+    if (!nb || !nfg || !nbg) { if (nb) kfree(nb); if (nfg) kfree(nfg); if (nbg) kfree(nbg); return; }
+
+    for (size_t i = 0; i < cells; i++) { nb[i] = ' '; nfg[i] = term->curr_fg; nbg[i] = term->curr_bg; }
+
+    int cur_row = term->row, cur_col = term->col;
+    if (cur_row < 0) cur_row = 0;
+    if (cur_col < 0) cur_col = 0;
+    if (cur_col > old_cols) cur_col = old_cols;
+
+    int out_r = 0, out_c = 0;
+    int new_cur_r = 0, new_cur_c = 0, have_cur = 0;
+    int new_view_r = 0, have_view = 0;
+
+    for (int r = 0; r <= old_last_row && out_r < cap_rows; r++) {
+        if (!have_view && r == term->view_row) { new_view_r = out_r; have_view = 1; }
+
+        int end = old_cols - 1;
+        while (end >= 0 && term->buffer[(size_t)r * (size_t)old_cols + (size_t)end] == ' ') end--;
+        int row_len = end + 1;
+        if (row_len < 0) row_len = 0;
+
+        int take_cur = -1;
+        if (r == cur_row) { take_cur = cur_col; if (take_cur > row_len) take_cur = row_len; }
+
+        for (int c = 0; c < row_len && out_r < cap_rows; c++) {
+            if (!have_cur && r == cur_row && c == take_cur) { new_cur_r = out_r; new_cur_c = out_c; have_cur = 1; }
+            size_t dst = (size_t)out_r * (size_t)new_cols + (size_t)out_c;
+            size_t src = (size_t)r * (size_t)old_cols + (size_t)c;
+            nb[dst] = term->buffer[src];
+            nfg[dst] = term->fg_colors[src];
+            nbg[dst] = term->bg_colors[src];
+            if (++out_c >= new_cols) { out_c = 0; out_r++; }
+        }
+
+        if (!have_cur && r == cur_row && take_cur == row_len) { new_cur_r = out_r; new_cur_c = out_c; have_cur = 1; }
+
+        int hard_nl = (r < old_last_row && end < (old_cols - 1));
+        if (hard_nl) { out_r++; out_c = 0; }
+    }
+
+    if (out_r >= cap_rows) { out_r = cap_rows - 1; out_c = 0; }
+
+    kfree(term->buffer);
+    kfree(term->fg_colors);
+    kfree(term->bg_colors);
+    term->buffer = nb;
+    term->fg_colors = nfg;
+    term->bg_colors = nbg;
+    term->cols = new_cols;
+    term->history_cap_rows = cap_rows;
+    term->history_rows = out_r + 1;
+    term->max_row = term->history_rows - 1;
+
+    term->view_row = have_view ? new_view_r : term->view_row;
+    if (term->view_row < 0) term->view_row = 0;
+    if (term->view_row > term->max_row) term->view_row = term->max_row;
+
+    term->row = have_cur ? new_cur_r : out_r;
+    term->col = have_cur ? new_cur_c : out_c;
+    if (term->row < 0) term->row = 0;
+    if (term->row > term->max_row) term->row = term->max_row;
+    if (term->col < 0) term->col = 0;
+    if (term->col >= term->cols) term->col = term->cols - 1;
+}
+
 void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y) {
-    for (int y = 0; y < TERM_H; y++) {
-        for (int x = 0; x < TERM_W; x++) {
+    int cols = term ? term->cols : 0;
+    if (cols <= 0) cols = TERM_W;
+    int view_rows = term ? term->view_rows : 0;
+    if (view_rows <= 0) view_rows = TERM_H;
+
+    for (int y = 0; y < view_rows; y++) {
+        for (int x = 0; x < cols; x++) {
             char ch;
             uint32_t fg, bg;
             term_get_cell(term, term->view_row + y, x, &ch, &fg, &bg);
