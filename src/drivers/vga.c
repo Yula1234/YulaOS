@@ -28,6 +28,7 @@ static uint32_t  vga_target_h = 768;
 int dirty_x1, dirty_y1, dirty_x2, dirty_y2;
 
 static inline int vga_can_use_avx(void);
+static inline int vga_can_use_avx2(void);
 
 void vga_reset_dirty() {
     dirty_x1 = 2000;
@@ -894,7 +895,143 @@ void vga_draw_gradient_v(int x, int y, int w, int h, uint32_t c1, uint32_t c2) {
     vga_mark_dirty(x, y, w, h);
 }
 
-__attribute__((target("sse2")))
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void vga_blur_rect_sse2_impl(int x, int y, int w, int h) {
+    const int stride = (int)vga_target_w;
+    uint32_t* row = vga_current_target + y * stride + x;
+
+    for (int i = 0; i < h; i++) {
+        uint32_t* center_ptr = row;
+        uint32_t* up_ptr     = row - stride;
+        uint32_t* down_ptr   = row + stride;
+
+        for (int j = 0; j <= w - 4; j += 4) {
+            __asm__ volatile (
+                "movdqu (%1), %%xmm0 \n\t"
+                "movdqu (%2), %%xmm1 \n\t"
+                "pavgb %%xmm1, %%xmm0 \n\t"
+
+                "movdqu -4(%0), %%xmm2 \n\t"
+                "movdqu 4(%0), %%xmm3 \n\t"
+                "pavgb %%xmm3, %%xmm2 \n\t"
+
+                "pavgb %%xmm2, %%xmm0 \n\t"
+
+                "movdqu %%xmm0, (%0) \n\t"
+                :
+                : "r"(center_ptr), "r"(up_ptr), "r"(down_ptr)
+                : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+            );
+
+            center_ptr += 4;
+            up_ptr += 4;
+            down_ptr += 4;
+        }
+
+        row += stride;
+    }
+}
+
+__attribute__((target("avx2"))) __attribute__((always_inline))
+static inline void vga_blur_rect_avx2_impl(int x, int y, int w, int h) {
+    int blocks8 = w >> 3;
+    int blocks4 = (w - (blocks8 << 3)) >> 2;
+
+    const int stride = (int)vga_target_w;
+    uint32_t* row = vga_current_target + y * stride + x;
+
+    for (int i = 0; i < h; i++) {
+        uint8_t* c8 = (uint8_t*)row;
+        uint8_t* u8 = (uint8_t*)(row - stride);
+        uint8_t* d8 = (uint8_t*)(row + stride);
+
+        size_t n8 = (size_t)blocks8;
+        size_t pairs = n8 >> 1;
+        if (pairs) {
+            __asm__ volatile (
+                "1:\n\t"
+                "prefetchnta 512(%1)\n\t"
+                "prefetchnta 512(%2)\n\t"
+                "vmovdqu   (%1), %%ymm0\n\t"
+                "vmovdqu   (%2), %%ymm1\n\t"
+                "vpavgb  %%ymm1, %%ymm0, %%ymm0\n\t"
+                "vmovdqu -4(%0), %%ymm2\n\t"
+                "vmovdqu  4(%0), %%ymm3\n\t"
+                "vpavgb  %%ymm3, %%ymm2, %%ymm2\n\t"
+                "vpavgb  %%ymm2, %%ymm0, %%ymm0\n\t"
+                "vmovdqu %%ymm0,   (%0)\n\t"
+                "vmovdqu  32(%1), %%ymm4\n\t"
+                "vmovdqu  32(%2), %%ymm5\n\t"
+                "vpavgb  %%ymm5, %%ymm4, %%ymm4\n\t"
+                "vmovdqu 28(%0), %%ymm6\n\t"
+                "vmovdqu 36(%0), %%ymm7\n\t"
+                "vpavgb  %%ymm7, %%ymm6, %%ymm6\n\t"
+                "vpavgb  %%ymm6, %%ymm4, %%ymm4\n\t"
+                "vmovdqu %%ymm4,  32(%0)\n\t"
+                "add $64, %0\n\t"
+                "add $64, %1\n\t"
+                "add $64, %2\n\t"
+                "dec %3\n\t"
+                "jnz 1b\n\t"
+                : "+r"(c8), "+r"(u8), "+r"(d8), "+r"(pairs)
+                :
+                : "memory", "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7", "cc"
+            );
+        }
+
+        if (n8 & 1u) {
+            __asm__ volatile (
+                "vmovdqu (%1), %%ymm0\n\t"
+                "vmovdqu (%2), %%ymm1\n\t"
+                "vpavgb  %%ymm1, %%ymm0, %%ymm0\n\t"
+                "vmovdqu -4(%0), %%ymm2\n\t"
+                "vmovdqu  4(%0), %%ymm3\n\t"
+                "vpavgb  %%ymm3, %%ymm2, %%ymm2\n\t"
+                "vpavgb  %%ymm2, %%ymm0, %%ymm0\n\t"
+                "vmovdqu %%ymm0, (%0)\n\t"
+                "add $32, %0\n\t"
+                "add $32, %1\n\t"
+                "add $32, %2\n\t"
+                : "+r"(c8), "+r"(u8), "+r"(d8)
+                :
+                : "memory", "ymm0", "ymm1", "ymm2", "ymm3"
+            );
+        }
+
+        uint32_t* center_ptr = (uint32_t*)c8;
+        uint32_t* up_ptr     = (uint32_t*)u8;
+        uint32_t* down_ptr   = (uint32_t*)d8;
+
+        for (int j = 0; j < blocks4; j++) {
+            __asm__ volatile (
+                "vmovdqu (%1), %%xmm0 \n\t"
+                "vmovdqu (%2), %%xmm1 \n\t"
+                "vpavgb %%xmm1, %%xmm0, %%xmm0 \n\t"
+
+                "vmovdqu -4(%0), %%xmm2 \n\t"
+                "vmovdqu 4(%0), %%xmm3 \n\t"
+                "vpavgb %%xmm3, %%xmm2, %%xmm2 \n\t"
+
+                "vpavgb %%xmm2, %%xmm0, %%xmm0 \n\t"
+
+                "vmovdqu %%xmm0, (%0) \n\t"
+                :
+                : "r"(center_ptr), "r"(up_ptr), "r"(down_ptr)
+                : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+            );
+
+            center_ptr += 4;
+            up_ptr += 4;
+            down_ptr += 4;
+        }
+
+        row += stride;
+    }
+
+    __asm__ volatile ("vzeroupper" ::: "memory");
+}
+
+__attribute__((target("avx2"))) __attribute__((target("sse2")))
 void vga_blur_rect(int x, int y, int w, int h) {
     if (!vga_current_target) return;
     if (x < 1) x = 1;
@@ -903,38 +1040,12 @@ void vga_blur_rect(int x, int y, int w, int h) {
     if (y + h >= (int)vga_target_h) h = vga_target_h - y - 1;
     if (w <= 0 || h <= 0) return;
 
-    for (int i = 0; i < h; i++) {
-        int cy = y + i;
-        uint32_t* center_ptr = &vga_current_target[cy * vga_target_w + x];
-        uint32_t* up_ptr     = &vga_current_target[(cy - 1) * vga_target_w + x];
-        uint32_t* down_ptr   = &vga_current_target[(cy + 1) * vga_target_w + x];
-        
-        int j = 0;
-        
-        for (; j <= w - 4; j += 4) {
-            __asm__ volatile (
-                "movdqu (%1), %%xmm0 \n\t"
-                "movdqu (%2), %%xmm1 \n\t"
-                "pavgb %%xmm1, %%xmm0 \n\t"
-                
-                "movdqu -4(%0), %%xmm2 \n\t"
-                "movdqu 4(%0), %%xmm3 \n\t"
-                "pavgb %%xmm3, %%xmm2 \n\t"
-                
-                "pavgb %%xmm2, %%xmm0 \n\t"
-                
-                "movdqu %%xmm0, (%0) \n\t"
-                : 
-                : "r"(center_ptr), "r"(up_ptr), "r"(down_ptr)
-                : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
-            );
-            
-            center_ptr += 4;
-            up_ptr += 4;
-            down_ptr += 4;
-        }
+    if (vga_can_use_avx2()) {
+        vga_blur_rect_avx2_impl(x, y, w, h);
+    } else {
+        vga_blur_rect_sse2_impl(x, y, w, h);
     }
-    
+
     vga_mark_dirty(x, y, w, h);
 }
 
@@ -1280,6 +1391,22 @@ static inline int vga_can_use_avx(void) {
     if (!simd_osxsave_enabled()) { cached = 0; return cached; }
     uint64_t xcr0 = simd_xgetbv(0);
     cached = (((xcr0 & 0x6ull) == 0x6ull) ? 1 : 0);
+    return cached;
+}
+
+static inline int vga_can_use_avx2(void) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+
+    if (!vga_can_use_avx()) { cached = 0; return cached; }
+
+    uint32_t max_leaf, b, c, d;
+    simd_cpuid(0, 0, &max_leaf, &b, &c, &d);
+    if (max_leaf < 7) { cached = 0; return cached; }
+
+    uint32_t a, ebx, ecx, edx;
+    simd_cpuid(7, 0, &a, &ebx, &ecx, &edx);
+    cached = ((ebx & (1u << 5)) != 0u) ? 1 : 0;
     return cached;
 }
  
