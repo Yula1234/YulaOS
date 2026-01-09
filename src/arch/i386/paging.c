@@ -18,6 +18,54 @@ uint32_t page_dir[1024] __attribute__((aligned(4096)));
 
 static spinlock_t paging_lock;
 
+#define IA32_PAT_MSR 0x277u
+#define PAT_MEMTYPE_WC 1u
+
+static int paging_pat_supported_cached = -1;
+
+static inline void paging_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t* a, uint32_t* b, uint32_t* c, uint32_t* d) {
+    __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(subleaf));
+}
+
+static inline uint64_t paging_rdmsr_u64(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void paging_wrmsr_u64(uint32_t msr, uint64_t val) {
+    uint32_t lo = (uint32_t)val;
+    uint32_t hi = (uint32_t)(val >> 32);
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+int paging_pat_is_supported(void) {
+    if (paging_pat_supported_cached >= 0) {
+        return paging_pat_supported_cached;
+    }
+
+    uint32_t a, b, c, d;
+    paging_cpuid(1, 0, &a, &b, &c, &d);
+    paging_pat_supported_cached = ((d & (1u << 16)) != 0u) ? 1 : 0;
+    return paging_pat_supported_cached;
+}
+
+void paging_init_pat(void) {
+    if (!paging_pat_is_supported()) {
+        return;
+    }
+
+    uint64_t pat = paging_rdmsr_u64(IA32_PAT_MSR);
+    uint64_t new_pat = pat;
+
+    new_pat &= ~(0xFFull << 32);
+    new_pat |= ((uint64_t)PAT_MEMTYPE_WC) << 32;
+
+    if (new_pat != pat) {
+        paging_wrmsr_u64(IA32_PAT_MSR, new_pat);
+    }
+}
+
 static inline uint32_t* read_cr3(void) {
     uint32_t val;
     __asm__ volatile("mov %%cr3, %0" : "=r"(val));
@@ -68,6 +116,7 @@ static void paging_allocate_table(uint32_t virt) {
 }
 
 void paging_init(uint32_t ram_size_bytes) {
+    paging_init_pat();
     spinlock_init(&paging_lock);
 
     for(int i = 0; i < 1024; i++) {

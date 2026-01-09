@@ -42,6 +42,7 @@ void smp_ap_main(cpu_t* cpu_arg) {
     __asm__ volatile("ltr %%ax" : : "a" (tss_selector));
     
     paging_switch(kernel_page_directory);
+    paging_init_pat();
     
     lapic_init();
     lapic_timer_init(15000);

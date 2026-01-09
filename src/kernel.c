@@ -200,12 +200,20 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     paging_init(memory_end_addr);
     heap_init();
 
-
-    // mapping video memory
-    uint32_t fb_size = fb_width * fb_height * 4;
-    for (uint32_t i = 0; i < fb_size; i += 4096) {
-        paging_map(kernel_page_directory, (uint32_t)fb_ptr + i, (uint32_t)fb_ptr + i, 3);
-    }
+ 
+     // mapping video memory
+     uint32_t fb_size = fb_pitch * fb_height;
+     uint32_t fb_flags = PTE_PRESENT | PTE_RW;
+     if (paging_pat_is_supported()) {
+         fb_flags |= PTE_PAT;
+     }
+     uint32_t fb_base = (uint32_t)fb_ptr;
+     uint32_t fb_page = fb_base & ~0xFFFu;
+     uint32_t fb_end = fb_base + fb_size;
+     uint32_t fb_map_size = (fb_end - fb_page + 0xFFFu) & ~0xFFFu;
+     for (uint32_t i = 0; i < fb_map_size; i += 4096) {
+         paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
+     }
 
     acpi_init();
 
