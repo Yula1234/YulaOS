@@ -816,16 +816,94 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Assignment to const lvalue");
         }
 
-        ir_tc_check_assign(fc->lc, e->tok, lvt, e->v.assign.right);
-
         IrType* lvir = ir_type_from_scc(fc->f, lvt);
         if (lvir && lvir->kind == IR_TY_VOID) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Cannot assign to void lvalue");
         }
 
         IrValueId addr = ir_lower_addr(fc, e->v.assign.left);
-        IrValueId rv = ir_lower_expr(fc, e->v.assign.right);
-        IrValueId cv = ir_lower_cast_value(fc, rv, lvir, e->tok);
+
+        if (e->v.assign.op == (AstBinOp)0) {
+            ir_tc_check_assign(fc->lc, e->tok, lvt, e->v.assign.right);
+
+            IrValueId rv = ir_lower_expr(fc, e->v.assign.right);
+            IrValueId cv = ir_lower_cast_value(fc, rv, lvir, e->tok);
+            ir_emit_store(fc->f, fc->cur, addr, cv);
+            return cv;
+        }
+
+        AstBinOp op = e->v.assign.op;
+
+        if (op == AST_BINOP_ADD || op == AST_BINOP_SUB) {
+            Type* rt = ir_lower_expr_type(fc->lc, e->v.assign.right);
+            int lptr = (lvt && lvt->kind == TYPE_PTR);
+            int rptr = (rt && rt->kind == TYPE_PTR);
+
+            if (lptr) {
+                if (rptr) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unsupported pointer arithmetic in compound assignment");
+                }
+
+                if (!ir_tc_is_int_type(rt)) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer offset must be integer");
+                }
+
+                uint32_t scale = type_size(lvt->base);
+                if (scale == 0) {
+                    scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Pointer arithmetic on void* is not supported");
+                }
+
+                IrType* base_ir = ir_type_from_scc(fc->f, lvt->base);
+                IrType* ptr_ir = ir_type_ptr(fc->f, base_ir);
+
+                IrValueId old_lv = ir_emit_load(fc->f, fc->cur, lvir, addr);
+                IrValueId basev = ir_lower_cast_value(fc, old_lv, ptr_ir, e->tok);
+
+                IrValueId offv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.assign.right), fc->f->ty_i32, e->tok);
+                if (scale != 1) {
+                    IrValueId sc = ir_emit_iconst(fc->f, fc->cur, (int32_t)scale);
+                    offv = ir_emit_bin(fc->f, fc->cur, IR_INSTR_MUL, fc->f->ty_i32, offv, sc);
+                }
+                if (op == AST_BINOP_SUB) {
+                    IrValueId z = ir_emit_iconst(fc->f, fc->cur, 0);
+                    offv = ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, fc->f->ty_i32, z, offv);
+                }
+
+                IrValueId res = ir_emit_ptr_add(fc->f, fc->cur, ptr_ir, basev, offv);
+                IrValueId cv = ir_lower_cast_value(fc, res, lvir, e->tok);
+                ir_emit_store(fc->f, fc->cur, addr, cv);
+                return cv;
+            }
+        }
+
+        Type* rt = ir_lower_expr_type(fc->lc, e->v.assign.right);
+        if (!ir_tc_is_int_type(lvt) || !ir_tc_is_int_type(rt)) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Compound assignment requires integer operands");
+        }
+
+        Type* ct = ir_tc_uac_common_int_type(fc->lc, lvt, rt);
+        if (!ct) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid arithmetic type");
+        }
+
+        int is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
+        IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+        IrValueId old_lv = ir_lower_cast_value(fc, ir_emit_load(fc->f, fc->cur, lvir, addr), ity, e->tok);
+        IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.assign.right), ity, e->tok);
+
+        IrInstrKind k = IR_INSTR_INVALID;
+        if (op == AST_BINOP_ADD) k = IR_INSTR_ADD;
+        else if (op == AST_BINOP_SUB) k = IR_INSTR_SUB;
+        else if (op == AST_BINOP_MUL) k = IR_INSTR_MUL;
+        else if (op == AST_BINOP_DIV) k = is_unsigned ? IR_INSTR_UDIV : IR_INSTR_SDIV;
+        else if (op == AST_BINOP_MOD) k = is_unsigned ? IR_INSTR_UREM : IR_INSTR_SREM;
+        else {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Compound assignment operator not supported");
+        }
+
+        IrValueId res = ir_emit_bin(fc->f, fc->cur, k, ity, old_lv, rv);
+        IrValueId cv = ir_lower_cast_value(fc, res, lvir, e->tok);
         ir_emit_store(fc->f, fc->cur, addr, cv);
         return cv;
     }

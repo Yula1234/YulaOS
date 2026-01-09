@@ -77,6 +77,7 @@ typedef struct AstExpr {
         struct {
             struct AstExpr* left;
             struct AstExpr* right;
+            AstBinOp op;
         } assign;
     } v;
 } AstExpr;

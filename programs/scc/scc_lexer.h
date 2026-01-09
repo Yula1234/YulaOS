@@ -44,6 +44,12 @@ typedef enum {
 
     TOK_ASSIGN,
 
+    TOK_PLUSEQ,
+    TOK_MINUSEQ,
+    TOK_STAREQ,
+    TOK_SLASHEQ,
+    TOK_PERCENTEQ,
+
     TOK_EQ,
     TOK_NE,
     TOK_LT,
@@ -246,11 +252,47 @@ static Token lx_next(Lexer* lx) {
     else if (c == '}') t.kind = TOK_RBRACE;
     else if (c == ';') t.kind = TOK_SEMI;
     else if (c == ',') t.kind = TOK_COMMA;
-    else if (c == '+') t.kind = TOK_PLUS;
-    else if (c == '-') t.kind = TOK_MINUS;
-    else if (c == '*') t.kind = TOK_STAR;
-    else if (c == '%') t.kind = TOK_PERCENT;
-    else if (c == '/') t.kind = TOK_SLASH;
+    else if (c == '+') {
+        if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_PLUSEQ;
+        } else {
+            t.kind = TOK_PLUS;
+        }
+    } else if (c == '-') {
+        if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_MINUSEQ;
+        } else {
+            t.kind = TOK_MINUS;
+        }
+    } else if (c == '*') {
+        if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_STAREQ;
+        } else {
+            t.kind = TOK_STAR;
+        }
+    } else if (c == '%') {
+        if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_PERCENTEQ;
+        } else {
+            t.kind = TOK_PERCENT;
+        }
+    } else if (c == '/') {
+        if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_SLASHEQ;
+        } else {
+            t.kind = TOK_SLASH;
+        }
+    }
     else if (c == '=') {
         if (lx_cur(lx) == '=') {
             lx_advance(lx);

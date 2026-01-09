@@ -167,11 +167,25 @@ static int expr_is_lvalue(AstExpr* e) {
     return 0;
 }
 
+static int tok_to_assign_binop(TokenKind k, AstBinOp* out_op) {
+    if (!out_op) return 0;
+
+    if (k == TOK_ASSIGN) { *out_op = (AstBinOp)0; return 1; }
+    if (k == TOK_PLUSEQ) { *out_op = AST_BINOP_ADD; return 1; }
+    if (k == TOK_MINUSEQ) { *out_op = AST_BINOP_SUB; return 1; }
+    if (k == TOK_STAREQ) { *out_op = AST_BINOP_MUL; return 1; }
+    if (k == TOK_SLASHEQ) { *out_op = AST_BINOP_DIV; return 1; }
+    if (k == TOK_PERCENTEQ) { *out_op = AST_BINOP_MOD; return 1; }
+
+    return 0;
+}
+
 static AstExpr* parse_expr_prec(Parser* p, int min_prec) {
     AstExpr* lhs = parse_unary(p);
 
     while (1) {
-        if (p->tok.kind == TOK_ASSIGN) {
+        AstBinOp aop = (AstBinOp)0;
+        if (tok_to_assign_binop(p->tok.kind, &aop)) {
             int prec = 10;
             int right_assoc = 1;
             if (prec < min_prec) break;
@@ -185,6 +199,7 @@ static AstExpr* parse_expr_prec(Parser* p, int min_prec) {
             AstExpr* e = ast_new_expr(p, AST_EXPR_ASSIGN, t);
             e->v.assign.left = lhs;
             e->v.assign.right = rhs;
+            e->v.assign.op = aop;
             lhs = e;
             continue;
         }
