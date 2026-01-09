@@ -563,6 +563,90 @@ void* memcpy(void *restrict dst, const void *restrict src, size_t n) {
 }
 
 __attribute__((target("sse2")))
+void* memmove(void* dst, const void* src, size_t n) {
+    uint8_t* d = (uint8_t*)dst;
+    const uint8_t* s = (const uint8_t*)src;
+
+    if (unlikely(n == 0 || d == s)) return dst;
+
+    if (d < s || (uintptr_t)d >= (uintptr_t)(s + n)) {
+        return memcpy(d, s, n);
+    }
+
+    uint8_t* d_end = d + n;
+    const uint8_t* s_end = s + n;
+
+    if (unlikely(n >= 64)) {
+        while (n && (((uintptr_t)d_end & 0xFu) != 0u)) {
+            *--d_end = *--s_end;
+            n--;
+        }
+
+        size_t bulk = n & ~(size_t)63;
+        if (bulk) {
+            int src_aligned = (((uintptr_t)s_end & 0xFu) == 0u);
+            size_t rem = bulk;
+            while (rem) {
+                s_end -= 64;
+                d_end -= 64;
+                if (src_aligned) {
+                    __asm__ volatile (
+                        "movdqa (%0), %%xmm0 \n\t"
+                        "movdqa 16(%0), %%xmm1 \n\t"
+                        "movdqa 32(%0), %%xmm2 \n\t"
+                        "movdqa 48(%0), %%xmm3 \n\t"
+                        "movdqa %%xmm0, (%1) \n\t"
+                        "movdqa %%xmm1, 16(%1) \n\t"
+                        "movdqa %%xmm2, 32(%1) \n\t"
+                        "movdqa %%xmm3, 48(%1) \n\t"
+                        : : "r"(s_end), "r"(d_end)
+                        : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+                    );
+                } else {
+                    __asm__ volatile (
+                        "movdqu (%0), %%xmm0 \n\t"
+                        "movdqu 16(%0), %%xmm1 \n\t"
+                        "movdqu 32(%0), %%xmm2 \n\t"
+                        "movdqu 48(%0), %%xmm3 \n\t"
+                        "movdqa %%xmm0, (%1) \n\t"
+                        "movdqa %%xmm1, 16(%1) \n\t"
+                        "movdqa %%xmm2, 32(%1) \n\t"
+                        "movdqa %%xmm3, 48(%1) \n\t"
+                        : : "r"(s_end), "r"(d_end)
+                        : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+                    );
+                }
+                rem -= 64;
+            }
+            n -= bulk;
+        }
+    }
+
+    if (n) {
+        size_t bytes = n & 3u;
+        while (bytes--) {
+            *--d_end = *--s_end;
+        }
+
+        size_t dwords = n >> 2;
+        if (dwords) {
+            d_end -= 4;
+            s_end -= 4;
+            __asm__ volatile(
+                "std\n\t"
+                "rep movsl\n\t"
+                "cld"
+                : "+D"(d_end), "+S"(s_end), "+c"(dwords)
+                :
+                : "memory", "cc"
+            );
+        }
+    }
+
+    return dst;
+}
+
+__attribute__((target("sse2")))
 void* memset(void* dst, int v, size_t n) {
     if (n < 64) {
         uint8_t* p = (uint8_t*)dst;

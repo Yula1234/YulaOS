@@ -516,7 +516,7 @@ void vga_putc(char c) {
     
     if (term_col >= TERM_W) { term_col = 0; term_row++; }
     if (term_row >= TERM_H) {
-        memcpy(term_buffer, term_buffer + TERM_W, TERM_W * (TERM_H - 1));
+        memmove(term_buffer, term_buffer + TERM_W, TERM_W * (TERM_H - 1));
         memset(term_buffer + TERM_W * (TERM_H - 1), ' ', TERM_W);
         term_row = TERM_H - 1;
     }

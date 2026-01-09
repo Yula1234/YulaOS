@@ -13,6 +13,7 @@ int strncmp(const char* a, const char* b, size_t n);
 
 __attribute__((target("sse2"))) void* memset(void* dst, int v, size_t n);
 __attribute__((target("sse2"))) void* memcpy(void* restrict dst, const void* restrict src, size_t n);
+__attribute__((target("sse2"))) void* memmove(void* dst, const void* src, size_t n);
 
 size_t strlcpy(char* restrict dst, const char* restrict src, size_t dstsz);
 size_t strlcat(char* restrict dst, const char* restrict src, size_t dstsz);

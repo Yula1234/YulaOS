@@ -6,6 +6,7 @@
 #include <arch/i386/paging.h>
 #include <mm/pmm.h>
 #include <drivers/vga.h>
+#include <kernel/panic.h>
 
 #include "vmm.h"
 
@@ -453,6 +454,13 @@ void vmm_free_pages(void* virt, size_t pages) {
 
     if (!merged_prev && !merged_next) {
         vm_free_block_t* new_node = alloc_node();
+
+        if(!new_node) {
+            registers_t dummy_regs = {0};
+            kernel_panic("VMM free pages failed to allocate new node", __FILE__, __LINE__, &dummy_regs);
+            return;
+        }
+
         new_node->start = vaddr;
         new_node->size = pages;
         new_node->max_size = pages;
