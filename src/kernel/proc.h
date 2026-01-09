@@ -121,7 +121,8 @@ typedef struct task {
     int winmap_win_id;
     uint32_t winmap_pages;
 
-    uint8_t fpu_state[512] __attribute__((aligned(16)));
+    uint8_t* fpu_state;
+    uint32_t fpu_state_size;
 
     dlist_head_t sem_node;
     void* blocked_on_sem;

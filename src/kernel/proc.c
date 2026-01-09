@@ -39,7 +39,8 @@ static spinlock_t sleep_lock;
 static task_t* pid_hash[PID_HASH_SIZE];
 static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
 
-static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
+static uint8_t* initial_fpu_state = 0;
+static uint32_t initial_fpu_state_size = 0;
 
 extern void irq_return(void);
 
@@ -93,6 +94,12 @@ void proc_init(void) {
     }
 
     memset(pid_hash, 0, sizeof(pid_hash));
+
+    initial_fpu_state_size = fpu_state_size();
+    initial_fpu_state = (uint8_t*)kmalloc_a(initial_fpu_state_size);
+    if (!initial_fpu_state) {
+        return;
+    }
 
     __asm__ volatile("fninit");
     fpu_save(initial_fpu_state);
@@ -245,7 +252,21 @@ static task_t* alloc_task(void) {
     memset(t, 0, sizeof(task_t));
     proc_fd_table_init(t);
 
-    memcpy(t->fpu_state, initial_fpu_state, 512);
+    if (!initial_fpu_state) {
+        spinlock_release_safe(&proc_lock, flags);
+        kfree(t);
+        return 0;
+    }
+
+    t->fpu_state_size = initial_fpu_state_size;
+    t->fpu_state = (uint8_t*)kmalloc_a(t->fpu_state_size);
+    if (!t->fpu_state) {
+        spinlock_release_safe(&proc_lock, flags);
+        kfree(t);
+        return 0;
+    }
+
+    memcpy(t->fpu_state, initial_fpu_state, t->fpu_state_size);
     
     sem_init(&t->exit_sem, 0); 
 
@@ -344,6 +365,12 @@ void proc_free_resources(task_t* t) {
         kfree(t->kstack); 
         t->kstack = 0; 
     }
+
+    if (t->fpu_state) {
+        kfree(t->fpu_state);
+        t->fpu_state = 0;
+        t->fpu_state_size = 0;
+    }
     
     pid_hash_remove(t);
 
@@ -434,8 +461,6 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     t->page_dir = 0;
     t->mem_pages = 0;
     t->priority = prio;
-
-    memcpy(t->fpu_state, initial_fpu_state, 512);
     
     t->kstack_size = KSTACK_SIZE;
     t->kstack = kmalloc_a(t->kstack_size);
