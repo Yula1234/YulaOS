@@ -992,14 +992,15 @@ void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
                     "test %2, %2\n\t"
                     "jz 2f\n\t"
                     "1:\n\t"
+                    "prefetchnta 256(%0)\n\t"
                     "movdqa   (%0), %%xmm0\n\t"
                     "movdqa 16(%0), %%xmm1\n\t"
                     "movdqa 32(%0), %%xmm2\n\t"
                     "movdqa 48(%0), %%xmm3\n\t"
-                    "movdqa %%xmm0,   (%1)\n\t"
-                    "movdqa %%xmm1, 16(%1)\n\t"
-                    "movdqa %%xmm2, 32(%1)\n\t"
-                    "movdqa %%xmm3, 48(%1)\n\t"
+                    "movntdq %%xmm0,   (%1)\n\t"
+                    "movntdq %%xmm1, 16(%1)\n\t"
+                    "movntdq %%xmm2, 32(%1)\n\t"
+                    "movntdq %%xmm3, 48(%1)\n\t"
                     "add $64, %0\n\t"
                     "add $64, %1\n\t"
                     "dec %2\n\t"
@@ -1014,14 +1015,15 @@ void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
                     "test %2, %2\n\t"
                     "jz 2f\n\t"
                     "1:\n\t"
+                    "prefetchnta 256(%0)\n\t"
                     "movdqu   (%0), %%xmm0\n\t"
                     "movdqu 16(%0), %%xmm1\n\t"
                     "movdqu 32(%0), %%xmm2\n\t"
                     "movdqu 48(%0), %%xmm3\n\t"
-                    "movdqa %%xmm0,   (%1)\n\t"
-                    "movdqa %%xmm1, 16(%1)\n\t"
-                    "movdqa %%xmm2, 32(%1)\n\t"
-                    "movdqa %%xmm3, 48(%1)\n\t"
+                    "movntdq %%xmm0,   (%1)\n\t"
+                    "movntdq %%xmm1, 16(%1)\n\t"
+                    "movntdq %%xmm2, 32(%1)\n\t"
+                    "movntdq %%xmm3, 48(%1)\n\t"
                     "add $64, %0\n\t"
                     "add $64, %1\n\t"
                     "dec %2\n\t"
@@ -1049,6 +1051,8 @@ void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
             );
         }
     }
+
+    __asm__ volatile("sfence" ::: "memory");
     vga_mark_dirty(x, y, draw_w, draw_h);
 }
 
@@ -1126,49 +1130,119 @@ void vga_flip_dirty() {
     int y1 = dirty_y1;
     int y2 = dirty_y2;
     int width_pixels = x2 - x1;
-    int count = width_pixels / 4; 
 
-    if (count <= 0) return;
+    if (width_pixels <= 0) return;
+
+    size_t row_bytes = (size_t)width_pixels * 4u;
 
     for (int y = y1; y < y2; y++) {
-        uint32_t* src = &back_buffer[y * fb_width + x1];
-        uint32_t* dst = (uint32_t*)((uint8_t*)fb_ptr + y * fb_pitch + x1 * 4);
+        const uint8_t* s8 = (const uint8_t*)&back_buffer[y * fb_width + x1];
+        uint8_t* d8 = (uint8_t*)fb_ptr + (size_t)y * (size_t)fb_pitch + (size_t)x1 * 4u;
+        size_t bytes = row_bytes;
 
-        if (((uint32_t)dst & 15) == 0) {
-            __asm__ volatile (
-                "test %%ecx, %%ecx\n\t"
-                "jz 2f\n\t"
-                "1:\n\t"
-                "movdqu (%%esi), %%xmm0\n\t" 
-                "movntdq %%xmm0, (%%edi)\n\t"
-                "add $16, %%esi\n\t"
-                "add $16, %%edi\n\t"
-                "dec %%ecx\n\t"
-                "jnz 1b\n\t"
-                "2:\n\t"
-                : "+S"(src), "+D"(dst), "+c"(count)
-                : 
-                : "memory", "xmm0", "cc"
-            );
-        } else {
-            __asm__ volatile (
-                "test %%ecx, %%ecx\n\t"
-                "jz 4f\n\t"
-                "3:\n\t"
-                "movdqu (%%esi), %%xmm0\n\t"
-                "movdqu %%xmm0, (%%edi)\n\t"
-                "add $16, %%esi\n\t"
-                "add $16, %%edi\n\t"
-                "dec %%ecx\n\t"
-                "jnz 3b\n\t"
-                "4:\n\t"
-                : "+S"(src), "+D"(dst), "+c"(count)
-                : 
-                : "memory", "xmm0", "cc"
-            );
+        while (bytes && (((uintptr_t)d8 & 0xFu) != 0u)) {
+            *(uint32_t*)d8 = *(const uint32_t*)s8;
+            d8 += 4;
+            s8 += 4;
+            bytes -= 4;
         }
-        
-        count = width_pixels / 4;
+
+        size_t blocks64 = bytes >> 6;
+        if (blocks64) {
+            if ((((uintptr_t)s8 & 0xFu) == 0u)) {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "prefetchnta 256(%0)\n\t"
+                    "movdqa   (%0), %%xmm0\n\t"
+                    "movdqa 16(%0), %%xmm1\n\t"
+                    "movdqa 32(%0), %%xmm2\n\t"
+                    "movdqa 48(%0), %%xmm3\n\t"
+                    "movntdq %%xmm0,   (%1)\n\t"
+                    "movntdq %%xmm1, 16(%1)\n\t"
+                    "movntdq %%xmm2, 32(%1)\n\t"
+                    "movntdq %%xmm3, 48(%1)\n\t"
+                    "add $64, %0\n\t"
+                    "add $64, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks64)
+                    :
+                    : "memory", "xmm0", "xmm1", "xmm2", "xmm3", "cc"
+                );
+            } else {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "prefetchnta 256(%0)\n\t"
+                    "movdqu   (%0), %%xmm0\n\t"
+                    "movdqu 16(%0), %%xmm1\n\t"
+                    "movdqu 32(%0), %%xmm2\n\t"
+                    "movdqu 48(%0), %%xmm3\n\t"
+                    "movntdq %%xmm0,   (%1)\n\t"
+                    "movntdq %%xmm1, 16(%1)\n\t"
+                    "movntdq %%xmm2, 32(%1)\n\t"
+                    "movntdq %%xmm3, 48(%1)\n\t"
+                    "add $64, %0\n\t"
+                    "add $64, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks64)
+                    :
+                    : "memory", "xmm0", "xmm1", "xmm2", "xmm3", "cc"
+                );
+            }
+        }
+
+        bytes &= 63u;
+        size_t blocks16 = bytes >> 4;
+        if (blocks16) {
+            if ((((uintptr_t)s8 & 0xFu) == 0u)) {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "movdqa (%0), %%xmm0\n\t"
+                    "movntdq %%xmm0, (%1)\n\t"
+                    "add $16, %0\n\t"
+                    "add $16, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks16)
+                    :
+                    : "memory", "xmm0", "cc"
+                );
+            } else {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "movdqu (%0), %%xmm0\n\t"
+                    "movntdq %%xmm0, (%1)\n\t"
+                    "add $16, %0\n\t"
+                    "add $16, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks16)
+                    :
+                    : "memory", "xmm0", "cc"
+                );
+            }
+        }
+
+        bytes &= 15u;
+        while (bytes) {
+            *(uint32_t*)d8 = *(const uint32_t*)s8;
+            d8 += 4;
+            s8 += 4;
+            bytes -= 4;
+        }
     }
 
     __asm__ volatile ("sfence" ::: "memory");
