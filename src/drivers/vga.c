@@ -972,30 +972,81 @@ void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
         
         uint32_t* dst = &back_buffer[screen_y * fb_width + x];
         uint32_t* src = &canvas[canvas_y * w + src_x];
-        
-        int count = draw_w / 4; 
 
-        if (count > 0) {
-            __asm__ volatile (
-                "test %2, %2\n\t"
-                "jz .end_blit_sse_safe\n\t"
-                ".loop_blit_sse_safe:\n\t"
-                "movups (%0), %%xmm0\n\t" 
-                "movups %%xmm0, (%1)\n\t" 
-                "add $16, %0\n\t"
-                "add $16, %1\n\t"
-                "dec %2\n\t"
-                "jnz .loop_blit_sse_safe\n\t"
-                ".end_blit_sse_safe:\n\t"
-                : "+r"(src), "+r"(dst), "+r"(count)
-                : 
-                : "memory", "xmm0", "cc"
-            );
+        uint32_t* dst32 = dst;
+        const uint32_t* src32 = src;
+        size_t pixels = (size_t)draw_w;
+
+        while (pixels && (((uintptr_t)dst32 & 0xFu) != 0u)) {
+            *dst32++ = *src32++;
+            pixels--;
         }
 
-        int remainder = draw_w % 4;
-        for (int j = 0; j < remainder; j++) {
-            dst[j] = src[j];
+        size_t blocks = pixels >> 4;
+        if (blocks) {
+            uint8_t* d8 = (uint8_t*)dst32;
+            const uint8_t* s8 = (const uint8_t*)src32;
+
+            if ((((uintptr_t)s8 & 0xFu) == 0u)) {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "movdqa   (%0), %%xmm0\n\t"
+                    "movdqa 16(%0), %%xmm1\n\t"
+                    "movdqa 32(%0), %%xmm2\n\t"
+                    "movdqa 48(%0), %%xmm3\n\t"
+                    "movdqa %%xmm0,   (%1)\n\t"
+                    "movdqa %%xmm1, 16(%1)\n\t"
+                    "movdqa %%xmm2, 32(%1)\n\t"
+                    "movdqa %%xmm3, 48(%1)\n\t"
+                    "add $64, %0\n\t"
+                    "add $64, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks)
+                    :
+                    : "memory", "xmm0", "xmm1", "xmm2", "xmm3", "cc"
+                );
+            } else {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "movdqu   (%0), %%xmm0\n\t"
+                    "movdqu 16(%0), %%xmm1\n\t"
+                    "movdqu 32(%0), %%xmm2\n\t"
+                    "movdqu 48(%0), %%xmm3\n\t"
+                    "movdqa %%xmm0,   (%1)\n\t"
+                    "movdqa %%xmm1, 16(%1)\n\t"
+                    "movdqa %%xmm2, 32(%1)\n\t"
+                    "movdqa %%xmm3, 48(%1)\n\t"
+                    "add $64, %0\n\t"
+                    "add $64, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks)
+                    :
+                    : "memory", "xmm0", "xmm1", "xmm2", "xmm3", "cc"
+                );
+            }
+
+            dst32 = (uint32_t*)d8;
+            src32 = (const uint32_t*)s8;
+        }
+
+        pixels &= 15u;
+        if (pixels) {
+            size_t cnt = pixels;
+            __asm__ volatile(
+                "cld\n\t"
+                "rep movsl"
+                : "+D"(dst32), "+S"(src32), "+c"(cnt)
+                :
+                : "memory", "cc"
+            );
         }
     }
     vga_mark_dirty(x, y, draw_w, draw_h);
