@@ -1661,31 +1661,11 @@ void vga_draw_sprite_scaled_masked(int x, int y, int sw, int sh, int scale, uint
 }
 
 static inline int vga_can_use_avx(void) {
-    static int cached = -1;
-    if (cached != -1) return cached;
-
-    if (!simd_cpu_has_xsave()) { cached = 0; return cached; }
-    if (!simd_cpu_has_avx()) { cached = 0; return cached; }
-    if (!simd_osxsave_enabled()) { cached = 0; return cached; }
-    uint64_t xcr0 = simd_xgetbv(0);
-    cached = (((xcr0 & 0x6ull) == 0x6ull) ? 1 : 0);
-    return cached;
+    return simd_can_use_avx();
 }
 
 static inline int vga_can_use_avx2(void) {
-    static int cached = -1;
-    if (cached != -1) return cached;
-
-    if (!vga_can_use_avx()) { cached = 0; return cached; }
-
-    uint32_t max_leaf, b, c, d;
-    simd_cpuid(0, 0, &max_leaf, &b, &c, &d);
-    if (max_leaf < 7) { cached = 0; return cached; }
-
-    uint32_t a, ebx, ecx, edx;
-    simd_cpuid(7, 0, &a, &ebx, &ecx, &edx);
-    cached = ((ebx & (1u << 5)) != 0u) ? 1 : 0;
-    return cached;
+    return simd_can_use_avx2();
 }
  
 __attribute__((target("sse2"))) __attribute__((always_inline))

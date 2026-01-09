@@ -84,6 +84,9 @@ typedef struct {
     uint8_t  framebuffer_type;
 } __attribute__((packed)) multiboot_info_t;
 
+volatile uint32_t kernel_simd_caps;
+volatile uint64_t kernel_xsave_mask;
+
 uint32_t* fb_ptr;
 uint32_t  fb_width;
 uint32_t  fb_height;
