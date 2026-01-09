@@ -781,7 +781,325 @@ __attribute__((unused)) static uint32_t color_blend(uint32_t c1, uint32_t c2, ui
     return (rb & 0xFF00FF) | (g & 0x00FF00);
 }
 
-__attribute__((target("sse2")))
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void vga_draw_rect_alpha_sse2_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color, uint8_t alpha) {
+    const int stride = (int)vga_target_w;
+    uint32_t* row = vga_current_target + y1 * stride + x1;
+
+    if (alpha == 255) {
+        uint32_t blocks4 = (uint32_t)draw_w >> 2;
+        uint32_t rem = (uint32_t)draw_w & 3u;
+
+        __asm__ volatile (
+            "movd %0, %%xmm0\n\t"
+            "pshufd $0, %%xmm0, %%xmm0\n\t"
+            : : "r"(color) : "xmm0"
+        );
+
+        for (int cy = 0; cy < draw_h; cy++) {
+            uint32_t* dst = row;
+            uint32_t n = blocks4;
+
+            if (n) {
+                __asm__ volatile (
+                    "1:\n\t"
+                    "movups %%xmm0, (%0)\n\t"
+                    "add $16, %0\n\t"
+                    "dec %1\n\t"
+                    "jnz 1b\n\t"
+                    : "+r"(dst), "+r"(n)
+                    :
+                    : "memory", "cc"
+                );
+            }
+
+            for (uint32_t i = 0; i < rem; i++) dst[i] = color;
+            row += stride;
+        }
+        return;
+    }
+
+    uint32_t a = (uint32_t)alpha;
+    uint32_t inv_a = 255u - a;
+
+    __asm__ volatile (
+        "movd %0, %%xmm6\n\t"
+        "pshuflw $0, %%xmm6, %%xmm6\n\t"
+        "punpcklqdq %%xmm6, %%xmm6\n\t"
+        "movd %1, %%xmm7\n\t"
+        "pshuflw $0, %%xmm7, %%xmm7\n\t"
+        "punpcklqdq %%xmm7, %%xmm7\n\t"
+        "pxor %%xmm4, %%xmm4\n\t"
+        "movd %2, %%xmm5\n\t"
+        "pshufd $0, %%xmm5, %%xmm5\n\t"
+        : : "r"(a), "r"(inv_a), "r"(color) : "xmm4", "xmm5", "xmm6", "xmm7"
+    );
+
+    size_t blocks8 = (size_t)draw_w >> 3;
+    size_t blocks4 = ((size_t)draw_w & 7u) >> 2;
+    int tail = draw_w & 3;
+
+    for (int cy = 0; cy < draw_h; cy++) {
+        uint8_t* p = (uint8_t*)row;
+
+        size_t n8 = blocks8;
+        if (n8) {
+            __asm__ volatile (
+                "1:\n\t"
+                "movdqu   (%0), %%xmm1\n\t"
+                "movdqa %%xmm1, %%xmm2\n\t"
+                "movdqa %%xmm5, %%xmm0\n\t"
+                "punpcklbw %%xmm4, %%xmm0\n\t"
+                "punpcklbw %%xmm4, %%xmm1\n\t"
+                "pmullw %%xmm6, %%xmm0\n\t"
+                "pmullw %%xmm7, %%xmm1\n\t"
+                "paddw %%xmm1, %%xmm0\n\t"
+                "psrlw $8, %%xmm0\n\t"
+                "movdqa %%xmm5, %%xmm3\n\t"
+                "punpckhbw %%xmm4, %%xmm3\n\t"
+                "punpckhbw %%xmm4, %%xmm2\n\t"
+                "pmullw %%xmm6, %%xmm3\n\t"
+                "pmullw %%xmm7, %%xmm2\n\t"
+                "paddw %%xmm2, %%xmm3\n\t"
+                "psrlw $8, %%xmm3\n\t"
+                "packuswb %%xmm3, %%xmm0\n\t"
+                "movdqu %%xmm0,   (%0)\n\t"
+
+                "movdqu 16(%0), %%xmm1\n\t"
+                "movdqa %%xmm1, %%xmm2\n\t"
+                "movdqa %%xmm5, %%xmm0\n\t"
+                "punpcklbw %%xmm4, %%xmm0\n\t"
+                "punpcklbw %%xmm4, %%xmm1\n\t"
+                "pmullw %%xmm6, %%xmm0\n\t"
+                "pmullw %%xmm7, %%xmm1\n\t"
+                "paddw %%xmm1, %%xmm0\n\t"
+                "psrlw $8, %%xmm0\n\t"
+                "movdqa %%xmm5, %%xmm3\n\t"
+                "punpckhbw %%xmm4, %%xmm3\n\t"
+                "punpckhbw %%xmm4, %%xmm2\n\t"
+                "pmullw %%xmm6, %%xmm3\n\t"
+                "pmullw %%xmm7, %%xmm2\n\t"
+                "paddw %%xmm2, %%xmm3\n\t"
+                "psrlw $8, %%xmm3\n\t"
+                "packuswb %%xmm3, %%xmm0\n\t"
+                "movdqu %%xmm0, 16(%0)\n\t"
+
+                "add $32, %0\n\t"
+                "dec %1\n\t"
+                "jnz 1b\n\t"
+                : "+r"(p), "+r"(n8)
+                :
+                : "memory", "xmm0", "xmm1", "xmm2", "xmm3", "cc"
+            );
+        }
+
+        if (blocks4) {
+            __asm__ volatile (
+                "movdqu   (%0), %%xmm1\n\t"
+                "movdqa %%xmm1, %%xmm2\n\t"
+                "movdqa %%xmm5, %%xmm0\n\t"
+                "punpcklbw %%xmm4, %%xmm0\n\t"
+                "punpcklbw %%xmm4, %%xmm1\n\t"
+                "pmullw %%xmm6, %%xmm0\n\t"
+                "pmullw %%xmm7, %%xmm1\n\t"
+                "paddw %%xmm1, %%xmm0\n\t"
+                "psrlw $8, %%xmm0\n\t"
+                "movdqa %%xmm5, %%xmm3\n\t"
+                "punpckhbw %%xmm4, %%xmm3\n\t"
+                "punpckhbw %%xmm4, %%xmm2\n\t"
+                "pmullw %%xmm6, %%xmm3\n\t"
+                "pmullw %%xmm7, %%xmm2\n\t"
+                "paddw %%xmm2, %%xmm3\n\t"
+                "psrlw $8, %%xmm3\n\t"
+                "packuswb %%xmm3, %%xmm0\n\t"
+                "movdqu %%xmm0,   (%0)\n\t"
+                "add $16, %0\n\t"
+                : "+r"(p)
+                :
+                : "memory", "xmm0", "xmm1", "xmm2", "xmm3"
+            );
+        }
+
+        uint32_t* tailp = (uint32_t*)p;
+        for (int i = 0; i < tail; i++) {
+            uint32_t bg = tailp[i];
+            uint32_t rb = ((color & 0xFF00FF) * a + (bg & 0xFF00FF) * inv_a) >> 8;
+            uint32_t g  = ((color & 0x00FF00) * a + (bg & 0x00FF00) * inv_a) >> 8;
+            tailp[i] = (rb & 0xFF00FF) | (g & 0x00FF00);
+        }
+
+        row += stride;
+    }
+}
+
+__attribute__((target("avx2"))) __attribute__((always_inline))
+static inline void vga_draw_rect_alpha_avx2_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color, uint8_t alpha) {
+    const int stride = (int)vga_target_w;
+    uint32_t* row = vga_current_target + y1 * stride + x1;
+
+    if (alpha == 255) {
+        size_t blocks8 = (size_t)draw_w >> 3;
+        size_t rem = (size_t)draw_w & 7u;
+
+        __asm__ volatile (
+            "vmovd %0, %%xmm0\n\t"
+            "vpbroadcastd %%xmm0, %%ymm0\n\t"
+            : : "r"(color) : "xmm0", "ymm0"
+        );
+
+        for (int cy = 0; cy < draw_h; cy++) {
+            uint8_t* p = (uint8_t*)row;
+            size_t n8 = blocks8;
+            if (n8) {
+                __asm__ volatile (
+                    "1:\n\t"
+                    "vmovdqu %%ymm0, (%0)\n\t"
+                    "add $32, %0\n\t"
+                    "dec %1\n\t"
+                    "jnz 1b\n\t"
+                    : "+r"(p), "+r"(n8)
+                    :
+                    : "memory", "cc"
+                );
+            }
+
+            uint32_t* t = (uint32_t*)p;
+            for (size_t i = 0; i < rem; i++) t[i] = color;
+            row += stride;
+        }
+
+        __asm__ volatile ("vzeroupper" ::: "memory");
+        return;
+    }
+
+    uint32_t a = (uint32_t)alpha;
+    uint32_t inv_a = 255u - a;
+    uint32_t mask_rgb = 0x00FFFFFFu;
+
+    __asm__ volatile (
+        "vmovd %0, %%xmm6\n\t"
+        "vpbroadcastw %%xmm6, %%ymm6\n\t"
+        "vmovd %1, %%xmm7\n\t"
+        "vpbroadcastw %%xmm7, %%ymm7\n\t"
+        "vpxor %%ymm4, %%ymm4, %%ymm4\n\t"
+        "vmovd %2, %%xmm5\n\t"
+        "vpbroadcastd %%xmm5, %%ymm5\n\t"
+        "vpunpcklbw %%ymm4, %%ymm5, %%ymm0\n\t"
+        "vpunpckhbw %%ymm4, %%ymm5, %%ymm1\n\t"
+        "vpmullw %%ymm6, %%ymm0, %%ymm0\n\t"
+        "vpmullw %%ymm6, %%ymm1, %%ymm1\n\t"
+
+        "vmovd %3, %%xmm3\n\t"
+        "vpbroadcastd %%xmm3, %%ymm3\n\t"
+        :
+        : "r"(a), "r"(inv_a), "r"(color), "r"(mask_rgb)
+        : "cc", "ymm0", "ymm1", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7", "xmm3", "xmm5", "xmm6", "xmm7"
+    );
+
+    size_t n8_total = (size_t)draw_w >> 3;
+    size_t blocks4 = ((size_t)draw_w & 7u) >> 2;
+    int tail = draw_w & 3;
+
+    for (int cy = 0; cy < draw_h; cy++) {
+        uint8_t* p = (uint8_t*)row;
+        size_t pairs = n8_total >> 1;
+        if (pairs) {
+            __asm__ volatile (
+                "1:\n\t"
+                "prefetchnta 512(%0)\n\t"
+
+                "vmovdqu   (%0), %%ymm2\n\t"
+                "vpunpcklbw %%ymm4, %%ymm2, %%ymm5\n\t"
+                "vpunpckhbw %%ymm4, %%ymm2, %%ymm6\n\t"
+                "vpmullw %%ymm7, %%ymm5, %%ymm5\n\t"
+                "vpmullw %%ymm7, %%ymm6, %%ymm6\n\t"
+                "vpaddw %%ymm0, %%ymm5, %%ymm5\n\t"
+                "vpaddw %%ymm1, %%ymm6, %%ymm6\n\t"
+                "vpsrlw $8, %%ymm5, %%ymm5\n\t"
+                "vpsrlw $8, %%ymm6, %%ymm6\n\t"
+                "vpackuswb %%ymm6, %%ymm5, %%ymm5\n\t"
+                "vpand %%ymm3, %%ymm5, %%ymm5\n\t"
+                "vmovdqu %%ymm5,   (%0)\n\t"
+
+                "vmovdqu 32(%0), %%ymm2\n\t"
+                "vpunpcklbw %%ymm4, %%ymm2, %%ymm5\n\t"
+                "vpunpckhbw %%ymm4, %%ymm2, %%ymm6\n\t"
+                "vpmullw %%ymm7, %%ymm5, %%ymm5\n\t"
+                "vpmullw %%ymm7, %%ymm6, %%ymm6\n\t"
+                "vpaddw %%ymm0, %%ymm5, %%ymm5\n\t"
+                "vpaddw %%ymm1, %%ymm6, %%ymm6\n\t"
+                "vpsrlw $8, %%ymm5, %%ymm5\n\t"
+                "vpsrlw $8, %%ymm6, %%ymm6\n\t"
+                "vpackuswb %%ymm6, %%ymm5, %%ymm5\n\t"
+                "vpand %%ymm3, %%ymm5, %%ymm5\n\t"
+                "vmovdqu %%ymm5, 32(%0)\n\t"
+
+                "add $64, %0\n\t"
+                "dec %1\n\t"
+                "jnz 1b\n\t"
+                : "+r"(p), "+r"(pairs)
+                :
+                : "memory", "cc", "ymm2", "ymm5", "ymm6"
+            );
+        }
+
+        if (n8_total & 1u) {
+            __asm__ volatile (
+                "vmovdqu (%0), %%ymm2\n\t"
+                "vpunpcklbw %%ymm4, %%ymm2, %%ymm5\n\t"
+                "vpunpckhbw %%ymm4, %%ymm2, %%ymm6\n\t"
+                "vpmullw %%ymm7, %%ymm5, %%ymm5\n\t"
+                "vpmullw %%ymm7, %%ymm6, %%ymm6\n\t"
+                "vpaddw %%ymm0, %%ymm5, %%ymm5\n\t"
+                "vpaddw %%ymm1, %%ymm6, %%ymm6\n\t"
+                "vpsrlw $8, %%ymm5, %%ymm5\n\t"
+                "vpsrlw $8, %%ymm6, %%ymm6\n\t"
+                "vpackuswb %%ymm6, %%ymm5, %%ymm5\n\t"
+                "vpand %%ymm3, %%ymm5, %%ymm5\n\t"
+                "vmovdqu %%ymm5, (%0)\n\t"
+                "add $32, %0\n\t"
+                : "+r"(p)
+                :
+                : "memory", "ymm2", "ymm5", "ymm6"
+            );
+        }
+
+        if (blocks4) {
+            __asm__ volatile (
+                "vmovdqu   (%0), %%xmm2\n\t"
+                "vpunpcklbw %%xmm4, %%xmm2, %%xmm5\n\t"
+                "vpunpckhbw %%xmm4, %%xmm2, %%xmm6\n\t"
+                "vpmullw %%xmm7, %%xmm5, %%xmm5\n\t"
+                "vpmullw %%xmm7, %%xmm6, %%xmm6\n\t"
+                "vpaddw %%xmm0, %%xmm5, %%xmm5\n\t"
+                "vpaddw %%xmm1, %%xmm6, %%xmm6\n\t"
+                "vpsrlw $8, %%xmm5, %%xmm5\n\t"
+                "vpsrlw $8, %%xmm6, %%xmm6\n\t"
+                "vpackuswb %%xmm6, %%xmm5, %%xmm5\n\t"
+                "vpand %%xmm3, %%xmm5, %%xmm5\n\t"
+                "vmovdqu %%xmm5,   (%0)\n\t"
+                "add $16, %0\n\t"
+                : "+r"(p)
+                :
+                : "memory", "xmm2", "xmm5", "xmm6"
+            );
+        }
+
+        uint32_t* tailp = (uint32_t*)p;
+        for (int i = 0; i < tail; i++) {
+            uint32_t bg = tailp[i];
+            uint32_t rb = ((color & 0xFF00FF) * a + (bg & 0xFF00FF) * inv_a) >> 8;
+            uint32_t g  = ((color & 0x00FF00) * a + (bg & 0x00FF00) * inv_a) >> 8;
+            tailp[i] = (rb & 0xFF00FF) | (g & 0x00FF00);
+        }
+
+        row += stride;
+    }
+
+    __asm__ volatile ("vzeroupper" ::: "memory");
+}
+
+__attribute__((target("avx2"))) __attribute__((target("sse2")))
 void vga_draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
     if (!vga_current_target || alpha == 0) return;
 
@@ -797,51 +1115,11 @@ void vga_draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alp
     int draw_h = y2 - y1;
 
     if (draw_w <= 0 || draw_h <= 0) return;
-    
-    uint32_t a = alpha;
-    uint32_t inv_a = 255 - a;
 
-    __asm__ volatile (
-        "movd %0, %%xmm6\n\t"
-        "pshuflw $0, %%xmm6, %%xmm6\n\t"
-        "punpcklqdq %%xmm6, %%xmm6\n\t" 
-        "movd %1, %%xmm7\n\t"
-        "pshuflw $0, %%xmm7, %%xmm7\n\t"
-        "punpcklqdq %%xmm7, %%xmm7\n\t" 
-        "pxor %%xmm4, %%xmm4\n\t" 
-        "movd %2, %%xmm5\n\t"
-        "pshufd $0, %%xmm5, %%xmm5\n\t" 
-        : : "r"(a), "r"(inv_a), "r"(color) : "xmm4", "xmm5", "xmm6", "xmm7"
-    );
-
-    for (int cy = y1; cy < y2; cy++) {
-        uint32_t* dst_ptr = &vga_current_target[cy * vga_target_w + x1];
-        
-        int count = draw_w / 2; 
-
-        while (count--) {
-            __asm__ volatile (
-                "movq (%0), %%xmm1\n\t" 
-                "movaps %%xmm5, %%xmm0\n\t" 
-                "punpcklbw %%xmm4, %%xmm0\n\t"
-                "punpcklbw %%xmm4, %%xmm1\n\t" 
-                "pmullw %%xmm6, %%xmm0\n\t" 
-                "pmullw %%xmm7, %%xmm1\n\t"    
-                "paddw %%xmm1, %%xmm0\n\t" 
-                "psrlw $8, %%xmm0\n\t"         
-                "packuswb %%xmm0, %%xmm0\n\t" 
-                "movq %%xmm0, (%0)\n\t" 
-                : : "r"(dst_ptr) : "memory", "xmm0", "xmm1"
-            );
-            dst_ptr += 2;
-        }
-        
-        if (draw_w % 2 != 0) {
-            uint32_t bg = *dst_ptr;
-            uint32_t rb = ((color & 0xFF00FF) * a + (bg & 0xFF00FF) * inv_a) >> 8;
-            uint32_t g  = ((color & 0x00FF00) * a + (bg & 0x00FF00) * inv_a) >> 8;
-            *dst_ptr = (rb & 0xFF00FF) | (g & 0x00FF00);
-        }
+    if (vga_can_use_avx2()) {
+        vga_draw_rect_alpha_avx2_impl(x1, y1, draw_w, draw_h, color, alpha);
+    } else {
+        vga_draw_rect_alpha_sse2_impl(x1, y1, draw_w, draw_h, color, alpha);
     }
 }
 
