@@ -208,6 +208,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
          fb_flags |= PTE_PAT;
      }
      uint32_t fb_base = (uint32_t)fb_ptr;
+     paging_init_mtrr_wc(fb_base, fb_size);
      uint32_t fb_page = fb_base & ~0xFFFu;
      uint32_t fb_end = fb_base + fb_size;
      uint32_t fb_map_size = (fb_end - fb_page + 0xFFFu) & ~0xFFFu;

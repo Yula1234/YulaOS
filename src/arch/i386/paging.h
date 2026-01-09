@@ -16,6 +16,7 @@
 void paging_init(uint32_t ram_size_bytes);
 void paging_init_pat(void);
 int paging_pat_is_supported(void);
+void paging_init_mtrr_wc(uint32_t phys_base, uint32_t size);
 
 void paging_switch(uint32_t* dir_phys);
 uint32_t* paging_get_dir(void);

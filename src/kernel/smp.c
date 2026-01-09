@@ -43,6 +43,15 @@ void smp_ap_main(cpu_t* cpu_arg) {
     
     paging_switch(kernel_page_directory);
     paging_init_pat();
+
+    extern uint32_t* fb_ptr;
+    extern uint32_t fb_height;
+    extern uint32_t fb_pitch;
+    if (fb_ptr && fb_pitch && fb_height) {
+        uint32_t fb_base = (uint32_t)fb_ptr;
+        uint32_t fb_size = fb_pitch * fb_height;
+        paging_init_mtrr_wc(fb_base, fb_size);
+    }
     
     lapic_init();
     lapic_timer_init(15000);

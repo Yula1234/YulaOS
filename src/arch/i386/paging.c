@@ -21,6 +21,11 @@ static spinlock_t paging_lock;
 #define IA32_PAT_MSR 0x277u
 #define PAT_MEMTYPE_WC 1u
 
+#define IA32_MTRRCAP_MSR 0xFEu
+#define IA32_MTRR_DEF_TYPE_MSR 0x2FFu
+#define IA32_MTRR_PHYSBASE0_MSR 0x200u
+#define IA32_MTRR_PHYSMASK0_MSR 0x201u
+
 static int paging_pat_supported_cached = -1;
 
 static inline void paging_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t* a, uint32_t* b, uint32_t* c, uint32_t* d) {
@@ -64,6 +69,121 @@ void paging_init_pat(void) {
     if (new_pat != pat) {
         paging_wrmsr_u64(IA32_PAT_MSR, new_pat);
     }
+}
+
+static inline uint32_t paging_read_cr0(void) {
+    uint32_t v;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(v));
+    return v;
+}
+
+static inline void paging_write_cr0(uint32_t v) {
+    __asm__ volatile("mov %0, %%cr0" : : "r"(v) : "memory");
+}
+
+static inline void paging_wbinvd(void) {
+    __asm__ volatile("wbinvd" : : : "memory");
+}
+
+static inline uint32_t paging_largest_pow2_le(uint32_t x) {
+    if (x == 0) return 0;
+    uint32_t p = 1;
+    while (p <= x / 2u) p <<= 1;
+    return p;
+}
+
+static inline uint32_t paging_phys_addr_bits(void) {
+    uint32_t max_ext, b, c, d;
+    paging_cpuid(0x80000000u, 0, &max_ext, &b, &c, &d);
+    if (max_ext >= 0x80000008u) {
+        uint32_t eax;
+        paging_cpuid(0x80000008u, 0, &eax, &b, &c, &d);
+        uint32_t bits = eax & 0xFFu;
+        if (bits >= 32u && bits <= 52u) {
+            return bits;
+        }
+    }
+    return 32u;
+}
+
+void paging_init_mtrr_wc(uint32_t phys_base, uint32_t size) {
+    if (size == 0) return;
+
+    uint32_t a, b, c, d;
+    paging_cpuid(1, 0, &a, &b, &c, &d);
+    if ((d & (1u << 12)) == 0u) {
+        return;
+    }
+
+    uint32_t base = phys_base & ~0xFFFu;
+    uint32_t end = phys_base + size;
+    uint32_t end_aligned = (end + 0xFFFu) & ~0xFFFu;
+    uint32_t len = end_aligned - base;
+    if (len == 0) return;
+
+    uint64_t cap = paging_rdmsr_u64(IA32_MTRRCAP_MSR);
+    uint32_t vcnt = (uint32_t)(cap & 0xFFu);
+    if (vcnt == 0) return;
+
+    if ((cap & (1ull << 10)) == 0ull) {
+        return;
+    }
+
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+
+    uint32_t cr0 = paging_read_cr0();
+    paging_write_cr0((cr0 | (1u << 30)) & ~(1u << 29));
+    paging_wbinvd();
+
+    uint64_t def_type = paging_rdmsr_u64(IA32_MTRR_DEF_TYPE_MSR);
+    uint64_t def_type_disabled = def_type & ~(1ull << 11);
+    paging_wrmsr_u64(IA32_MTRR_DEF_TYPE_MSR, def_type_disabled);
+    paging_wbinvd();
+
+    uint32_t remaining = len;
+    uint32_t curr = base;
+
+    uint32_t phys_bits = paging_phys_addr_bits();
+    uint64_t phys_mask = (phys_bits >= 64u) ? ~0ull : ((1ull << phys_bits) - 1ull);
+
+    for (uint32_t reg = 0; reg < vcnt && remaining; reg++) {
+        uint32_t mask_msr = IA32_MTRR_PHYSMASK0_MSR + reg * 2u;
+        uint64_t mask_val = paging_rdmsr_u64(mask_msr);
+        if ((mask_val & (1ull << 11)) != 0ull) {
+            continue;
+        }
+
+        uint32_t chunk = paging_largest_pow2_le(remaining);
+        while (chunk >= 4096u && (curr & (chunk - 1u)) != 0u) {
+            chunk >>= 1;
+        }
+        if (chunk < 4096u) {
+            break;
+        }
+
+        uint64_t base_addr = ((uint64_t)(curr & ~0xFFFu)) & phys_mask;
+        uint64_t base_val = base_addr | (uint64_t)PAT_MEMTYPE_WC;
+
+        uint64_t new_mask = ~(uint64_t)(chunk - 1u);
+        new_mask &= phys_mask;
+        new_mask &= ~(uint64_t)0xFFFull;
+        new_mask |= (1ull << 11);
+
+        paging_wrmsr_u64(IA32_MTRR_PHYSBASE0_MSR + reg * 2u, base_val);
+        paging_wrmsr_u64(IA32_MTRR_PHYSMASK0_MSR + reg * 2u, new_mask);
+
+        curr += chunk;
+        remaining -= chunk;
+    }
+
+    paging_wrmsr_u64(IA32_MTRR_DEF_TYPE_MSR, def_type);
+    paging_wbinvd();
+
+    paging_write_cr0(cr0);
+    paging_wbinvd();
+
+    __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory");
 }
 
 static inline uint32_t* read_cr3(void) {
