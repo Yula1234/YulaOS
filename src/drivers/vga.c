@@ -559,7 +559,130 @@ void vga_print_u32(uint32_t v) {
     while (i--) vga_putc(buf[i]);
 }
 
-__attribute__((target("sse2")))
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void vga_draw_rect_sse2_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color) {
+    const int stride = (int)vga_target_w;
+    uint32_t* row = vga_current_target + y1 * stride + x1;
+
+    for (int cy = 0; cy < draw_h; cy++) {
+        uint32_t* dst32 = row;
+        int n = draw_w;
+
+        while (n && (((uintptr_t)dst32 & 0xFu) != 0u)) {
+            *dst32++ = color;
+            n--;
+        }
+
+        uint8_t* p = (uint8_t*)dst32;
+        size_t blocks16 = (size_t)n >> 2;
+        size_t blocks64 = blocks16 >> 2;
+        size_t rem16 = blocks16 & 3u;
+
+        if (blocks64 | rem16) {
+            size_t tmp64 = blocks64;
+            size_t tmp16 = rem16;
+            __asm__ volatile (
+                "movd %[color], %%xmm0\n\t"
+                "pshufd $0, %%xmm0, %%xmm0\n\t"
+
+                "test %[b64], %[b64]\n\t"
+                "jz 2f\n\t"
+                "1:\n\t"
+                "movdqa %%xmm0,   0(%[p])\n\t"
+                "movdqa %%xmm0,  16(%[p])\n\t"
+                "movdqa %%xmm0,  32(%[p])\n\t"
+                "movdqa %%xmm0,  48(%[p])\n\t"
+                "add $64, %[p]\n\t"
+                "dec %[b64]\n\t"
+                "jnz 1b\n\t"
+                "2:\n\t"
+
+                "test %[b16], %[b16]\n\t"
+                "jz 4f\n\t"
+                "3:\n\t"
+                "movdqa %%xmm0, (%[p])\n\t"
+                "add $16, %[p]\n\t"
+                "dec %[b16]\n\t"
+                "jnz 3b\n\t"
+                "4:\n\t"
+                : [p]"+r"(p), [b64]"+r"(tmp64), [b16]"+r"(tmp16)
+                : [color]"r"(color)
+                : "memory", "xmm0", "cc"
+            );
+        }
+
+        dst32 = (uint32_t*)p;
+        for (int i = 0, tail = (n & 3); i < tail; i++) dst32[i] = color;
+
+        row += stride;
+    }
+}
+
+__attribute__((target("avx"))) __attribute__((always_inline))
+static inline void vga_draw_rect_avx_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color) {
+    const int stride = (int)vga_target_w;
+    uint32_t* row = vga_current_target + y1 * stride + x1;
+
+    for (int cy = 0; cy < draw_h; cy++) {
+        uint32_t* dst32 = row;
+        int n = draw_w;
+
+        while (n && (((uintptr_t)dst32 & 0x1Fu) != 0u)) {
+            *dst32++ = color;
+            n--;
+        }
+
+        uint8_t* p = (uint8_t*)dst32;
+        size_t blocks32 = (size_t)n >> 3;
+        size_t blocks128 = blocks32 >> 2;
+        size_t rem32 = blocks32 & 3u;
+
+        if (blocks128 | rem32) {
+            size_t tmp128 = blocks128;
+            size_t tmp32 = rem32;
+            __asm__ volatile (
+                "vmovd %[color], %%xmm0\n\t"
+                "vpshufd $0, %%xmm0, %%xmm0\n\t"
+                "vxorps %%ymm1, %%ymm1, %%ymm1\n\t"
+                "vinsertf128 $0, %%xmm0, %%ymm1, %%ymm0\n\t"
+                "vinsertf128 $1, %%xmm0, %%ymm0, %%ymm0\n\t"
+
+                "test %[b128], %[b128]\n\t"
+                "jz 2f\n\t"
+                "1:\n\t"
+                "vmovdqa %%ymm0,   0(%[p])\n\t"
+                "vmovdqa %%ymm0,  32(%[p])\n\t"
+                "vmovdqa %%ymm0,  64(%[p])\n\t"
+                "vmovdqa %%ymm0,  96(%[p])\n\t"
+                "add $128, %[p]\n\t"
+                "dec %[b128]\n\t"
+                "jnz 1b\n\t"
+                "2:\n\t"
+
+                "test %[b32], %[b32]\n\t"
+                "jz 4f\n\t"
+                "3:\n\t"
+                "vmovdqa %%ymm0, (%[p])\n\t"
+                "add $32, %[p]\n\t"
+                "dec %[b32]\n\t"
+                "jnz 3b\n\t"
+                "4:\n\t"
+                : [p]"+r"(p), [b128]"+r"(tmp128), [b32]"+r"(tmp32)
+                : [color]"r"(color)
+                : "memory", "xmm0", "ymm0", "ymm1", "cc"
+            );
+        }
+
+        dst32 = (uint32_t*)p;
+        for (int i = 0, tail = (n & 7); i < tail; i++) dst32[i] = color;
+
+        row += stride;
+    }
+
+    __asm__ volatile ("vzeroupper" ::: "memory");
+}
+
+__attribute__((target("avx"))) __attribute__((target("sse2")))
 void vga_draw_rect(int x, int y, int w, int h, uint32_t color) {
     if (!vga_current_target) return;
     if (x >= (int)vga_target_w || y >= (int)vga_target_h) return;
@@ -570,47 +693,18 @@ void vga_draw_rect(int x, int y, int w, int h, uint32_t color) {
     int x2 = (x + w > (int)vga_target_w) ? (int)vga_target_w : x + w;
     int y2 = (y + h > (int)vga_target_h) ? (int)vga_target_h : y + h;
 
-    int width_to_draw = x2 - x1;
-    if (width_to_draw <= 0) return;
+    int draw_w = x2 - x1;
+    int draw_h = y2 - y1;
+    if (draw_w <= 0 || draw_h <= 0) return;
 
-    uint32_t sse_width = width_to_draw / 4;
-    uint32_t remainder = width_to_draw % 4;
-
-    __asm__ volatile (
-        "movd %0, %%xmm0\n\t"
-        "pshufd $0, %%xmm0, %%xmm0\n\t"
-        : : "r"(color) : "xmm0"
-    );
-
-    uint32_t* dest_row = &vga_current_target[y1 * vga_target_w + x1];
-
-    for (int cy = y1; cy < y2; cy++) {
-        uint32_t* dest = dest_row;
-        
-        if (sse_width > 0) {
-            uint32_t tmp_count = sse_width;
-            uint32_t* tmp_dest = dest;
-            __asm__ volatile (
-                "1:\n\t"
-                "movups %%xmm0, (%0)\n\t"
-                "add $16, %0\n\t"
-                "dec %1\n\t"
-                "jnz 1b\n\t"
-                : "+r"(tmp_dest), "+r"(tmp_count)
-                :
-                : "memory"
-            );
-        }
-        
-        for (uint32_t j = 0; j < remainder; j++) {
-            dest[j] = color;
-        }
-        
-        dest_row += vga_target_w;
+    if (vga_can_use_avx()) {
+        vga_draw_rect_avx_impl(x1, y1, draw_w, draw_h, color);
+    } else {
+        vga_draw_rect_sse2_impl(x1, y1, draw_w, draw_h, color);
     }
+
     vga_mark_dirty(x, y, w, h);
 }
-
 
 void vga_init_graphics() {
     back_buffer = (uint32_t*)kmalloc_a(fb_width * fb_height * 4);
