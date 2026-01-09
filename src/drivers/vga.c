@@ -1235,14 +1235,6 @@ void vga_flip_dirty() {
                 );
             }
         }
-
-        bytes &= 15u;
-        while (bytes) {
-            *(uint32_t*)d8 = *(const uint32_t*)s8;
-            d8 += 4;
-            s8 += 4;
-            bytes -= 4;
-        }
     }
 
     __asm__ volatile ("sfence" ::: "memory");
