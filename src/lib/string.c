@@ -2,6 +2,7 @@
 // Copyright (C) 2025 Yula1234
 
 #include <stdint.h>
+#include <hal/simd.h>
 
 #include "string.h"
 
@@ -477,6 +478,56 @@ static inline void memcpy_sse_unaligned_src(void* dest, const void* src, size_t 
     }
 }
 
+__attribute__((target("avx"))) __attribute__((always_inline))
+static inline void memcpy_avx_aligned_src(void* dest, const void* src, size_t n) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+
+    while (n >= 128) {
+        __asm__ volatile (
+            "prefetchnta 256(%0) \n\t"
+            "vmovdqa   (%0), %%ymm0 \n\t"
+            "vmovdqa 32(%0), %%ymm1 \n\t"
+            "vmovdqa 64(%0), %%ymm2 \n\t"
+            "vmovdqa 96(%0), %%ymm3 \n\t"
+            "vmovdqa %%ymm0,   (%1) \n\t"
+            "vmovdqa %%ymm1, 32(%1) \n\t"
+            "vmovdqa %%ymm2, 64(%1) \n\t"
+            "vmovdqa %%ymm3, 96(%1) \n\t"
+            : : "r"(s), "r"(d)
+            : "memory", "ymm0", "ymm1", "ymm2", "ymm3"
+        );
+        s += 128; d += 128; n -= 128;
+    }
+
+    __asm__ volatile("vzeroupper" ::: "memory");
+}
+
+__attribute__((target("avx"))) __attribute__((always_inline))
+static inline void memcpy_avx_unaligned_src(void* dest, const void* src, size_t n) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+
+    while (n >= 128) {
+        __asm__ volatile (
+            "prefetchnta 256(%0) \n\t"
+            "vmovdqu   (%0), %%ymm0 \n\t"
+            "vmovdqu 32(%0), %%ymm1 \n\t"
+            "vmovdqu 64(%0), %%ymm2 \n\t"
+            "vmovdqu 96(%0), %%ymm3 \n\t"
+            "vmovdqa %%ymm0,   (%1) \n\t"
+            "vmovdqa %%ymm1, 32(%1) \n\t"
+            "vmovdqa %%ymm2, 64(%1) \n\t"
+            "vmovdqa %%ymm3, 96(%1) \n\t"
+            : : "r"(s), "r"(d)
+            : "memory", "ymm0", "ymm1", "ymm2", "ymm3"
+        );
+        s += 128; d += 128; n -= 128;
+    }
+
+    __asm__ volatile("vzeroupper" ::: "memory");
+}
+
 __attribute__((target("sse2"))) __attribute__((always_inline))
 static inline void* memset_sse(void* dest, int val, size_t n) {
     uint8_t* d = (uint8_t*)dest;
@@ -515,10 +566,26 @@ static inline void* memset_sse(void* dest, int val, size_t n) {
     return dest;
 }
 
-__attribute__((target("sse2")))
+__attribute__((target("avx"))) __attribute__((target("sse2")))
 void* memcpy(void *restrict dst, const void *restrict src, size_t n) {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
+
+    if (unlikely(n >= 128) && simd_can_use_avx()) {
+        while (n && (((uintptr_t)d & 0x1Fu) != 0u)) {
+            *d++ = *s++;
+            n--;
+        }
+
+        size_t bulk = n & ~(size_t)127;
+        if (bulk) {
+            if ((((uintptr_t)s & 0x1Fu) == 0u)) memcpy_avx_aligned_src(d, s, bulk);
+            else memcpy_avx_unaligned_src(d, s, bulk);
+            s += bulk;
+            d += bulk;
+            n -= bulk;
+        }
+    }
 
     if (unlikely(n >= 64)) {
         while (n && (((uintptr_t)d & 0xFu) != 0u)) {
