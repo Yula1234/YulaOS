@@ -27,6 +27,8 @@ static uint32_t  vga_target_h = 768;
 
 int dirty_x1, dirty_y1, dirty_x2, dirty_y2;
 
+static inline int vga_can_use_avx(void);
+
 void vga_reset_dirty() {
     dirty_x1 = 2000;
     dirty_y1 = 2000;
@@ -936,37 +938,8 @@ void vga_blur_rect(int x, int y, int w, int h) {
     vga_mark_dirty(x, y, w, h);
 }
 
-__attribute__((target("sse2")))
-void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
-    if (!canvas) return;
-
-    if (x >= (int)fb_width || y >= (int)fb_height) return;
-    if (x + w <= 0 || y + h <= 0) return;
-
-    int src_x = 0;
-    int src_y = 0;
-    int draw_w = w;
-    int draw_h = h;
-
-    if (x < 0) {
-        src_x = -x;
-        draw_w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        src_y = -y;
-        draw_h += y;
-        y = 0;
-    }
-    if (x + draw_w > (int)fb_width) {
-        draw_w = (int)fb_width - x;
-    }
-    if (y + draw_h > (int)fb_height) {
-        draw_h = (int)fb_height - y;
-    }
-
-    if (draw_w <= 0 || draw_h <= 0) return;
-
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void vga_blit_canvas_sse2_impl(int x, int y, uint32_t* canvas, int w, int src_x, int src_y, int draw_w, int draw_h) {
     for (int i = 0; i < draw_h; i++) {
         int screen_y = y + i;
         int canvas_y = src_y + i;
@@ -1054,6 +1027,184 @@ void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
     }
 
     __asm__ volatile("sfence" ::: "memory");
+}
+
+__attribute__((target("avx"))) __attribute__((always_inline))
+static inline void vga_blit_canvas_avx_impl(int x, int y, uint32_t* canvas, int w, int src_x, int src_y, int draw_w, int draw_h) {
+    for (int i = 0; i < draw_h; i++) {
+        int screen_y = y + i;
+        int canvas_y = src_y + i;
+
+        uint8_t* d8 = (uint8_t*)&back_buffer[screen_y * fb_width + x];
+        const uint8_t* s8 = (const uint8_t*)&canvas[canvas_y * w + src_x];
+        size_t bytes = (size_t)draw_w * 4u;
+
+        while (bytes && (((uintptr_t)d8 & 0x1Fu) != 0u)) {
+            *(uint32_t*)d8 = *(const uint32_t*)s8;
+            d8 += 4;
+            s8 += 4;
+            bytes -= 4;
+        }
+
+        size_t blocks128 = bytes >> 7;
+        if (blocks128) {
+            if ((((uintptr_t)s8 & 0x1Fu) == 0u)) {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "prefetchnta 512(%0)\n\t"
+                    "vmovdqa   (%0), %%ymm0\n\t"
+                    "vmovdqa  32(%0), %%ymm1\n\t"
+                    "vmovdqa  64(%0), %%ymm2\n\t"
+                    "vmovdqa  96(%0), %%ymm3\n\t"
+                    "vmovntdq %%ymm0,   (%1)\n\t"
+                    "vmovntdq %%ymm1,  32(%1)\n\t"
+                    "vmovntdq %%ymm2,  64(%1)\n\t"
+                    "vmovntdq %%ymm3,  96(%1)\n\t"
+                    "add $128, %0\n\t"
+                    "add $128, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks128)
+                    :
+                    : "memory", "ymm0", "ymm1", "ymm2", "ymm3", "cc"
+                );
+            } else {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "prefetchnta 512(%0)\n\t"
+                    "vmovdqu   (%0), %%ymm0\n\t"
+                    "vmovdqu  32(%0), %%ymm1\n\t"
+                    "vmovdqu  64(%0), %%ymm2\n\t"
+                    "vmovdqu  96(%0), %%ymm3\n\t"
+                    "vmovntdq %%ymm0,   (%1)\n\t"
+                    "vmovntdq %%ymm1,  32(%1)\n\t"
+                    "vmovntdq %%ymm2,  64(%1)\n\t"
+                    "vmovntdq %%ymm3,  96(%1)\n\t"
+                    "add $128, %0\n\t"
+                    "add $128, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks128)
+                    :
+                    : "memory", "ymm0", "ymm1", "ymm2", "ymm3", "cc"
+                );
+            }
+        }
+
+        bytes &= 127u;
+        size_t blocks32 = bytes >> 5;
+        if (blocks32) {
+            if ((((uintptr_t)s8 & 0x1Fu) == 0u)) {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "vmovdqa (%0), %%ymm0\n\t"
+                    "vmovntdq %%ymm0, (%1)\n\t"
+                    "add $32, %0\n\t"
+                    "add $32, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks32)
+                    :
+                    : "memory", "ymm0", "cc"
+                );
+            } else {
+                __asm__ volatile (
+                    "test %2, %2\n\t"
+                    "jz 2f\n\t"
+                    "1:\n\t"
+                    "vmovdqu (%0), %%ymm0\n\t"
+                    "vmovntdq %%ymm0, (%1)\n\t"
+                    "add $32, %0\n\t"
+                    "add $32, %1\n\t"
+                    "dec %2\n\t"
+                    "jnz 1b\n\t"
+                    "2:\n\t"
+                    : "+r"(s8), "+r"(d8), "+r"(blocks32)
+                    :
+                    : "memory", "ymm0", "cc"
+                );
+            }
+        }
+
+        bytes &= 31u;
+        size_t blocks16 = bytes >> 4;
+        if (blocks16) {
+            __asm__ volatile (
+                "test %2, %2\n\t"
+                "jz 2f\n\t"
+                "1:\n\t"
+                "vmovdqu (%0), %%xmm0\n\t"
+                "vmovntdq %%xmm0, (%1)\n\t"
+                "add $16, %0\n\t"
+                "add $16, %1\n\t"
+                "dec %2\n\t"
+                "jnz 1b\n\t"
+                "2:\n\t"
+                : "+r"(s8), "+r"(d8), "+r"(blocks16)
+                :
+                : "memory", "xmm0", "cc"
+            );
+        }
+
+        bytes &= 15u;
+        while (bytes) {
+            *(uint32_t*)d8 = *(const uint32_t*)s8;
+            d8 += 4;
+            s8 += 4;
+            bytes -= 4;
+        }
+    }
+
+    __asm__ volatile("sfence" ::: "memory");
+    __asm__ volatile("vzeroupper" ::: "memory");
+}
+
+__attribute__((target("avx"))) __attribute__((target("sse2")))
+void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
+    if (!canvas) return;
+
+    if (x >= (int)fb_width || y >= (int)fb_height) return;
+    if (x + w <= 0 || y + h <= 0) return;
+
+    int src_x = 0;
+    int src_y = 0;
+    int draw_w = w;
+    int draw_h = h;
+
+    if (x < 0) {
+        src_x = -x;
+        draw_w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        src_y = -y;
+        draw_h += y;
+        y = 0;
+    }
+    if (x + draw_w > (int)fb_width) {
+        draw_w = (int)fb_width - x;
+    }
+    if (y + draw_h > (int)fb_height) {
+        draw_h = (int)fb_height - y;
+    }
+
+    if (draw_w <= 0 || draw_h <= 0) return;
+
+    if (vga_can_use_avx()) {
+        vga_blit_canvas_avx_impl(x, y, canvas, w, src_x, src_y, draw_w, draw_h);
+    } else {
+        vga_blit_canvas_sse2_impl(x, y, canvas, w, src_x, src_y, draw_w, draw_h);
+    }
+
     vga_mark_dirty(x, y, draw_w, draw_h);
 }
 
