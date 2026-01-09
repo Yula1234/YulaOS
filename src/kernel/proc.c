@@ -16,7 +16,6 @@
 #include <hal/io.h>
 #include <hal/simd.h>
 
-
 #include "sched.h"
 #include "proc.h"
 #include "elf.h"
@@ -24,6 +23,18 @@
 
 #define PID_HASH_SIZE 16384
 #define PID_HASH_LOCKS_COUNT 256
+
+#define EI_CLASS 4
+#define EI_DATA 5
+#define EI_VERSION 6
+#define ELFCLASS32 1
+#define ELFDATA2LSB 1
+#define EV_CURRENT 1
+#define ET_EXEC 2
+#define EM_386 3
+#define PT_LOAD 1
+#define USER_ELF_MIN_VADDR 0x08000000u
+#define USER_ELF_MAX_VADDR 0xB0000000u
 
 static task_t* tasks_head = 0;
 static task_t* tasks_tail = 0;
@@ -520,19 +531,92 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     if (!exec_node) return 0;
 
     Elf32_Ehdr header;
+    Elf32_Phdr* phdrs = 0;
+    uint32_t max_vaddr = 0;
 
     if (exec_node->ops->read(exec_node, 0, sizeof(Elf32_Ehdr), &header) < (int)sizeof(Elf32_Ehdr)) {
         kfree(exec_node);
         return 0;
     }
     
-    if (header.e_ident[0] != 0x7F || header.e_ident[1] != 'E') {
+    if (header.e_ident[0] != 0x7F || header.e_ident[1] != 'E' || header.e_ident[2] != 'L' || header.e_ident[3] != 'F') {
+        kfree(exec_node);
+        return 0;
+    }
+    if (header.e_ident[EI_CLASS] != ELFCLASS32 || header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_ident[EI_VERSION] != EV_CURRENT) {
+        kfree(exec_node);
+        return 0;
+    }
+    if (header.e_type != ET_EXEC || header.e_machine != EM_386 || header.e_version != EV_CURRENT) {
+        kfree(exec_node);
+        return 0;
+    }
+    if (header.e_ehsize != sizeof(Elf32_Ehdr) || header.e_phentsize != sizeof(Elf32_Phdr)) {
+        kfree(exec_node);
+        return 0;
+    }
+    if (header.e_phnum == 0 || header.e_phnum > 64) {
+        kfree(exec_node);
+        return 0;
+    }
+    {
+        uint64_t ph_end = (uint64_t)header.e_phoff + (uint64_t)header.e_phnum * (uint64_t)sizeof(Elf32_Phdr);
+        if (header.e_phoff == 0 || ph_end > (uint64_t)exec_node->size) {
+            kfree(exec_node);
+            return 0;
+        }
+    }
+
+    size_t phdr_bytes = (size_t)header.e_phnum * sizeof(Elf32_Phdr);
+    phdrs = (Elf32_Phdr*)kmalloc(phdr_bytes);
+    if (!phdrs) {
+        kfree(exec_node);
+        return 0;
+    }
+    if (exec_node->ops->read(exec_node, header.e_phoff, (uint32_t)phdr_bytes, phdrs) < (int)phdr_bytes) {
+        kfree(phdrs);
+        kfree(exec_node);
+        return 0;
+    }
+
+    int have_load = 0;
+    int entry_ok = 0;
+    for (int i = 0; i < header.e_phnum; i++) {
+        if (phdrs[i].p_type != PT_LOAD) continue;
+
+        uint32_t start_v = phdrs[i].p_vaddr;
+        uint32_t mem_sz  = phdrs[i].p_memsz;
+        uint32_t file_off= phdrs[i].p_offset;
+        uint32_t file_sz = phdrs[i].p_filesz;
+
+        if (mem_sz < file_sz) { kfree(phdrs); kfree(exec_node); return 0; }
+
+        uint32_t end_v = start_v + mem_sz;
+        if (end_v < start_v) { kfree(phdrs); kfree(exec_node); return 0; }
+        if (start_v < USER_ELF_MIN_VADDR || end_v > USER_ELF_MAX_VADDR) { kfree(phdrs); kfree(exec_node); return 0; }
+
+        uint32_t diff = start_v & 0xFFFu;
+        if (file_off < diff) { kfree(phdrs); kfree(exec_node); return 0; }
+
+        uint64_t file_end = (uint64_t)file_off + (uint64_t)file_sz;
+        if (file_end > (uint64_t)exec_node->size) { kfree(phdrs); kfree(exec_node); return 0; }
+
+        have_load = 1;
+        if (end_v > max_vaddr) max_vaddr = end_v;
+        if (header.e_entry >= start_v && header.e_entry < end_v) entry_ok = 1;
+    }
+    if (!have_load || !entry_ok || max_vaddr == 0) {
+        kfree(phdrs);
         kfree(exec_node);
         return 0;
     }
 
     char** k_argv = (char**)kmalloc((argc + 1) * sizeof(char*));
-    if (!k_argv) return 0;
+    if (!k_argv) {
+        kfree(phdrs);
+        kfree(exec_node);
+        return 0;
+    }
     
     for (int i = 0; i < argc; i++) {
         int len = strlen(argv[i]) + 1;
@@ -545,6 +629,8 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     if (!t) {
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         kfree(k_argv);
+        kfree(phdrs);
+        kfree(exec_node);
         return 0;
     }
 
@@ -558,7 +644,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         t->parent_pid = 0;
     }
 
-     if (proc_current()) {
+    if (proc_current()) {
         task_t* parent = proc_current();
         proc_fd_entry_t* pe;
         dlist_for_each_entry(pe, &parent->fd_list, list) {
@@ -621,6 +707,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         kfree(exec_node);
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         kfree(k_argv);
+        kfree(phdrs);
         proc_free_resources(t);
         return 0;
     }
@@ -633,11 +720,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     t->mmap_list = 0;
     t->mmap_top = 0x80001000;
 
-    Elf32_Phdr* phdrs = (Elf32_Phdr*)kmalloc(header.e_phnum * sizeof(Elf32_Phdr));
-    exec_node->ops->read(exec_node, header.e_phoff, header.e_phnum * sizeof(Elf32_Phdr), phdrs);
-
-    uint32_t max_vaddr = 0;
-
     for (int i = 0; i < header.e_phnum; i++) {
         if (phdrs[i].p_type == 1) {
             uint32_t start_v = phdrs[i].p_vaddr;
@@ -646,9 +728,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
             uint32_t file_sz = phdrs[i].p_filesz;
             
             proc_add_mmap_region(t, exec_node, start_v, mem_sz, file_sz, file_off);
-            
-            uint32_t end_v = start_v + mem_sz;
-            if (end_v > max_vaddr) max_vaddr = end_v;
         }
     }
     
