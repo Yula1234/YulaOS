@@ -1363,12 +1363,22 @@ void shell_task(void* arg) {
                 shell_kbd_sel_step(ctx, my_term, (uint8_t)c);
             }
             else if ((uint8_t)c == 0x1B) {
-                ctx->sel_active = 0;
-                ctx->sel_selecting = 0;
-                ctx->sel_start_row = 0;
-                ctx->sel_start_col = 0;
-                ctx->sel_end_row = 0;
-                ctx->sel_end_col = 0;
+                if (ctx->sel_active) {
+                    ctx->sel_active = 0;
+                    ctx->sel_selecting = 0;
+                    ctx->sel_start_row = 0;
+                    ctx->sel_start_col = 0;
+                    ctx->sel_end_row = 0;
+                    ctx->sel_end_col = 0;
+                } else {
+                    if (line_len > 0 || cursor_pos > 0) {
+                        line[0] = 0;
+                        line_len = 0;
+                        cursor_pos = 0;
+                        ctx->cursor_pos = cursor_pos;
+                        refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    }
+                }
             }
             else if ((uint8_t)c == 0x88) {
                 if (cursor_pos > 0) {
