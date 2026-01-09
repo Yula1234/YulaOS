@@ -131,10 +131,9 @@ export vblank_mode=0
 export __GL_SYNC_TO_VBLANK=0
 
 QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
--device ide-hd,drive=disk,bus=ahci.0
--drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe
--accel kvm -vga virtio -display sdl,gl=on -m 1G -mem-prealloc
--smp 3 -cpu host,migratable=no,+invtsc,l3-cache=on 
--audiodev pa,id=snd0 -machine pcspk-audiodev=snd0"
+-device ide-hd,drive=disk,bus=ahci.0 -machine pcspk-audiodev=snd0 -m 1G
+-drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe,aio=io_uring
+-accel kvm -vga virtio -display sdl,gl=on -smp 3 -mem-prealloc
+-cpu host,migratable=no,+invtsc,l3-cache=on -audiodev pa,id=snd0"
 
-qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS
+qemu-system-x86_64 -cdrom bin/yulaos.iso $QEMU_ARGS
