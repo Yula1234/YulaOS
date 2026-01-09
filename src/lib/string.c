@@ -478,8 +478,8 @@ static inline void memcpy_sse_unaligned_src(void* dest, const void* src, size_t 
     }
 }
 
-__attribute__((target("avx"))) __attribute__((always_inline))
-static inline void memcpy_avx_aligned_src(void* dest, const void* src, size_t n) {
+__attribute__((target("avx")))
+static void memcpy_avx_aligned_src(void* dest, const void* src, size_t n) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
 
@@ -503,8 +503,8 @@ static inline void memcpy_avx_aligned_src(void* dest, const void* src, size_t n)
     __asm__ volatile("vzeroupper" ::: "memory");
 }
 
-__attribute__((target("avx"))) __attribute__((always_inline))
-static inline void memcpy_avx_unaligned_src(void* dest, const void* src, size_t n) {
+__attribute__((target("avx")))
+static void memcpy_avx_unaligned_src(void* dest, const void* src, size_t n) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
 
@@ -566,7 +566,7 @@ static inline void* memset_sse(void* dest, int val, size_t n) {
     return dest;
 }
 
-__attribute__((target("avx"))) __attribute__((target("sse2")))
+__attribute__((target("sse2")))
 void* memcpy(void *restrict dst, const void *restrict src, size_t n) {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;

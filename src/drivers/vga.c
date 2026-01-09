@@ -618,8 +618,8 @@ static inline void vga_draw_rect_sse2_impl(int x1, int y1, int draw_w, int draw_
     }
 }
 
-__attribute__((target("avx"))) __attribute__((always_inline))
-static inline void vga_draw_rect_avx_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color) {
+__attribute__((target("avx")))
+static void vga_draw_rect_avx_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color) {
     const int stride = (int)vga_target_w;
     uint32_t* row = vga_current_target + y1 * stride + x1;
 
@@ -682,7 +682,7 @@ static inline void vga_draw_rect_avx_impl(int x1, int y1, int draw_w, int draw_h
     __asm__ volatile ("vzeroupper" ::: "memory");
 }
 
-__attribute__((target("avx"))) __attribute__((target("sse2")))
+__attribute__((target("sse2")))
 void vga_draw_rect(int x, int y, int w, int h, uint32_t color) {
     if (!vga_current_target) return;
     if (x >= (int)vga_target_w || y >= (int)vga_target_h) return;
@@ -1026,8 +1026,8 @@ static inline void vga_draw_rect_alpha_sse2_impl(int x1, int y1, int draw_w, int
     }
 }
 
-__attribute__((target("avx2"))) __attribute__((always_inline))
-static inline void vga_draw_rect_alpha_avx2_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color, uint8_t alpha) {
+__attribute__((target("avx2")))
+static void vga_draw_rect_alpha_avx2_impl(int x1, int y1, int draw_w, int draw_h, uint32_t color, uint8_t alpha) {
     const int stride = (int)vga_target_w;
     uint32_t* row = vga_current_target + y1 * stride + x1;
 
@@ -1193,7 +1193,7 @@ static inline void vga_draw_rect_alpha_avx2_impl(int x1, int y1, int draw_w, int
     __asm__ volatile ("vzeroupper" ::: "memory");
 }
 
-__attribute__((target("avx2"))) __attribute__((target("sse2")))
+__attribute__((target("sse2")))
 void vga_draw_rect_alpha(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
     if (!vga_current_target || alpha == 0) return;
 
@@ -1304,8 +1304,8 @@ static inline void vga_blur_rect_sse2_impl(int x, int y, int w, int h) {
     }
 }
 
-__attribute__((target("avx2"))) __attribute__((always_inline))
-static inline void vga_blur_rect_avx2_impl(int x, int y, int w, int h) {
+__attribute__((target("avx2")))
+static void vga_blur_rect_avx2_impl(int x, int y, int w, int h) {
     int blocks8 = w >> 3;
     int blocks4 = (w - (blocks8 << 3)) >> 2;
 
@@ -1403,7 +1403,7 @@ static inline void vga_blur_rect_avx2_impl(int x, int y, int w, int h) {
     __asm__ volatile ("vzeroupper" ::: "memory");
 }
 
-__attribute__((target("avx2"))) __attribute__((target("sse2")))
+__attribute__((target("sse2")))
 void vga_blur_rect(int x, int y, int w, int h) {
     if (!vga_current_target) return;
     if (x < 1) x = 1;
@@ -1512,8 +1512,8 @@ static inline void vga_blit_canvas_sse2_impl(int x, int y, uint32_t* canvas, int
     __asm__ volatile("sfence" ::: "memory");
 }
 
-__attribute__((target("avx"))) __attribute__((always_inline))
-static inline void vga_blit_canvas_avx_impl(int x, int y, uint32_t* canvas, int w, int src_x, int src_y, int draw_w, int draw_h) {
+__attribute__((target("avx2")))
+static void vga_blit_canvas_avx_impl(int x, int y, uint32_t* canvas, int w, int src_x, int src_y, int draw_w, int draw_h) {
     for (int i = 0; i < draw_h; i++) {
         int screen_y = y + i;
         int canvas_y = src_y + i;
@@ -1651,7 +1651,7 @@ static inline void vga_blit_canvas_avx_impl(int x, int y, uint32_t* canvas, int 
     __asm__ volatile("vzeroupper" ::: "memory");
 }
 
-__attribute__((target("avx"))) __attribute__((target("sse2")))
+__attribute__((target("sse2")))
 void vga_blit_canvas(int x, int y, uint32_t* canvas, int w, int h) {
     if (!canvas) return;
 
@@ -1882,8 +1882,8 @@ static inline void vga_flip_dirty_sse2_impl(int x1, int x2, int y1, int y2) {
     __asm__ volatile ("sfence" ::: "memory");
 }
 
-__attribute__((target("avx"))) __attribute__((always_inline))
-static inline void vga_flip_dirty_avx_impl(int x1, int x2, int y1, int y2) {
+__attribute__((target("avx")))
+static void vga_flip_dirty_avx_impl(int x1, int x2, int y1, int y2) {
      int width_pixels = x2 - x1;
      if (width_pixels <= 0) return;
  
@@ -2023,7 +2023,7 @@ static inline void vga_flip_dirty_avx_impl(int x1, int x2, int y1, int y2) {
      __asm__ volatile ("vzeroupper" ::: "memory");
  }
  
-__attribute__((target("avx")))  __attribute__((target("sse2")))
+__attribute__((target("sse2")))
 void vga_flip_dirty() {
     if (dirty_x2 <= dirty_x1 || dirty_y2 <= dirty_y1) return;
 
