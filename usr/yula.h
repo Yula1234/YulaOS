@@ -124,4 +124,12 @@ static inline int get_fs_info(fs_info_t* buf) {
     return syscall(34, (int)buf, 0, 0);
 }
 
+static inline int spawn_process(const char* path, int argc, char** argv) {
+    return syscall(36, (int)path, argc, (int)argv);
+}
+
+static inline int waitpid(int pid, int* status) {
+    return syscall(37, pid, (int)status, 0);
+}
+
 #endif

@@ -128,6 +128,7 @@ typedef struct task {
     void* blocked_on_sem;
 
     volatile uint32_t exit_waiters;
+    int exit_status;
     semaphore_t exit_sem; 
   
 } task_t;
@@ -146,6 +147,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv);
 
 void proc_kill(task_t* t);
 void proc_wait(uint32_t pid);
+int proc_waitpid(uint32_t pid, int* out_status);
 void reaper_task_func(void* arg);
 
 task_t* proc_get_list_head();

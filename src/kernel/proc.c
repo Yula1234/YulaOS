@@ -834,6 +834,33 @@ void proc_wait(uint32_t pid) {
     __sync_fetch_and_sub(&target->exit_waiters, 1);
 }
 
+ int proc_waitpid(uint32_t pid, int* out_status) {
+     task_t* target = 0;
+
+     uint32_t flags = spinlock_acquire_safe(&proc_lock);
+     task_t* curr = tasks_head;
+     while (curr) {
+         if (curr->pid == pid) {
+             target = curr;
+             __sync_fetch_and_add(&target->exit_waiters, 1);
+             break;
+         }
+         curr = curr->next;
+     }
+     spinlock_release_safe(&proc_lock, flags);
+
+     if (!target) return -1;
+
+     sem_wait(&target->exit_sem);
+
+     if (out_status) {
+         *out_status = target->exit_status;
+     }
+
+     __sync_fetch_and_sub(&target->exit_waiters, 1);
+     return 0;
+ }
+
 
 void reaper_task_func(void* arg) {
     (void)arg;

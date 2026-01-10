@@ -64,6 +64,7 @@ void syscall_handler(registers_t* regs) {
 
     switch (sys_num) {
         case 0: // exit()
+            curr->exit_status = (int)regs->ebx;
             proc_kill(curr);
             sched_yield();  
             break;
@@ -74,7 +75,7 @@ void syscall_handler(registers_t* regs) {
             if (curr->terminal) {
                 term_print((term_instance_t*)curr->terminal, s);
             } else {
-                vga_print(s);
+                regs->eax = -1;
             }
         }
         break;
@@ -751,9 +752,64 @@ void syscall_handler(registers_t* regs) {
         }
         break;
 
+        case 36: // spawn_process(path, argc, argv)
+        {
+            const char* path = (const char*)regs->ebx;
+            int argc = (int)regs->ecx;
+            char** argv = (char**)regs->edx;
+
+            if (argc < 0 || argc > 64) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!check_user_buffer(curr, path, 1)) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (argc > 0) {
+                if (!argv || !check_user_buffer(curr, argv, (uint32_t)argc * sizeof(char*))) {
+                    regs->eax = -1;
+                    break;
+                }
+                for (int i = 0; i < argc; i++) {
+                    char* a = argv[i];
+                    if (!check_user_buffer(curr, a, 1)) {
+                        regs->eax = -1;
+                        break;
+                    }
+                }
+                if (regs->eax == (uint32_t)-1) break;
+            }
+
+            task_t* child = proc_spawn_elf(path, argc, argv);
+            regs->eax = child ? (int)child->pid : -1;
+        }
+        break;
+
+        case 37: // waitpid(pid, status_ptr)
+        {
+            uint32_t pid = (uint32_t)regs->ebx;
+            int* status_ptr = (int*)regs->ecx;
+
+            if (pid == 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (status_ptr && !check_user_buffer(curr, status_ptr, sizeof(int))) {
+                regs->eax = -1;
+                break;
+            }
+
+            int rc = proc_waitpid(pid, status_ptr);
+            regs->eax = (rc == 0) ? (int)pid : -1;
+        }
+        break;
 
         default:
-            vga_print("Unknown syscall\n");
+            regs->eax = -1;
             break;
     }
 }
