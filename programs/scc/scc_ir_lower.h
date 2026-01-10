@@ -406,6 +406,10 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
         if (e->v.unary.op == AST_UNOP_NOT) {
             return type_bool(lc->p);
         }
+        if (e->v.unary.op == AST_UNOP_BNOT) {
+            Type* ot = ir_lower_expr_type(lc, e->v.unary.expr);
+            return ir_tc_uac_promote_int_type(lc, ot);
+        }
         return 0;
     }
 
@@ -441,6 +445,14 @@ static Type* ir_lower_expr_type(IrLowerCtx* lc, AstExpr* e) {
 
         if (e->v.binary.op == AST_BINOP_MUL || e->v.binary.op == AST_BINOP_DIV || e->v.binary.op == AST_BINOP_MOD) {
             return ir_tc_uac_common_int_type(lc, lt, rt);
+        }
+
+        if (e->v.binary.op == AST_BINOP_BAND || e->v.binary.op == AST_BINOP_BXOR || e->v.binary.op == AST_BINOP_BOR) {
+            return ir_tc_uac_common_int_type(lc, lt, rt);
+        }
+
+        if (e->v.binary.op == AST_BINOP_SHL || e->v.binary.op == AST_BINOP_SHR) {
+            return ir_tc_uac_promote_int_type(lc, lt);
         }
 
         return 0;
@@ -781,6 +793,9 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         if ((e->v.unary.op == AST_UNOP_POS || e->v.unary.op == AST_UNOP_NEG) && !ir_tc_is_int_type(ut)) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unary + or - requires integer operand");
         }
+        if (e->v.unary.op == AST_UNOP_BNOT && !ir_tc_is_int_type(ut)) {
+            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unary ~ requires integer operand");
+        }
         if (e->v.unary.op == AST_UNOP_NOT && !ir_tc_is_scalar_type(ut)) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Unary ! requires scalar operand");
         }
@@ -792,7 +807,7 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         }
 
         IrType* ity = fc->f->ty_i32;
-        if (e->v.unary.op == AST_UNOP_POS || e->v.unary.op == AST_UNOP_NEG) {
+        if (e->v.unary.op == AST_UNOP_POS || e->v.unary.op == AST_UNOP_NEG || e->v.unary.op == AST_UNOP_BNOT) {
             Type* pt = ir_tc_uac_promote_int_type(fc->lc, ut);
             if (pt && ir_tc_uac_is_unsigned_kind(pt->kind)) ity = fc->f->ty_u32;
         }
@@ -803,6 +818,16 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
         if (e->v.unary.op == AST_UNOP_NEG) {
             IrValueId z = ir_lower_cast_value(fc, ir_emit_iconst(fc->f, fc->cur, 0), ity, e->tok);
             return ir_emit_bin(fc->f, fc->cur, IR_INSTR_SUB, ity, z, v);
+        }
+        if (e->v.unary.op == AST_UNOP_BNOT) {
+            IrValueId ones = 0;
+            if (ity == fc->f->ty_u32) {
+                ones = ir_emit_uconst(fc->f, fc->cur, 0xFFFFFFFFu);
+            } else {
+                ones = ir_emit_iconst(fc->f, fc->cur, -1);
+                ones = ir_lower_cast_value(fc, ones, ity, e->tok);
+            }
+            return ir_emit_bin(fc->f, fc->cur, IR_INSTR_XOR, ity, v, ones);
         }
     }
 
@@ -881,26 +906,43 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Compound assignment requires integer operands");
         }
 
-        Type* ct = ir_tc_uac_common_int_type(fc->lc, lvt, rt);
-        if (!ct) {
-            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid arithmetic type");
-        }
+        IrInstrKind k = IR_INSTR_INVALID;
+        IrType* ity = fc->f->ty_i32;
+        int is_unsigned = 0;
 
-        int is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
-        IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+        if (op == AST_BINOP_SHL || op == AST_BINOP_SHR) {
+            Type* pt = ir_tc_uac_promote_int_type(fc->lc, lvt);
+            if (!pt) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid shift type");
+            }
+            is_unsigned = ir_tc_uac_is_unsigned_kind(pt->kind);
+            ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            if (op == AST_BINOP_SHL) k = IR_INSTR_SHL;
+            else k = is_unsigned ? IR_INSTR_SHR : IR_INSTR_SAR;
+        } else {
+            Type* ct = ir_tc_uac_common_int_type(fc->lc, lvt, rt);
+            if (!ct) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid arithmetic type");
+            }
+            is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
+            ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            if (op == AST_BINOP_ADD) k = IR_INSTR_ADD;
+            else if (op == AST_BINOP_SUB) k = IR_INSTR_SUB;
+            else if (op == AST_BINOP_MUL) k = IR_INSTR_MUL;
+            else if (op == AST_BINOP_DIV) k = is_unsigned ? IR_INSTR_UDIV : IR_INSTR_SDIV;
+            else if (op == AST_BINOP_MOD) k = is_unsigned ? IR_INSTR_UREM : IR_INSTR_SREM;
+            else if (op == AST_BINOP_BAND) k = IR_INSTR_AND;
+            else if (op == AST_BINOP_BOR) k = IR_INSTR_OR;
+            else if (op == AST_BINOP_BXOR) k = IR_INSTR_XOR;
+            else {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Compound assignment operator not supported");
+            }
+        }
 
         IrValueId old_lv = ir_lower_cast_value(fc, ir_emit_load(fc->f, fc->cur, lvir, addr), ity, e->tok);
         IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.assign.right), ity, e->tok);
-
-        IrInstrKind k = IR_INSTR_INVALID;
-        if (op == AST_BINOP_ADD) k = IR_INSTR_ADD;
-        else if (op == AST_BINOP_SUB) k = IR_INSTR_SUB;
-        else if (op == AST_BINOP_MUL) k = IR_INSTR_MUL;
-        else if (op == AST_BINOP_DIV) k = is_unsigned ? IR_INSTR_UDIV : IR_INSTR_SDIV;
-        else if (op == AST_BINOP_MOD) k = is_unsigned ? IR_INSTR_UREM : IR_INSTR_SREM;
-        else {
-            scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Compound assignment operator not supported");
-        }
 
         IrValueId res = ir_emit_bin(fc->f, fc->cur, k, ity, old_lv, rv);
         IrValueId cv = ir_lower_cast_value(fc, res, lvir, e->tok);
@@ -1144,6 +1186,55 @@ static IrValueId ir_lower_expr(IrLowerFuncCtx* fc, AstExpr* e) {
             IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
             IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
             IrInstrKind k = (e->v.binary.op == AST_BINOP_ADD) ? IR_INSTR_ADD : IR_INSTR_SUB;
+            return ir_emit_bin(fc->f, fc->cur, k, ity, lv, rv);
+        }
+
+        if (e->v.binary.op == AST_BINOP_BAND || e->v.binary.op == AST_BINOP_BXOR || e->v.binary.op == AST_BINOP_BOR) {
+            if ((lt && lt->kind == TYPE_VOID) || (rt && rt->kind == TYPE_VOID)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
+            }
+            if (!ir_tc_is_int_type(lt) || !ir_tc_is_int_type(rt)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Bitwise operator requires integer operands");
+            }
+
+            Type* ct = ir_tc_uac_common_int_type(fc->lc, lt, rt);
+            if (!ct) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid arithmetic type");
+            }
+            int is_unsigned = ir_tc_uac_is_unsigned_kind(ct->kind);
+            IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
+
+            IrInstrKind k = IR_INSTR_INVALID;
+            if (e->v.binary.op == AST_BINOP_BAND) k = IR_INSTR_AND;
+            else if (e->v.binary.op == AST_BINOP_BOR) k = IR_INSTR_OR;
+            else if (e->v.binary.op == AST_BINOP_BXOR) k = IR_INSTR_XOR;
+            return ir_emit_bin(fc->f, fc->cur, k, ity, lv, rv);
+        }
+
+        if (e->v.binary.op == AST_BINOP_SHL || e->v.binary.op == AST_BINOP_SHR) {
+            if ((lt && lt->kind == TYPE_VOID) || (rt && rt->kind == TYPE_VOID)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Void value is not allowed here");
+            }
+            if (!ir_tc_is_int_type(lt) || !ir_tc_is_int_type(rt)) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Shift operator requires integer operands");
+            }
+
+            Type* pt = ir_tc_uac_promote_int_type(fc->lc, lt);
+            if (!pt) {
+                scc_fatal_at(fc->lc->p->file, fc->lc->p->src, e->tok.line, e->tok.col, "Internal error: invalid shift type");
+            }
+            int is_unsigned = ir_tc_uac_is_unsigned_kind(pt->kind);
+            IrType* ity = is_unsigned ? fc->f->ty_u32 : fc->f->ty_i32;
+
+            IrValueId lv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.left), ity, e->tok);
+            IrValueId rv = ir_lower_cast_value(fc, ir_lower_expr(fc, e->v.binary.right), ity, e->tok);
+
+            IrInstrKind k = IR_INSTR_INVALID;
+            if (e->v.binary.op == AST_BINOP_SHL) k = IR_INSTR_SHL;
+            else k = is_unsigned ? IR_INSTR_SHR : IR_INSTR_SAR;
             return ir_emit_bin(fc->f, fc->cur, k, ity, lv, rv);
         }
 

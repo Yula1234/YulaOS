@@ -135,6 +135,16 @@ static AstExpr* parse_unary(Parser* p) {
         return e;
     }
 
+    if (p->tok.kind == TOK_TILDE) {
+        Token t = p->tok;
+        parser_next(p);
+
+        AstExpr* e = ast_new_expr(p, AST_EXPR_UNARY, t);
+        e->v.unary.op = AST_UNOP_BNOT;
+        e->v.unary.expr = parse_unary(p);
+        return e;
+    }
+
     if (p->tok.kind == TOK_AMP || p->tok.kind == TOK_STAR) {
         Token t = p->tok;
         AstUnOp op = (p->tok.kind == TOK_AMP) ? AST_UNOP_ADDR : AST_UNOP_DEREF;
@@ -176,6 +186,12 @@ static int tok_to_assign_binop(TokenKind k, AstBinOp* out_op) {
     if (k == TOK_STAREQ) { *out_op = AST_BINOP_MUL; return 1; }
     if (k == TOK_SLASHEQ) { *out_op = AST_BINOP_DIV; return 1; }
     if (k == TOK_PERCENTEQ) { *out_op = AST_BINOP_MOD; return 1; }
+
+    if (k == TOK_AMPEQ) { *out_op = AST_BINOP_BAND; return 1; }
+    if (k == TOK_PIPEEQ) { *out_op = AST_BINOP_BOR; return 1; }
+    if (k == TOK_CARETEQ) { *out_op = AST_BINOP_BXOR; return 1; }
+    if (k == TOK_LSHIFTEQ) { *out_op = AST_BINOP_SHL; return 1; }
+    if (k == TOK_RSHIFTEQ) { *out_op = AST_BINOP_SHR; return 1; }
 
     return 0;
 }

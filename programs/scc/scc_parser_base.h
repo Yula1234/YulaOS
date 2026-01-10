@@ -62,6 +62,9 @@ static int tok_to_binop(TokenKind k, AstBinOp* out_op, int* out_prec, int* out_r
     if (k == TOK_PLUS) { *out_op = AST_BINOP_ADD; *out_prec = 50; return 1; }
     if (k == TOK_MINUS) { *out_op = AST_BINOP_SUB; *out_prec = 50; return 1; }
 
+    if (k == TOK_LSHIFT) { *out_op = AST_BINOP_SHL; *out_prec = 45; return 1; }
+    if (k == TOK_RSHIFT) { *out_op = AST_BINOP_SHR; *out_prec = 45; return 1; }
+
     if (k == TOK_LT) { *out_op = AST_BINOP_LT; *out_prec = 40; return 1; }
     if (k == TOK_LE) { *out_op = AST_BINOP_LE; *out_prec = 40; return 1; }
     if (k == TOK_GT) { *out_op = AST_BINOP_GT; *out_prec = 40; return 1; }
@@ -69,6 +72,10 @@ static int tok_to_binop(TokenKind k, AstBinOp* out_op, int* out_prec, int* out_r
 
     if (k == TOK_EQ) { *out_op = AST_BINOP_EQ; *out_prec = 35; return 1; }
     if (k == TOK_NE) { *out_op = AST_BINOP_NE; *out_prec = 35; return 1; }
+
+    if (k == TOK_AMP) { *out_op = AST_BINOP_BAND; *out_prec = 34; return 1; }
+    if (k == TOK_CARET) { *out_op = AST_BINOP_BXOR; *out_prec = 33; return 1; }
+    if (k == TOK_PIPE) { *out_op = AST_BINOP_BOR; *out_prec = 32; return 1; }
 
     if (k == TOK_ANDAND) { *out_op = AST_BINOP_ANDAND; *out_prec = 30; return 1; }
     if (k == TOK_OROR) { *out_op = AST_BINOP_OROR; *out_prec = 25; return 1; }

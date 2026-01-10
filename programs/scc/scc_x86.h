@@ -121,6 +121,18 @@ static void emit_x86_test_r32_r32(Buffer* text, X86Reg a, X86Reg b) {
     emit_x86_op_r32_r32(text, 0x85, a, b);
 }
 
+static void emit_x86_and_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    emit_x86_op_r32_r32(text, 0x21, dst, src);
+}
+
+static void emit_x86_or_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    emit_x86_op_r32_r32(text, 0x09, dst, src);
+}
+
+static void emit_x86_xor_r32_r32(Buffer* text, X86Reg dst, X86Reg src) {
+    emit_x86_op_r32_r32(text, 0x31, dst, src);
+}
+
 static void emit_x86_and_r32_imm32(Buffer* text, X86Reg r, uint32_t imm) {
     buf_push_u8(text, 0x81);
     emit_x86_modrm(text, 3u, 4u, (uint8_t)r);
@@ -138,10 +150,25 @@ static void emit_x86_shl_r32_imm8(Buffer* text, X86Reg r, uint8_t imm) {
     buf_push_u8(text, imm);
 }
 
+static void emit_x86_shl_r32_cl(Buffer* text, X86Reg r) {
+    buf_push_u8(text, 0xD3);
+    emit_x86_modrm(text, 3u, 4u, (uint8_t)r);
+}
+
+static void emit_x86_shr_r32_cl(Buffer* text, X86Reg r) {
+    buf_push_u8(text, 0xD3);
+    emit_x86_modrm(text, 3u, 5u, (uint8_t)r);
+}
+
 static void emit_x86_sar_r32_imm8(Buffer* text, X86Reg r, uint8_t imm) {
     buf_push_u8(text, 0xC1);
     emit_x86_modrm(text, 3u, 7u, (uint8_t)r);
     buf_push_u8(text, imm);
+}
+
+static void emit_x86_sar_r32_cl(Buffer* text, X86Reg r) {
+    buf_push_u8(text, 0xD3);
+    emit_x86_modrm(text, 3u, 7u, (uint8_t)r);
 }
 
 static void emit_x86_idiv_r32(Buffer* text, X86Reg r) {

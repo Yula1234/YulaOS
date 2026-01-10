@@ -119,6 +119,7 @@ static void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, 
         int32_t sv = (int32_t)v;
         if (e->v.unary.op == AST_UNOP_NEG) sv = -sv;
         else if (e->v.unary.op == AST_UNOP_NOT) sv = (sv == 0) ? 1 : 0;
+        else if (e->v.unary.op == AST_UNOP_BNOT) sv = ~sv;
         *out_val = (uint32_t)sv;
         *out_reloc_sym = 0;
         return;
@@ -149,7 +150,13 @@ static void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, 
             return;
         }
 
-        scc_fatal_at(ce->p->file, ce->p->src, e->tok.line, e->tok.col, "Only arithmetic operators are supported in global initializers");
+        if (e->v.binary.op == AST_BINOP_BAND) { *out_val = lv & rv; return; }
+        if (e->v.binary.op == AST_BINOP_BOR) { *out_val = lv | rv; return; }
+        if (e->v.binary.op == AST_BINOP_BXOR) { *out_val = lv ^ rv; return; }
+        if (e->v.binary.op == AST_BINOP_SHL) { *out_val = lv << (rv & 31u); return; }
+        if (e->v.binary.op == AST_BINOP_SHR) { *out_val = (uint32_t)((int32_t)lv >> (rv & 31u)); return; }
+
+        scc_fatal_at(ce->p->file, ce->p->src, e->tok.line, e->tok.col, "Only arithmetic and bitwise operators are supported in global initializers");
     }
 
     scc_fatal_at(ce->p->file, ce->p->src, e->tok.line, e->tok.col, "Non-constant global initializer");

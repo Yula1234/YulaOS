@@ -22,6 +22,7 @@ typedef enum {
     AST_UNOP_POS = 1,
     AST_UNOP_NEG,
     AST_UNOP_NOT,
+    AST_UNOP_BNOT,
     AST_UNOP_ADDR,
     AST_UNOP_DEREF,
 } AstUnOp;
@@ -32,6 +33,14 @@ typedef enum {
     AST_BINOP_MUL,
     AST_BINOP_DIV,
     AST_BINOP_MOD,
+
+    AST_BINOP_SHL,
+    AST_BINOP_SHR,
+
+    AST_BINOP_BAND,
+    AST_BINOP_BXOR,
+    AST_BINOP_BOR,
+
     AST_BINOP_EQ,
     AST_BINOP_NE,
     AST_BINOP_LT,

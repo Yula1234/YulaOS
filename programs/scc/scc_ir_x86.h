@@ -436,7 +436,9 @@ static void ir_x86_compute_liveness(IrFunc* f, IrX86Liveness* out_lv) {
 
             if (ins->kind == IR_INSTR_ZEXT || ins->kind == IR_INSTR_SEXT || ins->kind == IR_INSTR_TRUNC || ins->kind == IR_INSTR_BITCAST || ins->kind == IR_INSTR_PTRTOINT || ins->kind == IR_INSTR_INTTOPTR) {
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.cast.src, pos);
-            } else if (ins->kind == IR_INSTR_ADD || ins->kind == IR_INSTR_SUB || ins->kind == IR_INSTR_MUL || ins->kind == IR_INSTR_SDIV || ins->kind == IR_INSTR_SREM || ins->kind == IR_INSTR_UDIV || ins->kind == IR_INSTR_UREM) {
+            } else if (ins->kind == IR_INSTR_ADD || ins->kind == IR_INSTR_SUB || ins->kind == IR_INSTR_MUL || ins->kind == IR_INSTR_SDIV || ins->kind == IR_INSTR_SREM || ins->kind == IR_INSTR_UDIV || ins->kind == IR_INSTR_UREM ||
+                        ins->kind == IR_INSTR_AND || ins->kind == IR_INSTR_OR || ins->kind == IR_INSTR_XOR ||
+                        ins->kind == IR_INSTR_SHL || ins->kind == IR_INSTR_SHR || ins->kind == IR_INSTR_SAR) {
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.bin.left, pos);
                 ir_x86_lv_record_use(f, &lv, use_b, local_defs, ins->v.bin.right, pos);
             } else if (ins->kind == IR_INSTR_ICMP) {
@@ -788,7 +790,26 @@ static void ir_x86_emit_instr_arith(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32
     if (!cx || !f || !ins || !value_disp) return;
     Buffer* text = cx->text;
 
-    if (ins->kind != IR_INSTR_ADD && ins->kind != IR_INSTR_SUB && ins->kind != IR_INSTR_MUL && ins->kind != IR_INSTR_SDIV && ins->kind != IR_INSTR_SREM && ins->kind != IR_INSTR_UDIV && ins->kind != IR_INSTR_UREM) {
+    if (ins->kind != IR_INSTR_ADD && ins->kind != IR_INSTR_SUB && ins->kind != IR_INSTR_MUL && ins->kind != IR_INSTR_SDIV && ins->kind != IR_INSTR_SREM && ins->kind != IR_INSTR_UDIV && ins->kind != IR_INSTR_UREM &&
+        ins->kind != IR_INSTR_AND && ins->kind != IR_INSTR_OR && ins->kind != IR_INSTR_XOR &&
+        ins->kind != IR_INSTR_SHL && ins->kind != IR_INSTR_SHR && ins->kind != IR_INSTR_SAR) {
+        return;
+    }
+
+    if (ins->kind == IR_INSTR_SHL || ins->kind == IR_INSTR_SHR || ins->kind == IR_INSTR_SAR) {
+        emit_x86_push_r32(text, X86_REG_ECX);
+        ir_x86_load_value_to_eax(f, text, ins->v.bin.left, value_disp, value_loc);
+        emit_x86_push_eax(text);
+        ir_x86_load_value_to_eax(f, text, ins->v.bin.right, value_disp, value_loc);
+        emit_x86_mov_ecx_eax(text);
+        emit_x86_pop_eax(text);
+
+        if (ins->kind == IR_INSTR_SHL) emit_x86_shl_r32_cl(text, X86_REG_EAX);
+        else if (ins->kind == IR_INSTR_SHR) emit_x86_shr_r32_cl(text, X86_REG_EAX);
+        else emit_x86_sar_r32_cl(text, X86_REG_EAX);
+
+        ir_x86_store_value_from_eax(f, text, ins->result, value_disp, value_loc);
+        emit_x86_pop_r32(text, X86_REG_ECX);
         return;
     }
 
@@ -805,6 +826,12 @@ static void ir_x86_emit_instr_arith(IrX86Ctx* cx, IrFunc* f, IrInstr* ins, int32
         emit_x86_mov_eax_ecx(text);
     } else if (ins->kind == IR_INSTR_MUL) {
         emit_x86_imul_eax_ecx(text);
+    } else if (ins->kind == IR_INSTR_AND) {
+        emit_x86_and_r32_r32(text, X86_REG_EAX, X86_REG_ECX);
+    } else if (ins->kind == IR_INSTR_OR) {
+        emit_x86_or_r32_r32(text, X86_REG_EAX, X86_REG_ECX);
+    } else if (ins->kind == IR_INSTR_XOR) {
+        emit_x86_xor_r32_r32(text, X86_REG_EAX, X86_REG_ECX);
     } else if (ins->kind == IR_INSTR_SDIV || ins->kind == IR_INSTR_SREM) {
         emit_x86_push_r32(text, X86_REG_EBX);
         emit_x86_push_r32(text, X86_REG_EDX);

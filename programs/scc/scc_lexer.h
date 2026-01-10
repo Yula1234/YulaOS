@@ -50,6 +50,12 @@ typedef enum {
     TOK_SLASHEQ,
     TOK_PERCENTEQ,
 
+    TOK_AMPEQ,
+    TOK_PIPEEQ,
+    TOK_CARETEQ,
+    TOK_LSHIFTEQ,
+    TOK_RSHIFTEQ,
+
     TOK_EQ,
     TOK_NE,
     TOK_LT,
@@ -60,6 +66,12 @@ typedef enum {
     TOK_ANDAND,
     TOK_OROR,
     TOK_AMP,
+    TOK_PIPE,
+    TOK_CARET,
+    TOK_TILDE,
+
+    TOK_LSHIFT,
+    TOK_RSHIFT,
 
     TOK_BANG,
 
@@ -310,7 +322,17 @@ static Token lx_next(Lexer* lx) {
             t.kind = TOK_BANG;
         }
     } else if (c == '<') {
-        if (lx_cur(lx) == '=') {
+        if (lx_cur(lx) == '<') {
+            lx_advance(lx);
+            if (lx_cur(lx) == '=') {
+                lx_advance(lx);
+                t.len = 3;
+                t.kind = TOK_LSHIFTEQ;
+            } else {
+                t.len = 2;
+                t.kind = TOK_LSHIFT;
+            }
+        } else if (lx_cur(lx) == '=') {
             lx_advance(lx);
             t.len = 2;
             t.kind = TOK_LE;
@@ -318,7 +340,17 @@ static Token lx_next(Lexer* lx) {
             t.kind = TOK_LT;
         }
     } else if (c == '>') {
-        if (lx_cur(lx) == '=') {
+        if (lx_cur(lx) == '>') {
+            lx_advance(lx);
+            if (lx_cur(lx) == '=') {
+                lx_advance(lx);
+                t.len = 3;
+                t.kind = TOK_RSHIFTEQ;
+            } else {
+                t.len = 2;
+                t.kind = TOK_RSHIFT;
+            }
+        } else if (lx_cur(lx) == '=') {
             lx_advance(lx);
             t.len = 2;
             t.kind = TOK_GE;
@@ -330,6 +362,10 @@ static Token lx_next(Lexer* lx) {
             lx_advance(lx);
             t.len = 2;
             t.kind = TOK_ANDAND;
+        } else if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_AMPEQ;
         } else {
             t.kind = TOK_AMP;
         }
@@ -338,9 +374,23 @@ static Token lx_next(Lexer* lx) {
             lx_advance(lx);
             t.len = 2;
             t.kind = TOK_OROR;
+        } else if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_PIPEEQ;
         } else {
-            scc_fatal_at(lx->file, lx->src, t.line, t.col, "Unexpected character");
+            t.kind = TOK_PIPE;
         }
+    } else if (c == '^') {
+        if (lx_cur(lx) == '=') {
+            lx_advance(lx);
+            t.len = 2;
+            t.kind = TOK_CARETEQ;
+        } else {
+            t.kind = TOK_CARET;
+        }
+    } else if (c == '~') {
+        t.kind = TOK_TILDE;
     } else {
         scc_fatal_at(lx->file, lx->src, t.line, t.col, "Unexpected character");
     }
