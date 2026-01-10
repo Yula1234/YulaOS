@@ -225,9 +225,22 @@ void gui_task(void* arg) {
         static int last_left_click = 0;
         int just_pressed = left_click && !(last_mouse_buttons & 1);
 
+        int cursor_over_window = 0;
+        window_t* hw;
+        dlist_for_each_entry_reverse(hw, &window_list, list) {
+            if (!hw->is_active || hw->is_minimized) continue;
+            if (mouse_x >= hw->x && mouse_x < hw->x + hw->w &&
+                mouse_y >= hw->y && mouse_y < hw->y + hw->h)
+            {
+                cursor_over_window = 1;
+                break;
+            }
+        }
+
         for (int i = 0; i < ICON_COUNT; i++) {
             desktop_item_t* item = &desktop_icons[i];
-            int currently_hovered = (mouse_x >= item->x && mouse_x <= item->x + item->w &&
+            int currently_hovered = (!cursor_over_window &&
+                                     mouse_x >= item->x && mouse_x <= item->x + item->w &&
                                      mouse_y >= item->y && mouse_y <= item->y + item->h);
             
             if (currently_hovered != item->is_hovered) {
