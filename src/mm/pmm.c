@@ -66,6 +66,12 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
 
     used_pages_count = total_pages;
 
+    for (uint32_t p = first_free_idx; p < total_pages; p++) {
+        mem_map[p].flags = PMM_FLAG_USED;
+        mem_map[p].ref_count = 0;
+        mem_map[p].order = 0;
+    }
+
     for (uint32_t i = 0; i < first_free_idx; i++) {
         mem_map[i].flags = PMM_FLAG_USED | PMM_FLAG_KERNEL;
         mem_map[i].ref_count = 1;
@@ -83,6 +89,12 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
 
     while (i + max_block_size <= total_pages) {
         page_t* page = &mem_map[i];
+
+        for (uint32_t j = 0; j < max_block_size; j++) {
+            mem_map[i + j].flags = PMM_FLAG_USED;
+            mem_map[i + j].order = 0;
+            mem_map[i + j].ref_count = 0;
+        }
         
         page->flags = PMM_FLAG_FREE;
         page->order = PMM_MAX_ORDER;

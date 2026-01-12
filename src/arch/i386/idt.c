@@ -55,6 +55,21 @@ static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
 
+extern volatile int g_fb_mapped;
+
+static inline uint32_t get_cr3();
+
+__attribute__((noreturn)) static void early_exception_halt(const char* msg, registers_t* regs, uint32_t cr2) {
+    (void)msg;
+    (void)regs;
+    (void)cr2;
+
+    __asm__ volatile("cli");
+    while (1) {
+        __asm__ volatile("hlt");
+    }
+}
+
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_low = base & 0xFFFF;
     idt[num].base_high = (base >> 16) & 0xFFFF;
@@ -323,12 +338,18 @@ void isr_handler(registers_t* regs) {
                 int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
                 if (regs->cs != 0x1B && !is_kernel_access_to_user) {
+                    if (!g_fb_mapped) {
+                        early_exception_halt("Kernel Page Fault", regs, cr2);
+                    }
                     kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
                 } else {
                     if (curr) {
                         proc_kill(curr);
                         sched_yield();
                     } else {
+                        if (!g_fb_mapped) {
+                            early_exception_halt("Page Fault in Kernel", regs, cr2);
+                        }
                         kernel_panic("Page Fault in Kernel", "idt.c", regs->int_no, regs);
                     }
                 }
@@ -342,6 +363,9 @@ void isr_handler(registers_t* regs) {
                 proc_kill(curr);
                 sched_yield();
             } else {
+                if (!g_fb_mapped) {
+                    early_exception_halt(msg, regs, 0);
+                }
                 kernel_panic(msg, "idt.c", regs->int_no, regs);
             }
         }

@@ -10,15 +10,12 @@ extrn main
 section '.text'
 
 _start:
-    ; [esp]     -> Fake return address (0)
-    ; [esp+4]   -> argc
-    ; [esp+8]   -> argv
     pop eax 
     call main
     
-    mov ebx, eax    ; exit code
+    mov ebx, eax 
     mov eax, 0 
-    int 0x80        ; exit()
+    int 0x80 
     
     hlt
 

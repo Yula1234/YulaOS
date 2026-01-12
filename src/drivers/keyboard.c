@@ -18,6 +18,8 @@
 static int shift_pressed = 0;
 static int ctrl_pressed = 0;
 static int e0_flag = 0; 
+ 
+static spinlock_t kbd_scancode_lock;
 
 static const char map_norm[] = { 0,27,'1','2','3','4','5','6','7','8','9','0','-','=', '\b','\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' ' };
 static const char map_shift[] = { 0,27,'!','@','#','$','%','^','&','*','(',')','_','+', '\b','\t','Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,'A','S','D','F','G','H','J','K','L',':','\"','~',0,'|','Z','X','C','V','B','N','M','<','>','?',0,'*',0,' ' };
@@ -73,61 +75,93 @@ static void send_key_to_focused(char code) {
     wake_up_gui();
 }
 
-void keyboard_irq_handler(registers_t* regs) {
-    (void)regs;
-    uint8_t scancode = inb(0x60);
+void kbd_handle_scancode(uint8_t scancode) {
+    char send_code = 0;
+    char send_code_term0 = 0;
+    int do_ctrl_c = 0;
 
-    if (scancode == 0xE0) { e0_flag = 1; return; }
+    uint32_t flags = spinlock_acquire_safe(&kbd_scancode_lock);
+
+    if (scancode == 0xE0) { e0_flag = 1; goto out_unlock; }
 
     if (e0_flag) {
         e0_flag = 0;
         if (!(scancode & 0x80)) {
             switch (scancode) {
                 case 0x4B: // Left
-                    if (ctrl_pressed && shift_pressed) send_key_to_focused(0x86); // Shift + Ctrl + Left (NEW)
-                    else if (ctrl_pressed) send_key_to_focused(0x84);      // Ctrl + Left
-                    else if (shift_pressed) send_key_to_focused(0x82);     // Shift + Left
-                    else send_key_to_focused(0x11);
+                    if (ctrl_pressed && shift_pressed) send_code = 0x86; // Shift + Ctrl + Left (NEW)
+                    else if (ctrl_pressed) send_code = 0x84;      // Ctrl + Left
+                    else if (shift_pressed) send_code = 0x82;     // Shift + Left
+                    else send_code = 0x11;
                     break; 
 
                 case 0x4D: // Right
-                    if (ctrl_pressed && shift_pressed) send_key_to_focused(0x87); // Shift + Ctrl + Right (NEW)
-                    else if (ctrl_pressed) send_key_to_focused(0x85);      // Ctrl + Right
-                    else if (shift_pressed) send_key_to_focused(0x83);     // Shift + Right
-                    else send_key_to_focused(0x12);
+                    if (ctrl_pressed && shift_pressed) send_code = 0x87; // Shift + Ctrl + Right (NEW)
+                    else if (ctrl_pressed) send_code = 0x85;      // Ctrl + Right
+                    else if (shift_pressed) send_code = 0x83;     // Shift + Right
+                    else send_code = 0x12;
                     break;
 
                 case 0x48: // Up
-                    if (shift_pressed) send_key_to_focused(0x80); 
-                    else send_key_to_focused(0x13);
+                    if (shift_pressed) send_code = 0x80;
+                    else send_code = 0x13;
                     break;
                 case 0x50: // Down
-                    if (shift_pressed) send_key_to_focused(0x81); 
-                    else send_key_to_focused(0x14); 
+                    if (shift_pressed) send_code = 0x81;
+                    else send_code = 0x14;
                     break;
             }
         }
-        return;
+        goto out_unlock;
     }
 
-    if (scancode == 0x1D) { ctrl_pressed = 1; return; }
-    if (scancode == 0x9D) { ctrl_pressed = 0; return; }
-    if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
-    if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return; }
+    if (scancode == 0x1D) { ctrl_pressed = 1; goto out_unlock; }
+    if (scancode == 0x9D) { ctrl_pressed = 0; goto out_unlock; }
+    if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; goto out_unlock; }
+    if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; goto out_unlock; }
 
     // Ctrl+Shift+C (copy)
     if (ctrl_pressed && shift_pressed && scancode == 0x2E) {
-        send_key_to_focused(0x04);
-        return;
+        send_code = 0x04;
+        goto out_unlock;
     }
 
     // Ctrl+C
     if (ctrl_pressed && scancode == 0x2E) { 
+        do_ctrl_c = 1;
+        goto out_unlock;
+    }
+
+    if (!(scancode & 0x80)) {
+        if (ctrl_pressed) {
+            if (scancode == 0x1F) { send_code = 0x15; goto out_unlock; } // Ctrl+S
+            if (scancode == 0x10) { send_code = 0x17; goto out_unlock; } // Ctrl+Q
+            if (scancode == 0x2F) { send_code = 0x16; goto out_unlock; } // Ctrl+V
+            if (scancode == 0x16) { send_code = (char)0x88; goto out_unlock; }
+            if (scancode == 0x25) { send_code = (char)0x89; goto out_unlock; }
+
+            if (scancode == 0x21) { send_code_term0 = 0x06; } // Ctrl+F
+            if (scancode == 0x22) { send_code_term0 = 0x07; } // Ctrl+G
+            if (scancode == 0x2C) { send_code_term0 = 0x1A; } // Ctrl+Z
+            if (scancode == 0x15) { send_code_term0 = 0x19; } // Ctrl+Y
+            if (scancode == 0x31) { send_code_term0 = 0x0E; } // Ctrl+N
+        }
+
+        char c = shift_pressed ? map_shift[scancode] : map_norm[scancode];
+        if (c) {
+            send_code = c;
+        }
+    }
+
+out_unlock:
+    spinlock_release_safe(&kbd_scancode_lock, flags);
+
+    if (do_ctrl_c) {
         task_t* target_task = proc_find_by_pid(focused_window_pid);
 
         if (target_task) {
             if (target_task->term_mode == 0) {
-                send_key_to_focused(0x03); 
+                send_key_to_focused(0x03);
                 return;
             }
 
@@ -142,35 +176,29 @@ void keyboard_irq_handler(registers_t* regs) {
                     target_task->pending_signals |= (1 << 2);
                     if (target_task->state == TASK_WAITING) target_task->state = TASK_RUNNABLE;
                 }
-                send_key_to_focused(0x03); 
-            } 
+                send_key_to_focused(0x03);
+            }
         }
         return;
     }
 
-    if (!(scancode & 0x80)) {
-        if (ctrl_pressed) {
-            if (scancode == 0x1F) { send_key_to_focused(0x15); return; } // Ctrl+S
-            if (scancode == 0x10) { send_key_to_focused(0x17); return; } // Ctrl+Q
-            if (scancode == 0x2F) { send_key_to_focused(0x16); return; } // Ctrl+V
-            if (scancode == 0x16) { send_key_to_focused((char)0x88); return; }
-            if (scancode == 0x25) { send_key_to_focused((char)0x89); return; }
-
-            task_t* target_task = proc_find_by_pid(focused_window_pid);
-            if (target_task && target_task->term_mode == 0) {
-                if (scancode == 0x21) { send_key_to_focused(0x06); return; } // Ctrl+F
-                if (scancode == 0x22) { send_key_to_focused(0x07); return; } // Ctrl+G
-                if (scancode == 0x2C) { send_key_to_focused(0x1A); return; } // Ctrl+Z
-                if (scancode == 0x15) { send_key_to_focused(0x19); return; } // Ctrl+Y
-                if (scancode == 0x31) { send_key_to_focused(0x0E); return; } // Ctrl+N
-            }
-        }
-
-        char c = shift_pressed ? map_shift[scancode] : map_norm[scancode];
-        if (c) {
-            send_key_to_focused(c);
+    if (send_code_term0) {
+        task_t* target_task = proc_find_by_pid(focused_window_pid);
+        if (target_task && target_task->term_mode == 0) {
+            send_key_to_focused(send_code_term0);
+            return;
         }
     }
+
+    if (send_code) {
+        send_key_to_focused(send_code);
+    }
+}
+
+void keyboard_irq_handler(registers_t* regs) {
+    (void)regs;
+    uint8_t scancode = inb(0x60);
+    kbd_handle_scancode(scancode);
 }
 
 int kbd_try_read_char(char* out) {
@@ -277,5 +305,6 @@ void kbd_vfs_init() {
 
 void kbd_init(void) {
     sem_init(&kbd_sem, 0);
+    spinlock_init(&kbd_scancode_lock);
     irq_install_handler(1, keyboard_irq_handler);
 }

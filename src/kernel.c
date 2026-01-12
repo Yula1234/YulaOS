@@ -11,8 +11,10 @@
 #include <drivers/console.h>
 #include <drivers/mouse.h>
 #include <drivers/ahci.h>
+#include <drivers/uhci.h>
 #include <drivers/acpi.h> 
 #include <drivers/vga.h>
+#include <drivers/pci.h>
 
 #include <kernel/clipboard.h>
 #include <kernel/gui_task.h>
@@ -98,8 +100,86 @@ extern void put_pixel(int x, int y, uint32_t color);
 
 extern void smp_boot_aps(void);
 
+#ifndef ENABLE_UHCI
+#define ENABLE_UHCI 1
+#endif
+
+static int g_enable_uhci = ENABLE_UHCI;
+
+volatile int g_fb_mapped = 0;
+
+static inline uint16_t pci_read16_k(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t reg = pci_read(bus, slot, func, offset & 0xFCu);
+    return (uint16_t)((reg >> ((offset & 2u) * 8u)) & 0xFFFFu);
+}
+
+static inline void pci_write16_k(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint16_t value) {
+    uint8_t aligned = offset & 0xFCu;
+    uint32_t reg = pci_read(bus, slot, func, aligned);
+    uint32_t shift = (uint32_t)(offset & 2u) * 8u;
+    reg &= ~(0xFFFFu << shift);
+    reg |= ((uint32_t)value << shift);
+    pci_write(bus, slot, func, aligned, reg);
+}
+
+static void usb_quiesce_early(void) {
+    for (uint16_t bus = 0; bus < 256; bus++) {
+        for (uint8_t slot = 0; slot < 32; slot++) {
+            for (uint8_t func = 0; func < 8; func++) {
+                uint16_t vendor = (uint16_t)(pci_read((uint8_t)bus, slot, func, 0x00u) & 0xFFFFu);
+                if (vendor == 0xFFFFu) continue;
+
+                uint32_t reg = pci_read((uint8_t)bus, slot, func, 0x08u);
+                uint8_t class_code = (uint8_t)((reg >> 24) & 0xFFu);
+                uint8_t subclass = (uint8_t)((reg >> 16) & 0xFFu);
+                uint8_t prog_if = (uint8_t)((reg >> 8) & 0xFFu);
+
+                if (class_code != 0x0Cu || subclass != 0x03u) {
+                    continue;
+                }
+
+                if (prog_if == 0x00u) {
+                    uint32_t bar4 = pci_read((uint8_t)bus, slot, func, 0x20u);
+                    uint16_t io_base = (uint16_t)(bar4 & 0xFFFCu);
+                    if (io_base) {
+                        uint16_t cmd = pci_read16_k((uint8_t)bus, slot, func, 0x04u);
+                        if ((cmd & 0x0001u) == 0u) {
+                            pci_write16_k((uint8_t)bus, slot, func, 0x04u, (uint16_t)(cmd | 0x0001u));
+                        }
+
+                        outw((uint16_t)(io_base + 0x00u), 0);
+                        outw((uint16_t)(io_base + 0x00u), (uint16_t)(1u << 1));
+                        for (uint32_t i = 0; i < 100000u; i++) {
+                            if ((inw((uint16_t)(io_base + 0x00u)) & (1u << 1)) == 0u) break;
+                        }
+                        outw((uint16_t)(io_base + 0x02u), 0xFFFFu);
+                    }
+                }
+
+                uint16_t cmd = pci_read16_k((uint8_t)bus, slot, func, 0x04u);
+                cmd &= (uint16_t)~(0x0001u);
+                cmd &= (uint16_t)~(0x0002u);
+                cmd &= (uint16_t)~(0x0004u);
+                cmd |= (uint16_t)(1u << 10);
+                pci_write16_k((uint8_t)bus, slot, func, 0x04u, cmd);
+            }
+        }
+    }
+}
+
 static inline void sys_usleep(uint32_t us) {
     __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
+}
+
+static void uhci_late_init_task(void* arg) {
+    (void)arg;
+    uhci_init();
+    uhci_late_init();
+
+    while (1) {
+        uhci_poll();
+        sys_usleep(2000);
+    }
 }
 
 void idle_task_func(void* arg) {
@@ -158,29 +238,51 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     lapic_init();
     lapic_timer_init(15000);
 
-    uint32_t memory_end_addr = 0;
+    if (g_enable_uhci) {
+        usb_quiesce_early();
+    }
+
+    uint64_t memory_end_addr64 = 0;
 
     if (mb_info->flags & (1 << 6)) {
-        multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)mb_info->mmap_addr;
-        
-        while((uint32_t)mmap < mb_info->mmap_addr + mb_info->mmap_length) {
-            if (mmap->type == 1) {
-                uint64_t end = mmap->addr + mmap->len;
-                if (end > memory_end_addr) {
-                    memory_end_addr = (uint32_t)end;
+        uint32_t mmap_base = mb_info->mmap_addr;
+        uint32_t mmap_len = mb_info->mmap_length;
+
+        uint32_t off = 0;
+        uint32_t entries_printed = 0;
+        while (off + sizeof(uint32_t) <= mmap_len) {
+            multiboot_memory_map_t* e = (multiboot_memory_map_t*)(mmap_base + off);
+            if (e->size == 0) {
+                break;
+            }
+
+            (void)entries_printed;
+
+            if (e->type == 1) {
+                uint64_t end = e->addr + e->len;
+                if (end > 0xFFFFFFFFull) end = 0xFFFFFFFFull;
+                if (end > memory_end_addr64) {
+                    memory_end_addr64 = end;
                 }
             }
-            mmap = (multiboot_memory_map_t*)((uint32_t)mmap + mmap->size + sizeof(uint32_t));
+
+            uint32_t step = e->size + sizeof(uint32_t);
+            if (step > mmap_len - off) {
+                break;
+            }
+            off += step;
         }
-    } 
+    }
 
     else if (mb_info->flags & (1 << 0)) {
-        memory_end_addr = (mb_info->mem_upper * 1024) + 0x100000;
+        memory_end_addr64 = (uint64_t)(mb_info->mem_upper * 1024) + 0x100000ull;
     }
 
-    if (memory_end_addr == 0) {
-        memory_end_addr = 1024 * 1024 * 64; 
+    if (memory_end_addr64 == 0) {
+        memory_end_addr64 = 1024ull * 1024ull * 64ull;
     }
+
+    uint32_t memory_end_addr = (uint32_t)memory_end_addr64;
     
     #define PIC_MASTER_PORT 0x21
     #define PIC_SLAVE_PORT  0xA1
@@ -195,9 +297,11 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
         
     // Slave PIC: enable mouse (IRQ 12) and HDD (IRQ 14)
     outb(PIC_SLAVE_PORT, ~(PIC_MASK_MOUSE | PIC_MASK_HDD));
-    
+
     pmm_init(memory_end_addr, (uint32_t)&kernel_end);
+
     paging_init(memory_end_addr);
+
     heap_init();
 
  
@@ -215,6 +319,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
      for (uint32_t i = 0; i < fb_map_size; i += 4096) {
          paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
      }
+
+     g_fb_mapped = 1;
 
     acpi_init();
 
@@ -277,7 +383,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
             }
         }
     }
-    
+
     ahci_init();
 
     yulafs_init();
@@ -332,7 +438,11 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
             }
         }
     }
-    
+
+    if (g_enable_uhci) {
+        proc_spawn_kthread("uhci", PRIO_LOW, uhci_late_init_task, 0);
+    }
+
     proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
 
     ahci_set_async_mode(1);

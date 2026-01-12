@@ -5,6 +5,7 @@
 #include <mm/pmm.h>
 #include <mm/heap.h>
 #include <hal/lock.h>
+#include <hal/io.h>
 #include "paging.h"
 
 extern void smp_tlb_shootdown(uint32_t virt);
@@ -17,6 +18,14 @@ uint32_t* kernel_page_directory = 0;
 uint32_t page_dir[1024] __attribute__((aligned(4096)));
 
 static spinlock_t paging_lock;
+
+__attribute__((noreturn)) static void paging_halt(const char* msg) {
+    (void)msg;
+    __asm__ volatile("cli");
+    while (1) {
+        __asm__ volatile("hlt");
+    }
+}
 
 #define IA32_PAT_MSR 0x277u
 #define PAT_MEMTYPE_WC 1u
@@ -200,9 +209,13 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
 
     if (!(dir[pd_idx] & 1)) {
         void* new_pt_phys = pmm_alloc_block();
-        
+        if (!new_pt_phys) {
+            spinlock_release_safe(&paging_lock, int_flags);
+            paging_halt("pmm_alloc_block failed in paging_map");
+        }
+
         uint32_t* new_pt_virt = (uint32_t*)new_pt_phys;
-        
+
         memset(new_pt_virt, 0, 4096);
 
         dir[pd_idx] = ((uint32_t)new_pt_phys) | 7;
@@ -251,6 +264,9 @@ void paging_init(uint32_t ram_size_bytes) {
 
         if (!(page_dir[pd_idx] & 1)) {
             void* pt_phys = pmm_alloc_block();
+            if (!pt_phys) {
+                paging_halt("pmm_alloc_block failed in paging_init");
+            }
             memset(pt_phys, 0, 4096);
             page_dir[pd_idx] = ((uint32_t)pt_phys) | 3; // Supervisor | RW | Present
         }
@@ -262,10 +278,10 @@ void paging_init(uint32_t ram_size_bytes) {
     }
 
     paging_map(page_dir, 0xFEE00000, 0xFEE00000, 3);
-
+    
     kernel_page_directory = page_dir;
-
-    for (uint32_t addr = 0xD0000000; addr < 0xE0000000; addr += 0x400000) {
+    
+    for(uint32_t addr = 0xC0000000; addr < 0xC1000000; addr += 0x400000) {
         paging_allocate_table(addr);
     }
 

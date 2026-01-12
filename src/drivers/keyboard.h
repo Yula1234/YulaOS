@@ -9,6 +9,7 @@
 #include <arch/i386/idt.h>
 
 void kbd_init(void);
+void kbd_handle_scancode(uint8_t scancode);
 void keyboard_irq_handler(registers_t* regs);
 int  kbd_try_read_char(char* out);
 
