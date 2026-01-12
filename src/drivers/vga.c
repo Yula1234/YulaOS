@@ -400,6 +400,78 @@ void term_putc(term_instance_t* term, char c) {
     }
 }
 
+void term_write(term_instance_t* term, const char* buf, uint32_t len) {
+    if (!term || !buf || len == 0) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    int view_rows = term->view_rows;
+    if (view_rows <= 0) view_rows = TERM_H;
+
+    int was_at_bottom = (term->view_row + view_rows) >= term->row;
+
+    uint32_t i = 0;
+    while (i < len) {
+        char c = buf[i];
+
+        if (c == 0x0C || c == '\n' || c == '\b') {
+            term_putc(term, c);
+            i++;
+            continue;
+        }
+
+        if (term_ensure_rows(term, term->row + 1) != 0) return;
+
+        if (term->col >= cols) {
+            term->col = 0;
+            term->row++;
+            term_clear_row(term, term->row);
+            continue;
+        }
+
+        int remaining = cols - term->col;
+        if (remaining <= 0) continue;
+
+        uint32_t run = 0;
+        while (i + run < len && run < (uint32_t)remaining) {
+            char cc = buf[i + run];
+            if (cc == 0x0C || cc == '\n' || cc == '\b') break;
+            run++;
+        }
+
+        if (run == 0) {
+            term_putc(term, c);
+            i++;
+            continue;
+        }
+
+        size_t base = (size_t)term->row * (size_t)cols + (size_t)term->col;
+        memcpy(&term->buffer[base], &buf[i], run);
+        for (uint32_t k = 0; k < run; k++) {
+            term->fg_colors[base + (size_t)k] = term->curr_fg;
+            term->bg_colors[base + (size_t)k] = term->curr_bg;
+        }
+
+        term->col += (int)run;
+        i += run;
+
+        if (term->col >= cols) {
+            term->col = 0;
+            term->row++;
+            term_clear_row(term, term->row);
+        }
+    }
+
+    if (term->row >= term->history_rows) term->history_rows = term->row + 1;
+    if (term->row > term->max_row) term->max_row = term->row;
+
+    if (was_at_bottom) {
+        if (term->row >= view_rows) term->view_row = term->row - view_rows + 1;
+        else term->view_row = 0;
+    }
+}
+
 void term_print(term_instance_t* term, const char* s) {
     while (*s) term_putc(term, *s++);
 }

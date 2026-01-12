@@ -8,6 +8,7 @@
 
 #define VFS_FLAG_PIPE_READ   1u
 #define VFS_FLAG_PIPE_WRITE  2u
+#define VFS_FLAG_YULAFS      4u
 #define VFS_FLAG_EXEC_NODE   0x80000000u
 
 struct vfs_node;
@@ -39,6 +40,8 @@ int vfs_open(const char* path, int flags);
 int vfs_read(int fd, void* buf, uint32_t size);
 int vfs_write(int fd, const void* buf, uint32_t size);
 int vfs_close(int fd);
+int vfs_getdents(int fd, void* buf, uint32_t size);
+int vfs_fstatat(int dirfd, const char* name, void* stat_buf);
 
 void devfs_register(vfs_node_t* node);
 vfs_node_t* devfs_fetch(const char* name);

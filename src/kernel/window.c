@@ -232,7 +232,29 @@ void window_mark_dirty_by_pid(int pid) {
         }
     }
     sem_signal(&window_list_lock);
-    
+     
+    if (found) {
+        wake_up_gui();
+    }
+}
+
+void window_mark_dirty_by_pid_pair(int pid1, int pid2) {
+    if (pid1 <= 0 && pid2 <= 0) return;
+
+    sem_wait(&window_list_lock);
+    int found = 0;
+    window_t* win;
+    dlist_for_each_entry(win, &window_list, list) {
+        if (!win->is_active) continue;
+
+        int owner = win->owner_pid;
+        if ((pid1 > 0 && owner == pid1) || (pid2 > 0 && owner == pid2)) {
+            win->is_dirty = 1;
+            found = 1;
+        }
+    }
+    sem_signal(&window_list_lock);
+
     if (found) {
         wake_up_gui();
     }

@@ -49,6 +49,7 @@ void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y);
 void term_init(term_instance_t* term);
 void term_destroy(term_instance_t* term);
 void term_putc(term_instance_t* term, char c);
+void term_write(term_instance_t* term, const char* buf, uint32_t len);
 void term_print(term_instance_t* term, const char* s);
 void term_reflow(term_instance_t* term, int new_cols);
 void term_clear_row(term_instance_t* term, int row);

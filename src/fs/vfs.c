@@ -21,6 +21,46 @@ vfs_node_t* devfs_fetch(const char* name) {
     return 0;
 }
 
+int vfs_getdents(int fd, void* buf, uint32_t size) {
+    task_t* curr = proc_current();
+    file_t* f = proc_fd_get(curr, fd);
+    if (!f || !f->used) return -1;
+    if (!buf || size == 0) return -1;
+
+    vfs_node_t* node = f->node;
+    if (!node) return -1;
+    if ((node->flags & VFS_FLAG_YULAFS) == 0) return -1;
+
+    return yulafs_getdents(node->inode_idx, &f->offset, (yfs_dirent_info_t*)buf, size);
+}
+
+typedef struct {
+    uint32_t type;
+    uint32_t size;
+} __attribute__((packed)) vfs_stat_t;
+
+int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
+    task_t* curr = proc_current();
+    file_t* f = proc_fd_get(curr, dirfd);
+    if (!f || !f->used) return -1;
+    if (!name || !*name || !stat_buf) return -1;
+
+    vfs_node_t* node = f->node;
+    if (!node) return -1;
+    if ((node->flags & VFS_FLAG_YULAFS) == 0) return -1;
+
+    int ino = yulafs_lookup_in_dir(node->inode_idx, name);
+    if (ino < 0) return -1;
+
+    yfs_inode_t info;
+    if (yulafs_stat((yfs_ino_t)ino, &info) != 0) return -1;
+
+    vfs_stat_t* st = (vfs_stat_t*)stat_buf;
+    st->type = info.type;
+    st->size = info.size;
+    return 0;
+}
+
 static int yfs_read_wrapper(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
     return yulafs_read(node->inode_idx, buffer, offset, size);
 }
@@ -76,6 +116,7 @@ int vfs_open(const char* path, int flags) {
                 memset(node, 0, sizeof(vfs_node_t));
                 node->inode_idx = inode;
                 node->ops = &yfs_vfs_ops;
+                node->flags = VFS_FLAG_YULAFS;
                 
                 yfs_inode_t info;
                 if (yulafs_stat(inode, &info) == 0) {
@@ -165,7 +206,7 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
     memset(node, 0, sizeof(vfs_node_t));
     node->inode_idx = inode;
     node->ops = &yfs_vfs_ops;
-    node->flags = VFS_FLAG_EXEC_NODE;
+    node->flags = VFS_FLAG_EXEC_NODE | VFS_FLAG_YULAFS;
     
     yfs_inode_t info;
     if (yulafs_stat(inode, &info) == 0) {

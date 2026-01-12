@@ -64,33 +64,67 @@ void print_tree(const char* path, const char* prefix) {
     Entry* list = malloc(capacity * sizeof(Entry));
     if (!list) { close(fd); return; }
 
-    yfs_dirent_t dent;
-    while (read(fd, &dent, sizeof(yfs_dirent_t)) > 0) {
-        if (dent.inode == 0) continue;
-        if (strcmp(dent.name, ".") == 0 || strcmp(dent.name, "..") == 0) continue;
+    int used_getdents = 0;
 
-        if (count >= capacity) {
-            capacity *= 2;
-            list = realloc(list, capacity * sizeof(Entry));
-            if (!list) { close(fd); return; }
+    yfs_dirent_info_t dents[32];
+    while (1) {
+        int n = getdents(fd, dents, sizeof(dents));
+        if (n < 0) break;
+        used_getdents = 1;
+        if (n == 0) break;
+
+        int dent_count = n / (int)sizeof(yfs_dirent_info_t);
+        for (int di = 0; di < dent_count; di++) {
+            if (dents[di].inode == 0) continue;
+            if (strcmp(dents[di].name, ".") == 0 || strcmp(dents[di].name, "..") == 0) continue;
+
+            if (count >= capacity) {
+                capacity *= 2;
+                list = realloc(list, capacity * sizeof(Entry));
+                if (!list) { close(fd); return; }
+            }
+
+            strcpy(list[count].name, dents[di].name);
+            list[count].is_dir = (dents[di].type == 2);
+            list[count].size = (int)dents[di].size;
+            count++;
         }
+    }
 
-        strcpy(list[count].name, dent.name);
-        
-        char full_path[MAX_PATH];
-        strcpy(full_path, path);
-        if (full_path[strlen(full_path)-1] != '/') strcat(full_path, "/");
-        strcat(full_path, dent.name);
+    if (!used_getdents) {
+        yfs_dirent_t dent;
+        while (read(fd, &dent, sizeof(yfs_dirent_t)) > 0) {
+            if (dent.inode == 0) continue;
+            if (strcmp(dent.name, ".") == 0 || strcmp(dent.name, "..") == 0) continue;
 
-        stat_t st;
-        if (stat(full_path, &st) == 0) {
-            list[count].is_dir = (st.type == 2);
-            list[count].size = st.size;
-        } else {
-            list[count].is_dir = 0;
+            if (count >= capacity) {
+                capacity *= 2;
+                list = realloc(list, capacity * sizeof(Entry));
+                if (!list) { close(fd); return; }
+            }
+
+            strcpy(list[count].name, dent.name);
+            
+            stat_t st;
+            if (fstatat(fd, dent.name, &st) == 0) {
+                list[count].is_dir = (st.type == 2);
+                list[count].size = st.size;
+            } else {
+                char full_path[MAX_PATH];
+                strcpy(full_path, path);
+                if (full_path[strlen(full_path)-1] != '/') strcat(full_path, "/");
+                strcat(full_path, dent.name);
+
+                if (stat(full_path, &st) == 0) {
+                    list[count].is_dir = (st.type == 2);
+                    list[count].size = st.size;
+                } else {
+                    list[count].is_dir = 0;
+                }
+            }
+
+            count++;
         }
-
-        count++;
     }
     
     close(fd);
@@ -100,14 +134,22 @@ void print_tree(const char* path, const char* prefix) {
     for (int i = 0; i < count; i++) {
         int is_last = (i == count - 1);
 
+        char line_prefix[MAX_PATH + 8];
+        line_prefix[0] = 0;
+        strcat(line_prefix, prefix);
+        strcat(line_prefix, is_last ? "`-- " : "|-- ");
+
         set_console_color(C_TREE, C_BG);
-        print(prefix);
-        print(is_last ? "`-- " : "|-- ");
+        print(line_prefix);
 
         uint32_t col = get_color(list[i].name, list[i].is_dir);
         set_console_color(col, C_BG);
-        print(list[i].name);
-        print("\n");
+
+        char name_line[MAX_PATH + 2];
+        name_line[0] = 0;
+        strcat(name_line, list[i].name);
+        strcat(name_line, "\n");
+        print(name_line);
 
         if (list[i].is_dir) {
             total_dirs++;

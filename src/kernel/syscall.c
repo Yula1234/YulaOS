@@ -8,6 +8,7 @@
 #include <drivers/vga.h>
 #include <drivers/keyboard.h>
 
+#include <fs/vfs.h>
 #include <fs/yulafs.h>
 #include <fs/pipe.h>
 
@@ -805,6 +806,36 @@ void syscall_handler(registers_t* regs) {
 
             int rc = proc_waitpid(pid, status_ptr);
             regs->eax = (rc == 0) ? (int)pid : -1;
+        }
+        break;
+
+        case 38: // getdents(fd, buf, size)
+        {
+            int fd = (int)regs->ebx;
+            void* buf = (void*)regs->ecx;
+            uint32_t size = (uint32_t)regs->edx;
+
+            if (!check_user_buffer(curr, buf, size)) {
+                regs->eax = -1;
+                break;
+            }
+
+            regs->eax = vfs_getdents(fd, buf, size);
+        }
+        break;
+
+        case 39: // fstatat(dirfd, name, stat_t* buf)
+        {
+            int dirfd = (int)regs->ebx;
+            char* name = (char*)regs->ecx;
+            user_stat_t* u_stat = (user_stat_t*)regs->edx;
+
+            if (!check_user_buffer(curr, name, 1) || !check_user_buffer(curr, u_stat, sizeof(user_stat_t))) {
+                regs->eax = -1;
+                break;
+            }
+
+            regs->eax = vfs_fstatat(dirfd, name, u_stat);
         }
         break;
 

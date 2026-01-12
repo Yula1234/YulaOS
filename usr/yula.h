@@ -111,6 +111,13 @@ typedef struct {
 } __attribute__((packed)) stat_t;
 
 typedef struct {
+    uint32_t inode;
+    uint32_t type;
+    uint32_t size;
+    char name[60];
+} __attribute__((packed)) yfs_dirent_info_t;
+
+typedef struct {
     uint32_t total_blocks;
     uint32_t free_blocks;
     uint32_t block_size;
@@ -118,6 +125,14 @@ typedef struct {
 
 static inline int stat(const char* path, stat_t* buf) {
     return syscall(33, (int)path, (int)buf, 0);
+}
+
+static inline int getdents(int fd, void* buf, uint32_t size) {
+    return syscall(38, fd, (int)buf, (int)size);
+}
+
+static inline int fstatat(int dirfd, const char* name, stat_t* buf) {
+    return syscall(39, dirfd, (int)name, (int)buf);
 }
 
 static inline int get_fs_info(fs_info_t* buf) {
