@@ -2,9 +2,11 @@
 // Copyright (C) 2025 Yula1234
 
 #include "stdlib.h"
+#include "stdio.h"
 #include "syscall.h"
 
 void exit(int status) {
+    fflush(NULL);
     syscall(0, status, 0, 0); 
     while(1);
 }

@@ -20,11 +20,21 @@
 
 #define BUFSIZ 1024
 
+#define _IONBF 0
+#define _IOLBF 1
+#define _IOFBF 2
+
 typedef struct _iobuf {
     int  fd;
     int  flags;
     int  error;
     int  eof;
+
+    unsigned char* wbuf;
+    size_t wbuf_size;
+    size_t wbuf_len;
+    int wbuf_mode;
+    int wbuf_owned;
 } FILE;
 
 extern FILE* stdin;
@@ -52,6 +62,10 @@ int   fputc(int c, FILE* stream);
 int   fgetc(FILE* stream);
 int   fputs(const char* s, FILE* stream);
 char* fgets(char* s, int size, FILE* stream);
+
+int fflush(FILE* stream);
+int setvbuf(FILE* stream, char* buf, int mode, size_t size);
+void setbuf(FILE* stream, char* buf);
 
 #define putc(c, stream) fputc(c, stream)
 #define getc(stream)    fgetc(stream)
