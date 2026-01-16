@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld")
+USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
