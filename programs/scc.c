@@ -25,36 +25,11 @@
 #include "scc/scc_ir_lower.h"
 #include "scc/scc_ir_x86.h"
 
-static char* read_entire_file(const char* path, Buffer* tmp_storage) {
-    int fd = open(path, 0);
-    if (fd < 0) {
-        printf("Cannot open input file: %s\n", path);
-        return 0;
-    }
+#include "scc/scc_pp.h"
 
-    buf_init(tmp_storage, 4096);
-
-    while (1) {
-        char chunk[1024];
-        int r = read(fd, chunk, (int)sizeof(chunk));
-        if (r < 0) {
-            close(fd);
-            printf("Read error: %s\n", path);
-            return 0;
-        }
-        if (r == 0) break;
-        buf_write(tmp_storage, chunk, (uint32_t)r);
-    }
-
-    close(fd);
-    buf_push_u8(tmp_storage, 0);
-    return (char*)tmp_storage->data;
-}
-
-static void scc_compile_file(const char* in_path, const char* out_path) {
-    Buffer src_storage;
-    char* src = read_entire_file(in_path, &src_storage);
-    if (!src) exit(1);
+static void scc_compile_file(const char* in_path, const char* out_path, const SccPPConfig* pp_cfg) {
+    SccPPResult pp_res = scc_preprocess_file(pp_cfg, in_path);
+    if (!pp_res.ok || !pp_res.text) exit(1);
 
     Arena arena;
     arena_init(&arena, 16 * 1024);
@@ -65,9 +40,9 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
     Parser p;
     memset(&p, 0, sizeof(p));
     p.file = in_path;
-    p.src = src;
+    p.src = pp_res.text;
     p.lx.file = in_path;
-    p.lx.src = src;
+    p.lx.src = pp_res.text;
     p.lx.pos = 0;
     p.lx.line = 1;
     p.lx.col = 1;
@@ -172,17 +147,71 @@ static void scc_compile_file(const char* in_path, const char* out_path) {
     buf_free(&rel_data);
     symtab_free(&syms);
     arena_free(&arena);
-    buf_free(&src_storage);
+    free(pp_res.text);
+}
+
+static void scc_opt_push_cstr(const char* s, char*** out, int* out_count, int* out_cap) {
+    if (!s) return;
+    if (*out_count == *out_cap) {
+        int ncap = (*out_cap == 0) ? 8 : (*out_cap * 2);
+        char** nd = (char**)realloc(*out, (size_t)ncap * sizeof(char*));
+        if (!nd) exit(1);
+        *out = nd;
+        *out_cap = ncap;
+    }
+    (*out)[(*out_count)++] = strdup(s);
+}
+
+static void scc_opt_push_define(const char* s, SccPPDefine** out, int* out_count, int* out_cap) {
+    if (!s) return;
+    const char* eq = strchr(s, '=');
+    char* name = 0;
+    char* value = 0;
+
+    if (eq) {
+        name = (char*)malloc((size_t)(eq - s) + 1);
+        if (!name) exit(1);
+        memcpy(name, s, (size_t)(eq - s));
+        name[eq - s] = 0;
+        value = strdup(eq + 1);
+    } else {
+        name = strdup(s);
+        value = strdup("1");
+    }
+
+    if (!name || !name[0]) {
+        if (name) free(name);
+        if (value) free(value);
+        return;
+    }
+
+    if (*out_count == *out_cap) {
+        int ncap = (*out_cap == 0) ? 8 : (*out_cap * 2);
+        SccPPDefine* nd = (SccPPDefine*)realloc(*out, (size_t)ncap * sizeof(SccPPDefine));
+        if (!nd) exit(1);
+        *out = nd;
+        *out_cap = ncap;
+    }
+
+    (*out)[(*out_count)++] = (SccPPDefine){name, value};
 }
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        printf("SCC v0.2\nUsage: scc -o out.o input.c\n       scc input.c out.o\n");
+        printf("SCC v0.2\nUsage: scc [opts] -o out.o input.c\n       scc [opts] input.c out.o\n\nopts:\n  -I <dir>    add include search path\n  -D<name>=<value> define object-like macro\n  -D<name>    define object-like macro as 1\n");
         return 1;
     }
 
     const char* in_path = 0;
     const char* out_path = 0;
+
+    char** include_paths = 0;
+    int include_count = 0;
+    int include_cap = 0;
+
+    SccPPDefine* defines = 0;
+    int define_count = 0;
+    int define_cap = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0) {
@@ -191,6 +220,34 @@ int main(int argc, char** argv) {
                 return 1;
             }
             out_path = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "-I") == 0) {
+            if (i + 1 >= argc) {
+                printf("Missing value after -I\n");
+                return 1;
+            }
+            scc_opt_push_cstr(argv[++i], &include_paths, &include_count, &include_cap);
+            continue;
+        }
+
+        if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2]) {
+            scc_opt_push_cstr(argv[i] + 2, &include_paths, &include_count, &include_cap);
+            continue;
+        }
+
+        if (strcmp(argv[i], "-D") == 0) {
+            if (i + 1 >= argc) {
+                printf("Missing value after -D\n");
+                return 1;
+            }
+            scc_opt_push_define(argv[++i], &defines, &define_count, &define_cap);
+            continue;
+        }
+
+        if (strncmp(argv[i], "-D", 2) == 0 && argv[i][2]) {
+            scc_opt_push_define(argv[i] + 2, &defines, &define_count, &define_cap);
             continue;
         }
 
@@ -207,7 +264,30 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    scc_compile_file(in_path, out_path);
+    SccPPConfig pp_cfg;
+    memset(&pp_cfg, 0, sizeof(pp_cfg));
+    pp_cfg.include_paths = (const char**)include_paths;
+    pp_cfg.include_path_count = include_count;
+    pp_cfg.defines = defines;
+    pp_cfg.define_count = define_count;
+    pp_cfg.max_include_depth = 64;
+
+    scc_compile_file(in_path, out_path, &pp_cfg);
+
+    if (include_paths) {
+        for (int i = 0; i < include_count; i++) {
+            if (include_paths[i]) free(include_paths[i]);
+        }
+        free(include_paths);
+    }
+    if (defines) {
+        for (int i = 0; i < define_count; i++) {
+            if (defines[i].name) free((void*)defines[i].name);
+            if (defines[i].value) free((void*)defines[i].value);
+        }
+        free(defines);
+    }
+
     printf("Success: %s\n", out_path);
     return 0;
 }
