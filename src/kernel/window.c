@@ -387,9 +387,10 @@ void window_close_all_by_pid(int pid) {
                 win->on_close(win);
             }
 
-            vga_mark_dirty(win->x - 10, win->y - 10, 
-                           win->w + 25, win->h + 25);
-            
+            vga_set_target(0, 0, 0);
+            vga_mark_dirty(win->x - 24, win->y - 24,
+                           win->w + 48, win->h + 48);
+              
             sem_signal(&win->lock);
             
             dlist_del(&win->list);

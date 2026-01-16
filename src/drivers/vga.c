@@ -38,8 +38,6 @@ void vga_reset_dirty() {
 }
 
 void vga_mark_dirty(int x, int y, int w, int h) {
-    if (vga_current_target != back_buffer) return;
-
     int x1 = x;
     int y1 = y;
     int x2 = x + w;

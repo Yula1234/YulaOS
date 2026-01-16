@@ -114,7 +114,7 @@ static void draw_char(uint32_t* buf, int w, int h, int x, int y, char c, uint32_
             if ((glyph[row] >> (7 - col)) & 1) { 
                  int px = x + col;
                  int py = y + row;
-                 if (px < w && py < h) buf[py * w + px] = color;
+                 if (px >= 0 && py >= 0 && px < w && py < h) buf[py * w + px] = color;
             }
         }
     }
