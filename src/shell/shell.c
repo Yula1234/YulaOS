@@ -831,19 +831,24 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
 
     if (prev_read >= 0) vfs_close(prev_read);
 
-    task_t* last_task = 0;
-    for (int i = 0; i < cmd_count; i++) if (tasks[i]) last_task = tasks[i];
+    task_t* first_task = 0;
+    for (int i = 0; i < cmd_count; i++) {
+        if (tasks[i]) {
+            first_task = tasks[i];
+            break;
+        }
+    }
 
-    if (last_task) {
-        win->focused_pid = last_task->pid;
-        focused_window_pid = last_task->pid;
+    if (first_task) {
+        win->focused_pid = first_task->pid;
+        focused_window_pid = first_task->pid;
     }
 
     for (int i = 0; i < cmd_count; i++) {
         if (tasks[i]) proc_wait(tasks[i]->pid);
     }
 
-    if (last_task) {
+    if (first_task) {
         win->focused_pid = win->owner_pid;
         focused_window_pid = win->owner_pid;
         win->is_dirty = 1;

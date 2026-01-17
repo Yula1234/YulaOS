@@ -403,6 +403,18 @@ void proc_kill(task_t* t) {
     
     uint32_t pid_to_clean = t->pid;
 
+    uint32_t waited_pid = t->wait_for_pid;
+    if (waited_pid) {
+        task_t* waited = proc_find_by_pid(waited_pid);
+        if (waited) {
+            uint32_t old = __sync_fetch_and_sub(&waited->exit_waiters, 1);
+            if (old == 0) {
+                __sync_fetch_and_add(&waited->exit_waiters, 1);
+            }
+        }
+        t->wait_for_pid = 0;
+    }
+
     while (1) {
         int found_child = 0;
         uint32_t flags = spinlock_acquire_safe(&proc_lock);
@@ -857,12 +869,15 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 void proc_wait(uint32_t pid) {
     task_t* target = 0;
 
+    task_t* waiter = proc_current();
+
     uint32_t flags = spinlock_acquire_safe(&proc_lock);
     task_t* curr = tasks_head;
     while (curr) {
         if (curr->pid == pid) {
             target = curr;
             __sync_fetch_and_add(&target->exit_waiters, 1);
+            if (waiter) waiter->wait_for_pid = pid;
             break;
         }
         curr = curr->next;
@@ -872,11 +887,15 @@ void proc_wait(uint32_t pid) {
     if (!target) return;
 
     sem_wait(&target->exit_sem);
+
+    if (waiter) waiter->wait_for_pid = 0;
     __sync_fetch_and_sub(&target->exit_waiters, 1);
 }
 
  int proc_waitpid(uint32_t pid, int* out_status) {
      task_t* target = 0;
+
+     task_t* waiter = proc_current();
 
      uint32_t flags = spinlock_acquire_safe(&proc_lock);
      task_t* curr = tasks_head;
@@ -884,6 +903,7 @@ void proc_wait(uint32_t pid) {
          if (curr->pid == pid) {
              target = curr;
              __sync_fetch_and_add(&target->exit_waiters, 1);
+             if (waiter) waiter->wait_for_pid = pid;
              break;
          }
          curr = curr->next;
@@ -893,6 +913,8 @@ void proc_wait(uint32_t pid) {
      if (!target) return -1;
 
      sem_wait(&target->exit_sem);
+
+     if (waiter) waiter->wait_for_pid = 0;
 
      if (out_status) {
          *out_status = target->exit_status;

@@ -45,6 +45,28 @@ static void sem_give_n(semaphore_t* sem, uint32_t n) {
     }
 }
 
+static void sem_wake_all(semaphore_t* sem) {
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+
+    while (!dlist_empty(&sem->wait_list)) {
+        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+
+        dlist_del(&t->sem_node);
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
+        t->blocked_on_sem = 0;
+
+        sem->count++;
+
+        if (t->state != TASK_ZOMBIE) {
+            t->state = TASK_RUNNABLE;
+            sched_add(t);
+        }
+    }
+
+    spinlock_release_safe(&sem->lock, flags);
+}
+
 static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
     (void)offset;
     pipe_t* p = (pipe_t*)node->private_data;
@@ -159,18 +181,15 @@ static int pipe_close(vfs_node_t* node) {
     pipe_t* p = (pipe_t*)node->private_data;
     
     uint32_t flags = spinlock_acquire_safe(&p->lock);
-    if (node->flags == 1) p->readers--;
-    else if (node->flags == 2) p->writers--;
+    if (node->flags & VFS_FLAG_PIPE_READ) p->readers--;
+    else if (node->flags & VFS_FLAG_PIPE_WRITE) p->writers--;
     
     int readers = p->readers;
     int writers = p->writers;
     spinlock_release_safe(&p->lock, flags);
 
-    if (node->flags == 1) { 
-        sem_signal(&p->sem_write);
-    } else {
-        sem_signal(&p->sem_read);
-    }
+    sem_wake_all(&p->sem_read);
+    sem_wake_all(&p->sem_write);
 
     if (readers == 0 && writers == 0) {
         kfree(p);
@@ -206,13 +225,13 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     (*read_node)->ops = &pipe_ops;
     (*read_node)->private_data = p;
     (*read_node)->inode_idx = 0;
-    (*read_node)->flags = 1;
+    (*read_node)->flags = VFS_FLAG_PIPE_READ;
 
     strlcpy((*write_node)->name, "pipe_w", 32);
     (*write_node)->ops = &pipe_ops;
     (*write_node)->private_data = p;
     (*write_node)->inode_idx = 0;
-    (*write_node)->flags = 2;
+    (*write_node)->flags = VFS_FLAG_PIPE_WRITE;
 
     (*read_node)->refs = 1; 
     (*write_node)->refs = 1;
