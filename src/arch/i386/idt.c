@@ -117,6 +117,51 @@ static inline uint32_t get_cr3() {
     return val;
 }
 
+static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
+    if (!t) return 0;
+    mmap_area_t* m = t->mmap_list;
+    while (m) {
+        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) return m;
+        m = m->next;
+    }
+    return 0;
+}
+
+static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
+    if (!curr || !curr->page_dir) return 0;
+
+    uint32_t vaddr = cr2 & ~0xFFFu;
+    mmap_area_t* m = mmap_find_area(curr, vaddr);
+    if (!m) return 0;
+
+    void* new_page = pmm_alloc_block();
+    if (!new_page) return -1;
+
+    memset(new_page, 0, 4096);
+
+    uint32_t rel = vaddr - m->vaddr_start;
+    if (m->file && m->file->ops && m->file->ops->read && rel < m->file_size) {
+        uint32_t bytes = m->file_size - rel;
+        if (bytes > 4096) bytes = 4096;
+
+        if (m->file_offset > 0xFFFFFFFFu - rel) {
+            pmm_free_block(new_page);
+            return -1;
+        }
+
+        int r = m->file->ops->read(m->file, m->file_offset + rel, bytes, new_page);
+
+        if (r < 0) {
+            pmm_free_block(new_page);
+            return -1;
+        }
+    }
+
+    paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
+    curr->mem_pages++;
+    return 1;
+}
+
 extern void wake_up_gui();
 extern void proc_check_sleepers(uint32_t current_tick);
 
@@ -265,6 +310,17 @@ void isr_handler(registers_t* regs) {
                             sched_yield();
                             return;
                         }
+                    }
+                }
+
+                if (!handled) {
+                    int r = handle_mmap_demand_fault(curr, cr2);
+                    if (r == 1) {
+                        handled = 1;
+                    } else if (r < 0) {
+                        proc_kill(curr);
+                        sched_yield();
+                        return;
                     }
                 }
             }

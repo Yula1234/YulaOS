@@ -606,53 +606,6 @@ void syscall_handler(registers_t* regs) {
 
             __sync_fetch_and_add(&area->file->refs, 1);
 
-            uint32_t mapped = 0;
-            for (uint32_t off = 0; off < size_aligned; off += 4096) {
-                void* phys_page = pmm_alloc_block();
-                if (!phys_page) break;
-
-                memset(phys_page, 0, 4096);
-                if (area->file && area->file->ops && area->file->ops->read) {
-                    if (off < area->file_size) {
-                        uint32_t bytes = area->file_size - off;
-                        if (bytes > 4096) bytes = 4096;
-                        area->file->ops->read(area->file, area->file_offset + off, bytes, phys_page);
-                    }
-                }
-
-                paging_map(curr->page_dir, vaddr + off, (uint32_t)phys_page, 7);
-                curr->mem_pages++;
-                mapped += 4096;
-            }
-
-            if (mapped != size_aligned) {
-                for (uint32_t off = 0; off < mapped; off += 4096) {
-                    uint32_t v = vaddr + off;
-                    uint32_t pte;
-                    if (!paging_get_present_pte(curr->page_dir, v, &pte)) continue;
-                    if ((pte & 4) == 0) continue;
-
-                    paging_map(curr->page_dir, v, 0, 0);
-
-                    uint32_t phys = pte & ~0xFFF;
-                    if (curr->mem_pages > 0) curr->mem_pages--;
-                    if (phys && (pte & 0x200) == 0) {
-                        pmm_free_block((void*)phys);
-                    }
-                }
-
-                if (area->file) {
-                    uint32_t new_refs = __sync_sub_and_fetch(&area->file->refs, 1);
-                    if (new_refs == 0) {
-                        if (area->file->ops && area->file->ops->close) area->file->ops->close(area->file);
-                        else kfree(area->file);
-                    }
-                }
-                kfree(area);
-                regs->eax = 0;
-                break;
-            }
-
             area->next = curr->mmap_list;
             curr->mmap_list = area;
 

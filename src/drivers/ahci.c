@@ -240,6 +240,10 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
     if (count == 0 || count > 8) return 0;
     
     if (count > 8) count = 8;
+
+    uint32_t eflags;
+    __asm__ volatile("pushfl; popl %0" : "=r"(eflags) : : "memory");
+    int can_wait_irq = ((eflags & 0x200u) != 0u);
     
     uint32_t byte_count = count * 512;
     
@@ -327,7 +331,7 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
 
     int success = 1;
 
-    if (g_ahci_async_mode) {
+    if (g_ahci_async_mode && can_wait_irq) {
         sem_wait(&state->slot_sem[slot]);
     } else {
         while (port->ci & (1 << slot)) {

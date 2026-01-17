@@ -759,39 +759,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     for (uint32_t i = start_pde_idx; i <= end_pde_idx; i++) {
         t->page_dir[i] = 0;
     }
-
-    {
-        int ok = 1;
-        mmap_area_t* mm = t->mmap_list;
-        while (mm) {
-            if (mm->file) {
-                for (uint32_t off = 0; off < (mm->vaddr_end - mm->vaddr_start); off += 4096) {
-                    void* phys_page = pmm_alloc_block();
-                    if (!phys_page) { ok = 0; break; }
-                    memset(phys_page, 0, 4096);
-
-                    if (mm->file->ops && mm->file->ops->read) {
-                        if (off < mm->file_size) {
-                            uint32_t bytes = mm->file_size - off;
-                            if (bytes > 4096) bytes = 4096;
-                            mm->file->ops->read(mm->file, mm->file_offset + off, bytes, phys_page);
-                        }
-                    }
-
-                    paging_map(t->page_dir, mm->vaddr_start + off, (uint32_t)phys_page, 7);
-                    t->mem_pages++;
-                }
-            }
-            if (!ok) break;
-            mm = mm->next;
-        }
-        if (!ok) {
-            for(int i=0; i<argc; i++) kfree(k_argv[i]);
-            kfree(k_argv);
-            proc_free_resources(t);
-            return 0;
-        }
-    }
     
     t->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
     t->heap_start = t->prog_break;
