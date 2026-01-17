@@ -39,6 +39,33 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     return 1;
 }
 
+static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
+    if (!dir) return 0;
+
+    uint32_t pd_idx = virt >> 22;
+    uint32_t pt_idx = (virt >> 12) & 0x3FF;
+
+    uint32_t pde = dir[pd_idx];
+    if (!(pde & 1)) return 0;
+
+    uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
+    uint32_t pte = pt[pt_idx];
+    if (!(pte & 1)) return 0;
+
+    if (out_pte) *out_pte = pte;
+    return 1;
+}
+
+static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
+    if (!t) return 0;
+    mmap_area_t* m = t->mmap_list;
+    while (m) {
+        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) return m;
+        m = m->next;
+    }
+    return 0;
+}
+
 
 #define MAX_TASKS 32
 
@@ -132,12 +159,12 @@ void syscall_handler(registers_t* regs) {
         {
             int incr = (int)regs->ebx;
             uint32_t old_brk = curr->prog_break;
-            uint32_t new_brk = old_brk + incr;
-
-            if (new_brk >= 0x80000000) { 
-                regs->eax = -1; 
-                break; 
+            int64_t new_brk64 = (int64_t)(uint64_t)old_brk + (int64_t)incr;
+            if (new_brk64 < 0 || new_brk64 >= 0x80000000ll) {
+                regs->eax = -1;
+                break;
             }
+            uint32_t new_brk = (uint32_t)new_brk64;
             
             if (new_brk < curr->heap_start) {
                 regs->eax = -1;
@@ -149,13 +176,18 @@ void syscall_handler(registers_t* regs) {
                 uint32_t end_free   = (old_brk + 0xFFF) & ~0xFFF;
                 
                 for (uint32_t v = start_free; v < end_free; v += 4096) {
-                    if (paging_is_user_accessible(curr->page_dir, v)) {
-                        uint32_t phys = paging_get_phys(curr->page_dir, v);
+                    uint32_t pte;
+                    if (!paging_get_present_pte(curr->page_dir, v, &pte)) continue;
+                    if ((pte & 4) == 0) continue;
+
+                    paging_map(curr->page_dir, v, 0, 0);
+
+                    uint32_t phys = pte & ~0xFFF;
+                    if (curr->mem_pages > 0) curr->mem_pages--;
+                    if (phys && (pte & 0x200) == 0) {
                         pmm_free_block((void*)phys);
                     }
                 }
-
-                __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
             }
             
             curr->prog_break = new_brk;
@@ -564,9 +596,62 @@ void syscall_handler(registers_t* regs) {
             area->file_offset = 0;
             area->length = size;
             area->file = f->node;
-            area->file_size = size;
-            
+            area->file_size = (f->node->size < size) ? f->node->size : size;
+
+            if (vaddr + size_aligned < vaddr || vaddr + size_aligned > 0xC0000000) {
+                kfree(area);
+                regs->eax = 0;
+                break;
+            }
+
             __sync_fetch_and_add(&area->file->refs, 1);
+
+            uint32_t mapped = 0;
+            for (uint32_t off = 0; off < size_aligned; off += 4096) {
+                void* phys_page = pmm_alloc_block();
+                if (!phys_page) break;
+
+                memset(phys_page, 0, 4096);
+                if (area->file && area->file->ops && area->file->ops->read) {
+                    if (off < area->file_size) {
+                        uint32_t bytes = area->file_size - off;
+                        if (bytes > 4096) bytes = 4096;
+                        area->file->ops->read(area->file, area->file_offset + off, bytes, phys_page);
+                    }
+                }
+
+                paging_map(curr->page_dir, vaddr + off, (uint32_t)phys_page, 7);
+                curr->mem_pages++;
+                mapped += 4096;
+            }
+
+            if (mapped != size_aligned) {
+                for (uint32_t off = 0; off < mapped; off += 4096) {
+                    uint32_t v = vaddr + off;
+                    uint32_t pte;
+                    if (!paging_get_present_pte(curr->page_dir, v, &pte)) continue;
+                    if ((pte & 4) == 0) continue;
+
+                    paging_map(curr->page_dir, v, 0, 0);
+
+                    uint32_t phys = pte & ~0xFFF;
+                    if (curr->mem_pages > 0) curr->mem_pages--;
+                    if (phys && (pte & 0x200) == 0) {
+                        pmm_free_block((void*)phys);
+                    }
+                }
+
+                if (area->file) {
+                    uint32_t new_refs = __sync_sub_and_fetch(&area->file->refs, 1);
+                    if (new_refs == 0) {
+                        if (area->file->ops && area->file->ops->close) area->file->ops->close(area->file);
+                        else kfree(area->file);
+                    }
+                }
+                kfree(area);
+                regs->eax = 0;
+                break;
+            }
 
             area->next = curr->mmap_list;
             curr->mmap_list = area;
@@ -589,21 +674,20 @@ void syscall_handler(registers_t* regs) {
             uint32_t aligned_len = (len + 4095) & ~4095;
             uint32_t vaddr_end = vaddr + aligned_len;
 
-            for (uint32_t i = 0; i < aligned_len; i += 4096) {
-                uint32_t curr_v = vaddr + i;
-                
-                if (paging_is_user_accessible(curr->page_dir, curr_v)) {
-                    uint32_t phys = paging_get_phys(curr->page_dir, curr_v);
-                    
-                    if (phys) {
-                        pmm_free_block((void*)phys);
-                        if (curr->mem_pages > 0) curr->mem_pages--;
-                    }
-
-                    paging_map(curr->page_dir, curr_v, 0, 0); // Unmap PTE
-                    __asm__ volatile("invlpg (%0)" :: "r"(curr_v) : "memory");
+            uint32_t scan = vaddr;
+            while (scan < vaddr_end) {
+                mmap_area_t* a = mmap_find_area(curr, scan);
+                if (!a || a->vaddr_end <= scan) {
+                    regs->eax = -1;
+                    break;
+                }
+                if (a->vaddr_end > scan) {
+                    scan = a->vaddr_end;
                 }
             }
+            if (scan < vaddr_end) break;
+
+            int result = 0;
 
             mmap_area_t* prev = 0;
             mmap_area_t* m = curr->mmap_list;
@@ -622,72 +706,136 @@ void syscall_handler(registers_t* regs) {
                     continue;
                 }
 
-                if (u_start <= m_start && u_end >= m_end) {
-                    if (prev) prev->next = next_node;
-                    else curr->mmap_list = next_node;
+                result = 0;
 
-                    if (m->file) m->file->refs--;
-                    kfree(m);
-                    
-                    m = next_node;
-                    continue;
-                }
+                uint32_t o_start = (u_start > m_start) ? u_start : m_start;
+                uint32_t o_end   = (u_end < m_end) ? u_end : m_end;
 
-                if (u_start > m_start && u_end < m_end) {
+                if (o_start > m_start && o_end < m_end) {
                     mmap_area_t* new_right = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
                     if (!new_right) {
-                        regs->eax = -1; 
-                        break; 
+                        result = -1;
+                        break;
                     }
 
-                    new_right->vaddr_start = u_end;
+                    uint32_t orig_file_size = m->file_size;
+                    uint32_t left_len = o_start - m_start;
+                    uint32_t right_len = m_end - o_end;
+                    uint32_t cut_before_right = o_end - m_start;
+
+                    new_right->vaddr_start = o_end;
                     new_right->vaddr_end   = m_end;
-                    new_right->length      = m_end - u_end;
+                    new_right->length      = right_len;
                     new_right->file        = m->file;
-                    new_right->file_size   = m->file_size;
-                    
+                    new_right->next        = m->next;
+
                     if (m->file) {
-                        new_right->file_offset = m->file_offset + (u_end - m_start);
-                        m->file->refs++;
+                        new_right->file_offset = m->file_offset + cut_before_right;
+                        __sync_fetch_and_add(&m->file->refs, 1);
                     } else {
                         new_right->file_offset = 0;
                     }
 
-                    new_right->next = m->next;
+                    uint32_t right_file_size = 0;
+                    if (orig_file_size > cut_before_right) right_file_size = orig_file_size - cut_before_right;
+                    if (right_file_size > right_len) right_file_size = right_len;
+                    new_right->file_size = right_file_size;
+
+                    m->vaddr_end = o_start;
+                    m->length = left_len;
+
+                    uint32_t left_file_size = orig_file_size;
+                    if (left_file_size > left_len) left_file_size = left_len;
+                    m->file_size = left_file_size;
+
                     m->next = new_right;
 
-                    m->vaddr_end = u_start;
-                    m->length    = u_start - m_start;
-                    
-                    prev = new_right; 
+                    for (uint32_t curr_v = o_start; curr_v < o_end; curr_v += 4096) {
+                        uint32_t pte;
+                        if (!paging_get_present_pte(curr->page_dir, curr_v, &pte)) continue;
+                        if ((pte & 4) == 0) continue;
+
+                        paging_map(curr->page_dir, curr_v, 0, 0);
+
+                        uint32_t phys = pte & ~0xFFF;
+                        if (curr->mem_pages > 0) curr->mem_pages--;
+                        if (phys && (pte & 0x200) == 0) {
+                            pmm_free_block((void*)phys);
+                        }
+                    }
+
+                    prev = new_right;
                     m = new_right->next;
                     continue;
                 }
 
-                if (u_start <= m_start && u_end < m_end) {
-                    uint32_t cut_len = u_end - m_start;
-                    m->vaddr_start = u_end;
-                    m->length -= cut_len;
-                    m->file_offset += cut_len;
-                    
+                for (uint32_t curr_v = o_start; curr_v < o_end; curr_v += 4096) {
+                    uint32_t pte;
+                    if (!paging_get_present_pte(curr->page_dir, curr_v, &pte)) continue;
+                    if ((pte & 4) == 0) continue;
+
+                    paging_map(curr->page_dir, curr_v, 0, 0);
+
+                    uint32_t phys = pte & ~0xFFF;
+                    if (curr->mem_pages > 0) curr->mem_pages--;
+                    if (phys && (pte & 0x200) == 0) {
+                        pmm_free_block((void*)phys);
+                    }
+                }
+
+                if (o_start == m_start && o_end == m_end) {
+                    if (prev) prev->next = next_node;
+                    else curr->mmap_list = next_node;
+
+                    if (m->file) {
+                        uint32_t new_refs = __sync_sub_and_fetch(&m->file->refs, 1);
+                        if (new_refs == 0) {
+                            if (m->file->ops && m->file->ops->close) m->file->ops->close(m->file);
+                            else kfree(m->file);
+                        }
+                    }
+                    kfree(m);
+
+                    m = next_node;
+                    continue;
+                }
+
+                if (o_start == m_start && o_end < m_end) {
+                    uint32_t cut_len = o_end - m_start;
+                    uint32_t new_len = m_end - o_end;
+
+                    m->vaddr_start = o_end;
+                    m->length = new_len;
+
+                    if (m->file) m->file_offset += cut_len;
+
+                    if (m->file_size > cut_len) m->file_size -= cut_len;
+                    else m->file_size = 0;
+                    if (m->file_size > new_len) m->file_size = new_len;
+
                     prev = m;
                     m = next_node;
                     continue;
                 }
 
-                if (u_start > m_start && u_end >= m_end) {
-                    m->vaddr_end = u_start;
-                    m->length = u_start - m_start;
-                    
+                if (o_start > m_start && o_end == m_end) {
+                    uint32_t new_len = o_start - m_start;
+
+                    m->vaddr_end = o_start;
+                    m->length = new_len;
+
+                    if (m->file_size > new_len) m->file_size = new_len;
+
                     prev = m;
                     m = next_node;
                     continue;
                 }
-                
+
                 prev = m;
                 m = next_node;
             }
-            regs->eax = 0;
+
+            regs->eax = result;
         }
         break;
 

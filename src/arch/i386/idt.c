@@ -252,48 +252,6 @@ void isr_handler(registers_t* regs) {
                 }
 
                 if (!handled) {
-                    mmap_area_t* m = curr->mmap_list;
-                    while (m) {
-                        if (cr2 >= m->vaddr_start && cr2 < m->vaddr_end) {
-                            void* phys_page = pmm_alloc_block();
-                            if (phys_page) {
-                                uint32_t vaddr_page = cr2 & ~0xFFF;
-                                paging_map(curr->page_dir, vaddr_page, (uint32_t)phys_page, 7);
-                                curr->mem_pages++;
-
-                                uint32_t old_cr3;
-                                __asm__ volatile("mov %%cr3, %0" : "=r"(old_cr3));
-                                __asm__ volatile("mov %0, %%cr3" :: "r"(kernel_page_directory));
-
-                                uint32_t offset_in_vma = vaddr_page - m->vaddr_start;
-                                uint32_t file_pos = m->file_offset + offset_in_vma;
-                                memset(phys_page, 0, 4096);
-
-                                if (m->file->ops && m->file->ops->read) {
-                                    if (offset_in_vma < m->file_size) {
-                                        uint32_t bytes = m->file_size - offset_in_vma;
-                                        if (bytes > 4096) bytes = 4096;
-                                        __asm__ volatile("sti");
-                                        m->file->ops->read(m->file, file_pos, bytes, (void*)phys_page);
-                                        __asm__ volatile("cli");
-                                    }
-                                }
-                                
-                                __asm__ volatile("mov %0, %%cr3" :: "r"(old_cr3));
-                                __asm__ volatile("invlpg (%0)" :: "r"(vaddr_page) : "memory");
-                                handled = 1;
-                            } else {
-                                proc_kill(curr);
-                                sched_yield();
-                                return;
-                            }
-                            break; 
-                        }
-                        m = m->next;
-                    }
-                }
-
-                if (!handled) {
                     if (cr2 >= curr->heap_start && cr2 < curr->prog_break) {
                         void* new_page = pmm_alloc_block();
                         if (new_page) {

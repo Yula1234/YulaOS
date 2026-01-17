@@ -326,11 +326,14 @@ void proc_free_resources(task_t* t) {
     mmap_area_t* m = t->mmap_list;
     while (m) {
         mmap_area_t* next = m->next;
-        if (m->file && m->file->refs > 0) {
-             uint32_t new_refs = __sync_sub_and_fetch(&m->file->refs, 1);
-             if (new_refs == 0 && (m->file->flags & VFS_FLAG_EXEC_NODE)) {
-                 kfree(m->file);
-             }
+        if (m->file) {
+            if (__sync_sub_and_fetch(&m->file->refs, 1) == 0) {
+                if (m->file->ops && m->file->ops->close) {
+                    m->file->ops->close(m->file);
+                } else {
+                    kfree(m->file);
+                }
+            }
         }
         kfree(m);
         m = next;
@@ -513,11 +516,16 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     
     uint32_t aligned_size = (size + diff + 4095) & ~4095;
 
+    uint32_t aligned_file_size = file_size;
+    if (aligned_file_size > 0xFFFFFFFFu - diff) aligned_file_size = 0xFFFFFFFFu;
+    else aligned_file_size += diff;
+    if (aligned_file_size > aligned_size) aligned_file_size = aligned_size;
+
     area->vaddr_start = aligned_vaddr;
     area->vaddr_end   = aligned_vaddr + aligned_size;
     area->file_offset = aligned_offset;
     area->length      = size;
-    area->file_size   = file_size;
+    area->file_size   = aligned_file_size;
     area->file        = node;
     
     __sync_fetch_and_add(&node->refs, 1);
@@ -738,6 +746,39 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     for (uint32_t i = start_pde_idx; i <= end_pde_idx; i++) {
         t->page_dir[i] = 0;
+    }
+
+    {
+        int ok = 1;
+        mmap_area_t* mm = t->mmap_list;
+        while (mm) {
+            if (mm->file) {
+                for (uint32_t off = 0; off < (mm->vaddr_end - mm->vaddr_start); off += 4096) {
+                    void* phys_page = pmm_alloc_block();
+                    if (!phys_page) { ok = 0; break; }
+                    memset(phys_page, 0, 4096);
+
+                    if (mm->file->ops && mm->file->ops->read) {
+                        if (off < mm->file_size) {
+                            uint32_t bytes = mm->file_size - off;
+                            if (bytes > 4096) bytes = 4096;
+                            mm->file->ops->read(mm->file, mm->file_offset + off, bytes, phys_page);
+                        }
+                    }
+
+                    paging_map(t->page_dir, mm->vaddr_start + off, (uint32_t)phys_page, 7);
+                    t->mem_pages++;
+                }
+            }
+            if (!ok) break;
+            mm = mm->next;
+        }
+        if (!ok) {
+            for(int i=0; i<argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+            proc_free_resources(t);
+            return 0;
+        }
     }
     
     t->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
