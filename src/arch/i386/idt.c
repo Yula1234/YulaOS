@@ -13,6 +13,7 @@
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
 #include <kernel/kdb.h>
+#include <kernel/shm.h>
 
 #include <hal/io.h>
 #include <hal/apic.h>
@@ -44,6 +45,7 @@ extern uint32_t isr_stub_table[];
 extern void isr_stub_0x80(void);
 extern void isr_stub_0xFF(void);
 extern void isr_stub_0xF0(void);
+extern void isr_stub_0xF1(void);
 extern void isr_stub_0xA1(void);
 extern uint32_t* kernel_page_directory;
 
@@ -54,6 +56,7 @@ static irq_handler_t irq_vector_handlers[256] = {0};
 static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
+extern void smp_blit_ipi_handler(void);
 
 extern volatile int g_fb_mapped;
 
@@ -127,12 +130,128 @@ static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
     return 0;
 }
 
+static int ensure_user_stack_writable(task_t* curr, uint32_t addr) {
+    if (!curr || !curr->page_dir) return 0;
+    if (addr < curr->stack_bottom || addr >= curr->stack_top) return 0;
+
+    uint32_t vaddr = addr & ~0xFFFu;
+    if (paging_is_user_accessible(curr->page_dir, vaddr)) return 1;
+
+    void* new_page = pmm_alloc_block();
+    if (!new_page) return 0;
+
+    paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
+    curr->mem_pages++;
+    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+    return 1;
+}
+
+static void maybe_deliver_pending_signal(task_t* curr, registers_t* regs) {
+    if (!curr || !regs) return;
+    if (curr->state == TASK_ZOMBIE || curr->state == TASK_UNUSED) return;
+    if (regs->cs != 0x1B) return;
+    if (curr->is_running_signal) return;
+    if (curr->pending_signals == 0) return;
+
+    for (int i = 0; i < 32; i++) {
+        if (!(curr->pending_signals & (1u << i))) continue;
+
+        if (!curr->handlers[i]) {
+            if (i == 2 || i == 4 || i == 11 || i == 15) {
+                uint32_t old_esp = regs->useresp;
+                if (old_esp < 16u) {
+                    proc_kill(curr);
+                    sched_yield();
+                    return;
+                }
+
+                uint32_t new_esp = old_esp - 16u;
+                uint32_t new_esp_end = new_esp + 15u;
+                if (new_esp_end < new_esp ||
+                    !ensure_user_stack_writable(curr, new_esp) ||
+                    !ensure_user_stack_writable(curr, new_esp_end)) {
+                    proc_kill(curr);
+                    sched_yield();
+                    return;
+                }
+
+                uint8_t* code = (uint8_t*)new_esp;
+                code[0] = 0xCD; code[1] = 0x80;
+                code[2] = 0xEB; code[3] = 0xFE;
+                for (int k = 4; k < 16; k++) code[k] = 0x90;
+
+                regs->eax = 0;
+                regs->ebx = 128u + (uint32_t)i;
+                regs->useresp = new_esp;
+                regs->eip = new_esp;
+
+                curr->pending_signals &= ~(1u << i);
+            }
+            return;
+        }
+
+        memcpy(&curr->signal_context, regs, sizeof(registers_t));
+
+        uint32_t old_esp = regs->useresp;
+        if (old_esp < 8u) {
+            proc_kill(curr);
+            sched_yield();
+            return;
+        }
+
+        uint32_t new_esp = old_esp - 8u;
+        uint32_t new_esp_end = new_esp + 7u;
+        if (new_esp_end < new_esp ||
+            !ensure_user_stack_writable(curr, new_esp) ||
+            !ensure_user_stack_writable(curr, new_esp_end)) {
+            proc_kill(curr);
+            sched_yield();
+            return;
+        }
+
+        uint32_t* user_esp = (uint32_t*)old_esp;
+        user_esp--; *user_esp = (uint32_t)i;
+        user_esp--; *user_esp = 0x0;
+        regs->useresp = (uint32_t)user_esp;
+        regs->eip = (uint32_t)curr->handlers[i];
+
+        curr->pending_signals &= ~(1u << i);
+        curr->is_running_signal = 1;
+        return;
+    }
+}
+
 static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     if (!curr || !curr->page_dir) return 0;
 
     uint32_t vaddr = cr2 & ~0xFFFu;
     mmap_area_t* m = mmap_find_area(curr, vaddr);
     if (!m) return 0;
+
+    if ((m->map_flags & MAP_SHARED) && m->file && (m->file->flags & VFS_FLAG_SHM) && m->file->private_data) {
+        typedef struct {
+            spinlock_t lock;
+            uint32_t size;
+            uint32_t page_count;
+            uint32_t* pages;
+        } shm_obj_t;
+
+        shm_obj_t* obj = (shm_obj_t*)m->file->private_data;
+        uint32_t rel = vaddr - m->vaddr_start;
+        uint32_t page_idx = rel / 4096u;
+
+        uint32_t flags = spinlock_acquire_safe(&obj->lock);
+        uint32_t phys = 0;
+        if (obj->pages && page_idx < obj->page_count) {
+            phys = obj->pages[page_idx];
+        }
+        spinlock_release_safe(&obj->lock, flags);
+
+        if (!phys) return -1;
+
+        paging_map(curr->page_dir, vaddr, phys, 7 | 0x200u);
+        return 1;
+    }
 
     void* new_page = pmm_alloc_block();
     if (!new_page) return -1;
@@ -162,7 +281,6 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     return 1;
 }
 
-extern void wake_up_gui();
 extern void proc_check_sleepers(uint32_t current_tick);
 
 void isr_handler(registers_t* regs) {
@@ -175,11 +293,22 @@ void isr_handler(registers_t* regs) {
         lapic_eoi();
         return;
     }
+
+    if (regs->int_no == IPI_BLIT_VECTOR) {
+        smp_blit_ipi_handler();
+        lapic_eoi();
+        return;
+    }
     cpu_t* cpu = cpu_current();
     task_t* curr = cpu->current_task;
 
     if (regs->int_no == 0x80) {
         syscall_handler(regs);
+        cpu = cpu_current();
+        curr = cpu ? cpu->current_task : 0;
+        if (curr) {
+            maybe_deliver_pending_signal(curr, regs);
+        }
         return;
     }
 
@@ -191,10 +320,6 @@ void isr_handler(registers_t* regs) {
 
             if (cpu->index == 0) {
                 timer_ticks++;
-
-                if (timer_ticks % 100 == 0) {
-                    wake_up_gui();
-                }
 
                 proc_check_sleepers(timer_ticks);
             }
@@ -222,7 +347,8 @@ void isr_handler(registers_t* regs) {
                 }
             }
 
-            if (curr && curr->state == TASK_RUNNING && curr->pid != 0) {
+            int from_user = (regs->cs == 0x1B);
+            if (from_user && curr && curr->state == TASK_RUNNING && curr->pid != 0) {
                 if (curr->exec_start > 0) {
                     uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
                     if (delta_exec >= 1) {
@@ -241,12 +367,20 @@ void isr_handler(registers_t* regs) {
                     return; 
                 }
             }
+
+            if (curr) {
+                maybe_deliver_pending_signal(curr, regs);
+            }
             lapic_eoi();
             return;
         } 
         else {
             if (irq_vector_handlers[regs->int_no]) {
                 irq_vector_handlers[regs->int_no](regs);
+            }
+
+            if (curr) {
+                maybe_deliver_pending_signal(curr, regs);
             }
 
             if (g_legacy_pic_enabled && regs->int_no >= 32 && regs->int_no <= 47) {
@@ -290,6 +424,11 @@ void isr_handler(registers_t* regs) {
                         __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
                         handled = 1;
                     } else {
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                            return;
+                        }
                         proc_kill(curr);
                         sched_yield();
                         return;
@@ -306,6 +445,11 @@ void isr_handler(registers_t* regs) {
                             __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
                             handled = 1;
                         } else {
+                            curr->pending_signals |= (1u << SIGSEGV);
+                            if (regs->cs == 0x1B) {
+                                maybe_deliver_pending_signal(curr, regs);
+                                return;
+                            }
                             proc_kill(curr);
                             sched_yield();
                             return;
@@ -318,6 +462,11 @@ void isr_handler(registers_t* regs) {
                     if (r == 1) {
                         handled = 1;
                     } else if (r < 0) {
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                            return;
+                        }
                         proc_kill(curr);
                         sched_yield();
                         return;
@@ -340,15 +489,6 @@ void isr_handler(registers_t* regs) {
             }
 
             if (!handled) {
-
-                if (curr && strcmp(curr->name, "gui") == 0) {
-                    kdb_enter("GUI Thread Crashed", curr);
-                    
-                    proc_kill(curr);
-                    sched_yield();
-                    return;
-                }
-
                 int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
                 if (regs->cs != 0x1B && !is_kernel_access_to_user) {
@@ -358,8 +498,13 @@ void isr_handler(registers_t* regs) {
                     kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
                 } else {
                     if (curr) {
-                        proc_kill(curr);
-                        sched_yield();
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                        } else {
+                            proc_kill(curr);
+                            sched_yield();
+                        }
                     } else {
                         if (!g_fb_mapped) {
                             early_exception_halt("Page Fault in Kernel", regs, cr2);
@@ -374,8 +519,9 @@ void isr_handler(registers_t* regs) {
             if (regs->int_no < 32) msg = exception_messages[regs->int_no];
             
             if (regs->cs == 0x1B && curr) {
-                proc_kill(curr);
-                sched_yield();
+                (void)msg;
+                curr->pending_signals |= (1u << SIGILL);
+                maybe_deliver_pending_signal(curr, regs);
             } else {
                 if (!g_fb_mapped) {
                     early_exception_halt(msg, regs, 0);
@@ -385,29 +531,8 @@ void isr_handler(registers_t* regs) {
         }
     }
 
-    if (curr && regs->cs == 0x1B && !curr->is_running_signal) {
-        if (curr->pending_signals != 0) {
-            for (int i = 0; i < 32; i++) {
-                if (curr->pending_signals & (1 << i)) {
-                    if (curr->handlers[i]) {
-                        memcpy(&curr->signal_context, regs, sizeof(registers_t));
-                        uint32_t* user_esp = (uint32_t*)regs->useresp;
-                        user_esp--; *user_esp = (uint32_t)i;
-                        user_esp--; *user_esp = 0x0;
-                        regs->useresp = (uint32_t)user_esp;
-                        regs->eip = (uint32_t)curr->handlers[i];
-                        curr->pending_signals &= ~(1 << i);
-                        curr->is_running_signal = 1;
-                        break;
-                    } else {
-                        if (i == 2 || i == 11 || i == 15) {
-                            proc_kill(curr);
-                            sched_yield();
-                        }
-                    }
-                }
-            }
-        }
+    if (curr) {
+        maybe_deliver_pending_signal(curr, regs);
     }
 }
 
@@ -422,10 +547,11 @@ void idt_init(void) {
     memset(&idt, 0, sizeof(idt));
 
     for (int i = 0; i < 48; i++) idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
-    idt_set_gate(0x80, (uint32_t)isr_stub_0x80, 0x08, 0xEE);
+    idt_set_gate(0x80, (uint32_t)isr_stub_0x80, 0x08, 0xEF);
     
     idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
     idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
+    idt_set_gate(IPI_BLIT_VECTOR, (uint32_t)isr_stub_0xF1, 0x08, 0x8E);
     idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
 
     outb(0x20, 0x11); io_wait();

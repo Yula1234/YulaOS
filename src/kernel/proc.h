@@ -28,6 +28,9 @@ typedef enum {
 #define SIGSEGV 11
 #define SIGTERM 15
 
+#define MAP_SHARED  1
+#define MAP_PRIVATE 2
+
 typedef void (*sig_handler_t)(int);
 
 typedef struct mmap_area {
@@ -36,6 +39,7 @@ typedef struct mmap_area {
     uint32_t file_offset;
     uint32_t length;
     uint32_t file_size; 
+    uint32_t map_flags;
     
     struct vfs_node* file;
     
@@ -118,8 +122,7 @@ typedef struct task {
     mmap_area_t* mmap_list;
     uint32_t mmap_top;
 
-    int winmap_win_id;
-    uint32_t winmap_pages;
+    uint32_t fbmap_pages;
 
     uint8_t* fpu_state;
     uint32_t fpu_state_size;
@@ -158,5 +161,6 @@ task_t* proc_find_by_pid(uint32_t pid);
 void proc_sleep_remove(task_t* t);
 void proc_check_sleepers(uint32_t current_tick);
 void proc_sleep_add(task_t* t, uint32_t wake_tick);
+void proc_wake(task_t* t);
 
 #endif

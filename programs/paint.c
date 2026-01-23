@@ -2,10 +2,49 @@
 // Copyright (C) 2026 Yula1234
 
 #include <yula.h>
+#include <comp.h>
 #include <font.h>
+
+static inline void dbg_write(const char* s) {
+    if (!s) return;
+    write(1, s, (uint32_t)strlen(s));
+}
+
+static inline int ptr_is_invalid(const void* p) {
+    return !p || p == (const void*)-1;
+}
 
 static int WIN_W = 800;
 static int WIN_H = 600;
+
+#define SIGINT  2
+#define SIGILL  4
+#define SIGSEGV 11
+#define SIGTERM 15
+
+static volatile int g_dbg_stage;
+static volatile int32_t g_dbg_resize_w;
+static volatile int32_t g_dbg_resize_h;
+
+static void paint_on_signal(int sig) {
+    char tmp[160];
+    (void)snprintf(tmp, sizeof(tmp), "paint: signal=%d stage=%d win=%dx%d resize=%dx%d\n",
+                   sig,
+                   (int)g_dbg_stage,
+                   WIN_W,
+                   WIN_H,
+                   (int)g_dbg_resize_w,
+                   (int)g_dbg_resize_h);
+    dbg_write(tmp);
+    syscall(0, 128 + (uint32_t)sig, 0, 0);
+}
+
+
+#define PAINT_MAX_SURFACE_BYTES (32u * 1024u * 1024u)
+#define PAINT_MAX_IMG_BYTES     (16u * 1024u * 1024u)
+
+#define PAINT_MAX_SURFACE_PIXELS (PAINT_MAX_SURFACE_BYTES / 4u)
+#define PAINT_MAX_IMG_PIXELS     (PAINT_MAX_IMG_BYTES / 4u)
 
 #define C_WIN_BG    0x1E1E1E
 #define C_PANEL_BG  0x252526
@@ -39,7 +78,6 @@ typedef struct {
 } snapshot_t;
 
 static uint32_t* canvas;
-static int win_id;
 
 static rect_t r_header;
 static rect_t r_toolbar;
@@ -49,6 +87,14 @@ static rect_t r_canvas;
 static uint32_t* img;
 static int img_w;
 static int img_h;
+
+static inline size_t img_pixel_count(void) {
+    if (ptr_is_invalid(img)) return 0;
+    if (img_w <= 0 || img_h <= 0) return 0;
+    size_t c = (size_t)(uint32_t)img_w * (size_t)(uint32_t)img_h;
+    if (c == 0 || c > (size_t)PAINT_MAX_IMG_PIXELS) return 0;
+    return c;
+}
 
 static const uint32_t palette[8] = {
     0x000000,
@@ -147,13 +193,21 @@ static int pt_in_rect(int x, int y, rect_t r) {
 
 static int snapshot_reserve(snapshot_t* s, int w, int h) {
     if (!s || w <= 0 || h <= 0) return 0;
-    if (s->pixels && s->w == w && s->h == h) return 1;
+    if (s->pixels && !ptr_is_invalid(s->pixels) && s->w == w && s->h == h) return 1;
 
-    size_t bytes = (size_t)w * (size_t)h * 4u;
-    if (bytes == 0) return 0;
+    uint64_t bytes64 = (uint64_t)(uint32_t)w * (uint64_t)(uint32_t)h * 4ull;
+    if (bytes64 == 0 || bytes64 > (uint64_t)PAINT_MAX_IMG_BYTES) return 0;
+    if (bytes64 > (uint64_t)(size_t)-1) return 0;
+    size_t bytes = (size_t)bytes64;
 
-    void* p = s->pixels ? realloc(s->pixels, bytes) : malloc(bytes);
-    if (!p) return 0;
+    g_dbg_stage = 3165;
+    void* p = malloc(bytes);
+    if (ptr_is_invalid(p)) return 0;
+    g_dbg_stage = 3166;
+
+    if (s->pixels && !ptr_is_invalid(s->pixels)) {
+        free(s->pixels);
+    }
 
     s->pixels = (uint32_t*)p;
     s->w = w;
@@ -163,26 +217,33 @@ static int snapshot_reserve(snapshot_t* s, int w, int h) {
 
 static void snapshot_free(snapshot_t* s) {
     if (!s) return;
-    if (s->pixels) free(s->pixels);
+    if (s->pixels && !ptr_is_invalid(s->pixels)) free(s->pixels);
     s->pixels = 0;
     s->w = 0;
     s->h = 0;
 }
 
 static int snapshot_capture(snapshot_t* out) {
-    if (!out || !img || img_w <= 0 || img_h <= 0) return 0;
+    g_dbg_stage = 3161;
+    size_t count = img_pixel_count();
+    if (!out || count == 0) return 0;
+    g_dbg_stage = 3162;
     if (!snapshot_reserve(out, img_w, img_h)) return 0;
-    size_t bytes = (size_t)img_w * (size_t)img_h * 4u;
+    size_t bytes = count * 4u;
+    if (bytes == 0 || bytes > (size_t)PAINT_MAX_IMG_BYTES) return 0;
+    g_dbg_stage = 3167;
     memcpy(out->pixels, img, bytes);
+    g_dbg_stage = 3168;
     return 1;
 }
 
 static void img_swap_with_snapshot(snapshot_t* s) {
-    if (!s || !img) return;
-    if (!s->pixels) return;
+    if (!s || ptr_is_invalid(img)) return;
+    if (ptr_is_invalid(s->pixels)) return;
     if (s->w != img_w || s->h != img_h) return;
 
-    size_t count = (size_t)img_w * (size_t)img_h;
+    size_t count = img_pixel_count();
+    if (count == 0) return;
     for (size_t i = 0; i < count; i++) {
         uint32_t t = img[i];
         img[i] = s->pixels[i];
@@ -195,9 +256,12 @@ static void clear_redo() {
 }
 
 static void push_undo() {
+    g_dbg_stage = 316;
+    g_dbg_stage = 3160;
     if (!snapshot_capture(&undo_stack[0])) return;
     undo_count = 1;
     clear_redo();
+    g_dbg_stage = 317;
 }
 
 static void do_undo() {
@@ -235,19 +299,39 @@ static void img_resize_to_canvas() {
     int new_h = r_canvas.h;
     if (new_w <= 0 || new_h <= 0) return;
 
-    if (img && img_w == new_w && img_h == new_h) return;
+    if (!ptr_is_invalid(img) && img && img_w == new_w && img_h == new_h) return;
 
-    size_t bytes = (size_t)new_w * (size_t)new_h * 4u;
-    uint32_t* nimg = (uint32_t*)malloc(bytes);
-    if (!nimg) return;
+    const uint32_t max_img_pixels = (uint32_t)PAINT_MAX_IMG_PIXELS;
+    if (max_img_pixels == 0) return;
 
-    for (int i = 0; i < new_w * new_h; i++) nimg[i] = C_CANVAS_BG;
+    uint64_t want_pixels64 = (uint64_t)(uint32_t)new_w * (uint64_t)(uint32_t)new_h;
+    if (want_pixels64 > (uint64_t)max_img_pixels) {
+        if (new_w >= new_h) {
+            new_w = (int)((uint32_t)max_img_pixels / (uint32_t)new_h);
+        } else {
+            new_h = (int)((uint32_t)max_img_pixels / (uint32_t)new_w);
+        }
+        if (new_w <= 0 || new_h <= 0) return;
+    }
 
-    if (img) {
-        int cw = min_i(img_w, new_w);
-        int ch = min_i(img_h, new_h);
-        for (int y = 0; y < ch; y++) {
-            memcpy(nimg + y * new_w, img + y * img_w, (size_t)cw * 4u);
+    uint64_t bytes64 = (uint64_t)(uint32_t)new_w * (uint64_t)(uint32_t)new_h * 4ull;
+    if (bytes64 == 0 || bytes64 > 0xFFFFFFFFu) return;
+    uint32_t bytes = (uint32_t)bytes64;
+
+    uint32_t* nimg = (uint32_t*)malloc((size_t)bytes);
+    if (ptr_is_invalid(nimg)) return;
+
+    size_t count = (size_t)(uint32_t)new_w * (size_t)(uint32_t)new_h;
+    for (size_t i = 0; i < count; i++) nimg[i] = C_CANVAS_BG;
+
+    if (img && !ptr_is_invalid(img)) {
+        size_t old_count = img_pixel_count();
+        if (old_count != 0) {
+            int cw = min_i(img_w, new_w);
+            int ch = min_i(img_h, new_h);
+            for (int y = 0; y < ch; y++) {
+                memcpy(nimg + y * new_w, img + y * img_w, (size_t)cw * 4u);
+            }
         }
         free(img);
     }
@@ -256,16 +340,20 @@ static void img_resize_to_canvas() {
     img_w = new_w;
     img_h = new_h;
 
-    for (int i = 0; i < undo_count; i++) snapshot_free(&undo_stack[i]);
-    for (int i = 0; i < redo_count; i++) snapshot_free(&redo_stack[i]);
+    snapshot_free(&undo_stack[0]);
+    snapshot_free(&redo_stack[0]);
     undo_count = 0;
     redo_count = 0;
 }
 
 static void img_put_pixel(int x, int y, uint32_t color) {
+    size_t count = img_pixel_count();
+    if (count == 0) return;
     if ((unsigned)x >= (unsigned)img_w) return;
     if ((unsigned)y >= (unsigned)img_h) return;
-    img[y * img_w + x] = color;
+    size_t idx = (size_t)(uint32_t)y * (size_t)(uint32_t)img_w + (size_t)(uint32_t)x;
+    if (idx >= count) return;
+    img[idx] = color;
 }
 
 static void img_draw_disc(int cx, int cy, int r, uint32_t color) {
@@ -298,6 +386,9 @@ static void img_draw_line(int x0, int y0, int x1, int y1, int r, uint32_t color)
 }
 
 static void img_fill_rect(int x0, int y0, int x1, int y1, uint32_t color) {
+    size_t count = img_pixel_count();
+    if (count == 0) return;
+    size_t w = (size_t)(uint32_t)img_w;
     int lx = min_i(x0, x1);
     int rx = max_i(x0, x1);
     int ty = min_i(y0, y1);
@@ -310,7 +401,9 @@ static void img_fill_rect(int x0, int y0, int x1, int y1, uint32_t color) {
     if (lx > rx || ty > by) return;
 
     for (int y = ty; y <= by; y++) {
-        uint32_t* row = img + y * img_w;
+        size_t row_off = (size_t)(uint32_t)y * w;
+        if (row_off >= count) continue;
+        uint32_t* row = img + row_off;
         for (int x = lx; x <= rx; x++) {
             row[x] = color;
         }
@@ -334,6 +427,9 @@ static void img_draw_rect(int x0, int y0, int x1, int y1, int r, uint32_t color,
 }
 
 static void img_fill_circle(int cx, int cy, int rad, uint32_t color) {
+    size_t count = img_pixel_count();
+    if (count == 0) return;
+    size_t w = (size_t)(uint32_t)img_w;
     if (rad <= 0) {
         img_put_pixel(cx, cy, color);
         return;
@@ -350,7 +446,9 @@ static void img_fill_circle(int cx, int cy, int rad, uint32_t color) {
         if (lx < 0) lx = 0;
         if (rx >= img_w) rx = img_w - 1;
 
-        uint32_t* row = img + y * img_w;
+        size_t row_off = (size_t)(uint32_t)y * w;
+        if (row_off >= count) continue;
+        uint32_t* row = img + row_off;
         for (int x = lx; x <= rx; x++) {
             row[x] = color;
         }
@@ -397,17 +495,23 @@ static void img_draw_circle(int x0, int y0, int x1, int y1, int r, uint32_t colo
 }
 
 static void flood_fill(int sx, int sy, uint32_t target, uint32_t repl) {
-    if (!img) return;
+    size_t count = img_pixel_count();
+    if (count == 0) return;
+    size_t w = (size_t)(uint32_t)img_w;
     if (target == repl) return;
     if ((unsigned)sx >= (unsigned)img_w) return;
     if ((unsigned)sy >= (unsigned)img_h) return;
-    if (img[sy * img_w + sx] != target) return;
+    {
+        size_t start_idx = (size_t)(uint32_t)sy * w + (size_t)(uint32_t)sx;
+        if (start_idx >= count) return;
+        if (img[start_idx] != target) return;
+    }
 
     typedef struct { int x; int y; } pt_t;
     int cap = 1024;
     int top = 0;
     pt_t* st = (pt_t*)malloc((size_t)cap * sizeof(pt_t));
-    if (!st) return;
+    if (ptr_is_invalid(st)) return;
 
     st[top++] = (pt_t){sx, sy};
 
@@ -417,15 +521,17 @@ static void flood_fill(int sx, int sy, uint32_t target, uint32_t repl) {
         int y = p.y;
 
         if ((unsigned)x >= (unsigned)img_w || (unsigned)y >= (unsigned)img_h) continue;
-        if (img[y * img_w + x] != target) continue;
+        size_t row_off = (size_t)(uint32_t)y * w;
+        if (row_off >= count) continue;
+        uint32_t* row = img + row_off;
+        if (row[x] != target) continue;
 
         int lx = x;
-        while (lx > 0 && img[y * img_w + (lx - 1)] == target) lx--;
+        while (lx > 0 && row[lx - 1] == target) lx--;
 
         int rx = x;
-        while (rx + 1 < img_w && img[y * img_w + (rx + 1)] == target) rx++;
+        while (rx + 1 < img_w && row[rx + 1] == target) rx++;
 
-        uint32_t* row = img + y * img_w;
         for (int i = lx; i <= rx; i++) row[i] = repl;
 
         for (int dir = -1; dir <= 1; dir += 2) {
@@ -433,16 +539,24 @@ static void flood_fill(int sx, int sy, uint32_t target, uint32_t repl) {
             if ((unsigned)ny >= (unsigned)img_h) continue;
 
             int i = lx;
-            uint32_t* nrow = img + ny * img_w;
+            size_t nrow_off = (size_t)(uint32_t)ny * w;
+            if (nrow_off >= count) continue;
+            uint32_t* nrow = img + nrow_off;
             while (i <= rx) {
                 if (nrow[i] == target) {
                     if (top == cap) {
                         int ncap = cap * 2;
-                        pt_t* nst = (pt_t*)realloc(st, (size_t)ncap * sizeof(pt_t));
-                        if (!nst) {
+                        if (ncap < cap) {
                             free(st);
                             return;
                         }
+                        pt_t* nst = (pt_t*)malloc((size_t)ncap * sizeof(pt_t));
+                        if (ptr_is_invalid(nst)) {
+                            free(st);
+                            return;
+                        }
+                        memcpy(nst, st, (size_t)cap * sizeof(pt_t));
+                        free(st);
                         st = nst;
                         cap = ncap;
                     }
@@ -666,11 +780,14 @@ static void render_all() {
     fill_rect(r_canvas.x, r_canvas.y, r_canvas.w, r_canvas.h, C_CANVAS_BG);
     draw_frame(r_canvas.x, r_canvas.y, r_canvas.w, r_canvas.h, C_BORDER);
 
-    if (img) {
-        int cw = min_i(img_w, r_canvas.w);
-        int ch = min_i(img_h, r_canvas.h);
-        for (int y = 0; y < ch; y++) {
-            memcpy(canvas + (r_canvas.y + y) * WIN_W + r_canvas.x, img + y * img_w, (size_t)cw * 4u);
+    if (img && !ptr_is_invalid(img) && img_w > 0 && img_h > 0) {
+        size_t count = img_pixel_count();
+        if (count != 0) {
+            int cw = min_i(img_w, r_canvas.w);
+            int ch = min_i(img_h, r_canvas.h);
+            for (int y = 0; y < ch; y++) {
+                memcpy(canvas + (r_canvas.y + y) * WIN_W + r_canvas.x, img + y * img_w, (size_t)cw * 4u);
+            }
         }
     }
 
@@ -703,6 +820,8 @@ static void render_all() {
 }
 
 static int mouse_to_img(int mx, int my, int* out_x, int* out_y) {
+    size_t count = img_pixel_count();
+    if (count == 0) return 0;
     if (!pt_in_rect(mx, my, r_canvas)) return 0;
     int ix = mx - r_canvas.x;
     int iy = my - r_canvas.y;
@@ -714,8 +833,10 @@ static int mouse_to_img(int mx, int my, int* out_x, int* out_y) {
 }
 
 static void handle_mouse_down(int mx, int my) {
+    g_dbg_stage = 311;
     int ix, iy;
     if (pt_in_rect(mx, my, r_toolbar)) {
+        g_dbg_stage = 312;
         int p = palette_hit(mx, my);
         if (p >= 0) {
             cur_color = palette[p];
@@ -735,16 +856,24 @@ static void handle_mouse_down(int mx, int my) {
         return;
     }
 
+    g_dbg_stage = 313;
     if (!mouse_to_img(mx, my, &ix, &iy)) return;
 
+    const size_t img_count = img_pixel_count();
+    if (img_count == 0) return;
+    const size_t idx = (size_t)(uint32_t)iy * (size_t)(uint32_t)img_w + (size_t)(uint32_t)ix;
+    if (idx >= img_count) return;
+
     if (tool == TOOL_PICK) {
-        cur_color = img[iy * img_w + ix];
+        g_dbg_stage = 314;
+        cur_color = img[idx];
         return;
     }
 
     if (tool == TOOL_FILL) {
+        g_dbg_stage = 315;
         push_undo();
-        uint32_t target = img[iy * img_w + ix];
+        uint32_t target = img[idx];
         flood_fill(ix, iy, target, cur_color);
         return;
     }
@@ -754,6 +883,7 @@ static void handle_mouse_down(int mx, int my) {
     last_img_y = iy;
 
     if (tool == TOOL_BRUSH || tool == TOOL_ERASER) {
+        g_dbg_stage = 318;
         push_undo();
         uint32_t col = (tool == TOOL_ERASER) ? C_CANVAS_BG : cur_color;
         img_draw_disc(ix, iy, brush_r, col);
@@ -834,65 +964,363 @@ static int handle_key(unsigned char c) {
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
-    win_id = create_window(WIN_W, WIN_H, "Paint");
-    if (win_id < 0) return 1;
+    dbg_write("paint: start\n");
 
-    canvas = (uint32_t*)map_window(win_id);
-    if (!canvas) return 1;
+    set_term_mode(0);
+
+    g_dbg_stage = 1;
+
+    (void)signal(SIGSEGV, (void*)paint_on_signal);
+    (void)signal(SIGILL, (void*)paint_on_signal);
+    (void)signal(SIGTERM, (void*)paint_on_signal);
+    (void)signal(SIGINT, (void*)paint_on_signal);
+
+    const uint32_t surface_id = 1u;
+    uint32_t size_bytes = (uint32_t)WIN_W * (uint32_t)WIN_H * 4u;
+
+    comp_conn_t conn;
+    comp_conn_reset(&conn);
+    if (comp_connect(&conn, "compositor") != 0) {
+        dbg_write("paint: comp_connect failed\n");
+        return 1;
+    }
+    if (comp_send_hello(&conn) != 0) {
+        dbg_write("paint: hello failed\n");
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    char shm_name[32];
+    shm_name[0] = '\0';
+
+    const int pid = getpid();
+    int shm_fd = -1;
+    int shm_gen = 0;
+    for (int i = 0; i < 8; i++) {
+        (void)snprintf(shm_name, sizeof(shm_name), "paint_%d_%d", pid, i);
+        shm_fd = shm_create_named(shm_name, size_bytes);
+        if (shm_fd >= 0) break;
+    }
+    if (shm_fd < 0) {
+        dbg_write("paint: shm_create_named failed\n");
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    canvas = (uint32_t*)mmap(shm_fd, size_bytes, MAP_SHARED);
+    if (ptr_is_invalid(canvas)) {
+        dbg_write("paint: mmap(shm) failed\n");
+        close(shm_fd);
+        shm_unlink_named(shm_name);
+        comp_disconnect(&conn);
+        return 1;
+    }
 
     layout_update();
     img_resize_to_canvas();
 
     render_all();
-    update_window(win_id);
 
-    yula_event_t ev;
+    if (comp_send_attach_shm_name(&conn, surface_id, shm_name, size_bytes, (uint32_t)WIN_W, (uint32_t)WIN_H, (uint32_t)WIN_W, 0u) != 0) {
+        dbg_write("paint: attach_shm_name failed\n");
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+        close(shm_fd);
+        shm_unlink_named(shm_name);
+        comp_disconnect(&conn);
+        return 1;
+    }
+    if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
+        dbg_write("paint: commit failed\n");
+        (void)comp_send_destroy_surface(&conn, surface_id, 0u);
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+        close(shm_fd);
+        shm_unlink_named(shm_name);
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    dbg_write("paint: committed\n");
+
     int running = 1;
+    int last_buttons = 0;
+    int last_mx = 0;
+    int last_my = 0;
+    int have_mouse = 0;
+
+    comp_ipc_hdr_t hdr;
+    uint8_t payload[COMP_IPC_MAX_PAYLOAD];
 
     while (running) {
         int need_update = 0;
 
-        while (get_event(win_id, &ev)) {
-            if (ev.type == YULA_EVENT_KEY_DOWN) {
-                if (handle_key((unsigned char)ev.arg1)) {
-                    running = 0;
-                    break;
+        for (;;) {
+            int rr = comp_try_recv(&conn, &hdr, payload, (uint32_t)sizeof(payload));
+            if (rr < 0) {
+                running = 0;
+                break;
+            }
+            if (rr == 0) break;
+
+            if (hdr.type != (uint16_t)COMP_IPC_MSG_INPUT || hdr.len != (uint32_t)sizeof(comp_ipc_input_t)) {
+                continue;
+            }
+
+            comp_ipc_input_t in;
+            memcpy(&in, payload, sizeof(in));
+            if (in.surface_id != surface_id) continue;
+
+            if (in.kind == COMP_IPC_INPUT_RESIZE) {
+                g_dbg_stage = 100;
+                int32_t nw_i = in.x;
+                int32_t nh_i = in.y;
+                g_dbg_resize_w = nw_i;
+                g_dbg_resize_h = nh_i;
+                if (nw_i <= 0 || nh_i <= 0) continue;
+                if (nw_i == WIN_W && nh_i == WIN_H) continue;
+
+                const uint32_t max_pix = (uint32_t)PAINT_MAX_SURFACE_PIXELS;
+                if (max_pix == 0) continue;
+                {
+                    uint64_t want_pix64 = (uint64_t)(uint32_t)nw_i * (uint64_t)(uint32_t)nh_i;
+                    if (want_pix64 > (uint64_t)max_pix) {
+                        if (nw_i >= nh_i) {
+                            nw_i = (int32_t)((uint32_t)max_pix / (uint32_t)nh_i);
+                        } else {
+                            nh_i = (int32_t)((uint32_t)max_pix / (uint32_t)nw_i);
+                        }
+                        if (nw_i <= 0 || nh_i <= 0) continue;
+                    }
                 }
-                need_update = 1;
-            } else if (ev.type == YULA_EVENT_MOUSE_DOWN) {
-                handle_mouse_down(ev.arg1, ev.arg2);
-                need_update = 1;
-            } else if (ev.type == YULA_EVENT_MOUSE_MOVE) {
-                handle_mouse_move(ev.arg1, ev.arg2);
-                need_update = 1;
-            } else if (ev.type == YULA_EVENT_MOUSE_UP) {
-                handle_mouse_up();
-                need_update = 1;
-            } else if (ev.type == YULA_EVENT_RESIZE) {
-                WIN_W = ev.arg1;
-                WIN_H = ev.arg2;
-                canvas = (uint32_t*)map_window(win_id);
-                if (!canvas) { running = 0; break; }
+
+                uint64_t bytes64 = (uint64_t)(uint32_t)nw_i * (uint64_t)(uint32_t)nh_i * 4u;
+                if (bytes64 == 0 || bytes64 > 0xFFFFFFFFu || bytes64 > (uint64_t)PAINT_MAX_SURFACE_BYTES) continue;
+                uint32_t need_size_bytes = (uint32_t)bytes64;
+
+                const int can_reuse_shm = (need_size_bytes <= size_bytes) && (shm_name[0] != '\0') && (shm_fd >= 0) && canvas;
+                if (can_reuse_shm) {
+                    g_dbg_stage = 110;
+                    const int old_w = WIN_W;
+                    const int old_h = WIN_H;
+                    uint16_t err_code = 0;
+                    if (comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, (uint32_t)nw_i, (uint32_t)nh_i, (uint32_t)nw_i, 0u, 2000u, &err_code) != 0) {
+                        char tmp[96];
+                        (void)snprintf(tmp, sizeof(tmp), "paint: resize attach failed err=%u\n", (unsigned)err_code);
+                        dbg_write(tmp);
+                        continue;
+                    }
+
+                    g_dbg_stage = 120;
+                    WIN_W = nw_i;
+                    WIN_H = nh_i;
+                    layout_update();
+                    g_dbg_stage = 121;
+                    img_resize_to_canvas();
+                    g_dbg_stage = 122;
+                    render_all();
+
+                    g_dbg_stage = 130;
+                    if (comp_send_commit_sync(&conn, surface_id, 32, 32, 0u, 2000u, &err_code) != 0) {
+                        char tmp[96];
+                        (void)snprintf(tmp, sizeof(tmp), "paint: resize commit failed err=%u\n", (unsigned)err_code);
+                        dbg_write(tmp);
+
+                        WIN_W = old_w;
+                        WIN_H = old_h;
+                        layout_update();
+                        img_resize_to_canvas();
+                        render_all();
+                        continue;
+                    }
+
+                    mouse_down = 0;
+                    drag_active = 0;
+                    have_mouse = 0;
+                    last_buttons = 0;
+                    need_update = 0;
+                    continue;
+                }
+
+                uint64_t grow64 = (uint64_t)size_bytes * 2ull;
+                uint64_t new_cap64 = (grow64 >= (uint64_t)need_size_bytes) ? grow64 : (uint64_t)need_size_bytes;
+                if (new_cap64 > (uint64_t)PAINT_MAX_SURFACE_BYTES) new_cap64 = (uint64_t)need_size_bytes;
+                if (new_cap64 > 0xFFFFFFFFu) continue;
+                uint32_t new_cap_bytes = (uint32_t)new_cap64;
+
+                char new_shm_name[32];
+                new_shm_name[0] = '\0';
+                int new_shm_fd = -1;
+                g_dbg_stage = 200;
+                for (int i = 0; i < 16; i++) {
+                    shm_gen++;
+                    (void)snprintf(new_shm_name, sizeof(new_shm_name), "paint_%d_r%d", pid, shm_gen);
+                    new_shm_fd = shm_create_named(new_shm_name, new_cap_bytes);
+                    if (new_shm_fd >= 0) break;
+                }
+                if (new_shm_fd < 0) continue;
+
+                g_dbg_stage = 210;
+                uint32_t* new_canvas = (uint32_t*)mmap(new_shm_fd, new_cap_bytes, MAP_SHARED);
+                if (ptr_is_invalid(new_canvas)) {
+                    dbg_write("paint: resize mmap failed\n");
+                    close(new_shm_fd);
+                    shm_unlink_named(new_shm_name);
+                    continue;
+                }
+
+                uint16_t err_code = 0;
+                g_dbg_stage = 220;
+                if (comp_send_attach_shm_name_sync(&conn, surface_id, new_shm_name, new_cap_bytes, (uint32_t)nw_i, (uint32_t)nh_i, (uint32_t)nw_i, 0u, 2000u, &err_code) != 0) {
+                    char tmp[96];
+                    (void)snprintf(tmp, sizeof(tmp), "paint: resize attach(new) failed err=%u\n", (unsigned)err_code);
+                    dbg_write(tmp);
+                    munmap((void*)new_canvas, new_cap_bytes);
+                    close(new_shm_fd);
+                    shm_unlink_named(new_shm_name);
+                    continue;
+                }
+
+                uint32_t* old_canvas = canvas;
+                uint32_t old_size_bytes = size_bytes;
+                int old_shm_fd = shm_fd;
+                int old_w = WIN_W;
+                int old_h = WIN_H;
+                char old_shm_name[32];
+                memcpy(old_shm_name, shm_name, sizeof(old_shm_name));
+
+                canvas = new_canvas;
+                WIN_W = nw_i;
+                WIN_H = nh_i;
+                size_bytes = new_cap_bytes;
+                shm_fd = new_shm_fd;
+                memcpy(shm_name, new_shm_name, sizeof(shm_name));
+
+                g_dbg_stage = 230;
                 layout_update();
+                g_dbg_stage = 231;
                 img_resize_to_canvas();
+                g_dbg_stage = 232;
+                render_all();
+
+                g_dbg_stage = 240;
+                if (comp_send_commit_sync(&conn, surface_id, 32, 32, 0u, 2000u, &err_code) != 0) {
+                    char tmp[96];
+                    (void)snprintf(tmp, sizeof(tmp), "paint: resize commit(new) failed err=%u\n", (unsigned)err_code);
+                    dbg_write(tmp);
+
+                    canvas = old_canvas;
+                    WIN_W = old_w;
+                    WIN_H = old_h;
+                    size_bytes = old_size_bytes;
+                    shm_fd = old_shm_fd;
+                    memcpy(shm_name, old_shm_name, sizeof(shm_name));
+                    layout_update();
+                    img_resize_to_canvas();
+                    render_all();
+
+                    munmap((void*)new_canvas, new_cap_bytes);
+                    close(new_shm_fd);
+                    shm_unlink_named(new_shm_name);
+                    need_update = 1;
+                    continue;
+                }
+
+                if (old_canvas) {
+                    munmap((void*)old_canvas, old_size_bytes);
+                }
+                if (old_shm_fd >= 0) {
+                    close(old_shm_fd);
+                }
+                if (old_shm_name[0]) {
+                    shm_unlink_named(old_shm_name);
+                }
 
                 mouse_down = 0;
                 drag_active = 0;
+                have_mouse = 0;
+                last_buttons = 0;
+                need_update = 0;
+                continue;
+            }
 
-                need_update = 1;
+            if (in.kind == COMP_IPC_INPUT_KEY) {
+                if (in.key_state == 1u) {
+                    if (handle_key((unsigned char)(uint8_t)in.keycode)) {
+                        running = 0;
+                        break;
+                    }
+                    need_update = 1;
+                }
+                continue;
+            }
+
+            if (in.kind == COMP_IPC_INPUT_MOUSE) {
+                const int mx = (int)in.x;
+                const int my = (int)in.y;
+                const int buttons = (int)in.buttons;
+
+                const int prev_buttons = have_mouse ? last_buttons : 0;
+                if (!have_mouse) {
+                    last_mx = mx;
+                    last_my = my;
+                    have_mouse = 1;
+                }
+
+                const int down_now = (buttons & 1) != 0;
+                const int down_prev = (prev_buttons & 1) != 0;
+
+                if (down_now && !down_prev) {
+                    g_dbg_stage = 310;
+                    handle_mouse_down(mx, my);
+                    need_update = 1;
+                }
+                if (!down_now && down_prev) {
+                    g_dbg_stage = 330;
+                    handle_mouse_up();
+                    need_update = 1;
+                }
+                if (mx != last_mx || my != last_my) {
+                    if (mouse_down) {
+                        g_dbg_stage = 320;
+                        handle_mouse_move(mx, my);
+                        need_update = 1;
+                    }
+                }
+
+                last_mx = mx;
+                last_my = my;
+                last_buttons = buttons;
             }
         }
 
         if (need_update && canvas) {
+            g_dbg_stage = 400;
             render_all();
-            update_window(win_id);
+            g_dbg_stage = 401;
         }
-        usleep(8000);
+        usleep(16000);
     }
 
     for (int i = 0; i < undo_count; i++) snapshot_free(&undo_stack[i]);
     for (int i = 0; i < redo_count; i++) snapshot_free(&redo_stack[i]);
     if (img) free(img);
+
+    (void)comp_send_destroy_surface(&conn, surface_id, 0u);
+    comp_disconnect(&conn);
+
+    if (canvas) {
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+    }
+    if (shm_fd >= 0) {
+        close(shm_fd);
+        shm_fd = -1;
+    }
+    if (shm_name[0]) {
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+    }
 
     return 0;
 }

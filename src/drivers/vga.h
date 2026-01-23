@@ -60,6 +60,7 @@ void vga_init(void);
 void vga_init_graphics(void);
 void vga_reset_dirty(void);
 void vga_flip_dirty(void);
+void vga_present_rect(const void* src, uint32_t src_stride, int x, int y, int w, int h);
 void vga_clear_terminal(void);
 void vga_flip(void);
 

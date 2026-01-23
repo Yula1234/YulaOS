@@ -83,6 +83,7 @@ void window_bring_to_front(window_t* win);
 void window_close_all_by_pid(int pid);
 void window_mark_dirty_by_pid(int pid);
 void window_mark_dirty_by_pid_pair(int pid1, int pid2);
+int window_system_is_ready(void);
 
 void window_push_event(window_t* win, int type, int a1, int a2, int a3);
 int window_pop_event(window_t* win, yula_event_t* out_ev);

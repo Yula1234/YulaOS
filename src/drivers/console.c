@@ -7,7 +7,6 @@
 #include <fs/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/sched.h>
-#include <kernel/window.h>
 #include <hal/lock.h>
 
 #include "console.h"
@@ -40,8 +39,6 @@ static int console_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, c
         pos = end;
     }
 
-    window_mark_dirty_by_pid_pair((int)curr->pid, (int)curr->parent_pid);
-    
     return size;
 }
 

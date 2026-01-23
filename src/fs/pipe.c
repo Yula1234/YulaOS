@@ -6,7 +6,7 @@
 #include <hal/lock.h>
 #include <mm/heap.h>
 
-#include "vfs.h"
+#include "pipe.h"
 
 #define PIPE_SIZE 4096
 
@@ -43,6 +43,18 @@ static void sem_give_n(semaphore_t* sem, uint32_t n) {
     while (n--) {
         sem_signal(sem);
     }
+}
+
+static int sem_try_take_n(semaphore_t* sem, uint32_t n) {
+    if (n == 0) return 1;
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    if (sem->count >= (int)n) {
+        sem->count -= (int)n;
+        spinlock_release_safe(&sem->lock, flags);
+        return 1;
+    }
+    spinlock_release_safe(&sem->lock, flags);
+    return 0;
 }
 
 static void sem_wake_all(semaphore_t* sem) {
@@ -124,6 +136,110 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
         sem_give_n(&p->sem_write, n);
     }
     return (int)read_count;
+}
+
+int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
+    if (!node || !buffer || size == 0) return 0;
+    if ((node->flags & VFS_FLAG_PIPE_READ) == 0) return -1;
+
+    pipe_t* p = (pipe_t*)node->private_data;
+    char* buf = (char*)buffer;
+
+    uint32_t flags = spinlock_acquire_safe(&p->lock);
+    uint32_t available = p->write_ptr - p->read_ptr;
+    int writers = p->writers;
+    spinlock_release_safe(&p->lock, flags);
+
+    if (available == 0) {
+        if (writers == 0) return -1;
+        return 0;
+    }
+
+    uint32_t want = size;
+    if (want > PIPE_BATCH) want = PIPE_BATCH;
+
+    uint32_t take = 0;
+    while (take < want && sem_try_acquire(&p->sem_read)) {
+        take++;
+    }
+    if (take == 0) return 0;
+
+    flags = spinlock_acquire_safe(&p->lock);
+    uint32_t now_avail = p->write_ptr - p->read_ptr;
+
+    if (now_avail == 0 && p->writers == 0) {
+        spinlock_release_safe(&p->lock, flags);
+        sem_give_n(&p->sem_read, take);
+        return -1;
+    }
+
+    uint32_t n = take;
+    if (n > now_avail) n = now_avail;
+
+    uint32_t rp = p->read_ptr % PIPE_SIZE;
+    uint32_t contig = PIPE_SIZE - rp;
+
+    uint32_t n1 = n;
+    if (n1 > contig) n1 = contig;
+    memcpy(&buf[0], &p->buffer[rp], n1);
+    p->read_ptr += n1;
+
+    uint32_t n2 = n - n1;
+    if (n2 > 0) {
+        memcpy(&buf[n1], &p->buffer[0], n2);
+        p->read_ptr += n2;
+    }
+
+    spinlock_release_safe(&p->lock, flags);
+
+    if (n < take) {
+        sem_give_n(&p->sem_read, take - n);
+    }
+    sem_give_n(&p->sem_write, n);
+    return (int)n;
+}
+
+int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
+    if (!node || !buffer || size == 0) return 0;
+    if ((node->flags & VFS_FLAG_PIPE_WRITE) == 0) return -1;
+    if (size > PIPE_SIZE) return 0;
+
+    pipe_t* p = (pipe_t*)node->private_data;
+    const char* buf = (const char*)buffer;
+
+    uint32_t flags = spinlock_acquire_safe(&p->lock);
+    int readers = p->readers;
+    spinlock_release_safe(&p->lock, flags);
+    if (readers == 0) return -1;
+
+    if (!sem_try_take_n(&p->sem_write, size)) {
+        return 0;
+    }
+
+    flags = spinlock_acquire_safe(&p->lock);
+    if (p->readers == 0) {
+        spinlock_release_safe(&p->lock, flags);
+        sem_give_n(&p->sem_write, size);
+        return -1;
+    }
+
+    uint32_t wp = p->write_ptr % PIPE_SIZE;
+    uint32_t contig = PIPE_SIZE - wp;
+
+    uint32_t n1 = size;
+    if (n1 > contig) n1 = contig;
+    memcpy(&p->buffer[wp], &buf[0], n1);
+    p->write_ptr += n1;
+
+    uint32_t n2 = size - n1;
+    if (n2 > 0) {
+        memcpy(&p->buffer[0], &buf[n1], n2);
+        p->write_ptr += n2;
+    }
+
+    spinlock_release_safe(&p->lock, flags);
+    sem_give_n(&p->sem_read, size);
+    return (int)size;
 }
 
 static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {

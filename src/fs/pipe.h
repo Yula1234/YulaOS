@@ -8,4 +8,8 @@
 
 int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node);
 
+int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer);
+
+int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer);
+
 #endif

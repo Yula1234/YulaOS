@@ -10,6 +10,7 @@
 #include <drivers/keyboard.h>
 #include <drivers/console.h>
 #include <drivers/mouse.h>
+#include <drivers/fbdev.h>
 #include <drivers/ahci.h>
 #include <drivers/uhci.h>
 #include <drivers/acpi.h> 
@@ -17,8 +18,7 @@
 #include <drivers/pci.h>
 
 #include <kernel/clipboard.h>
-#include <kernel/gui_task.h>
-#include <kernel/window.h>
+#include <kernel/tty.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
@@ -84,6 +84,22 @@ typedef struct {
     uint32_t framebuffer_height;
     uint8_t  framebuffer_bpp;
     uint8_t  framebuffer_type;
+
+    union {
+        struct {
+            uint32_t framebuffer_palette_addr;
+            uint16_t framebuffer_palette_num_colors;
+        } __attribute__((packed)) palette;
+
+        struct {
+            uint8_t framebuffer_red_field_position;
+            uint8_t framebuffer_red_mask_size;
+            uint8_t framebuffer_green_field_position;
+            uint8_t framebuffer_green_mask_size;
+            uint8_t framebuffer_blue_field_position;
+            uint8_t framebuffer_blue_mask_size;
+        } __attribute__((packed)) rgb;
+    } framebuffer_color_info;
 } __attribute__((packed)) multiboot_info_t;
 
 volatile uint32_t kernel_simd_caps;
@@ -202,28 +218,27 @@ void syncer_task(void* arg) {
 
 __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
     if (magic != 0x2BADB002) {
-        registers_t dummy_regs = {0};
-        kernel_panic("Invalid multiboot magic number", __FILE__, __LINE__, &dummy_regs);
+        __asm__ volatile("cli");
+        while (1) __asm__ volatile("hlt");
     }
 
     if (!(mb_info->flags & (1u << 12))) {
-        registers_t dummy_regs = {0};
-        kernel_panic("Bootloader did not provide framebuffer info", __FILE__, __LINE__, &dummy_regs);
+        __asm__ volatile("cli");
+        while (1) __asm__ volatile("hlt");
     }
 
     if (mb_info->framebuffer_type != 1 || mb_info->framebuffer_bpp != 32) {
-        registers_t dummy_regs = {0};
-        kernel_panic("Unsupported framebuffer mode (need 32bpp linear)", __FILE__, __LINE__, &dummy_regs);
+        __asm__ volatile("cli");
+        while (1) __asm__ volatile("hlt");
     }
 
     if (mb_info->framebuffer_width == 0 || mb_info->framebuffer_height == 0 ||
         mb_info->framebuffer_pitch < mb_info->framebuffer_width * 4) {
-        registers_t dummy_regs = {0};
-        kernel_panic("Invalid framebuffer parameters", __FILE__, __LINE__, &dummy_regs);
+        __asm__ volatile("cli");
+        while (1) __asm__ volatile("hlt");
     }
 
-    kernel_init_simd(); 
-
+    kernel_enable_sse();
     cpu_init_system();
 
     fb_ptr = (uint32_t*)(uint32_t)mb_info->framebuffer_addr;
@@ -234,6 +249,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     gdt_init();
     idt_init();
 
+    kernel_init_simd();
 
     lapic_init();
     lapic_timer_init(15000);
@@ -317,10 +333,10 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
      uint32_t fb_end = fb_base + fb_size;
      uint32_t fb_map_size = (fb_end - fb_page + 0xFFFu) & ~0xFFFu;
      for (uint32_t i = 0; i < fb_map_size; i += 4096) {
-         paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
-     }
+        paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
+    }
 
-     g_fb_mapped = 1;
+    g_fb_mapped = 1;
 
     acpi_init();
 
@@ -388,10 +404,12 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     yulafs_init();
     yulafs_lookup("/"); 
-
+ 
     kbd_vfs_init();
     console_init();
-
+    mouse_vfs_init();
+    fb_vfs_init();
+ 
     proc_init();
     sched_init();
 
@@ -401,10 +419,17 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     for (int i = 0; i < MAX_CPUS; i++) {
         cpus[i].idle_task = proc_create_idle(i);
     }
-    
-    window_init_system(); 
-
-    proc_spawn_kthread("gui", PRIO_GUI, gui_task, 0);
+     
+    task_t* tty_t = proc_spawn_kthread("tty", PRIO_GUI, tty_task, 0);
+    task_t* sh_t = proc_spawn_kthread("shell", PRIO_USER, shell_task, 0);
+    if (!tty_t || !sh_t) {
+        vga_set_target(0, 0, 0);
+        vga_draw_rect(0, 0, (int)fb_width, (int)fb_height, 0x000000);
+        vga_print_at("BOOT ERROR: kthread spawn failed", 16, 16, COLOR_RED);
+        vga_mark_dirty(0, 0, (int)fb_width, (int)fb_height);
+        vga_flip_dirty();
+        for (;;) __asm__ volatile("hlt");
+    }
 
     smp_boot_aps();
  

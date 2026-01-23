@@ -4,6 +4,7 @@
 #include <lib/string.h>
 #include <mm/heap.h>
 #include <hal/simd.h>
+#include <drivers/fbdev.h>
 
 #include "font8x16.h"
 
@@ -906,6 +907,8 @@ void vga_print_at(const char* s, int x, int y, uint32_t fg) {
 
 __attribute__((target("sse2")))
 void vga_flip() {
+    if (!fb_kernel_can_render()) return;
+
     uint32_t count = (fb_width * fb_height) / 4; 
     uint32_t* src = back_buffer;
     uint32_t* dst = fb_ptr;
@@ -2095,6 +2098,8 @@ static void vga_flip_dirty_avx_impl(int x1, int x2, int y1, int y2) {
  
 __attribute__((target("sse2")))
 void vga_flip_dirty() {
+    if (!fb_kernel_can_render()) return;
+
     if (dirty_x2 <= dirty_x1 || dirty_y2 <= dirty_y1) return;
 
     int x1 = dirty_x1 & ~3;
@@ -2111,5 +2116,160 @@ void vga_flip_dirty() {
         vga_flip_dirty_avx_impl(x1, x2, y1, y2);
     } else {
         vga_flip_dirty_sse2_impl(x1, x2, y1, y2);
+    }
+}
+
+__attribute__((target("sse2"))) __attribute__((always_inline))
+static inline void vga_present_row_sse2(uint8_t* d8, const uint8_t* s8, size_t bytes) {
+    while (bytes && (((uintptr_t)d8 & 0xFu) != 0u)) {
+        *(uint32_t*)d8 = *(const uint32_t*)s8;
+        d8 += 4;
+        s8 += 4;
+        bytes -= 4;
+    }
+
+    size_t blocks16 = bytes >> 4;
+    if (blocks16) {
+        __asm__ volatile(
+            "test %2, %2\n\t"
+            "jz 2f\n\t"
+            "1:\n\t"
+            "movdqu (%0), %%xmm0\n\t"
+            "movntdq %%xmm0, (%1)\n\t"
+            "add $16, %0\n\t"
+            "add $16, %1\n\t"
+            "dec %2\n\t"
+            "jnz 1b\n\t"
+            "2:\n\t"
+            : "+r"(s8), "+r"(d8), "+r"(blocks16)
+            :
+            : "memory", "xmm0", "cc"
+        );
+    }
+
+    bytes &= 15u;
+    while (bytes) {
+        *(uint32_t*)d8 = *(const uint32_t*)s8;
+        d8 += 4;
+        s8 += 4;
+        bytes -= 4;
+    }
+}
+
+__attribute__((target("avx"))) __attribute__((always_inline))
+static inline void vga_present_row_avx(uint8_t* d8, const uint8_t* s8, size_t bytes) {
+    while (bytes && (((uintptr_t)d8 & 0x1Fu) != 0u)) {
+        *(uint32_t*)d8 = *(const uint32_t*)s8;
+        d8 += 4;
+        s8 += 4;
+        bytes -= 4;
+    }
+
+    size_t blocks32 = bytes >> 5;
+    if (blocks32) {
+        __asm__ volatile(
+            "test %2, %2\n\t"
+            "jz 2f\n\t"
+            "1:\n\t"
+            "vmovdqu (%0), %%ymm0\n\t"
+            "vmovntdq %%ymm0, (%1)\n\t"
+            "add $32, %0\n\t"
+            "add $32, %1\n\t"
+            "dec %2\n\t"
+            "jnz 1b\n\t"
+            "2:\n\t"
+            : "+r"(s8), "+r"(d8), "+r"(blocks32)
+            :
+            : "memory", "ymm0", "cc"
+        );
+    }
+
+    bytes &= 31u;
+    size_t blocks16 = bytes >> 4;
+    if (blocks16) {
+        __asm__ volatile(
+            "test %2, %2\n\t"
+            "jz 2f\n\t"
+            "1:\n\t"
+            "vmovdqu (%0), %%xmm0\n\t"
+            "vmovntdq %%xmm0, (%1)\n\t"
+            "add $16, %0\n\t"
+            "add $16, %1\n\t"
+            "dec %2\n\t"
+            "jnz 1b\n\t"
+            "2:\n\t"
+            : "+r"(s8), "+r"(d8), "+r"(blocks16)
+            :
+            : "memory", "xmm0", "cc"
+        );
+    }
+
+    bytes &= 15u;
+    while (bytes) {
+        *(uint32_t*)d8 = *(const uint32_t*)s8;
+        d8 += 4;
+        s8 += 4;
+        bytes -= 4;
+    }
+}
+
+__attribute__((target("sse2")))
+static void vga_present_rect_sse2_impl(const uint8_t* src_base, uint32_t src_stride, int x1, int x2, int y1, int y2) {
+    int width_pixels = x2 - x1;
+    if (width_pixels <= 0) return;
+
+    size_t row_bytes = (size_t)width_pixels * 4u;
+    for (int y = y1; y < y2; y++) {
+        const uint8_t* s8 = src_base + (size_t)y * (size_t)src_stride + (size_t)x1 * 4u;
+        uint8_t* d8 = (uint8_t*)fb_ptr + (size_t)y * (size_t)fb_pitch + (size_t)x1 * 4u;
+        vga_present_row_sse2(d8, s8, row_bytes);
+    }
+
+    __asm__ volatile("sfence" ::: "memory");
+}
+
+__attribute__((target("avx")))
+static void vga_present_rect_avx_impl(const uint8_t* src_base, uint32_t src_stride, int x1, int x2, int y1, int y2) {
+    int width_pixels = x2 - x1;
+    if (width_pixels <= 0) return;
+
+    size_t row_bytes = (size_t)width_pixels * 4u;
+    for (int y = y1; y < y2; y++) {
+        const uint8_t* s8 = src_base + (size_t)y * (size_t)src_stride + (size_t)x1 * 4u;
+        uint8_t* d8 = (uint8_t*)fb_ptr + (size_t)y * (size_t)fb_pitch + (size_t)x1 * 4u;
+        vga_present_row_avx(d8, s8, row_bytes);
+    }
+
+    __asm__ volatile("sfence" ::: "memory");
+    __asm__ volatile("vzeroupper" ::: "memory");
+}
+
+void vga_present_rect(const void* src, uint32_t src_stride, int x, int y, int w, int h) {
+    if (!src) return;
+    if (w <= 0 || h <= 0) return;
+
+    if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) return;
+
+    int x1 = x;
+    int y1 = y;
+    int x2 = x + w;
+    int y2 = y + h;
+
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > (int)fb_width) x2 = (int)fb_width;
+    if (y2 > (int)fb_height) y2 = (int)fb_height;
+    if (x1 >= x2 || y1 >= y2) return;
+
+    x1 &= ~3;
+    x2 = (x2 + 3) & ~3;
+    if (x2 > (int)fb_width) x2 = (int)fb_width;
+    if (x1 >= x2) return;
+
+    const uint8_t* src_base = (const uint8_t*)src;
+    if (vga_can_use_avx()) {
+        vga_present_rect_avx_impl(src_base, src_stride, x1, x2, y1, y2);
+    } else {
+        vga_present_rect_sse2_impl(src_base, src_stride, x1, x2, y1, y2);
     }
 }

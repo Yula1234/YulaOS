@@ -8,6 +8,12 @@
 
 #include <arch/i386/idt.h>
 
+typedef struct {
+    int32_t x;
+    int32_t y;
+    int32_t buttons;
+} mouse_state_t;
+
 extern int mouse_x, mouse_y;
 extern int mouse_buttons;
 
@@ -18,5 +24,7 @@ void mouse_irq_handler(registers_t* regs);
 
 void mouse_wait(uint8_t type);
 void mouse_write(uint8_t a);
+
+void mouse_vfs_init(void);
 
 #endif

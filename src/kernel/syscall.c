@@ -2,11 +2,17 @@
 // Copyright (C) 2025 Yula1234
 
 #include <arch/i386/paging.h>
-#include <kernel/window.h>
 #include <lib/string.h>
+#include <hal/lock.h>
+#include <hal/simd.h>
 
 #include <drivers/vga.h>
 #include <drivers/keyboard.h>
+#include <drivers/fbdev.h>
+#include <kernel/input_focus.h>
+#include <kernel/rtc.h>
+#include <kernel/shm.h>
+#include <kernel/ipc_endpoint.h>
 
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
@@ -19,10 +25,18 @@
 #include "syscall.h"
 #include "sched.h"
 #include "proc.h"
+#include "cpu.h"
 
 extern volatile uint32_t timer_ticks;
 
+extern uint32_t* fb_ptr;
+extern uint32_t  fb_width;
+extern uint32_t  fb_height;
+extern uint32_t  fb_pitch;
+
 extern uint32_t* paging_get_dir(void); 
+
+extern int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h);
 
 static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     if (!buf) return 0;
@@ -37,6 +51,81 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     if (!task || !task->page_dir) return 0;
 
     return 1;
+}
+
+static void prefault_user_read(const void* p, uint32_t len) {
+    if (!p || len == 0) return;
+
+    uintptr_t addr = (uintptr_t)p;
+    uintptr_t end = addr + (uintptr_t)len - 1u;
+    if (end < addr) return;
+
+    for (uintptr_t cur = addr; cur <= end;) {
+        (void)*(volatile const uint8_t*)cur;
+        uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
+        if (next <= cur) break;
+        cur = next;
+    }
+}
+
+static uint8_t fb_present_fpu_tmp[MAX_CPUS][4096] __attribute__((aligned(64)));
+
+__attribute__((always_inline))
+static inline uint32_t irq_save_disable(void) {
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+__attribute__((always_inline))
+static inline void irq_restore(uint32_t flags) {
+    __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory", "cc");
+}
+
+static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr);
+
+static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
+    if (!t || !t->page_dir) return 0;
+    if (end_excl <= start) return 0;
+
+    if (start < 0x08000000u || end_excl > 0xC0000000u) return 0;
+
+    uintptr_t cur = start;
+    while (cur < end_excl) {
+        uint32_t v = (uint32_t)cur;
+
+        if (t->stack_bottom < t->stack_top && v >= t->stack_bottom && v < t->stack_top) {
+            uintptr_t lim = (uintptr_t)t->stack_top;
+            cur = (end_excl < lim) ? end_excl : lim;
+            continue;
+        }
+
+        if (t->heap_start < t->prog_break && v >= t->heap_start && v < t->prog_break) {
+            uintptr_t lim = (uintptr_t)t->prog_break;
+            cur = (end_excl < lim) ? end_excl : lim;
+            continue;
+        }
+
+        mmap_area_t* m = mmap_find_area(t, v);
+        if (!m) return 0;
+        if (m->vaddr_start >= m->vaddr_end) return 0;
+        if (v < m->vaddr_start || v >= m->vaddr_end) return 0;
+
+        uintptr_t lim = (uintptr_t)m->vaddr_end;
+        cur = (end_excl < lim) ? end_excl : lim;
+    }
+    return 1;
+}
+
+static void vfs_node_release(vfs_node_t* node) {
+    if (!node) return;
+    if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
+        if (node->ops && node->ops->close) {
+            node->ops->close(node);
+        } else {
+            kfree(node);
+        }
+    }
 }
 
 static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
@@ -56,6 +145,38 @@ static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pt
     return 1;
 }
 
+static int check_user_buffer_present(task_t* task, const void* buf, uint32_t size) {
+    if (!check_user_buffer(task, buf, size)) return 0;
+    if (size == 0) return 1;
+
+    uint32_t start = (uint32_t)buf;
+    uint32_t end = start + size;
+    if (end < start) return 0;
+
+    uint32_t v = start & ~0xFFFu;
+    uint32_t v_end = (end + 0xFFFu) & ~0xFFFu;
+    for (; v < v_end; v += 4096u) {
+        uint32_t pte;
+        if (!paging_get_present_pte(task->page_dir, v, &pte)) return 0;
+        if ((pte & 4u) == 0) return 0;
+    }
+    return 1;
+}
+
+static int copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, const char* user_src) {
+    if (!task || !dst || dst_size == 0 || !user_src) return -1;
+
+    for (uint32_t i = 0; i < dst_size; i++) {
+        const void* p = (const void*)((uint32_t)user_src + i);
+        if (!check_user_buffer_present(task, p, 1)) return -1;
+        char c = *(const char*)p;
+        dst[i] = c;
+        if (c == '\0') return 0;
+    }
+
+    return -1;
+}
+
 static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
     if (!t) return 0;
     mmap_area_t* m = t->mmap_list;
@@ -66,11 +187,30 @@ static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
     return 0;
 }
 
+static inline uint32_t align_down_4k_u32(uint32_t v) {
+    return v & ~0xFFFu;
+}
+
+static inline uint32_t align_up_4k_u32(uint32_t v) {
+    return (v + 0xFFFu) & ~0xFFFu;
+}
+
+static inline int ranges_overlap_u32(uint32_t a_start, uint32_t a_end_excl, uint32_t b_start, uint32_t b_end_excl) {
+    return (a_start < b_end_excl) && (b_start < a_end_excl);
+}
+
+static mmap_area_t* mmap_find_overlap(task_t* t, uint32_t start, uint32_t end_excl) {
+    if (!t) return 0;
+    mmap_area_t* m = t->mmap_list;
+    while (m) {
+        if (ranges_overlap_u32(start, end_excl, m->vaddr_start, m->vaddr_end)) return m;
+        m = m->next;
+    }
+    return 0;
+}
+
 
 #define MAX_TASKS 32
-
-#define MAP_SHARED  1
-#define MAP_PRIVATE 2
 
 typedef struct {
     uint32_t type;  // 1=FILE, 2=DIR
@@ -83,7 +223,19 @@ typedef struct {
     uint32_t block_size;
 } __attribute__((packed)) user_fs_info_t;
 
-extern void wake_up_gui();
+typedef struct {
+    int32_t x;
+    int32_t y;
+    int32_t w;
+    int32_t h;
+} __attribute__((packed)) fb_rect_t;
+
+typedef struct {
+    const void* src;
+    uint32_t src_stride;
+    const fb_rect_t* rects;
+    uint32_t rect_count;
+} __attribute__((packed)) fb_present_req_t;
 
 void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti"); 
@@ -101,10 +253,138 @@ void syscall_handler(registers_t* regs) {
         {
             char* s = (char*)regs->ebx;
             if (curr->terminal) {
-                term_print((term_instance_t*)curr->terminal, s);
+                term_instance_t* term = (term_instance_t*)curr->terminal;
+                spinlock_acquire(&term->lock);
+                term_print(term, s);
+                spinlock_release(&term->lock);
             } else {
                 regs->eax = -1;
             }
+        }
+        break;
+
+        case 43: // shm_create(size)
+        {
+            uint32_t size = (uint32_t)regs->ebx;
+            if (size == 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            uint32_t pages = (size + 4095u) / 4096u;
+            if (pages == 0 || pages > 16384u) {
+                regs->eax = -1;
+                break;
+            }
+
+            vfs_node_t* node = shm_create_node(size);
+            if (!node) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* f = 0;
+            int fd = proc_fd_alloc(curr, &f);
+            if (fd < 0 || !f) {
+                if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
+                    if (node->ops && node->ops->close) node->ops->close(node);
+                    else kfree(node);
+                }
+                regs->eax = -1;
+                break;
+            }
+
+            f->node = node;
+            f->offset = 0;
+            f->used = 1;
+            regs->eax = fd;
+        }
+        break;
+
+        case 51:
+        {
+            const char* u_name = (const char*)regs->ebx;
+            uint32_t size = (uint32_t)regs->ecx;
+
+            if (size == 0) {
+                regs->eax = -1;
+                break;
+            }
+            uint32_t pages = (size + 4095u) / 4096u;
+            if (pages == 0 || pages > 16384u) {
+                regs->eax = -1;
+                break;
+            }
+
+            char name[32];
+            if (copy_user_str_bounded(curr, name, (uint32_t)sizeof(name), u_name) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            vfs_node_t* node = shm_create_named_node(name, size);
+            if (!node) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* f = 0;
+            int fd = proc_fd_alloc(curr, &f);
+            if (fd < 0 || !f) {
+                vfs_node_release(node);
+                regs->eax = -1;
+                break;
+            }
+
+            f->node = node;
+            f->offset = 0;
+            f->used = 1;
+            regs->eax = fd;
+        }
+        break;
+
+        case 52:
+        {
+            const char* u_name = (const char*)regs->ebx;
+
+            char name[32];
+            if (copy_user_str_bounded(curr, name, (uint32_t)sizeof(name), u_name) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            vfs_node_t* node = shm_open_named_node(name);
+            if (!node) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* f = 0;
+            int fd = proc_fd_alloc(curr, &f);
+            if (fd < 0 || !f) {
+                vfs_node_release(node);
+                regs->eax = -1;
+                break;
+            }
+
+            f->node = node;
+            f->offset = 0;
+            f->used = 1;
+            regs->eax = fd;
+        }
+        break;
+
+        case 53:
+        {
+            const char* u_name = (const char*)regs->ebx;
+
+            char name[32];
+            if (copy_user_str_bounded(curr, name, (uint32_t)sizeof(name), u_name) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            regs->eax = shm_unlink_named(name);
         }
         break;
 
@@ -171,6 +451,27 @@ void syscall_handler(registers_t* regs) {
                 break;
             }
 
+            if (incr > 0) {
+                uint32_t chk_start = align_down_4k_u32(old_brk);
+                uint32_t chk_end_excl = align_up_4k_u32(new_brk);
+                if (chk_end_excl < chk_start) {
+                    regs->eax = -1;
+                    break;
+                }
+
+                if (curr->stack_bottom < curr->stack_top) {
+                    if (ranges_overlap_u32(chk_start, chk_end_excl, curr->stack_bottom, curr->stack_top)) {
+                        regs->eax = -1;
+                        break;
+                    }
+                }
+
+                if (mmap_find_overlap(curr, chk_start, chk_end_excl)) {
+                    regs->eax = -1;
+                    break;
+                }
+            }
+
             if (incr < 0) {
                 uint32_t start_free = (new_brk + 0xFFF) & ~0xFFF;
                 uint32_t end_free   = (old_brk + 0xFFF) & ~0xFFF;
@@ -191,6 +492,15 @@ void syscall_handler(registers_t* regs) {
             }
             
             curr->prog_break = new_brk;
+
+            if (incr > 0) {
+                uint64_t guard64 = 0x100000ull;
+                uint64_t need64 = (uint64_t)new_brk + guard64;
+                if (need64 < 0xC0000000ull) {
+                    uint32_t need = align_up_4k_u32((uint32_t)need64);
+                    if (curr->mmap_top < need) curr->mmap_top = need;
+                }
+            }
             regs->eax = old_brk;
         }
         break;
@@ -258,7 +568,6 @@ void syscall_handler(registers_t* regs) {
         case 15: // get_time(char* buf)
         {
             if (check_user_buffer(curr, (void*)regs->ebx, 9)) {
-                extern void get_time_string(char* buf);
                 get_time_string((char*)regs->ebx);
                 regs->eax = 0;
             } else regs->eax = -1;
@@ -284,156 +593,12 @@ void syscall_handler(registers_t* regs) {
             curr->is_running_signal = 0;
             break;
 
-        case 20: // create_window(w, h, title)
-        {
-            int req_w = regs->ebx;
-            int req_h = regs->ecx;
-            char* user_title = (char*)regs->edx;
-
-            char k_title[32];
-            if (user_title) {
-                strlcpy(k_title, user_title, 32);
-            } else {
-                strlcpy(k_title, "User Window", 32);
-            }
-
-            int total_w = req_w + 12;
-            int total_h = req_h + 44;
-            
-            window_t* win = window_create(100, 100, total_w, total_h, k_title, 0);
-
-            if (win) {
-                curr->term_mode = 0; 
-                regs->eax = win->window_id;
-            } else {
-                regs->eax = -1;
-            }
-        }
-        break;
-
-        case 21: // map_window(win_id)
-        {
-            int id = regs->ebx;
-            window_t* win = window_find_by_id(id);
-            if (!win || !win->is_active) {
-                regs->eax = 0; break;
-            }
-            
-            sem_wait(&win->lock);
-            if (win->owner_pid != (int)curr->pid || !win->canvas) {
-                sem_signal(&win->lock);
-                regs->eax = 0; 
-                break;
-            }
-
-            uint32_t user_vaddr_start = 0xA0000000;
-            
-            int canvas_w = win->target_w - 12;
-            int canvas_h = win->target_h - 44;
-            
-            if (canvas_w <= 0 || canvas_h <= 0) {
-                sem_signal(&win->lock);
-                regs->eax = 0;
-                break;
-            }
-            
-            uint32_t size_bytes = canvas_w * canvas_h * 4;
-            uint32_t pages = (size_bytes + 0xFFF) / 4096;
-            
-            uint32_t kern_vaddr = (uint32_t)win->canvas;
-
-            sem_signal(&win->lock);
-
-            if (curr->winmap_pages > 0) {
-                for (uint32_t i = 0; i < curr->winmap_pages; i++) {
-                    uint32_t v = user_vaddr_start + i * 4096;
-                    if (paging_is_user_accessible(curr->page_dir, v)) {
-                        paging_map(curr->page_dir, v, 0, 0);
-                    }
-                }
-                if (curr->mem_pages >= curr->winmap_pages) curr->mem_pages -= curr->winmap_pages;
-                else curr->mem_pages = 0;
-                curr->winmap_pages = 0;
-                curr->winmap_win_id = 0;
-            }
-
-            uint32_t mapped_pages = 0;
-
-            for (uint32_t i = 0; i < pages; i++) {
-                uint32_t offset = i * 4096;
-                uint32_t phys = paging_get_phys(kernel_page_directory, kern_vaddr + offset);
-                if (phys) {
-                    paging_map(curr->page_dir, user_vaddr_start + offset, phys, 0x207);
-                    curr->mem_pages++;
-                    mapped_pages++;
-                }
-            }
-
-            curr->winmap_pages = mapped_pages;
-            curr->winmap_win_id = id;
-
-            win = window_find_by_id(id);
-            if (win && win->is_active) {
-                sem_wait(&win->lock);
-                if (win->owner_pid == (int)curr->pid && win->old_canvas) {
-                    kfree(win->old_canvas);
-                    win->old_canvas = 0;
-                }
-                sem_signal(&win->lock);
-            }
-
-            __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
-            regs->eax = user_vaddr_start;
-        }
-        break;
-        
-        case 22: // update_window(win_id)
-        {
-            int id = regs->ebx;
-            window_t* win = window_find_by_id(id);
-            if (win && win->is_active) {
-                sem_wait(&win->lock);
-                if (win->is_active && win->owner_pid == (int)curr->pid) {
-                    win->is_dirty = 1;
-                }
-                sem_signal(&win->lock);
-                wake_up_gui();
-            }
-        }
-        break;
-
-        case 23: // get_event(win_id, buffer_ptr) -> returns 1 if event found, 0 if empty
-        {
-            int id = regs->ebx;
-            yula_event_t* user_ev = (yula_event_t*)regs->ecx;
-            
-            if (!user_ev || !check_user_buffer(curr, user_ev, sizeof(yula_event_t))) {
-                regs->eax = 0;
-                break;
-            }
-            
-            window_t* win = window_find_by_id(id);
-            if (win && win->is_active) {
-                sem_wait(&win->lock);
-                int is_owner = (win->owner_pid == (int)curr->pid);
-                sem_signal(&win->lock);
-                
-                if (is_owner) {
-                    yula_event_t k_ev;
-                    if (window_pop_event(win, &k_ev)) {
-                        *user_ev = k_ev;
-                        regs->eax = 1;
-                    } else {
-                        regs->eax = 0;
-                    }
-                } else {
-                    regs->eax = 0;
-                }
-            } else {
-                regs->eax = 0;
-            }
-        }
-        break;
+        case 20: // (removed) create_window
+        case 21: // (removed) map_window
+        case 22: // (removed) update_window
+        case 23: // (removed) get_event
+            regs->eax = (uint32_t)-1;
+            break;
 
         case 25: // set_clipboard(buf, len)
         {
@@ -467,6 +632,150 @@ void syscall_handler(registers_t* regs) {
         }
         break;
 
+        case 50:
+        {
+            const fb_present_req_t* u_req = (const fb_present_req_t*)regs->ebx;
+
+            if (fb_get_owner_pid() != curr->pid) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!check_user_buffer(curr, u_req, (uint32_t)sizeof(*u_req))) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!user_range_mappable(curr, (uintptr_t)u_req, (uintptr_t)u_req + (uintptr_t)sizeof(*u_req))) {
+                regs->eax = -1;
+                break;
+            }
+
+            fb_present_req_t req = *u_req;
+
+            if (!req.src || req.src_stride == 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (req.rect_count == 0) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (!req.rects) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (req.rect_count > 4096u) {
+                regs->eax = -1;
+                break;
+            }
+
+            uint32_t min_stride = fb_width * 4u;
+            if (req.src_stride < min_stride) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!check_user_buffer(curr, req.rects, req.rect_count * (uint32_t)sizeof(fb_rect_t))) {
+                regs->eax = -1;
+                break;
+            }
+
+            {
+                uintptr_t rs = (uintptr_t)req.rects;
+                uintptr_t re = rs + (uintptr_t)req.rect_count * (uintptr_t)sizeof(fb_rect_t);
+                if (re < rs || !user_range_mappable(curr, rs, re)) {
+                    regs->eax = -1;
+                    break;
+                }
+            }
+
+            uint32_t fpu_sz = fpu_state_size();
+            if (fpu_sz == 0 || fpu_sz > 4096u) {
+                regs->eax = -1;
+                break;
+            }
+
+            const fb_rect_t* rects = req.rects;
+            for (uint32_t i = 0; i < req.rect_count; i++) {
+                fb_rect_t r = rects[i];
+                if (r.w <= 0 || r.h <= 0) continue;
+
+                int64_t x1_64 = (int64_t)r.x;
+                int64_t y1_64 = (int64_t)r.y;
+                int64_t x2_64 = (int64_t)r.x + (int64_t)r.w;
+                int64_t y2_64 = (int64_t)r.y + (int64_t)r.h;
+
+                if (x2_64 <= 0 || y2_64 <= 0) continue;
+                if (x1_64 >= (int64_t)fb_width || y1_64 >= (int64_t)fb_height) continue;
+
+                int x1 = (int)x1_64;
+                int y1 = (int)y1_64;
+                int x2 = (int)x2_64;
+                int y2 = (int)y2_64;
+
+                if (x1 < 0) x1 = 0;
+                if (y1 < 0) y1 = 0;
+                if (x2 > (int)fb_width) x2 = (int)fb_width;
+                if (y2 > (int)fb_height) y2 = (int)fb_height;
+                if (x1 >= x2 || y1 >= y2) continue;
+
+                x1 &= ~3;
+                x2 = (x2 + 3) & ~3;
+                if (x2 > (int)fb_width) x2 = (int)fb_width;
+                if (x1 >= x2) continue;
+
+                uint32_t row_bytes = (uint32_t)((uint32_t)(x2 - x1) * 4u);
+                const uint8_t* src_base = (const uint8_t*)req.src;
+                for (int y = y1; y < y2; y++) {
+                    uint64_t row_off = (uint64_t)(uint32_t)y * (uint64_t)req.src_stride + (uint64_t)(uint32_t)x1 * 4ull;
+                    uint64_t row_addr = (uint64_t)(uintptr_t)src_base + row_off;
+                    uint64_t row_end_excl = row_addr + (uint64_t)row_bytes;
+
+                    if (row_end_excl < row_addr || row_addr < 0x08000000ull || row_end_excl > 0xC0000000ull) {
+                        regs->eax = -1;
+                        goto fb_present_done;
+                    }
+
+                    if (!user_range_mappable(curr, (uintptr_t)row_addr, (uintptr_t)row_end_excl)) {
+                        regs->eax = -1;
+                        goto fb_present_done;
+                    }
+
+                    prefault_user_read((const void*)(uintptr_t)row_addr, row_bytes);
+                }
+
+                cpu_t* cpu = cpu_current();
+                if (!cpu || cpu->index < 0 || cpu->index >= MAX_CPUS) {
+                    regs->eax = -1;
+                    goto fb_present_done;
+                }
+
+                uint8_t* fpu_tmp = &fb_present_fpu_tmp[cpu->index][0];
+                uint32_t irq_flags = irq_save_disable();
+                fpu_save(fpu_tmp);
+
+                smp_fb_present_rect(curr, req.src, req.src_stride, x1, y1, x2 - x1, y2 - y1);
+
+                fpu_restore(fpu_tmp);
+                irq_restore(irq_flags);
+            }
+
+fb_present_done:
+            if (regs->eax != (uint32_t)-1) {
+                regs->eax = 0;
+            }
+        }
+        break;
+
         case 28: // set_console_color(fg, bg)
         {
             uint32_t fg = (uint32_t)regs->ebx;
@@ -474,8 +783,10 @@ void syscall_handler(registers_t* regs) {
             
             if (curr->terminal) {
                 term_instance_t* term = (term_instance_t*)curr->terminal;
+                spinlock_acquire(&term->lock);
                 term->curr_fg = fg;
                 term->curr_bg = bg;
+                spinlock_release(&term->lock);
             }
             regs->eax = 0;
         }
@@ -529,6 +840,232 @@ void syscall_handler(registers_t* regs) {
         }
         break;
 
+        case 44: // pipe_try_read(fd, buf, size)
+        {
+            int fd = (int)regs->ebx;
+            void* buf = (void*)regs->ecx;
+            uint32_t size = (uint32_t)regs->edx;
+
+            if (!check_user_buffer(curr, buf, size)) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* f = proc_fd_get(curr, fd);
+            if (!f || !f->used || !f->node) {
+                regs->eax = -1;
+                break;
+            }
+
+            regs->eax = pipe_read_nonblock(f->node, size, buf);
+        }
+        break;
+
+        case 45: // pipe_try_write(fd, buf, size)
+        {
+            int fd = (int)regs->ebx;
+            const void* buf = (const void*)regs->ecx;
+            uint32_t size = (uint32_t)regs->edx;
+
+            if (!check_user_buffer(curr, buf, size)) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* f = proc_fd_get(curr, fd);
+            if (!f || !f->used || !f->node) {
+                regs->eax = -1;
+                break;
+            }
+
+            regs->eax = pipe_write_nonblock(f->node, size, buf);
+        }
+        break;
+
+        case 46: // kbd_try_read(char* out)
+        {
+            char* out = (char*)regs->ebx;
+            if (!check_user_buffer(curr, out, 1)) {
+                regs->eax = -1;
+                break;
+            }
+
+            uint32_t focus_pid = input_focus_get_pid();
+            if (focus_pid > 0 && curr && curr->pid != focus_pid) {
+                regs->eax = 0;
+                break;
+            }
+
+            char c = 0;
+            if (!kbd_try_read_char(&c)) {
+                regs->eax = 0;
+                break;
+            }
+
+            out[0] = c;
+            regs->eax = 1;
+        }
+        break;
+
+        case 47:
+        {
+            const char* u_name = (const char*)regs->ebx;
+            char name[32];
+
+            if (copy_user_str_bounded(curr, name, (uint32_t)sizeof(name), u_name) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            vfs_node_t* node = ipc_listen_create(name);
+            if (!node) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* f = 0;
+            int fd = proc_fd_alloc(curr, &f);
+            if (fd < 0 || !f) {
+                vfs_node_release(node);
+                regs->eax = -1;
+                break;
+            }
+
+            f->node = node;
+            f->offset = 0;
+            f->used = 1;
+            regs->eax = fd;
+        }
+        break;
+
+        case 48:
+        {
+            int listen_fd = (int)regs->ebx;
+            int* out_fds = (int*)regs->ecx;
+
+            if (!check_user_buffer_present(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* lf = proc_fd_get(curr, listen_fd);
+            if (!lf || !lf->used || !lf->node) {
+                regs->eax = -1;
+                break;
+            }
+            if ((lf->node->flags & VFS_FLAG_IPC_LISTEN) == 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            vfs_node_t* in_r = 0;
+            vfs_node_t* out_w = 0;
+            int ar = ipc_accept(lf->node, &in_r, &out_w);
+            if (ar <= 0) {
+                regs->eax = ar;
+                break;
+            }
+
+            file_t* fr = 0;
+            file_t* fw = 0;
+
+            int fd_r = proc_fd_alloc(curr, &fr);
+            if (fd_r < 0 || !fr) {
+                vfs_node_release(in_r);
+                vfs_node_release(out_w);
+                regs->eax = -1;
+                break;
+            }
+
+            int fd_w = proc_fd_alloc(curr, &fw);
+            if (fd_w < 0 || !fw) {
+                file_t tmp;
+                memset(&tmp, 0, sizeof(tmp));
+                proc_fd_remove(curr, fd_r, &tmp);
+
+                vfs_node_release(in_r);
+                vfs_node_release(out_w);
+                regs->eax = -1;
+                break;
+            }
+
+            fr->node = in_r;
+            fr->offset = 0;
+            fr->used = 1;
+
+            fw->node = out_w;
+            fw->offset = 0;
+            fw->used = 1;
+
+            out_fds[0] = fd_r;
+            out_fds[1] = fd_w;
+            regs->eax = 1;
+        }
+        break;
+
+        case 49:
+        {
+            const char* u_name = (const char*)regs->ebx;
+            int* out_fds = (int*)regs->ecx;
+
+            if (!check_user_buffer_present(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
+                regs->eax = -1;
+                break;
+            }
+
+            char name[32];
+            if (copy_user_str_bounded(curr, name, (uint32_t)sizeof(name), u_name) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            vfs_node_t* in_w = 0;
+            vfs_node_t* out_r = 0;
+            void* pending = 0;
+            if (ipc_connect(name, &in_w, &out_r, &pending) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            file_t* fr = 0;
+            file_t* fw = 0;
+
+            int fd_r = proc_fd_alloc(curr, &fr);
+            if (fd_r < 0 || !fr) {
+                ipc_connect_cancel(pending);
+                vfs_node_release(in_w);
+                vfs_node_release(out_r);
+                regs->eax = -1;
+                break;
+            }
+
+            int fd_w = proc_fd_alloc(curr, &fw);
+            if (fd_w < 0 || !fw) {
+                file_t tmp;
+                memset(&tmp, 0, sizeof(tmp));
+                proc_fd_remove(curr, fd_r, &tmp);
+
+                ipc_connect_cancel(pending);
+                vfs_node_release(in_w);
+                vfs_node_release(out_r);
+                regs->eax = -1;
+                break;
+            }
+
+            fr->node = out_r;
+            fr->offset = 0;
+            fr->used = 1;
+
+            fw->node = in_w;
+            fw->offset = 0;
+            fw->used = 1;
+
+            out_fds[0] = fd_r;
+            out_fds[1] = fd_w;
+            regs->eax = 0;
+        }
+        break;
+
         case 30: // dup2(oldfd, newfd)
         {
             int oldfd = (int)regs->ebx;
@@ -571,12 +1108,23 @@ void syscall_handler(registers_t* regs) {
             uint32_t size = (uint32_t)regs->ecx;
             int flags = (int)regs->edx;
 
-            if (!(flags & MAP_PRIVATE)) {
+            uint32_t map_kind = (uint32_t)flags & (MAP_PRIVATE | MAP_SHARED);
+            if (!(map_kind == MAP_PRIVATE || map_kind == MAP_SHARED)) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (((uint32_t)flags & ~(MAP_PRIVATE | MAP_SHARED)) != 0) {
                 regs->eax = 0;
                 break;
             }
 
             if (size == 0) { regs->eax = 0; break; }
+
+            if (size > 0xFFFFFFFFu - 4095u) {
+                regs->eax = 0;
+                break;
+            }
 
             file_t* f = proc_fd_get(curr, fd);
             if (fd < 0 || !f || !f->used || !f->node) {
@@ -584,9 +1132,82 @@ void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            uint32_t vaddr = curr->mmap_top;
-            
+            if (f->node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (f->node->flags & VFS_FLAG_SHM) {
+                if (map_kind != MAP_SHARED) {
+                    regs->eax = 0;
+                    break;
+                }
+                if (!f->node->private_data) {
+                    regs->eax = 0;
+                    break;
+                }
+                if (size > f->node->size) {
+                    regs->eax = 0;
+                    break;
+                }
+            } else {
+                if (map_kind == MAP_SHARED) {
+                    regs->eax = 0;
+                    break;
+                }
+                if (!f->node->ops || !f->node->ops->read) {
+                    regs->eax = 0;
+                    break;
+                }
+            }
+
             uint32_t size_aligned = (size + 4095) & ~4095;
+            uint32_t vaddr = align_up_4k_u32(curr->mmap_top);
+
+            if (curr->heap_start < curr->prog_break) {
+                uint64_t need64 = (uint64_t)curr->prog_break + 0x100000ull;
+                if (need64 < 0xC0000000ull) {
+                    uint32_t need = align_up_4k_u32((uint32_t)need64);
+                    if (vaddr < need) vaddr = need;
+                }
+            }
+
+            int found = 0;
+            for (int iter = 0; iter < 256; iter++) {
+                uint32_t end_excl = vaddr + size_aligned;
+                if (end_excl < vaddr || end_excl > 0xC0000000u) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                if (curr->stack_bottom < curr->stack_top) {
+                    if (ranges_overlap_u32(vaddr, end_excl, curr->stack_bottom, curr->stack_top)) {
+                        regs->eax = 0;
+                        break;
+                    }
+                }
+
+                if (curr->heap_start < curr->prog_break) {
+                    if (ranges_overlap_u32(vaddr, end_excl, curr->heap_start, curr->prog_break)) {
+                        vaddr = align_up_4k_u32(curr->prog_break + 0x100000u);
+                        continue;
+                    }
+                }
+
+                mmap_area_t* ov = mmap_find_overlap(curr, vaddr, end_excl);
+                if (ov) {
+                    vaddr = align_up_4k_u32(ov->vaddr_end);
+                    continue;
+                }
+
+                found = 1;
+                break;
+            }
+
+            if (!found) {
+                regs->eax = 0;
+                break;
+            }
 
             mmap_area_t* area = kmalloc(sizeof(mmap_area_t));
             if (!area) { regs->eax = 0; break; }
@@ -597,6 +1218,7 @@ void syscall_handler(registers_t* regs) {
             area->length = size;
             area->file = f->node;
             area->file_size = (f->node->size < size) ? f->node->size : size;
+            area->map_flags = map_kind;
 
             if (vaddr + size_aligned < vaddr || vaddr + size_aligned > 0xC0000000) {
                 kfree(area);
@@ -609,7 +1231,7 @@ void syscall_handler(registers_t* regs) {
             area->next = curr->mmap_list;
             curr->mmap_list = area;
 
-            curr->mmap_top += size_aligned;
+            curr->mmap_top = vaddr + size_aligned;
 
             regs->eax = vaddr;
         }
@@ -680,6 +1302,7 @@ void syscall_handler(registers_t* regs) {
                     new_right->vaddr_end   = m_end;
                     new_right->length      = right_len;
                     new_right->file        = m->file;
+                    new_right->map_flags   = m->map_flags;
                     new_right->next        = m->next;
 
                     if (m->file) {
@@ -711,7 +1334,7 @@ void syscall_handler(registers_t* regs) {
                         paging_map(curr->page_dir, curr_v, 0, 0);
 
                         uint32_t phys = pte & ~0xFFF;
-                        if (curr->mem_pages > 0) curr->mem_pages--;
+                        if ((pte & 0x200) == 0 && curr->mem_pages > 0) curr->mem_pages--;
                         if (phys && (pte & 0x200) == 0) {
                             pmm_free_block((void*)phys);
                         }
@@ -730,7 +1353,7 @@ void syscall_handler(registers_t* regs) {
                     paging_map(curr->page_dir, curr_v, 0, 0);
 
                     uint32_t phys = pte & ~0xFFF;
-                    if (curr->mem_pages > 0) curr->mem_pages--;
+                    if ((pte & 0x200) == 0 && curr->mem_pages > 0) curr->mem_pages--;
                     if (phys && (pte & 0x200) == 0) {
                         pmm_free_block((void*)phys);
                     }
@@ -937,6 +1560,95 @@ void syscall_handler(registers_t* regs) {
             }
 
             regs->eax = vfs_fstatat(dirfd, name, u_stat);
+        }
+        break;
+
+        case 40:
+        {
+            if (fb_get_owner_pid() != curr->pid) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) {
+                regs->eax = 0;
+                break;
+            }
+
+            const uint32_t user_vaddr_start = 0xB1000000u;
+
+            uint32_t fb_base = (uint32_t)fb_ptr;
+            uint32_t page_off = fb_base & 0xFFFu;
+            uint32_t fb_page = fb_base & ~0xFFFu;
+
+            uint32_t fb_size = fb_pitch * fb_height;
+            if (fb_size == 0) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (fb_size > 0xFFFFFFFFu - page_off) {
+                regs->eax = 0;
+                break;
+            }
+
+            uint32_t map_size = fb_size + page_off;
+            uint32_t pages = (map_size + 0xFFFu) / 4096u;
+
+            if (curr->fbmap_pages > 0) {
+                for (uint32_t i = 0; i < curr->fbmap_pages; i++) {
+                    uint32_t v = user_vaddr_start + i * 4096u;
+                    if (paging_is_user_accessible(curr->page_dir, v)) {
+                        paging_map(curr->page_dir, v, 0, 0);
+                    }
+                }
+                if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
+                else curr->mem_pages = 0;
+                curr->fbmap_pages = 0;
+            }
+
+            uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
+            if (paging_pat_is_supported()) {
+                flags |= PTE_PAT;
+            }
+
+            for (uint32_t i = 0; i < pages; i++) {
+                uint32_t offset = i * 4096u;
+                paging_map(curr->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
+                curr->mem_pages++;
+            }
+
+            curr->fbmap_pages = pages;
+
+            __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
+            regs->eax = user_vaddr_start + page_off;
+        }
+        break;
+
+        case 41:
+        {
+            regs->eax = fb_acquire(curr->pid);
+        }
+        break;
+
+        case 42:
+        {
+            const uint32_t user_vaddr_start = 0xB1000000u;
+
+            if (curr->fbmap_pages > 0) {
+                for (uint32_t i = 0; i < curr->fbmap_pages; i++) {
+                    uint32_t v = user_vaddr_start + i * 4096u;
+                    if (paging_is_user_accessible(curr->page_dir, v)) {
+                        paging_map(curr->page_dir, v, 0, 0);
+                    }
+                }
+                if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
+                else curr->mem_pages = 0;
+                curr->fbmap_pages = 0;
+            }
+
+            __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
+            regs->eax = fb_release(curr->pid);
         }
         break;
 

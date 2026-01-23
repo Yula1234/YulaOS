@@ -27,13 +27,42 @@ typedef struct {
     int arg3;
 } yula_event_t;
 
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t stride;
+    uint32_t bpp;
+    uint32_t size_bytes;
+} fb_info_t;
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+    int32_t w;
+    int32_t h;
+} __attribute__((packed)) fb_rect_t;
+
+typedef struct {
+    const void* src;
+    uint32_t src_stride;
+    const fb_rect_t* rects;
+    uint32_t rect_count;
+} __attribute__((packed)) fb_present_req_t;
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+    int32_t buttons;
+} mouse_state_t;
+
 
 static inline void signal(int sig, void* handler) {
-    __asm__ volatile("int $0x80" : : "a"(17), "b"(sig), "c"(handler));
+    syscall(17, sig, (int)handler, 0);
 }
 
 static inline void sigreturn() {
-    __asm__ volatile("int $0x80" : : "a"(18));
+    syscall(18, 0, 0, 0);
 }
 
 static inline int getpid() {
@@ -97,6 +126,49 @@ static inline int dup2(int oldfd, int newfd) {
     return syscall(30, oldfd, newfd, 0);
 }
 
+static inline int pipe_try_read(int fd, void* buf, uint32_t size) {
+    return syscall(44, fd, (int)buf, (int)size);
+}
+
+static inline int pipe_try_write(int fd, const void* buf, uint32_t size) {
+    return syscall(45, fd, (int)buf, (int)size);
+}
+
+static inline int kbd_try_read(char* out) {
+    return syscall(46, (int)out, 0, 0);
+}
+
+static inline int ipc_listen(const char* name) {
+    return syscall(47, (int)name, 0, 0);
+}
+
+static inline int ipc_accept(int listen_fd, int out_fds[2]) {
+    return syscall(48, listen_fd, (int)out_fds, 0);
+}
+
+static inline int ipc_connect(const char* name, int out_fds[2]) {
+    return syscall(49, (int)name, (int)out_fds, 0);
+}
+
+#define MAP_SHARED  1
+#define MAP_PRIVATE 2
+
+static inline int shm_create(uint32_t size) {
+    return syscall(43, (int)size, 0, 0);
+}
+
+static inline int shm_create_named(const char* name, uint32_t size) {
+    return syscall(51, (int)name, (int)size, 0);
+}
+
+static inline int shm_open_named(const char* name) {
+    return syscall(52, (int)name, 0, 0);
+}
+
+static inline int shm_unlink_named(const char* name) {
+    return syscall(53, (int)name, 0, 0);
+}
+
 static inline void* mmap(int fd, uint32_t size, int flags) {
     return (void*)syscall(31, fd, size, flags);
 }
@@ -145,6 +217,29 @@ static inline int spawn_process(const char* path, int argc, char** argv) {
 
 static inline int waitpid(int pid, int* status) {
     return syscall(37, pid, (int)status, 0);
+}
+
+static inline void* map_framebuffer(void) {
+    uint32_t r = (uint32_t)syscall(40, 0, 0, 0);
+    if (r == 0) return 0;
+    return (void*)(uintptr_t)r;
+}
+
+static inline int fb_acquire(void) {
+    return syscall(41, 0, 0, 0);
+}
+
+static inline int fb_release(void) {
+    return syscall(42, 0, 0, 0);
+}
+
+static inline int fb_present(const void* src, uint32_t src_stride, const fb_rect_t* rects, uint32_t rect_count) {
+    fb_present_req_t req;
+    req.src = src;
+    req.src_stride = src_stride;
+    req.rects = rects;
+    req.rect_count = rect_count;
+    return syscall(50, (int)(uintptr_t)&req, 0, 0);
 }
 
 #endif

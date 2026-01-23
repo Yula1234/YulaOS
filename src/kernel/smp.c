@@ -28,7 +28,7 @@ static volatile uint32_t tlb_shootdown_pending = 0;
 static inline int smp_interrupts_enabled(void) {
     uint32_t flags;
     __asm__ volatile("pushfl; popl %0" : "=r"(flags));
-    return (flags & 0x200) != 0;
+    return (flags & 0x200u) != 0u;
 }
 
 void smp_ap_main(cpu_t* cpu_arg) {
@@ -171,4 +171,169 @@ void smp_tlb_shootdown(uint32_t virt) {
     }
 
     __sync_lock_release(&tlb_shootdown_lock);
+}
+
+static volatile uint32_t blit_lock = 0;
+
+typedef struct {
+    volatile uint32_t pending_mask;
+    volatile uint32_t active_mask;
+    uint32_t* page_dir;
+    const void* src;
+    uint32_t src_stride;
+    int x;
+    int y;
+    int w;
+    int h;
+} blit_job_t;
+
+static blit_job_t blit_job;
+
+static uint8_t blit_fpu_state[MAX_CPUS][4096] __attribute__((aligned(64)));
+
+__attribute__((always_inline))
+static inline uint32_t popcount32(uint32_t v) {
+    v = v - ((v >> 1) & 0x55555555u);
+    v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
+    v = (v + (v >> 4)) & 0x0F0F0F0Fu;
+    v = v + (v >> 8);
+    v = v + (v >> 16);
+    return v & 0x3Fu;
+}
+
+__attribute__((always_inline))
+static inline void smp_blit_do_work_for_cpu(cpu_t* cpu) {
+    if (!cpu) return;
+
+    uint32_t bit = 1u << cpu->index;
+    uint32_t active = blit_job.active_mask;
+    if ((active & bit) == 0u) return;
+
+    uint32_t total = popcount32(active);
+    if (total == 0) return;
+
+    uint32_t ordinal = popcount32(active & (bit - 1u));
+    int per = (blit_job.h + (int)total - 1) / (int)total;
+    if (per <= 0) return;
+
+    int y1 = blit_job.y + (int)ordinal * per;
+    int y2 = y1 + per;
+    int y_end = blit_job.y + blit_job.h;
+    if (y1 < blit_job.y) y1 = blit_job.y;
+    if (y2 > y_end) y2 = y_end;
+    if (y1 >= y2) return;
+
+    vga_present_rect(blit_job.src, blit_job.src_stride, blit_job.x, y1, blit_job.w, y2 - y1);
+}
+
+void smp_blit_ipi_handler(void) {
+    cpu_t* cpu = cpu_current();
+    if (!cpu) return;
+
+    uint32_t bit = 1u << cpu->index;
+    if ((blit_job.active_mask & bit) == 0u) return;
+
+    uint32_t* old_dir = paging_get_dir();
+    if (blit_job.page_dir && old_dir != blit_job.page_dir) {
+        paging_switch(blit_job.page_dir);
+    }
+
+    uint32_t fpu_sz = fpu_state_size();
+    if (fpu_sz != 0 && fpu_sz <= 4096u) {
+        uint8_t* fpu_tmp = &blit_fpu_state[cpu->index][0];
+        fpu_save(fpu_tmp);
+
+        smp_blit_do_work_for_cpu(cpu);
+
+        fpu_restore(fpu_tmp);
+    } else {
+        smp_blit_do_work_for_cpu(cpu);
+    }
+
+    if (blit_job.page_dir && old_dir != blit_job.page_dir) {
+        paging_switch(old_dir);
+    }
+
+    __sync_fetch_and_and(&blit_job.pending_mask, ~bit);
+}
+
+int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h) {
+    if (!owner || !owner->page_dir) {
+        vga_present_rect(src, src_stride, x, y, w, h);
+        return 0;
+    }
+
+    if (cpu_count <= 1 || ap_running_count == 0) {
+        vga_present_rect(src, src_stride, x, y, w, h);
+        return 0;
+    }
+
+    if (h < 64) {
+        vga_present_rect(src, src_stride, x, y, w, h);
+        return 0;
+    }
+
+    while (__sync_lock_test_and_set(&blit_lock, 1)) {
+        __asm__ volatile("pause");
+    }
+
+    if (cpu_count <= 1 || ap_running_count == 0) {
+        __sync_lock_release(&blit_lock);
+        vga_present_rect(src, src_stride, x, y, w, h);
+        return 0;
+    }
+
+    cpu_t* me = cpu_current();
+    if (!me) {
+        __sync_lock_release(&blit_lock);
+        vga_present_rect(src, src_stride, x, y, w, h);
+        return 0;
+    }
+
+    uint32_t active_mask = 0;
+    for (int i = 0; i < cpu_count; i++) {
+        cpu_t* c = &cpus[i];
+        if (!c->started) continue;
+        if (c->id < 0) continue;
+        active_mask |= (1u << c->index);
+    }
+    active_mask |= (1u << me->index);
+
+    uint32_t other_mask = active_mask & ~(1u << me->index);
+    if (other_mask == 0u) {
+        __sync_lock_release(&blit_lock);
+        vga_present_rect(src, src_stride, x, y, w, h);
+        return 0;
+    }
+
+    blit_job.page_dir = owner->page_dir;
+    blit_job.src = src;
+    blit_job.src_stride = src_stride;
+    blit_job.x = x;
+    blit_job.y = y;
+    blit_job.w = w;
+    blit_job.h = h;
+    blit_job.active_mask = active_mask;
+    blit_job.pending_mask = other_mask;
+    __sync_synchronize();
+
+    for (int i = 0; i < cpu_count; i++) {
+        cpu_t* c = &cpus[i];
+        uint32_t bit = 1u << c->index;
+        if ((other_mask & bit) == 0u) continue;
+        if (!c->started) continue;
+        if (c->id < 0) continue;
+
+        lapic_write(LAPIC_ICRHI, (uint32_t)c->id << 24);
+        lapic_write(LAPIC_ICRLO, (uint32_t)IPI_BLIT_VECTOR | 0x00004000);
+    }
+
+    smp_blit_do_work_for_cpu(me);
+
+    while (blit_job.pending_mask != 0u) {
+        __asm__ volatile("pause");
+    }
+
+    __sync_lock_release(&blit_lock);
+    return 0;
 }

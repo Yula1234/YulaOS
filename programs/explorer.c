@@ -2,6 +2,7 @@
 // Copyright (C) 2025 Yula1234
 
 #include <yula.h>
+#include <comp.h>
 #include <font.h>
 
 static int WIN_W = 640;
@@ -43,10 +44,81 @@ int entry_count = 0;
 char current_path[256];
 int selected_idx = -1;
 uint32_t* canvas = 0;
-int win_id = -1;
+
+static const uint32_t surface_id = 1u;
+
+static comp_conn_t conn;
+static char shm_name[32];
+static int shm_fd = -1;
+static int shm_gen = 0;
+static uint32_t size_bytes = 0;
 
 void sys_unlink(const char* path) {
     __asm__ volatile("int $0x80" : : "a"(14), "b"((int)path));
+}
+
+static int ensure_surface(uint32_t need_w, uint32_t need_h) {
+    if (need_w == 0 || need_h == 0) return -1;
+
+    uint64_t bytes64 = (uint64_t)need_w * (uint64_t)need_h * 4ull;
+    if (bytes64 == 0 || bytes64 > 0xFFFFFFFFu) return -1;
+    const uint32_t need_bytes = (uint32_t)bytes64;
+
+    const int can_reuse = (canvas && shm_fd >= 0 && shm_name[0] != '\0' && need_bytes <= size_bytes);
+    if (can_reuse) {
+        uint16_t err = 0;
+        if (comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, need_w, need_h, need_w, 0u, 2000u, &err) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    uint64_t grow64 = (uint64_t)size_bytes * 2ull;
+    uint64_t cap64 = (grow64 >= (uint64_t)need_bytes) ? grow64 : (uint64_t)need_bytes;
+    if (cap64 > 0xFFFFFFFFu) cap64 = (uint64_t)need_bytes;
+    const uint32_t cap_bytes = (uint32_t)cap64;
+
+    char new_name[32];
+    new_name[0] = '\0';
+    int new_fd = -1;
+    for (int i = 0; i < 16; i++) {
+        shm_gen++;
+        (void)snprintf(new_name, sizeof(new_name), "explorer_%d_r%d", getpid(), shm_gen);
+        new_fd = shm_create_named(new_name, cap_bytes);
+        if (new_fd >= 0) break;
+    }
+    if (new_fd < 0) return -1;
+
+    uint32_t* new_canvas = (uint32_t*)mmap(new_fd, cap_bytes, MAP_SHARED);
+    if (!new_canvas) {
+        close(new_fd);
+        shm_unlink_named(new_name);
+        return -1;
+    }
+
+    uint16_t err = 0;
+    if (comp_send_attach_shm_name_sync(&conn, surface_id, new_name, cap_bytes, need_w, need_h, need_w, 0u, 2000u, &err) != 0) {
+        munmap((void*)new_canvas, cap_bytes);
+        close(new_fd);
+        shm_unlink_named(new_name);
+        return -1;
+    }
+
+    uint32_t* old_canvas = canvas;
+    uint32_t old_size_bytes = size_bytes;
+    int old_fd = shm_fd;
+    char old_name[32];
+    memcpy(old_name, shm_name, sizeof(old_name));
+
+    canvas = new_canvas;
+    size_bytes = cap_bytes;
+    shm_fd = new_fd;
+    memcpy(shm_name, new_name, sizeof(shm_name));
+
+    if (old_canvas) munmap((void*)old_canvas, old_size_bytes);
+    if (old_fd >= 0) close(old_fd);
+    if (old_name[0]) shm_unlink_named(old_name);
+    return 0;
 }
 
 void fmt_int(int n, char* buf) {
@@ -270,107 +342,231 @@ void render_all() {
 }
 
 int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+
+    set_term_mode(0);
     strcpy(current_path, "/");
     load_directory();
 
-    win_id = create_window(WIN_W, WIN_H, "File Explorer");
-    if (win_id < 0) return 1;
+    comp_conn_reset(&conn);
+    if (comp_connect(&conn, "compositor") != 0) return 1;
+    if (comp_send_hello(&conn) != 0) {
+        comp_disconnect(&conn);
+        return 1;
+    }
 
-    canvas = (uint32_t*)map_window(win_id);
-    if (!canvas) return 1;
-    
+    shm_name[0] = '\0';
+    size_bytes = (uint32_t)WIN_W * (uint32_t)WIN_H * 4u;
+    for (int i = 0; i < 8; i++) {
+        (void)snprintf(shm_name, sizeof(shm_name), "explorer_%d_%d", getpid(), i);
+        shm_fd = shm_create_named(shm_name, size_bytes);
+        if (shm_fd >= 0) break;
+    }
+    if (shm_fd < 0) {
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    canvas = (uint32_t*)mmap(shm_fd, size_bytes, MAP_SHARED);
+    if (!canvas) {
+        close(shm_fd);
+        shm_fd = -1;
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    {
+        uint16_t err = 0;
+        if (comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, (uint32_t)WIN_W, (uint32_t)WIN_H, (uint32_t)WIN_W, 0u, 2000u, &err) != 0) {
+            munmap((void*)canvas, size_bytes);
+            canvas = 0;
+            close(shm_fd);
+            shm_fd = -1;
+            shm_unlink_named(shm_name);
+            shm_name[0] = '\0';
+            comp_disconnect(&conn);
+            return 1;
+        }
+    }
+
     render_all();
-    update_window(win_id);
+    if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
+        (void)comp_send_destroy_surface(&conn, surface_id, 0u);
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+        close(shm_fd);
+        shm_fd = -1;
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+        comp_disconnect(&conn);
+        return 1;
+    }
 
-    yula_event_t ev;
+    comp_ipc_hdr_t hdr;
+    uint8_t payload[COMP_IPC_MAX_PAYLOAD];
+
     int running = 1;
-    
+    int have_mouse = 0;
+    int last_mx = 0;
+    int last_my = 0;
+    int last_buttons = 0;
+
     while (running) {
         int need_update = 0;
-        
-        while (get_event(win_id, &ev)) {
-            if (ev.type == YULA_EVENT_MOUSE_MOVE) {
-                int mx = ev.arg1;
-                int my = ev.arg2;
-                int hover_changed = 0;
-                for (int i = 0; i < entry_count; i++) {
-                    int prev = entries[i].hover;
-                    int x = entries[i].x - 10;
-                    int y = entries[i].y - 5;
-                    int w = ICON_W + 20;
-                    int h = ICON_H + 30;
-                    
-                    entries[i].hover = (mx >= x && mx < x+w && my >= y && my < y+h);
-                    if (prev != entries[i].hover) hover_changed = 1;
-                }
-                if (hover_changed) need_update = 1;
+
+        for (;;) {
+            int rr = comp_try_recv(&conn, &hdr, payload, (uint32_t)sizeof(payload));
+            if (rr < 0) {
+                running = 0;
+                break;
             }
-            else if (ev.type == YULA_EVENT_MOUSE_DOWN) {
-                int mx = ev.arg1;
-                int my = ev.arg2;
-                
-                if (my < 36) { 
-                    if (mx < 50) {
-                        nav_up();
-                        need_update = 1;
-                    }
-                } 
-                else {
-                    int hit = -1;
+            if (rr == 0) break;
+
+            if (hdr.type != (uint16_t)COMP_IPC_MSG_INPUT || hdr.len != (uint32_t)sizeof(comp_ipc_input_t)) {
+                continue;
+            }
+
+            comp_ipc_input_t in;
+            memcpy(&in, payload, sizeof(in));
+            if (in.surface_id != surface_id) continue;
+
+            if (in.kind == COMP_IPC_INPUT_MOUSE) {
+                const int mx = (int)in.x;
+                const int my = (int)in.y;
+                const int buttons = (int)in.buttons;
+
+                const int prev_buttons = have_mouse ? last_buttons : 0;
+                if (!have_mouse) {
+                    last_mx = mx;
+                    last_my = my;
+                    have_mouse = 1;
+                }
+
+                const int down_now = (buttons & 1) != 0;
+                const int down_prev = (prev_buttons & 1) != 0;
+
+                if (mx != last_mx || my != last_my) {
+                    int hover_changed = 0;
                     for (int i = 0; i < entry_count; i++) {
-                        if (entries[i].hover) { hit = i; break; }
+                        int prev = entries[i].hover;
+                        int x = entries[i].x - 10;
+                        int y = entries[i].y - 5;
+                        int w = ICON_W + 20;
+                        int h = ICON_H + 30;
+
+                        entries[i].hover = (mx >= x && mx < x + w && my >= y && my < y + h);
+                        if (prev != entries[i].hover) hover_changed = 1;
                     }
-                    
-                    if (hit != -1) {
-                        if (hit == selected_idx) {
-                            if (entries[hit].type == 2) {
-                                if (strcmp(entries[hit].name, "..") == 0) {
-                                    nav_up();
-                                } else {
-                                    if (strcmp(current_path, "/") != 0) strcat(current_path, "/");
-                                    strcat(current_path, entries[hit].name);
-                                    load_directory();
-                                }
-                            }
-                        } else {
-                            selected_idx = hit;
+                    if (hover_changed) need_update = 1;
+                }
+
+                if (down_now && !down_prev) {
+                    if (my < 36) {
+                        if (mx < 50) {
+                            nav_up();
+                            need_update = 1;
                         }
                     } else {
-                        selected_idx = -1;
+                        int hit = -1;
+                        for (int i = 0; i < entry_count; i++) {
+                            if (entries[i].hover) {
+                                hit = i;
+                                break;
+                            }
+                        }
+
+                        if (hit != -1) {
+                            if (hit == selected_idx) {
+                                if (entries[hit].type == 2) {
+                                    if (strcmp(entries[hit].name, "..") == 0) {
+                                        nav_up();
+                                    } else {
+                                        if (strcmp(current_path, "/") != 0) strcat(current_path, "/");
+                                        strcat(current_path, entries[hit].name);
+                                        load_directory();
+                                    }
+                                }
+                            } else {
+                                selected_idx = hit;
+                            }
+                        } else {
+                            selected_idx = -1;
+                        }
+                        need_update = 1;
                     }
-                    need_update = 1;
                 }
+
+                last_mx = mx;
+                last_my = my;
+                last_buttons = buttons;
+                continue;
             }
-            else if (ev.type == YULA_EVENT_KEY_DOWN) {
-                char c = (char)ev.arg1;
-                if (c == 'q' || c == 'Q') running = 0;
+
+            if (in.kind == COMP_IPC_INPUT_KEY) {
+                if (in.key_state != 1u) continue;
+                const unsigned char c = (unsigned char)(uint8_t)in.keycode;
+
+                if (c == 'q' || c == 'Q') {
+                    running = 0;
+                    break;
+                }
                 if (c == 'd' || c == 'D') {
                     if (selected_idx != -1 && entries[selected_idx].type != 2) {
                         char full[300];
                         strcpy(full, current_path);
-                        if (full[strlen(full)-1] != '/') strcat(full, "/");
+                        if (full[strlen(full) - 1] != '/') strcat(full, "/");
                         strcat(full, entries[selected_idx].name);
                         sys_unlink(full);
                         load_directory();
                         need_update = 1;
                     }
                 }
+                continue;
             }
-            else if (ev.type == YULA_EVENT_RESIZE) {
-                WIN_W = ev.arg1;
-                WIN_H = ev.arg2;
-                canvas = (uint32_t*)map_window(win_id);
-                if (!canvas) running = 0;
+
+            if (in.kind == COMP_IPC_INPUT_RESIZE) {
+                const int32_t nw = in.x;
+                const int32_t nh = in.y;
+                if (nw <= 0 || nh <= 0) continue;
+                if (nw == WIN_W && nh == WIN_H) continue;
+
+                if (ensure_surface((uint32_t)nw, (uint32_t)nh) != 0) {
+                    continue;
+                }
+                WIN_W = (int)nw;
+                WIN_H = (int)nh;
+                have_mouse = 0;
+                last_buttons = 0;
                 need_update = 1;
+                continue;
             }
         }
 
         if (need_update && canvas) {
             render_all();
-            update_window(win_id);
+            if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
+                running = 0;
+            }
         }
         usleep(10000);
     }
 
+    (void)comp_send_destroy_surface(&conn, surface_id, 0u);
+    if (canvas && size_bytes) {
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+    }
+    if (shm_fd >= 0) {
+        close(shm_fd);
+        shm_fd = -1;
+    }
+    if (shm_name[0]) {
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+    }
+    comp_disconnect(&conn);
     return 0;
 }

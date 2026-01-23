@@ -29,6 +29,7 @@
 #define LAPIC_TIMER_DIV     0x03E0
 
 #define IPI_TLB_VECTOR      0xF0
+#define IPI_BLIT_VECTOR     0xF1
 
 void lapic_init(void);
 void lapic_timer_init(uint32_t hz);

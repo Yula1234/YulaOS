@@ -5,19 +5,21 @@
 #include <fs/vfs.h>
 
 #include <kernel/sched.h>
-#include <kernel/window.h>
 #include <kernel/proc.h>
+#include <kernel/input_focus.h>
 
 #include <hal/io.h>
 #include <hal/irq.h>
 #include <hal/lock.h>
 
-
 #include "keyboard.h"
 
 static int shift_pressed = 0;
 static int ctrl_pressed = 0;
+static int alt_pressed = 0;
 static int e0_flag = 0; 
+
+static uint8_t super_mask;
  
 static spinlock_t kbd_scancode_lock;
 
@@ -30,49 +32,23 @@ static uint32_t kbd_head = 0, kbd_tail = 0;
 
 static semaphore_t kbd_sem;
 
+static spinlock_t kbd_buf_lock;
+
 static void kbd_put_char(char c) {
+    uint32_t flags = spinlock_acquire_safe(&kbd_buf_lock);
     uint32_t next = (kbd_head + 1) % KBD_BUF_SIZE;
     if (next != kbd_tail) {
         kbd_buffer[kbd_head] = c;
         kbd_head = next;
         sem_signal(&kbd_sem); 
     }
+    spinlock_release_safe(&kbd_buf_lock, flags);
 }
 
-extern void wake_up_gui();
 extern volatile uint32_t timer_ticks;
 
 static void send_key_to_focused(char code) {
-    task_t* focused_task = 0;
-    
-    if (focused_window_pid > 0) {
-        focused_task = proc_find_by_pid(focused_window_pid);
-        
-        window_t* win;
-        dlist_for_each_entry(win, &window_list, list) {
-            if (win->is_active && win->owner_pid == focused_window_pid) {
-                window_push_event(win, YULA_EVENT_KEY_DOWN, code, 0, 0);
-                break; 
-            }
-        }
-    }
-    
-    int should_write_to_buffer = 0;
-    
-    if (!focused_task) {
-        should_write_to_buffer = 1;
-    } else {
-        if (focused_task->term_mode == 1) {
-            should_write_to_buffer = 1;
-        }
-    }
-
-    if (should_write_to_buffer) {
-        kbd_put_char(code);
-    } else {
-        sem_signal(&kbd_sem); 
-    }
-    wake_up_gui();
+    kbd_put_char(code);
 }
 
 void kbd_handle_scancode(uint8_t scancode) {
@@ -86,28 +62,54 @@ void kbd_handle_scancode(uint8_t scancode) {
 
     if (e0_flag) {
         e0_flag = 0;
-        if (!(scancode & 0x80)) {
-            switch (scancode) {
+        uint8_t sc = (uint8_t)(scancode & 0x7Fu);
+        int is_break = (scancode & 0x80u) ? 1 : 0;
+
+        if (sc == 0x1D) { ctrl_pressed = is_break ? 0 : 1; goto out_unlock; }
+        if (sc == 0x38) { alt_pressed = is_break ? 0 : 1; goto out_unlock; }
+        if (sc == 0x5B) {
+            uint8_t prev = super_mask;
+            if (is_break) super_mask &= (uint8_t)~1u;
+            else super_mask |= 1u;
+            if (!is_break && prev == 0 && super_mask) send_code = (char)0xC0;
+            if (is_break && prev && super_mask == 0) send_code = (char)0xC1;
+            goto out_unlock;
+        }
+        if (sc == 0x5C) {
+            uint8_t prev = super_mask;
+            if (is_break) super_mask &= (uint8_t)~2u;
+            else super_mask |= 2u;
+            if (!is_break && prev == 0 && super_mask) send_code = (char)0xC0;
+            if (is_break && prev && super_mask == 0) send_code = (char)0xC1;
+            goto out_unlock;
+        }
+
+        if (!is_break) {
+            switch (sc) {
                 case 0x4B: // Left
-                    if (ctrl_pressed && shift_pressed) send_code = 0x86; // Shift + Ctrl + Left (NEW)
+                    if (super_mask) send_code = (char)0xB1;
+                    else if (ctrl_pressed && shift_pressed) send_code = 0x86; // Shift + Ctrl + Left (NEW)
                     else if (ctrl_pressed) send_code = 0x84;      // Ctrl + Left
                     else if (shift_pressed) send_code = 0x82;     // Shift + Left
                     else send_code = 0x11;
                     break; 
 
                 case 0x4D: // Right
-                    if (ctrl_pressed && shift_pressed) send_code = 0x87; // Shift + Ctrl + Right (NEW)
+                    if (super_mask) send_code = (char)0xB2;
+                    else if (ctrl_pressed && shift_pressed) send_code = 0x87; // Shift + Ctrl + Right (NEW)
                     else if (ctrl_pressed) send_code = 0x85;      // Ctrl + Right
                     else if (shift_pressed) send_code = 0x83;     // Shift + Right
                     else send_code = 0x12;
                     break;
 
                 case 0x48: // Up
-                    if (shift_pressed) send_code = 0x80;
+                    if (super_mask) send_code = (char)0xB3;
+                    else if (shift_pressed) send_code = 0x80;
                     else send_code = 0x13;
                     break;
                 case 0x50: // Down
-                    if (shift_pressed) send_code = 0x81;
+                    if (super_mask) send_code = (char)0xB4;
+                    else if (shift_pressed) send_code = 0x81;
                     else send_code = 0x14;
                     break;
             }
@@ -117,6 +119,8 @@ void kbd_handle_scancode(uint8_t scancode) {
 
     if (scancode == 0x1D) { ctrl_pressed = 1; goto out_unlock; }
     if (scancode == 0x9D) { ctrl_pressed = 0; goto out_unlock; }
+    if (scancode == 0x38) { alt_pressed = 1; goto out_unlock; }
+    if (scancode == 0xB8) { alt_pressed = 0; goto out_unlock; }
     if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; goto out_unlock; }
     if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; goto out_unlock; }
 
@@ -133,6 +137,20 @@ void kbd_handle_scancode(uint8_t scancode) {
     }
 
     if (!(scancode & 0x80)) {
+        if (super_mask) {
+            if (scancode >= 0x02 && scancode <= 0x06) {
+                uint8_t k = (uint8_t)(scancode - 0x02);
+                send_code = shift_pressed ? (char)(0xA0u + k) : (char)(0x90u + k);
+                goto out_unlock;
+            }
+
+            if (scancode == 0x10) { send_code = (char)0xA8; goto out_unlock; }
+            if (scancode == 0x24) { send_code = (char)0xA9; goto out_unlock; }
+            if (scancode == 0x25) { send_code = (char)0xAA; goto out_unlock; }
+            if (scancode == 0x21) { send_code = (char)0xAB; goto out_unlock; }
+            if (scancode == 0x32) { send_code = (char)0xAC; goto out_unlock; }
+        }
+
         if (ctrl_pressed) {
             if (scancode == 0x1F) { send_code = 0x15; goto out_unlock; } // Ctrl+S
             if (scancode == 0x10) { send_code = 0x17; goto out_unlock; } // Ctrl+Q
@@ -157,7 +175,8 @@ out_unlock:
     spinlock_release_safe(&kbd_scancode_lock, flags);
 
     if (do_ctrl_c) {
-        task_t* target_task = proc_find_by_pid(focused_window_pid);
+        uint32_t focus_pid = input_focus_get_pid();
+        task_t* target_task = proc_find_by_pid(focus_pid);
 
         if (target_task) {
             if (target_task->term_mode == 0) {
@@ -169,12 +188,13 @@ out_unlock:
                 if (target_task->wait_for_pid > 0) {
                     int child_pid = target_task->wait_for_pid;
                     task_t* t = proc_find_by_pid(child_pid);
-                    proc_kill(t);
-                    target_task->state = TASK_RUNNABLE;
-                    target_task->wait_for_pid = 0;
+                    if (t) {
+                        t->pending_signals |= (1 << 2);
+                        proc_wake(t);
+                    }
                 } else {
                     target_task->pending_signals |= (1 << 2);
-                    if (target_task->state == TASK_WAITING) target_task->state = TASK_RUNNABLE;
+                    proc_wake(target_task);
                 }
                 send_key_to_focused(0x03);
             }
@@ -183,7 +203,8 @@ out_unlock:
     }
 
     if (send_code_term0) {
-        task_t* target_task = proc_find_by_pid(focused_window_pid);
+        uint32_t focus_pid = input_focus_get_pid();
+        task_t* target_task = proc_find_by_pid(focus_pid);
         if (target_task && target_task->term_mode == 0) {
             send_key_to_focused(send_code_term0);
             return;
@@ -202,9 +223,15 @@ void keyboard_irq_handler(registers_t* regs) {
 }
 
 int kbd_try_read_char(char* out) {
-    if (kbd_head == kbd_tail) return 0; 
+    if (!out) return 0;
+    uint32_t flags = spinlock_acquire_safe(&kbd_buf_lock);
+    if (kbd_head == kbd_tail) {
+        spinlock_release_safe(&kbd_buf_lock, flags);
+        return 0;
+    }
     *out = kbd_buffer[kbd_tail];
     kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
+    spinlock_release_safe(&kbd_buf_lock, flags);
     return 1;
 }
 
@@ -226,10 +253,18 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
             return -2; // EINTR
         }
 
+        int focus_pid = (int)input_focus_get_pid();
+        if (focus_pid > 0 && curr && (int)curr->pid != focus_pid) {
+            uint32_t target = timer_ticks + 5;
+            proc_sleep_add(curr, target);
+            continue;
+        }
+
         while (1) {
             task_t* focused_task = 0;
-            if (focused_window_pid > 0) {
-                focused_task = proc_find_by_pid((uint32_t)focused_window_pid);
+            focus_pid = (int)input_focus_get_pid();
+            if (focus_pid > 0) {
+                focused_task = proc_find_by_pid((uint32_t)focus_pid);
             }
 
             int block_for_focus = 0;
@@ -263,8 +298,9 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
         }
 
         task_t* focused_task = 0;
-        if (focused_window_pid > 0) {
-            focused_task = proc_find_by_pid((uint32_t)focused_window_pid);
+        focus_pid = (int)input_focus_get_pid();
+        if (focus_pid > 0) {
+            focused_task = proc_find_by_pid((uint32_t)focus_pid);
         }
 
         int block_for_focus = 0;
@@ -306,5 +342,6 @@ void kbd_vfs_init() {
 void kbd_init(void) {
     sem_init(&kbd_sem, 0);
     spinlock_init(&kbd_scancode_lock);
+    spinlock_init(&kbd_buf_lock);
     irq_install_handler(1, keyboard_irq_handler);
 }

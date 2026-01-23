@@ -9,6 +9,8 @@
 #define VFS_FLAG_PIPE_READ   1u
 #define VFS_FLAG_PIPE_WRITE  2u
 #define VFS_FLAG_YULAFS      4u
+#define VFS_FLAG_SHM         8u
+#define VFS_FLAG_IPC_LISTEN  16u
 #define VFS_FLAG_EXEC_NODE   0x80000000u
 
 struct vfs_node;

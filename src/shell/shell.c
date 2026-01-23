@@ -5,8 +5,9 @@
 #include <hal/lock.h>
 
 #include <kernel/clipboard.h>
-#include <kernel/window.h>
 #include <kernel/proc.h>
+#include <kernel/tty.h>
+ #include <kernel/input_focus.h>
 
 #include <drivers/keyboard.h>
 #include <drivers/vga.h>
@@ -77,7 +78,8 @@ typedef struct {
     spinlock_t lock;
 } shell_context_t;
 
-extern void wake_up_gui();
+extern uint32_t fb_width;
+extern uint32_t fb_height;
 
 static void hist_init(shell_history_t* h);
 static void hist_destroy(shell_history_t* h);
@@ -259,181 +261,6 @@ static void refresh_line(term_instance_t* term, const char* path, char* line, in
          else 
              term->view_row = 0;
     }
-}
-
-static void shell_cleanup_handler(window_t* win) {
-    if (win->user_data) {
-        shell_context_t* ctx = (shell_context_t*)win->user_data;
-        if (ctx->term) {
-            term_destroy(ctx->term);
-            kfree(ctx->term);
-        }
-        if (ctx->hist) { hist_destroy(ctx->hist); kfree(ctx->hist); }
-        if (ctx->line) kfree(ctx->line);
-        if (ctx->cwd_path) kfree(ctx->cwd_path);
-        kfree(ctx);
-    }
-}
-
-static void shell_window_draw_handler(window_t* self, int x, int y) {
-    shell_context_t* ctx = (shell_context_t*)self->user_data;
-    if (!ctx || !ctx->term) return;
-    term_instance_t* term = ctx->term;
-    if(!term) return;
-
-    uint32_t ctx_flags = spinlock_acquire_safe(&ctx->lock);
-    spinlock_acquire(&term->lock);
-    
-    int canvas_w = self->target_w - 12;
-    int canvas_h = self->target_h - 44; 
-    int status_bar_h = 22;              
-    int text_area_h = canvas_h - status_bar_h;
-    int text_area_w = canvas_w - 6;
-    if (text_area_w < 8) text_area_w = 8;
-    
-    int visible_rows = text_area_h / 16; 
-    if (visible_rows < 1) visible_rows = 1;
-
-    int cols = text_area_w / 8;
-    if (cols < 1) cols = 1;
-
-    if (term->cols != cols) {
-        term_reflow(term, cols);
-
-        if (ctx->cwd_path && ctx->line) {
-            int prompt_len = get_prompt_len(ctx->cwd_path);
-            int cursor_row = (prompt_len + ctx->cursor_pos) / term->cols;
-            ctx->input_start_row = term->row - cursor_row;
-            if (ctx->input_start_row < 0) ctx->input_start_row = 0;
-            if (ctx->input_rows < 1) ctx->input_rows = 1;
-            refresh_line(term, ctx->cwd_path, ctx->line, ctx->cursor_pos, &ctx->input_start_row, &ctx->input_rows);
-        }
-
-        ctx->sel_active = 0;
-        ctx->sel_selecting = 0;
-        ctx->sel_start_row = 0;
-        ctx->sel_start_col = 0;
-        ctx->sel_end_row = 0;
-        ctx->sel_end_col = 0;
-    }
-    term->view_rows = visible_rows;
-
-    yula_event_t ev;
-    while (window_pop_event(self, &ev)) {
-        if (ev.type == YULA_EVENT_MOUSE_DOWN && ev.arg3 == 1) {
-            if (ev.arg1 >= 0 && ev.arg2 >= 0 && ev.arg1 < (canvas_w - 6) && ev.arg2 < text_area_h) {
-                int col = ev.arg1 / 8;
-                int row = (ev.arg2 / 16) + term->view_row;
-                if (col < 0) col = 0;
-                if (col >= term->cols) col = term->cols - 1;
-                if (row < 0) row = 0;
-
-                if (ctx->sel_active) {
-                    int nsr = ctx->sel_start_row;
-                    int nsc = ctx->sel_start_col;
-                    int ner = ctx->sel_end_row;
-                    int nec = ctx->sel_end_col;
-                    shell_sel_normalize(term, nsr, nsc, ner, nec, &nsr, &nsc, &ner, &nec);
-
-                    if (!shell_sel_contains(nsr, nsc, ner, nec, row, col)) {
-                        ctx->sel_active = 0;
-                        ctx->sel_selecting = 0;
-                        ctx->sel_start_row = 0;
-                        ctx->sel_start_col = 0;
-                        ctx->sel_end_row = 0;
-                        ctx->sel_end_col = 0;
-                        continue;
-                    }
-                }
-
-                ctx->sel_active = 1;
-                ctx->sel_selecting = 1;
-                ctx->sel_start_row = row;
-                ctx->sel_start_col = col;
-                ctx->sel_end_row = row;
-                ctx->sel_end_col = col;
-            }
-        } else if (ev.type == YULA_EVENT_MOUSE_MOVE) {
-            if (ctx->sel_selecting && (ev.arg3 & 1)) {
-                if (ev.arg1 >= 0 && ev.arg2 >= 0 && ev.arg1 < (canvas_w - 6) && ev.arg2 < text_area_h) {
-                    int col = ev.arg1 / 8;
-                    int row = (ev.arg2 / 16) + term->view_row;
-                    if (col < 0) col = 0;
-                    if (col >= term->cols) col = term->cols - 1;
-                    if (row < 0) row = 0;
-                    ctx->sel_end_row = row;
-                    ctx->sel_end_col = col;
-                }
-            }
-            if (!(ev.arg3 & 1)) {
-                ctx->sel_selecting = 0;
-            }
-        } else if (ev.type == YULA_EVENT_MOUSE_UP && ev.arg3 == 1) {
-            ctx->sel_selecting = 0;
-        }
-    }
-
-    int sel_active = ctx->sel_active;
-    int sel_sr = ctx->sel_start_row;
-    int sel_sc = ctx->sel_start_col;
-    int sel_er = ctx->sel_end_row;
-    int sel_ec = ctx->sel_end_col;
-    spinlock_release_safe(&ctx->lock, ctx_flags);
-
-    if (sel_active) {
-        shell_sel_normalize(term, sel_sr, sel_sc, sel_er, sel_ec, &sel_sr, &sel_sc, &sel_er, &sel_ec);
-    }
-
-    vga_draw_rect(x, y, canvas_w, text_area_h, C_BG);
-
-    for (int r = 0; r < visible_rows; r++) {
-        int buf_row = term->view_row + r;
-
-        for (int c = 0; c < term->cols; c++) {
-            char ch;
-            uint32_t fg;
-            uint32_t bg;
-            term_get_cell(term, buf_row, c, &ch, &fg, &bg);
-
-            int is_sel = sel_active && shell_sel_contains(sel_sr, sel_sc, sel_er, sel_ec, buf_row, c);
-            if (is_sel) {
-                vga_draw_rect(x + c * 8, y + r * 16, 8, 16, C_SEL_BG);
-                if (ch != ' ') vga_draw_char_sse(x + c * 8, y + r * 16, ch, C_SEL_FG);
-            } else {
-                if (bg != C_BG) vga_draw_rect(x + c * 8, y + r * 16, 8, 16, bg);
-                if (ch != ' ') vga_draw_char_sse(x + c * 8, y + r * 16, ch, fg);
-            }
-        }
-    }
-
-    int sb_x = x + canvas_w - 6;
-    vga_draw_rect(sb_x, y, 6, text_area_h, 0x222222);
-    int total_rows = term->max_row + 1;
-    if (total_rows < visible_rows) total_rows = visible_rows;
-    int thumb_h = (visible_rows * text_area_h) / total_rows;
-    if (thumb_h < 10) thumb_h = 10;
-    if (thumb_h > text_area_h) thumb_h = text_area_h;
-    int scrollable_area_h = text_area_h - thumb_h;
-    int scrollable_rows = total_rows - visible_rows;
-    int thumb_y = 0;
-    if (scrollable_rows > 0) thumb_y = (term->view_row * scrollable_area_h) / scrollable_rows;
-    vga_draw_rect(sb_x + 1, y + thumb_y, 4, thumb_h, 0x666666);
-
-    int bx = x;
-    int by = y + text_area_h; 
-    vga_draw_rect(bx, by, canvas_w, status_bar_h, C_BAR_BG);
-    vga_draw_rect(bx, by, canvas_w, 1, 0x333333); 
-    vga_print_at("PID:", bx + 10, by + 5, C_BAR_TXT);
-    vga_print_at(itoa(self->owner_pid), bx + 45, by + 5, C_ACCENT);
-
-    if (focused_window_pid == (int)self->owner_pid) {
-        int rel_cursor_row = term->row - term->view_row;
-        if (rel_cursor_row >= 0 && rel_cursor_row < visible_rows) {
-            vga_draw_rect(x + term->col * 8, y + rel_cursor_row * 16 + 12, 8, 2, 0x00FF00);
-        }
-    }
-
-    spinlock_release(&term->lock);
 }
 
 static void print_padded(term_instance_t* term, const char* text, int width, uint32_t color) {
@@ -714,8 +541,8 @@ static task_t* spawn_command(const char* cmd, int argc, char** argv) {
     return child;
 }
 
-static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args, int arg_count) {
-    if (!term || !win || !args || arg_count <= 0) return 0;
+static int shell_run_pipeline(term_instance_t* term, int shell_pid, char** args, int arg_count) {
+    if (!term || !args || arg_count <= 0) return 0;
 
     int cmd_count = 1;
     for (int i = 0; i < arg_count; i++) {
@@ -726,11 +553,15 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
     for (int i = 0; i < arg_count; i++) {
         if (strcmp(args[i], "|") == 0) {
             if (i == 0 || i == arg_count - 1) {
+                spinlock_acquire(&term->lock);
                 term_print(term, "Invalid pipeline\n");
+                spinlock_release(&term->lock);
                 return 1;
             }
             if (i > 0 && strcmp(args[i - 1], "|") == 0) {
+                spinlock_acquire(&term->lock);
                 term_print(term, "Invalid pipeline\n");
+                spinlock_release(&term->lock);
                 return 1;
             }
         }
@@ -743,7 +574,9 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
         if (cmd_start) kfree(cmd_start);
         if (cmd_argc) kfree(cmd_argc);
         if (tasks) kfree(tasks);
+        spinlock_acquire(&term->lock);
         term_print(term, "Out of memory\n");
+        spinlock_release(&term->lock);
         return 1;
     }
 
@@ -763,7 +596,9 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
 
     for (int i = 0; i < cmd_count; i++) {
         if (cmd_argc[i] <= 0 || !args[cmd_start[i]]) {
+            spinlock_acquire(&term->lock);
             term_print(term, "Invalid pipeline\n");
+            spinlock_release(&term->lock);
             kfree(cmd_start);
             kfree(cmd_argc);
             kfree(tasks);
@@ -774,7 +609,9 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
     int saved_stdout = shell_dup(1);
     int saved_stdin = shell_dup(0);
     if (saved_stdout < 0 || saved_stdin < 0) {
+        spinlock_acquire(&term->lock);
         term_print(term, "Pipe setup failed\n");
+        spinlock_release(&term->lock);
         if (saved_stdout >= 0) vfs_close(saved_stdout);
         if (saved_stdin >= 0) vfs_close(saved_stdin);
         kfree(cmd_start);
@@ -792,7 +629,9 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
         if (i < cmd_count - 1) {
             int pfds[2];
             if (shell_create_pipe(pfds) != 0) {
+                spinlock_acquire(&term->lock);
                 term_print(term, "Pipe creation failed\n");
+                spinlock_release(&term->lock);
                 break;
             }
             next_read = pfds[0];
@@ -808,9 +647,11 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
         task_t* t = spawn_command(args[cmd_start[i]], cmd_argc[i], &args[cmd_start[i]]);
         tasks[i] = t;
         if (!t) {
+            spinlock_acquire(&term->lock);
             term_print(term, "Command not found: ");
             term_print(term, args[cmd_start[i]]);
             term_print(term, "\n");
+            spinlock_release(&term->lock);
         }
 
         shell_dup2(saved_stdin, 0);
@@ -840,8 +681,7 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
     }
 
     if (first_task) {
-        win->focused_pid = first_task->pid;
-        focused_window_pid = first_task->pid;
+        input_focus_set_pid(first_task->pid);
     }
 
     for (int i = 0; i < cmd_count; i++) {
@@ -849,10 +689,7 @@ static int shell_run_pipeline(term_instance_t* term, window_t* win, char** args,
     }
 
     if (first_task) {
-        win->focused_pid = win->owner_pid;
-        focused_window_pid = win->owner_pid;
-        win->is_dirty = 1;
-        wake_up_gui();
+        input_focus_set_pid((uint32_t)shell_pid);
     }
 
     vfs_close(saved_stdout);
@@ -917,7 +754,7 @@ static void shell_sel_normalize(term_instance_t* term, int sr, int sc, int er, i
      if (out_ec) *out_ec = ec;
 }
 
-static int shell_sel_contains(int sr, int sc, int er, int ec, int row, int col) {
+static __attribute__((unused)) int shell_sel_contains(int sr, int sc, int er, int ec, int row, int col) {
     if (row < sr || row > er) return 0;
     if (sr == er) return (col >= sc && col <= ec);
     if (row == sr) return col >= sc;
@@ -1043,13 +880,13 @@ static int shell_copy_selection(shell_context_t* ctx) {
 
      int active = 0;
      int sr = 0, sc = 0, er = 0, ec = 0;
-     uint32_t flags = spinlock_acquire_safe(&ctx->lock);
+     spinlock_acquire(&ctx->lock);
      active = ctx->sel_active;
      sr = ctx->sel_start_row;
      sc = ctx->sel_start_col;
      er = ctx->sel_end_row;
      ec = ctx->sel_end_col;
-     spinlock_release_safe(&ctx->lock, flags);
+     spinlock_release(&ctx->lock);
 
      if (!active) return 0;
 
@@ -1097,11 +934,17 @@ void shell_task(void* arg) {
         return;
     }
 
-    spinlock_init(&my_term->lock);
     spinlock_init(&ctx->lock);
 
     ctx->term = my_term; ctx->hist = my_hist;
     hist_init(my_hist);
+
+    int cols = (int)(fb_width / 8);
+    int view_rows = (int)(fb_height / 16);
+    if (cols < 1) cols = 1;
+    if (view_rows < 1) view_rows = 1;
+    my_term->cols = cols;
+    my_term->view_rows = view_rows;
 
     term_init(my_term);
 
@@ -1110,7 +953,12 @@ void shell_task(void* arg) {
     self->term_mode = 1;
     my_term->curr_fg = C_TEXT; my_term->curr_bg = C_BG;
 
+    input_focus_set_pid((uint32_t)self->pid);
+    tty_set_terminal(my_term);
+
+    spinlock_acquire(&my_term->lock);
     term_putc(my_term, 0x0C);
+    spinlock_release(&my_term->lock);
 
     size_t line_cap = LINE_INIT_CAP;
     char* line = (char*)kzalloc(line_cap);
@@ -1144,31 +992,20 @@ void shell_task(void* arg) {
         path_set(&ctx->cwd_path, &cwd_path_cap, "/");
     }
 
-    window_t* win = window_create(100, 100, 652, 265, "shell", shell_window_draw_handler);
-    if (!win) {
-        term_destroy(my_term);
-        hist_destroy(my_hist);
-        kfree(line);
-        kfree(ctx->cwd_path);
-        kfree(my_term);
-        kfree(my_hist);
-        kfree(ctx);
-        return;
-    }
-    win->user_data = ctx; win->on_close = shell_cleanup_handler;
-
     int kbd_fd = vfs_open("/dev/kbd", 0);
     vfs_open("/dev/console", 1); 
     vfs_open("/dev/console", 1); 
 
+    spinlock_acquire(&my_term->lock);
     print_prompt_text(my_term, ctx->cwd_path);
+    spinlock_release(&my_term->lock);
     ctx->input_start_row = my_term->row;
     ctx->input_rows = 1;
     ctx->cursor_pos = 0;
     if (yulafs_lookup("/bin") == -1) yulafs_mkdir("/bin");
     if (yulafs_lookup("/home") == -1) yulafs_mkdir("/home");
 
-    while (win->is_active) {
+    while (1) {
         proc_current()->cwd_inode = cwd_inode;
         char c = 0;
         int bytes_read = vfs_read(kbd_fd, &c, 1);
@@ -1178,31 +1015,29 @@ void shell_task(void* arg) {
             if ((uint8_t)c == (uint8_t)SHELL_KEY_COPY) {
                 shell_copy_selection(ctx);
 
-                uint32_t sel_flags = spinlock_acquire_safe(&ctx->lock);
+                spinlock_acquire(&ctx->lock);
                 ctx->sel_active = 0;
                 ctx->sel_selecting = 0;
                 ctx->sel_start_row = 0;
                 ctx->sel_start_col = 0;
                 ctx->sel_end_row = 0;
                 ctx->sel_end_col = 0;
-                spinlock_release_safe(&ctx->lock, sel_flags);
-
-                win->is_dirty = 1;
-                wake_up_gui();
+                spinlock_release(&ctx->lock);
                 continue;
             }
 
-            uint32_t flags = spinlock_acquire_safe(&ctx->lock);
+            spinlock_acquire(&ctx->lock);
 
             if (c == '\n') {
-                
+
+                spinlock_acquire(&my_term->lock);
                 int visual_end = get_prompt_len(ctx->cwd_path) + line_len;
                 int cols = my_term->cols;
                 if (cols <= 0) cols = TERM_W;
                 my_term->row = ctx->input_start_row + (visual_end / cols);
                 my_term->col = visual_end % cols;
-
                 term_putc(my_term, '\n');
+                spinlock_release(&my_term->lock);
 
                 line[line_len] = '\0';
                 hist_add(my_hist, line);
@@ -1210,7 +1045,7 @@ void shell_task(void* arg) {
                 char** args = 0;
                 int arg_count = parse_args(line, &args);
 
-                spinlock_release_safe(&ctx->lock, flags);
+                spinlock_release(&ctx->lock);
 
                 int measure_time = 0;
                 uint32_t start_ticks = 0;
@@ -1218,7 +1053,9 @@ void shell_task(void* arg) {
 
                 if (arg_count > 0 && strcmp(args[0], "time") == 0) {
                     if (arg_count < 2) {
+                        spinlock_acquire(&my_term->lock);
                         term_print(my_term, "Usage: time <command>\n");
+                        spinlock_release(&my_term->lock);
                         goto loop_end; 
                     }
                     
@@ -1233,49 +1070,90 @@ void shell_task(void* arg) {
                 }
 
                 if (arg_count > 0) {
-                    if (!shell_run_pipeline(my_term, win, args, arg_count)) {
-                        if (strcmp(args[0], "help") == 0) term_print(my_term, "Commands: ls, cd, pwd, mkdir, run, clear, exit, ps, kill\n");
-                        else if (strcmp(args[0], "ls") == 0) shell_ls(my_term, (arg_count > 1) ? args[1] : 0, cwd_inode);
-                        else if (strcmp(args[0], "cd") == 0) shell_cd(my_term, (arg_count > 1) ? args[1] : "/", &cwd_inode, &ctx->cwd_path, &cwd_path_cap);
-                        else if (strcmp(args[0], "pwd") == 0) { term_print(my_term, ctx->cwd_path); term_print(my_term, "\n"); }
-                        else if (strcmp(args[0], "clear") == 0) {
+                    if (!shell_run_pipeline(my_term, (int)self->pid, args, arg_count)) {
+                        if (strcmp(args[0], "help") == 0) {
+                            spinlock_acquire(&my_term->lock);
+                            term_print(my_term, "Commands: ls, cd, pwd, mkdir, run, clear, exit, ps, kill\n");
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "ls") == 0) {
+                            spinlock_acquire(&my_term->lock);
+                            shell_ls(my_term, (arg_count > 1) ? args[1] : 0, cwd_inode);
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "cd") == 0) {
+                            spinlock_acquire(&my_term->lock);
+                            shell_cd(my_term, (arg_count > 1) ? args[1] : "/", &cwd_inode, &ctx->cwd_path, &cwd_path_cap);
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "pwd") == 0) {
+                            spinlock_acquire(&my_term->lock);
+                            term_print(my_term, ctx->cwd_path);
+                            term_print(my_term, "\n");
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "clear") == 0) {
+                            spinlock_acquire(&my_term->lock);
                             term_putc(my_term, 0x0C);
-                        }
-                        else if (strcmp(args[0], "mkdir") == 0 && arg_count > 1) yulafs_mkdir(args[1]);
-                        else if (strcmp(args[0], "exit") == 0) { should_exit = 1; goto loop_end; }
-                        else if (strcmp(args[0], "ps") == 0) shell_ps(my_term);
-                        else if (strcmp(args[0], "kill") == 0 && arg_count > 1) {
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "mkdir") == 0 && arg_count > 1) {
+                            yulafs_mkdir(args[1]);
+                        } else if (strcmp(args[0], "exit") == 0) {
+                            should_exit = 1;
+                            goto loop_end;
+                        } else if (strcmp(args[0], "ps") == 0) {
+                            spinlock_acquire(&my_term->lock);
+                            shell_ps(my_term);
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "kill") == 0 && arg_count > 1) {
                             int ret; int pid = atoi(args[1]);
                             __asm__ volatile("int $0x80" : "=a"(ret) : "a"(9), "b"(pid));
+                            spinlock_acquire(&my_term->lock);
                             term_print(my_term, (ret == 0) ? "Killed\n" : "Fail\n");
-                        }
-                        else if (strcmp(args[0], "rm") == 0 && arg_count > 1) {
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "rm") == 0 && arg_count > 1) {
                             int ret;
                             ret = yulafs_unlink(args[1]);
-
+                            spinlock_acquire(&my_term->lock);
                             if (ret == 0) term_print(my_term, "Deleted\n");
                             else term_print(my_term, "Fail\n");
-                        }
-                        else {
+                            spinlock_release(&my_term->lock);
+                        } else if (strcmp(args[0], "run") == 0) {
+                            if (arg_count < 2 || !args[1]) {
+                                spinlock_acquire(&my_term->lock);
+                                term_print(my_term, "Usage: run <command> [args...]\n");
+                                spinlock_release(&my_term->lock);
+                            } else {
+                                task_t* child = spawn_command(args[1], arg_count - 1, &args[1]);
+                                if (child) {
+                                    spinlock_acquire(&my_term->lock);
+                                    term_print(my_term, "Started PID ");
+                                    term_print(my_term, itoa(child->pid));
+                                    term_print(my_term, "\n");
+                                    spinlock_release(&my_term->lock);
+                                } else {
+                                    spinlock_acquire(&my_term->lock);
+                                    term_print(my_term, "Command not found: ");
+                                    term_print(my_term, args[1]);
+                                    term_print(my_term, "\n");
+                                    spinlock_release(&my_term->lock);
+                                }
+                            }
+                        } else {
                             task_t* child = spawn_command(args[0], arg_count, args);
                             if (child) {
-                                win->focused_pid = child->pid;
-                                focused_window_pid = child->pid;
+                                input_focus_set_pid(child->pid);
                                 proc_wait(child->pid);
-                                win->focused_pid = win->owner_pid;
-                                focused_window_pid = win->owner_pid;
-                                win->is_dirty = 1;
-                                wake_up_gui();
+                                input_focus_set_pid((uint32_t)self->pid);
                             } else {
+                                spinlock_acquire(&my_term->lock);
                                 term_print(my_term, "Command not found: ");
                                 term_print(my_term, args[0]);
                                 term_print(my_term, "\n");
+                                spinlock_release(&my_term->lock);
                             }
                         }
                     }
                 }
 
                 if (measure_time) {
+                    spinlock_acquire(&my_term->lock);
                     uint32_t end_ticks = timer_ticks;
                     uint32_t diff = end_ticks - start_ticks;
                     
@@ -1306,6 +1184,7 @@ void shell_task(void* arg) {
                     term_print(my_term, "s (");
                     term_print(my_term, s_ticks);
                     term_print(my_term, " ticks)\n");
+                    spinlock_release(&my_term->lock);
                 }
 
                 loop_end: 
@@ -1313,14 +1192,13 @@ void shell_task(void* arg) {
                 if (args) kfree(args);
                 if (should_exit) break;
 
-                flags = spinlock_acquire_safe(&ctx->lock);
+                spinlock_acquire(&ctx->lock);
 
-                my_term->curr_fg = C_TEXT; 
+                spinlock_acquire(&my_term->lock);
+                my_term->curr_fg = C_TEXT;
                 my_term->curr_bg = C_BG;
 
-                if (my_term->col > 0) {
-                    term_putc(my_term, '\n');
-                }
+                if (my_term->col > 0) term_putc(my_term, '\n');
                 
                 line_len = 0; 
                 cursor_pos = 0; 
@@ -1330,8 +1208,8 @@ void shell_task(void* arg) {
                 ctx->input_start_row = my_term->row;
                 ctx->input_rows = 1;
                 ctx->cursor_pos = 0;
-                
-                win->is_dirty = 1;
+
+                spinlock_release(&my_term->lock);
             } 
             else if (c == 0x13) { 
                 const char* h_str = hist_get_prev(my_hist);
@@ -1344,7 +1222,9 @@ void shell_task(void* arg) {
                         line_len = (int)n;
                         cursor_pos = line_len;
                         ctx->cursor_pos = cursor_pos;
+                        spinlock_acquire(&my_term->lock);
                         refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                        spinlock_release(&my_term->lock);
                     }
                 }
             }
@@ -1360,7 +1240,9 @@ void shell_task(void* arg) {
                         line_len = (int)n;
                         cursor_pos = line_len;
                         ctx->cursor_pos = cursor_pos;
+                        spinlock_acquire(&my_term->lock);
                         refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                        spinlock_release(&my_term->lock);
                     }
                 }
             }
@@ -1381,7 +1263,9 @@ void shell_task(void* arg) {
                         line_len = 0;
                         cursor_pos = 0;
                         ctx->cursor_pos = cursor_pos;
+                        spinlock_acquire(&my_term->lock);
                         refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                        spinlock_release(&my_term->lock);
                     }
                 }
             }
@@ -1393,7 +1277,9 @@ void shell_task(void* arg) {
                     line_len -= cursor_pos;
                     cursor_pos = 0;
                     ctx->cursor_pos = cursor_pos;
+                    spinlock_acquire(&my_term->lock);
                     refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    spinlock_release(&my_term->lock);
                 }
             }
             else if ((uint8_t)c == 0x89) {
@@ -1401,27 +1287,45 @@ void shell_task(void* arg) {
                     line[cursor_pos] = 0;
                     line_len = cursor_pos;
                     ctx->cursor_pos = cursor_pos;
+                    spinlock_acquire(&my_term->lock);
                     refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    spinlock_release(&my_term->lock);
                 }
             }
-            else if (c == 0x11) { if (cursor_pos > 0) { cursor_pos--; ctx->cursor_pos = cursor_pos; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows); } }
-            else if (c == 0x12) { if (cursor_pos < line_len) { cursor_pos++; ctx->cursor_pos = cursor_pos; refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows); } }
+            else if (c == 0x11) {
+                if (cursor_pos > 0) {
+                    cursor_pos--; ctx->cursor_pos = cursor_pos;
+                    spinlock_acquire(&my_term->lock);
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    spinlock_release(&my_term->lock);
+                }
+            }
+            else if (c == 0x12) {
+                if (cursor_pos < line_len) {
+                    cursor_pos++; ctx->cursor_pos = cursor_pos;
+                    spinlock_acquire(&my_term->lock);
+                    refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    spinlock_release(&my_term->lock);
+                }
+            }
             else if ((uint8_t)c == 0x80) {
                 if (ctx->sel_active) {
                     shell_kbd_sel_step(ctx, my_term, 0x80);
                 } else if (my_term->view_row > 0) {
+                    spinlock_acquire(&my_term->lock);
                     my_term->view_row--;
-                    win->is_dirty = 1;
+                    spinlock_release(&my_term->lock);
                 }
             }
             else if ((uint8_t)c == 0x81) { 
                 if (ctx->sel_active) {
                     shell_kbd_sel_step(ctx, my_term, 0x81);
                 } else {
+                    spinlock_acquire(&my_term->lock);
                     int visible_rows = my_term->view_rows;
-                    if (visible_rows <= 0) visible_rows = (win->target_h - 44 - 22) / 16;
                     if (visible_rows < 1) visible_rows = 1;
-                    if (my_term->view_row + visible_rows <= my_term->max_row) { my_term->view_row++; win->is_dirty = 1; }
+                    if (my_term->view_row + visible_rows <= my_term->max_row) { my_term->view_row++; }
+                    spinlock_release(&my_term->lock);
                 }
             }
             else if (c == '\b') {
@@ -1429,7 +1333,9 @@ void shell_task(void* arg) {
                     for (int i = cursor_pos; i < line_len; i++) line[i-1] = line[i];
                     line_len--; cursor_pos--; line[line_len] = 0;
                     ctx->cursor_pos = cursor_pos;
+                    spinlock_acquire(&my_term->lock);
                     refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    spinlock_release(&my_term->lock);
                 }
             } 
             else if ((uint8_t)c >= 32) {
@@ -1439,16 +1345,16 @@ void shell_task(void* arg) {
                     line[cursor_pos] = c;
                     line_len++; cursor_pos++; line[line_len] = 0;
                     ctx->cursor_pos = cursor_pos;
+                    spinlock_acquire(&my_term->lock);
                     refresh_line(my_term, ctx->cwd_path, line, cursor_pos, &ctx->input_start_row, &ctx->input_rows);
+                    spinlock_release(&my_term->lock);
                 }
             }
-            spinlock_release_safe(&ctx->lock, flags);
-            win->is_dirty = 1;
-            wake_up_gui();
+            spinlock_release(&ctx->lock);
         }
     }
 
-    win->on_close = 0; win->on_draw = 0; win->user_data = 0;
+    tty_set_terminal(0);
     hist_destroy(my_hist);
     kfree(my_hist);
     kfree(line);
@@ -1457,4 +1363,4 @@ void shell_task(void* arg) {
     kfree(my_term);
     kfree(ctx);
     sys_exit();
-}
+ }

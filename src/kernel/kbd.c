@@ -6,8 +6,6 @@
 #include <hal/io.h>
 #include <lib/string.h>
 #include <kernel/proc.h>
-#include <kernel/gui_task.h>
-#include <kernel/window.h>
 #include <kernel/sched.h>
 #include <hal/io.h>
 #include <drivers/pc_speaker.h>
@@ -97,22 +95,6 @@ static char* itoa_hex(uint32_t val) {
     return buf;
 }
 
-extern spinlock_t window_lock;
-
-void kdb_restart_gui() {
-    kdb_print("\n[KDB] Resetting window system...\n");
-    
-    window_list_lock.count = 1;
-    window_list_lock.lock.locked = 0;
-    kdb_print("[KDB] window_lock forced to UNLOCKED.\n");
-
-    window_init_system();
-    kdb_print("[KDB] Window list cleared.\n");
-
-    proc_spawn_kthread("gui", PRIO_GUI, gui_task, (void*)1);
-    kdb_print("[KDB] New 'gui' thread spawned.\n");
-}
-
 void kdb_enter(const char* reason, task_t* faulty_process) {
     __asm__ volatile("cli");
 
@@ -138,7 +120,6 @@ void kdb_enter(const char* reason, task_t* faulty_process) {
     
     kdb_print("\nAvailable commands:\n");
     kdb_print("  help    - Show this menu\n");
-    kdb_print("  restart - Restart GUI subsystem (Force Unlock)\n");
     kdb_print("  reboot  - Hard reboot\n");
     kdb_print("  exit    - Kill process and try to continue (Risky)\n");
 
@@ -174,21 +155,10 @@ void kdb_enter(const char* reason, task_t* faulty_process) {
         }
 
         if (strcmp(cmd_buf, "help") == 0) {
-            kdb_print("Commands: restart, reboot, exit\n");
-        } 
+            kdb_print("Commands: reboot, exit\n");
+        }
         else if (strcmp(cmd_buf, "reboot") == 0) {
             outb(0x64, 0xFE);
-        }
-        else if (strcmp(cmd_buf, "restart") == 0) {
-            if (faulty_process && strcmp(faulty_process->name, "gui") == 0) {
-                kdb_restart_gui();
-                kdb_print("[KDB] Returning to scheduler. Fingers crossed!\n");
-
-                outb(0x21, old_mask);
-                return; 
-            } else {
-                kdb_print("Error: Faulty process is not GUI. Cannot restart generic process yet.\n");
-            }
         }
         else if (strcmp(cmd_buf, "exit") == 0) {
             outb(0x21, old_mask);

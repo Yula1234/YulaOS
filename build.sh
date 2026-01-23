@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint")
+USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "compositor" "comp_client" "wm" "wm_test")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -58,6 +58,7 @@ done
 echo "[kernel] compiling C..."
 for FILE in $(find src -name "*.c"); do
     if [[ "$FILE" == src/usr* ]]; then continue; fi
+    if [[ "$FILE" == src/kernel/window.c || "$FILE" == src/kernel/gui_task.c || "$FILE" == src/kernel/monitor_task.c ]]; then continue; fi
     
     REL="${FILE#src/}"
     FLAT="${REL//\//_}"
@@ -136,6 +137,7 @@ QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
 -drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe,aio=io_uring
 -accel kvm -vga virtio -display sdl,gl=on -smp 3 -mem-prealloc
 -cpu host,migratable=no,+invtsc,l3-cache=on -audiodev pa,id=snd0
--device usb-mouse,bus=uhci.0,port=2"
+-device usb-mouse,bus=uhci.0,port=2
+"
 
 qemu-system-x86_64 -cdrom bin/yulaos.iso $QEMU_ARGS

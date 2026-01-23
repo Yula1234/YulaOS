@@ -7,5 +7,6 @@
 #include <stdint.h>
 
 void gui_task(void* arg);
+void wake_up_gui(void);
 
 #endif

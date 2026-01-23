@@ -9,6 +9,7 @@
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 #include <arch/i386/idt.h>
+#include <kernel/gui_task.h>
 
 #include "monitor_task.h"
 #include "window.h"
@@ -210,8 +211,6 @@ static void monitor_draw(window_t* win, int x, int y) {
     
     vga_draw_rect(right_x - 10, y + 10, 1, h - 20, C_BORDER);
 }
-
-extern void wake_up_gui();
 
 void monitor_task(void* arg) {
     (void)arg;

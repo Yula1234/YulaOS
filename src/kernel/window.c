@@ -3,13 +3,14 @@
 
 #include <drivers/vga.h>
 #include <kernel/proc.h>
+#include <kernel/gui_task.h>
 #include <lib/string.h>
 #include <hal/lock.h>
 #include <mm/heap.h>
 
 #include "window.h"
 
-extern void wake_up_gui();
+static volatile int window_system_ready = 0;
 
 dlist_head_t window_list;
 int focused_window_pid = 0;
@@ -19,7 +20,6 @@ static uint32_t active_gradient[28];
 static uint32_t inactive_gradient[28];
 
 semaphore_t window_list_lock;
-
 
 void window_precompute_gradients() {
     uint32_t a1 = 0x3E3E42, a2 = 0x2D2D30;
@@ -38,15 +38,20 @@ void window_precompute_gradients() {
     }
 }
 
-
 void window_init_system() {
     dlist_init(&window_list);
     sem_init(&window_list_lock, 1);
     window_precompute_gradients();
     next_window_id = 1;
+    window_system_ready = 1;
+}
+
+int window_system_is_ready(void) {
+    return window_system_ready != 0;
 }
 
 void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
+    if (!window_system_ready) return;
     uint32_t flags = spinlock_acquire_safe(&win->event_lock);
     
     int next = (win->evt_head + 1) % MAX_WIN_EVENTS;
@@ -66,6 +71,7 @@ void window_push_event(window_t* win, int type, int a1, int a2, int a3) {
 }
 
 int window_pop_event(window_t* win, yula_event_t* out_ev) {
+    if (!window_system_ready) return 0;
     uint32_t flags = spinlock_acquire_safe(&win->event_lock);
     
     if (win->evt_head == win->evt_tail) {
@@ -82,6 +88,7 @@ int window_pop_event(window_t* win, yula_event_t* out_ev) {
 
 window_t* window_find_by_id(int window_id) {
     if (window_id <= 0) return 0;
+    if (!window_system_ready) return 0;
     
     sem_wait(&window_list_lock);
     window_t* win;
@@ -100,6 +107,7 @@ window_t* window_find_by_id(int window_id) {
 
 window_t* window_find_by_pid(int pid) {
     if (pid <= 0) return 0;
+    if (!window_system_ready) return 0;
     
     sem_wait(&window_list_lock);
     window_t* win;
@@ -117,6 +125,7 @@ window_t* window_find_by_pid(int pid) {
 }
 
 void window_bring_to_front_nolock(window_t* win) {
+    if (!window_system_ready) return;
     if (!win || !win->is_active) return;
     dlist_del(&win->list);
     dlist_add_tail(&win->list, &window_list);
@@ -124,14 +133,14 @@ void window_bring_to_front_nolock(window_t* win) {
 }
 
 void window_bring_to_front(window_t* win) {
+    if (!window_system_ready) return;
     sem_wait(&window_list_lock);
     window_bring_to_front_nolock(win);
     sem_signal(&window_list_lock);
 }
 
-extern void wake_up_gui();
-
 window_t* window_create(int x, int y, int w, int h, const char* title, window_draw_handler_t handler) {
+    if (!window_system_ready) return 0;
     sem_wait(&window_list_lock);
     
     int count = 0;
@@ -220,8 +229,8 @@ window_t* window_create(int x, int y, int w, int h, const char* title, window_dr
     return win;
 }
 
-
 void window_mark_dirty_by_pid(int pid) {
+    if (!window_system_ready) return;
     sem_wait(&window_list_lock);
     int found = 0;
     window_t* win;
@@ -240,7 +249,8 @@ void window_mark_dirty_by_pid(int pid) {
 
 void window_mark_dirty_by_pid_pair(int pid1, int pid2) {
     if (pid1 <= 0 && pid2 <= 0) return;
-
+    if (!window_system_ready) return;
+ 
     sem_wait(&window_list_lock);
     int found = 0;
     window_t* win;
@@ -261,6 +271,7 @@ void window_mark_dirty_by_pid_pair(int pid1, int pid2) {
 }
 
 void window_draw_all() {
+    if (!window_system_ready) return;
     sem_wait(&window_list_lock);
     
     window_t* win;
@@ -365,6 +376,7 @@ void window_draw_all() {
 }
 
 void window_close_all_by_pid(int pid) {
+    if (!window_system_ready) return;
     sem_wait(&window_list_lock);
 
     window_t* win, *n;

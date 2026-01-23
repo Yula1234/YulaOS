@@ -920,23 +920,29 @@ static void uhci_hid_kbd_process(uhci_hid_dev_t* dev, const uint8_t* rep, uint32
     uint8_t mod_lctrl = (mod & (1u << 0)) ? 1u : 0u;
     uint8_t mod_lshift = (mod & (1u << 1)) ? 1u : 0u;
     uint8_t mod_lalt = (mod & (1u << 2)) ? 1u : 0u;
+    uint8_t mod_lgui = (mod & (1u << 3)) ? 1u : 0u;
     uint8_t mod_rctrl = (mod & (1u << 4)) ? 1u : 0u;
     uint8_t mod_rshift = (mod & (1u << 5)) ? 1u : 0u;
     uint8_t mod_ralt = (mod & (1u << 6)) ? 1u : 0u;
+    uint8_t mod_rgui = (mod & (1u << 7)) ? 1u : 0u;
 
     uint8_t prev_lctrl = (dev->kbd_prev_mod & (1u << 0)) ? 1u : 0u;
     uint8_t prev_lshift = (dev->kbd_prev_mod & (1u << 1)) ? 1u : 0u;
     uint8_t prev_lalt = (dev->kbd_prev_mod & (1u << 2)) ? 1u : 0u;
+    uint8_t prev_lgui = (dev->kbd_prev_mod & (1u << 3)) ? 1u : 0u;
     uint8_t prev_rctrl = (dev->kbd_prev_mod & (1u << 4)) ? 1u : 0u;
     uint8_t prev_rshift = (dev->kbd_prev_mod & (1u << 5)) ? 1u : 0u;
     uint8_t prev_ralt = (dev->kbd_prev_mod & (1u << 6)) ? 1u : 0u;
+    uint8_t prev_rgui = (dev->kbd_prev_mod & (1u << 7)) ? 1u : 0u;
 
     if (mod_lctrl != prev_lctrl) uhci_kbd_send_scancode(0x1D, 0, mod_lctrl ? 0 : 1);
     if (mod_lshift != prev_lshift) uhci_kbd_send_scancode(0x2A, 0, mod_lshift ? 0 : 1);
     if (mod_lalt != prev_lalt) uhci_kbd_send_scancode(0x38, 0, mod_lalt ? 0 : 1);
+    if (mod_lgui != prev_lgui) uhci_kbd_send_scancode(0x5B, 1, mod_lgui ? 0 : 1);
     if (mod_rctrl != prev_rctrl) uhci_kbd_send_scancode(0x1D, 1, mod_rctrl ? 0 : 1);
     if (mod_rshift != prev_rshift) uhci_kbd_send_scancode(0x36, 0, mod_rshift ? 0 : 1);
     if (mod_ralt != prev_ralt) uhci_kbd_send_scancode(0x38, 1, mod_ralt ? 0 : 1);
+    if (mod_rgui != prev_rgui) uhci_kbd_send_scancode(0x5C, 1, mod_rgui ? 0 : 1);
 
     for (uint32_t i = 0; i < 6; i++) {
         uint8_t k = dev->kbd_prev_keys[i];

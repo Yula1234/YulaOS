@@ -2,6 +2,7 @@
 // Copyright (C) 2025 Yula1234
 
 #include <yula.h>
+#include <comp.h>
 #include <font.h>
 
 static int WIN_W = 800;
@@ -116,8 +117,15 @@ typedef struct {
 } Editor;
 
 uint32_t* canvas;
-int win_id;
 Editor ed;
+
+static const uint32_t surface_id = 1u;
+
+static comp_conn_t conn;
+static char shm_name[32];
+static int shm_fd = -1;
+static int shm_gen = 0;
+static uint32_t size_bytes = 0;
 
 const char* kwd_general[] = {
     "mov", "lea", "push", "pop", "add", "sub", "imul", "div", "xor", "or", "and", 
@@ -1437,16 +1445,10 @@ void render_ui() {
     int ty = 8;
     render_string(tx, ty, title, C_TAB_FG);
     tx += title_w;
-    if (ed.dirty) {
-        render_string(tx, ty, "*", C_UI_ACCENT);
-        tx += CHAR_W;
-    }
-    tx += 12;
-    render_string(tx, ty, lang, C_UI_MUTED);
-
     int y = WIN_H - STATUS_H;
     draw_rect(0, y, WIN_W, STATUS_H, C_STATUS_BG);
     draw_rect(0, y, WIN_W, 1, C_UI_BORDER);
+    int status_text_y = y + 6;
     
     if (ed.lines.count <= 0) lines_rebuild(&ed.lines, &ed.text, ed.lang);
     int line0 = lines_find_line(&ed.lines, ed.cursor);
@@ -1455,21 +1457,21 @@ void render_ui() {
     int col = (ed.cursor - line_start) + 1;
     
     char l[8], c[8]; fmt_int(line, l); fmt_int(col, c);
-    render_string(WIN_W - 190, y+8, (ed.lang == LANG_C) ? "C" : "ASM", C_UI_MUTED);
-    render_string(WIN_W - 150, y+8, "Ln", C_UI_MUTED);
-    render_string(WIN_W - 130, y+8, l, C_STATUS_FG);
-    render_string(WIN_W - 80, y+8, "Col", C_UI_MUTED);
-    render_string(WIN_W - 50, y+8, c, C_STATUS_FG);
+    render_string(WIN_W - 190, status_text_y, (ed.lang == LANG_C) ? "C" : "ASM", C_UI_MUTED);
+    render_string(WIN_W - 150, status_text_y, "Ln", C_UI_MUTED);
+    render_string(WIN_W - 130, status_text_y, l, C_STATUS_FG);
+    render_string(WIN_W - 80, status_text_y, "Col", C_UI_MUTED);
+    render_string(WIN_W - 50, status_text_y, c, C_STATUS_FG);
 
     if (ed.mode == MODE_FIND) {
         int right_w = 210;
         int px = 10;
-        render_string(px, y+8, "Find:", C_UI_MUTED);
+        render_string(px, status_text_y, "Find:", C_UI_MUTED);
         int bx = px + 6 * CHAR_W + 8;
         int bw = (WIN_W - right_w) - bx - 10;
         if (bw < 80) bw = 80;
 
-        int text_y = y + 8;
+        int text_y = status_text_y;
         int glyph_top = text_y + 5;
         int pad_y = 2;
         int box_shift = 1;
@@ -1492,12 +1494,12 @@ void render_ui() {
     else if (ed.mode == MODE_GOTO) {
         int right_w = 210;
         int px = 10;
-        render_string(px, y+8, "Goto:", C_UI_MUTED);
+        render_string(px, status_text_y, "Goto:", C_UI_MUTED);
         int bx = px + 6 * CHAR_W + 8;
         int bw = (WIN_W - right_w) - bx - 10;
         if (bw < 80) bw = 80;
 
-        int text_y = y + 8;
+        int text_y = status_text_y;
         int glyph_top = text_y + 5;
         int pad_y = 2;
         int box_shift = 1;
@@ -1518,13 +1520,79 @@ void render_ui() {
         draw_rect(cx, cy, 2, ch, C_CURSOR);
     }
     else if (ed.status_len > 0) {
-        render_string(10, y+8, ed.status, ed.status_color ? ed.status_color : C_UI_MUTED);
+        render_string(10, status_text_y, ed.status, ed.status_color ? ed.status_color : C_UI_MUTED);
     }
+}
+
+static int ensure_surface(uint32_t need_w, uint32_t need_h) {
+    if (need_w == 0 || need_h == 0) return -1;
+
+    uint64_t bytes64 = (uint64_t)need_w * (uint64_t)need_h * 4ull;
+    if (bytes64 == 0 || bytes64 > 0xFFFFFFFFu) return -1;
+    const uint32_t need_bytes = (uint32_t)bytes64;
+
+    const int can_reuse = (canvas && shm_fd >= 0 && shm_name[0] != '\0' && need_bytes <= size_bytes);
+    if (can_reuse) {
+        uint16_t err = 0;
+        if (comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, need_w, need_h, need_w, 0u, 2000u, &err) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    uint64_t grow64 = (uint64_t)size_bytes * 2ull;
+    uint64_t cap64 = (grow64 >= (uint64_t)need_bytes) ? grow64 : (uint64_t)need_bytes;
+    if (cap64 > 0xFFFFFFFFu) cap64 = (uint64_t)need_bytes;
+    const uint32_t cap_bytes = (uint32_t)cap64;
+
+    char new_name[32];
+    new_name[0] = '\0';
+    int new_fd = -1;
+    for (int i = 0; i < 16; i++) {
+        shm_gen++;
+        (void)snprintf(new_name, sizeof(new_name), "geditor_%d_r%d", getpid(), shm_gen);
+        new_fd = shm_create_named(new_name, cap_bytes);
+        if (new_fd >= 0) break;
+    }
+    if (new_fd < 0) return -1;
+
+    uint32_t* new_canvas = (uint32_t*)mmap(new_fd, cap_bytes, MAP_SHARED);
+    if (!new_canvas) {
+        close(new_fd);
+        shm_unlink_named(new_name);
+        return -1;
+    }
+
+    uint16_t err = 0;
+    if (comp_send_attach_shm_name_sync(&conn, surface_id, new_name, cap_bytes, need_w, need_h, need_w, 0u, 2000u, &err) != 0) {
+        munmap((void*)new_canvas, cap_bytes);
+        close(new_fd);
+        shm_unlink_named(new_name);
+        return -1;
+    }
+
+    uint32_t* old_canvas = canvas;
+    uint32_t old_size_bytes = size_bytes;
+    int old_fd = shm_fd;
+    char old_name[32];
+    memcpy(old_name, shm_name, sizeof(old_name));
+
+    canvas = new_canvas;
+    size_bytes = cap_bytes;
+    shm_fd = new_fd;
+    memcpy(shm_name, new_name, sizeof(shm_name));
+
+    if (old_canvas) munmap((void*)old_canvas, old_size_bytes);
+    if (old_fd >= 0) close(old_fd);
+    if (old_name[0]) shm_unlink_named(old_name);
+    return 0;
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) strcpy(ed.filename, "new.asm");
     else strcpy(ed.filename, argv[1]);
+
+    set_term_mode(0);
 
     ed.lang = LANG_ASM;
     const char* ext = path_ext(ed.filename);
@@ -1561,21 +1629,93 @@ int main(int argc, char** argv) {
     
     load_file();
 
-    win_id = create_window(WIN_W, WIN_H, "GEditor");
-    if (win_id < 0) return 1;
-    canvas = (uint32_t*)map_window(win_id);
-    if (!canvas) return 1;
+    comp_conn_reset(&conn);
+    if (comp_connect(&conn, "compositor") != 0) return 1;
+    if (comp_send_hello(&conn) != 0) {
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    shm_name[0] = '\0';
+    size_bytes = (uint32_t)WIN_W * (uint32_t)WIN_H * 4u;
+    for (int i = 0; i < 8; i++) {
+        (void)snprintf(shm_name, sizeof(shm_name), "geditor_%d_%d", getpid(), i);
+        shm_fd = shm_create_named(shm_name, size_bytes);
+        if (shm_fd >= 0) break;
+    }
+    if (shm_fd < 0) {
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    canvas = (uint32_t*)mmap(shm_fd, size_bytes, MAP_SHARED);
+    if (!canvas) {
+        close(shm_fd);
+        shm_fd = -1;
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+        comp_disconnect(&conn);
+        return 1;
+    }
+
+    {
+        uint16_t err = 0;
+        if (comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, (uint32_t)WIN_W, (uint32_t)WIN_H, (uint32_t)WIN_W, 0u, 2000u, &err) != 0) {
+            munmap((void*)canvas, size_bytes);
+            canvas = 0;
+            close(shm_fd);
+            shm_fd = -1;
+            shm_unlink_named(shm_name);
+            shm_name[0] = '\0';
+            comp_disconnect(&conn);
+            return 1;
+        }
+    }
 
     render_editor();
     render_ui();
-    update_window(win_id);
+    if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
+        (void)comp_send_destroy_surface(&conn, surface_id, 0u);
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+        close(shm_fd);
+        shm_fd = -1;
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+        comp_disconnect(&conn);
+        return 1;
+    }
 
-    yula_event_t ev;
+    comp_ipc_hdr_t hdr;
+    uint8_t payload[COMP_IPC_MAX_PAYLOAD];
+
+    int have_mouse = 0;
+    int last_mx = 0;
+    int last_my = 0;
+    int last_buttons = 0;
+
     while (!ed.quit) {
         int update = 0;
-        while (get_event(win_id, &ev)) {
-            if (ev.type == YULA_EVENT_KEY_DOWN) {
-                unsigned char c = (unsigned char)ev.arg1;
+        for (;;) {
+            int rr = comp_try_recv(&conn, &hdr, payload, (uint32_t)sizeof(payload));
+            if (rr < 0) {
+                ed.quit = 1;
+                break;
+            }
+            if (rr == 0) break;
+
+            if (hdr.type != (uint16_t)COMP_IPC_MSG_INPUT || hdr.len != (uint32_t)sizeof(comp_ipc_input_t)) {
+                continue;
+            }
+
+            comp_ipc_input_t in;
+            memcpy(&in, payload, sizeof(in));
+            if (in.surface_id != surface_id) continue;
+
+            if (in.kind == COMP_IPC_INPUT_KEY) {
+                if (in.key_state != 1u) continue;
+
+                unsigned char c = (unsigned char)(uint8_t)in.keycode;
 
                 if (c == 0x17) { ed.quit = 1; update = 1; continue; } // Ctrl+Q
                 if (c == 0x15) { save_file(); update = 1; continue; } // Ctrl+S
@@ -1634,46 +1774,95 @@ int main(int argc, char** argv) {
                 else if (c >= 32 && c <= 126) insert_char((char)c);
                 
                 update = 1;
+                continue;
             }
-            else if (ev.type == YULA_EVENT_MOUSE_DOWN) {
-                int pos = get_pos_from_coords(ev.arg1, ev.arg2);
-                ed.cursor = pos;
-                ed.sel_bound = pos;
-                ed.is_dragging = 1;
-                update_pref_col();
-                update = 1;
-            }
-            else if (ev.type == YULA_EVENT_MOUSE_MOVE) {
-                if (ed.is_dragging) {
-                    int pos = get_pos_from_coords(ev.arg1, ev.arg2);
+
+            if (in.kind == COMP_IPC_INPUT_MOUSE) {
+                const int mx = (int)in.x;
+                const int my = (int)in.y;
+                const int buttons = (int)in.buttons;
+
+                const int prev_buttons = have_mouse ? last_buttons : 0;
+                if (!have_mouse) {
+                    last_mx = mx;
+                    last_my = my;
+                    have_mouse = 1;
+                }
+
+                const int down_now = ((buttons & 1) != 0);
+                const int down_prev = ((prev_buttons & 1) != 0);
+
+                if (down_now && !down_prev) {
+                    int pos = get_pos_from_coords(mx, my);
+                    ed.cursor = pos;
+                    ed.sel_bound = pos;
+                    ed.is_dragging = 1;
+                    update_pref_col();
+                    update = 1;
+                }
+                if (down_now && ed.is_dragging && (mx != last_mx || my != last_my)) {
+                    int pos = get_pos_from_coords(mx, my);
                     if (pos != ed.cursor) {
                         ed.cursor = pos;
                         update_pref_col();
                         update = 1;
                     }
                 }
+                if (!down_now && down_prev) {
+                    ed.is_dragging = 0;
+                    if (ed.sel_bound == ed.cursor) ed.sel_bound = -1;
+                    update = 1;
+                }
+
+                last_mx = mx;
+                last_my = my;
+                last_buttons = buttons;
+                continue;
             }
-            else if (ev.type == YULA_EVENT_MOUSE_UP) {
-                ed.is_dragging = 0;
-                if (ed.sel_bound == ed.cursor) ed.sel_bound = -1;
+
+            if (in.kind == COMP_IPC_INPUT_RESIZE) {
+                const int32_t nw = in.x;
+                const int32_t nh = in.y;
+                if (nw <= 0 || nh <= 0) continue;
+                if (nw == WIN_W && nh == WIN_H) continue;
+
+                if (ensure_surface((uint32_t)nw, (uint32_t)nh) != 0) {
+                    continue;
+                }
+
+                WIN_W = (int)nw;
+                WIN_H = (int)nh;
+                have_mouse = 0;
+                last_buttons = 0;
                 update = 1;
-            }
-            else if (ev.type == YULA_EVENT_RESIZE) {
-                WIN_W = ev.arg1;
-                WIN_H = ev.arg2;
-                canvas = (uint32_t*)map_window(win_id);
-                if (!canvas) { ed.quit = 1; break; }
-                update = 1;
+                continue;
             }
         }
         
         if (update) {
             render_editor();
             render_ui();
-            update_window(win_id);
+            if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
+                ed.quit = 1;
+            }
         }
         usleep(4000);
     }
+
+    (void)comp_send_destroy_surface(&conn, surface_id, 0u);
+    if (canvas && size_bytes) {
+        munmap((void*)canvas, size_bytes);
+        canvas = 0;
+    }
+    if (shm_fd >= 0) {
+        close(shm_fd);
+        shm_fd = -1;
+    }
+    if (shm_name[0]) {
+        shm_unlink_named(shm_name);
+        shm_name[0] = '\0';
+    }
+    comp_disconnect(&conn);
     
     lines_destroy(&ed.lines);
     gb_destroy(&ed.text);

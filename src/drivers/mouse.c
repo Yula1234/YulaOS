@@ -3,6 +3,12 @@
 
 #include <arch/i386/idt.h>
 
+#include <fs/vfs.h>
+#include <drivers/mouse.h>
+
+#include <kernel/input_focus.h>
+#include <kernel/proc.h>
+
 #include <hal/io.h>
 #include <hal/irq.h>
 
@@ -16,6 +22,40 @@ static uint8_t mouse_byte[3];
 
 extern uint32_t fb_width;
 extern uint32_t fb_height;
+
+static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
+    (void)node;
+    (void)offset;
+
+    if (!buffer) return -1;
+    if (size < sizeof(mouse_state_t)) return -1;
+
+    task_t* curr = proc_current();
+    uint32_t focus_pid = input_focus_get_pid();
+    if (focus_pid > 0 && curr && curr->pid != focus_pid) {
+        return 0;
+    }
+
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+
+    mouse_state_t st;
+    st.x = mouse_x;
+    st.y = mouse_y;
+    st.buttons = mouse_buttons;
+
+    __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory");
+
+    *(mouse_state_t*)buffer = st;
+    return (int)sizeof(mouse_state_t);
+}
+
+static vfs_ops_t mouse_ops = { .read = mouse_vfs_read };
+static vfs_node_t mouse_node = { .name = "mouse", .ops = &mouse_ops, .size = sizeof(mouse_state_t) };
+
+void mouse_vfs_init(void) {
+    devfs_register(&mouse_node);
+}
 
 void mouse_wait(uint8_t type) {
     uint32_t timeout = 100000;
@@ -95,7 +135,6 @@ void mouse_irq_handler(registers_t* regs) {
     }
 }
 
-
 void mouse_init() {
     uint8_t status;
 
@@ -124,8 +163,6 @@ void mouse_init() {
     outb(0x21, inb(0x21) & ~(1 << 2)); // Master: Cascade
 }
 
-extern void wake_up_gui();
-
 void mouse_process_byte(uint8_t data) {
     if (mouse_cycle == 0 && !(data & 0x08)) return;
 
@@ -148,6 +185,5 @@ void mouse_process_byte(uint8_t data) {
         if (mouse_y < 0) mouse_y = 0;
         if (mouse_x >= (int)fb_width)  mouse_x = fb_width - 1;
         if (mouse_y >= (int)fb_height) mouse_y = fb_height - 1;
-        wake_up_gui();
     }
 }

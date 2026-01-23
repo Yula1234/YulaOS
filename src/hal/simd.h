@@ -85,12 +85,7 @@ static inline uint32_t fpu_state_size(void) {
     return ebx;
 }
 
-static inline void kernel_init_simd(void) {
-    uint32_t a1, b1, c1, d1;
-    simd_cpuid(1, 0, &a1, &b1, &c1, &d1);
-    int has_xsave = (c1 & (1u << 26)) != 0;
-    int has_avx = (c1 & (1u << 28)) != 0;
-
+static inline void kernel_enable_sse(void) {
     uint32_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     cr0 &= ~((1u << 2) | (1u << 3));
@@ -101,8 +96,22 @@ static inline void kernel_init_simd(void) {
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1u << 9);
     cr4 |= (1u << 10);
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+}
 
-    if (has_xsave) {
+static inline void kernel_init_simd(void) {
+    uint32_t a1, b1, c1, d1;
+    simd_cpuid(1, 0, &a1, &b1, &c1, &d1);
+    int has_xsave = (c1 & (1u << 26)) != 0;
+    int has_osxsave = (c1 & (1u << 27)) != 0;
+    int has_avx = (c1 & (1u << 28)) != 0;
+
+    kernel_enable_sse();
+
+    uint32_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+
+    if (has_xsave && has_osxsave) {
         cr4 |= (1u << 18);
     }
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
@@ -110,7 +119,7 @@ static inline void kernel_init_simd(void) {
     kernel_simd_caps = 0;
     kernel_xsave_mask = 0;
 
-    if (has_xsave && simd_osxsave_enabled()) {
+    if (has_xsave && has_osxsave && simd_osxsave_enabled()) {
         uint64_t supported = simd_xcr0_supported_mask();
         uint64_t xcr0 = 0x3;
 

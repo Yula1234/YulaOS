@@ -15,6 +15,7 @@
 #include <hal/lock.h>
 #include <hal/io.h>
 #include <hal/simd.h>
+ #include <drivers/fbdev.h>
 
 #include "sched.h"
 #include "proc.h"
@@ -403,6 +404,19 @@ void proc_kill(task_t* t) {
     
     uint32_t pid_to_clean = t->pid;
 
+    fb_release_by_pid(pid_to_clean);
+
+    if (t->fbmap_pages > 0 && t->page_dir) {
+        const uint32_t user_vaddr_start = 0xB1000000u;
+        for (uint32_t i = 0; i < t->fbmap_pages; i++) {
+            uint32_t v = user_vaddr_start + i * 4096u;
+            paging_map(t->page_dir, v, 0, 0);
+        }
+        if (t->mem_pages >= t->fbmap_pages) t->mem_pages -= t->fbmap_pages;
+        else t->mem_pages = 0;
+        t->fbmap_pages = 0;
+    }
+
     uint32_t waited_pid = t->wait_for_pid;
     if (waited_pid) {
         task_t* waited = proc_find_by_pid(waited_pid);
@@ -439,9 +453,6 @@ void proc_kill(task_t* t) {
     proc_sleep_remove(t);
 
     sched_remove(t);
-    
-    extern void window_close_all_by_pid(int pid);
-    window_close_all_by_pid(pid_to_clean);
 
     t->state = TASK_ZOMBIE;
 
@@ -538,6 +549,7 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     area->file_offset = aligned_offset;
     area->length      = size;
     area->file_size   = aligned_file_size;
+    area->map_flags   = MAP_PRIVATE;
     area->file        = node;
     
     __sync_fetch_and_add(&node->refs, 1);
@@ -980,6 +992,12 @@ task_t* proc_create_idle(int cpu_index) {
 void proc_sleep_add(task_t* t, uint32_t wake_tick) {
     uint32_t flags = spinlock_acquire_safe(&sleep_lock);
     
+    if (t->sleep_node.next != 0 && t->sleep_node.prev != 0) {
+        dlist_del(&t->sleep_node);
+        t->sleep_node.next = 0;
+        t->sleep_node.prev = 0;
+    }
+
     t->wake_tick = wake_tick;
     t->state = TASK_WAITING;
     
@@ -1014,6 +1032,8 @@ void proc_check_sleepers(uint32_t current_tick) {
         dlist_for_each_entry_safe(pos, n, &sleeping_list, sleep_node) {
             if (pos->wake_tick <= current_tick) {
                 dlist_del(&pos->sleep_node);
+                pos->sleep_node.next = 0;
+                pos->sleep_node.prev = 0;
                 
                 pos->wake_tick = 0;
                 pos->state = TASK_RUNNABLE;
@@ -1036,4 +1056,19 @@ void proc_sleep_remove(task_t* t) {
     }
     
     spinlock_release_safe(&sleep_lock, flags);
+}
+
+void proc_wake(task_t* t) {
+    if (!t) return;
+    if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) return;
+
+    proc_sleep_remove(t);
+    t->wake_tick = 0;
+
+    if (t->blocked_on_sem) return;
+
+    if (t->state == TASK_WAITING) {
+        t->state = TASK_RUNNABLE;
+        sched_add(t);
+    }
 }
