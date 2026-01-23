@@ -1295,7 +1295,8 @@ static void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_
                 continue;
             }
             {
-                const int first_commit = (s->committed == 0);
+                const int first_commit = (s->commit_gen == 0);
+                const int was_committed = (s->committed != 0);
 
                 if (cm.surface_id == 0x80000001u) {
                     s->x = 0;
@@ -1316,18 +1317,21 @@ static void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_
                 }
 
                 if (wm && wm->connected) {
-                    comp_ipc_wm_event_t ev;
-                    memset(&ev, 0, sizeof(ev));
-                    ev.kind = first_commit ? COMP_WM_EVENT_MAP : COMP_WM_EVENT_COMMIT;
-                    ev.client_id = client_id;
-                    ev.surface_id = cm.surface_id;
-                    ev.sx = (int32_t)s->x;
-                    ev.sy = (int32_t)s->y;
-                    ev.sw = (uint32_t)s->w;
-                    ev.sh = (uint32_t)s->h;
-                    ev.flags = 0;
-                    if (wm_send_event(wm, &ev, 1) < 0) {
-                        wm_disconnect(wm);
+                    const int send = first_commit || (!was_committed);
+                    if (send) {
+                        comp_ipc_wm_event_t ev;
+                        memset(&ev, 0, sizeof(ev));
+                        ev.kind = first_commit ? COMP_WM_EVENT_MAP : COMP_WM_EVENT_COMMIT;
+                        ev.client_id = client_id;
+                        ev.surface_id = cm.surface_id;
+                        ev.sx = (int32_t)s->x;
+                        ev.sy = (int32_t)s->y;
+                        ev.sw = (uint32_t)s->w;
+                        ev.sh = (uint32_t)s->h;
+                        ev.flags = 0;
+                        if (wm_send_event(wm, &ev, first_commit ? 1 : 0) < 0) {
+                            wm_disconnect(wm);
+                        }
                     }
                 }
             }
@@ -1904,12 +1908,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             draw_cursor(out, stride, w, h, ms.x, ms.y);
 
             if (frame_pixels) {
-                fb_rect_t r;
-                r.x = 0;
-                r.y = 0;
-                r.w = w;
-                r.h = h;
-                (void)fb_present(frame_pixels, (uint32_t)info.pitch, &r, 1u);
+                memcpy((void*)fb, (const void*)frame_pixels, (size_t)frame_size_bytes);
             }
         }
 

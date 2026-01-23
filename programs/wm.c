@@ -1091,12 +1091,18 @@ static void wm_apply_layout(comp_conn_t* c, wm_state_t* st) {
                 if (nw < (int32_t)WM_RESIZE_MIN_W) nw = (int32_t)WM_RESIZE_MIN_W;
                 if (nh < (int32_t)WM_RESIZE_MIN_H) nh = (int32_t)WM_RESIZE_MIN_H;
 
-                v->x = nx;
-                v->y = ny;
-                v->w = (uint32_t)nw;
-                v->h = (uint32_t)nh;
-                (void)comp_wm_resize(c, v->client_id, v->surface_id, nw, nh);
-                (void)comp_wm_move(c, v->client_id, v->surface_id, nx, ny);
+                const int need_move = (v->x != nx) || (v->y != ny);
+                const int need_resize = ((int32_t)v->w != nw) || ((int32_t)v->h != nh);
+                if (need_resize) {
+                    (void)comp_wm_resize(c, v->client_id, v->surface_id, nw, nh);
+                    v->w = (uint32_t)nw;
+                    v->h = (uint32_t)nh;
+                }
+                if (need_move) {
+                    (void)comp_wm_move(c, v->client_id, v->surface_id, nx, ny);
+                    v->x = nx;
+                    v->y = ny;
+                }
                 continue;
             }
 
@@ -1456,9 +1462,11 @@ static void wm_on_commit(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event
 
     wm_view_t* v = wm_get_or_create_view(st, ev->client_id, ev->surface_id);
     if (!v) return;
-    const int idx = (int)(v - st->views);
-    v->w = ev->sw;
-    v->h = ev->sh;
+
+    if (v->floating) {
+        v->w = ev->sw;
+        v->h = ev->sh;
+    }
 
     if (ev->surface_id == WM_UI_BAR_SURFACE_ID || v->ui) {
         v->ui = 1;
@@ -1474,9 +1482,8 @@ static void wm_on_commit(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event
         return;
     }
 
-    if (!st->drag_active && !v->floating) {
-        wm_apply_layout(c, st);
-    }
+    (void)c;
+    (void)st;
 }
 
 static void wm_on_click(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t* ev) {
