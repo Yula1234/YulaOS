@@ -12,5 +12,6 @@
 *.swp
 
 *.txt
+*.py
 
 bin/

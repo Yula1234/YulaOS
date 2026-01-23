@@ -87,6 +87,10 @@ static rect_t r_canvas;
 static uint32_t* img;
 static int img_w;
 static int img_h;
+ static int img_shm_fd = -1;
+ static char img_shm_name[32];
+ static uint32_t img_cap_bytes;
+ static int img_shm_gen;
 
 static inline size_t img_pixel_count(void) {
     if (ptr_is_invalid(img)) return 0;
@@ -318,27 +322,73 @@ static void img_resize_to_canvas() {
     if (bytes64 == 0 || bytes64 > 0xFFFFFFFFu) return;
     uint32_t bytes = (uint32_t)bytes64;
 
-    uint32_t* nimg = (uint32_t*)malloc((size_t)bytes);
-    if (ptr_is_invalid(nimg)) return;
+    const int old_w = img_w;
+    const int old_h = img_h;
 
-    size_t count = (size_t)(uint32_t)new_w * (size_t)(uint32_t)new_h;
-    for (size_t i = 0; i < count; i++) nimg[i] = C_CANVAS_BG;
+    const int can_reuse = (img && !ptr_is_invalid(img) && img_shm_fd >= 0 && bytes <= img_cap_bytes && new_w == old_w);
+    if (can_reuse) {
+        img_h = new_h;
 
-    if (img && !ptr_is_invalid(img)) {
-        size_t old_count = img_pixel_count();
-        if (old_count != 0) {
-            int cw = min_i(img_w, new_w);
-            int ch = min_i(img_h, new_h);
-            for (int y = 0; y < ch; y++) {
-                memcpy(nimg + y * new_w, img + y * img_w, (size_t)cw * 4u);
+        if (new_h > old_h) {
+            for (int y = old_h; y < new_h; y++) {
+                uint32_t* row = img + (size_t)(uint32_t)y * (size_t)(uint32_t)old_w;
+                for (int x = 0; x < old_w; x++) {
+                    row[x] = C_CANVAS_BG;
+                }
             }
         }
-        free(img);
-    }
+    } else {
+        if (bytes > (uint32_t)PAINT_MAX_IMG_BYTES) return;
 
-    img = nimg;
-    img_w = new_w;
-    img_h = new_h;
+        char new_name[32];
+        new_name[0] = '\0';
+        int new_fd = -1;
+        const int pid = getpid();
+        for (int i = 0; i < 16; i++) {
+            img_shm_gen++;
+            (void)snprintf(new_name, sizeof(new_name), "paintimg_%d_%d", pid, img_shm_gen);
+            new_fd = shm_create_named(new_name, bytes);
+            if (new_fd >= 0) break;
+        }
+        if (new_fd < 0) return;
+
+        uint32_t* nimg = (uint32_t*)mmap(new_fd, bytes, MAP_SHARED);
+        if (ptr_is_invalid(nimg)) {
+            close(new_fd);
+            shm_unlink_named(new_name);
+            return;
+        }
+
+        size_t count = (size_t)(uint32_t)new_w * (size_t)(uint32_t)new_h;
+        for (size_t i = 0; i < count; i++) nimg[i] = C_CANVAS_BG;
+
+        if (img && !ptr_is_invalid(img) && old_w > 0 && old_h > 0) {
+            int cw = min_i(old_w, new_w);
+            int ch = min_i(old_h, new_h);
+            for (int y = 0; y < ch; y++) {
+                memcpy(nimg + (size_t)(uint32_t)y * (size_t)(uint32_t)new_w,
+                       img + (size_t)(uint32_t)y * (size_t)(uint32_t)old_w,
+                       (size_t)(uint32_t)cw * 4u);
+            }
+        }
+
+        if (img && !ptr_is_invalid(img) && img_cap_bytes) {
+            munmap((void*)img, img_cap_bytes);
+        }
+        if (img_shm_fd >= 0) {
+            close(img_shm_fd);
+        }
+        if (img_shm_name[0]) {
+            (void)shm_unlink_named(img_shm_name);
+        }
+
+        img = nimg;
+        img_w = new_w;
+        img_h = new_h;
+        img_shm_fd = new_fd;
+        img_cap_bytes = bytes;
+        memcpy(img_shm_name, new_name, sizeof(img_shm_name));
+    }
 
     snapshot_free(&undo_stack[0]);
     snapshot_free(&redo_stack[0]);
@@ -1304,7 +1354,19 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < undo_count; i++) snapshot_free(&undo_stack[i]);
     for (int i = 0; i < redo_count; i++) snapshot_free(&redo_stack[i]);
-    if (img) free(img);
+    if (img && !ptr_is_invalid(img) && img_cap_bytes) {
+        munmap((void*)img, img_cap_bytes);
+    }
+    img = 0;
+    if (img_shm_fd >= 0) {
+        close(img_shm_fd);
+        img_shm_fd = -1;
+    }
+    if (img_shm_name[0]) {
+        (void)shm_unlink_named(img_shm_name);
+        img_shm_name[0] = '\0';
+    }
+    img_cap_bytes = 0;
 
     (void)comp_send_destroy_surface(&conn, surface_id, 0u);
     comp_disconnect(&conn);

@@ -166,10 +166,13 @@ static int check_user_buffer_present(task_t* task, const void* buf, uint32_t siz
 static int copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, const char* user_src) {
     if (!task || !dst || dst_size == 0 || !user_src) return -1;
 
+    if (!check_user_buffer(task, user_src, 1)) return -1;
+
     for (uint32_t i = 0; i < dst_size; i++) {
         const void* p = (const void*)((uint32_t)user_src + i);
-        if (!check_user_buffer_present(task, p, 1)) return -1;
-        char c = *(const char*)p;
+        if (!check_user_buffer(task, p, 1)) return -1;
+        prefault_user_read(p, 1);
+        char c = *(volatile const char*)p;
         dst[i] = c;
         if (c == '\0') return 0;
     }
