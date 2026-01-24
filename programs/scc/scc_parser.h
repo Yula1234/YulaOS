@@ -6,6 +6,14 @@
 
 #include "scc_parser_base.h"
 
+AstUnit* parse_unit(Parser* p);
+
+#ifdef SCC_PARSER_IMPLEMENTATION
+
+static AstExpr* parse_expr_prec(Parser* p, int min_prec);
+static AstExpr* parse_expr(Parser* p);
+static AstStmt* parse_stmt(Parser* p);
+
 static AstExpr* parse_primary(Parser* p) {
     if (p->tok.kind == TOK_NUM) {
         Token t = p->tok;
@@ -618,7 +626,7 @@ static ToplevelKind parse_toplevel_decl(Parser* p, AstFunc** out_func, AstGlobal
     return TOPLEVEL_FUNC;
 }
 
-static AstUnit* parse_unit(Parser* p) {
+AstUnit* parse_unit(Parser* p) {
     AstUnit* u = (AstUnit*)arena_alloc(p->arena, sizeof(AstUnit), 8);
     memset(u, 0, sizeof(*u));
 
@@ -651,5 +659,9 @@ static AstUnit* parse_unit(Parser* p) {
     u->first_global = gfirst;
     return u;
 }
+
+#undef SCC_PARSER_IMPLEMENTATION
+
+#endif
 
 #endif

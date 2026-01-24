@@ -21,31 +21,61 @@ typedef struct {
     int loop_depth;
 } Parser;
 
-static void parser_next(Parser* p) {
+void parser_next(Parser* p);
+void parser_expect(Parser* p, TokenKind k, const char* msg);
+int parser_match(Parser* p, TokenKind k);
+AstExpr* ast_new_expr(Parser* p, AstExprKind kind, Token tok);
+AstStmt* ast_new_stmt(Parser* p, AstStmtKind kind, Token tok);
+int tok_to_binop(TokenKind k, AstBinOp* out_op, int* out_prec, int* out_right_assoc);
+
+Type* type_int(Parser* p);
+Type* type_uint(Parser* p);
+Type* type_short(Parser* p);
+Type* type_ushort(Parser* p);
+Type* type_long(Parser* p);
+Type* type_ulong(Parser* p);
+Type* type_char(Parser* p);
+Type* type_uchar(Parser* p);
+Type* type_bool(Parser* p);
+Type* type_void(Parser* p);
+Type* type_ptr_to(Parser* p, Type* base);
+Type* parse_type(Parser* p);
+
+Var* scope_find(Parser* p, const char* name);
+Var* scope_find_current(Parser* p, const char* name);
+void scope_enter(Parser* p);
+void scope_leave(Parser* p);
+Var* scope_add_param(Parser* p, const char* name, Type* ty, int index);
+Var* scope_add_local(Parser* p, const char* name, Type* ty);
+char* decode_string(Parser* p, Token t, int* out_len);
+
+#ifdef SCC_PARSER_BASE_IMPLEMENTATION
+
+void parser_next(Parser* p) {
     p->tok = lx_next(&p->lx);
 }
 
-static void parser_expect(Parser* p, TokenKind k, const char* msg) {
+void parser_expect(Parser* p, TokenKind k, const char* msg) {
     if (p->tok.kind != k) {
         scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, msg);
     }
     parser_next(p);
 }
 
-static int parser_match(Parser* p, TokenKind k) {
+int parser_match(Parser* p, TokenKind k) {
     if (p->tok.kind != k) return 0;
     parser_next(p);
     return 1;
 }
 
-static AstExpr* ast_new_expr(Parser* p, AstExprKind kind, Token tok) {
+AstExpr* ast_new_expr(Parser* p, AstExprKind kind, Token tok) {
     AstExpr* e = (AstExpr*)arena_alloc(p->arena, sizeof(AstExpr), 8);
     e->kind = kind;
     e->tok = tok;
     return e;
 }
 
-static AstStmt* ast_new_stmt(Parser* p, AstStmtKind kind, Token tok) {
+AstStmt* ast_new_stmt(Parser* p, AstStmtKind kind, Token tok) {
     AstStmt* s = (AstStmt*)arena_alloc(p->arena, sizeof(AstStmt), 8);
     memset(s, 0, sizeof(*s));
     s->kind = kind;
@@ -53,7 +83,7 @@ static AstStmt* ast_new_stmt(Parser* p, AstStmtKind kind, Token tok) {
     return s;
 }
 
-static int tok_to_binop(TokenKind k, AstBinOp* out_op, int* out_prec, int* out_right_assoc) {
+int tok_to_binop(TokenKind k, AstBinOp* out_op, int* out_prec, int* out_right_assoc) {
     *out_right_assoc = 0;
 
     if (k == TOK_STAR) { *out_op = AST_BINOP_MUL; *out_prec = 60; return 1; }
@@ -83,10 +113,7 @@ static int tok_to_binop(TokenKind k, AstBinOp* out_op, int* out_prec, int* out_r
     return 0;
 }
 
-static AstExpr* parse_expr_prec(Parser* p, int min_prec);
-static AstExpr* parse_expr(Parser* p);
-
-static Type* type_int(Parser* p) {
+Type* type_int(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_INT;
     t->base = 0;
@@ -94,7 +121,7 @@ static Type* type_int(Parser* p) {
     return t;
 }
 
-static Type* type_uint(Parser* p) {
+Type* type_uint(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_UINT;
     t->base = 0;
@@ -102,7 +129,7 @@ static Type* type_uint(Parser* p) {
     return t;
 }
 
-static Type* type_short(Parser* p) {
+Type* type_short(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_SHORT;
     t->base = 0;
@@ -110,7 +137,7 @@ static Type* type_short(Parser* p) {
     return t;
 }
 
-static Type* type_ushort(Parser* p) {
+Type* type_ushort(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_USHORT;
     t->base = 0;
@@ -118,7 +145,7 @@ static Type* type_ushort(Parser* p) {
     return t;
 }
 
-static Type* type_long(Parser* p) {
+Type* type_long(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_LONG;
     t->base = 0;
@@ -126,7 +153,7 @@ static Type* type_long(Parser* p) {
     return t;
 }
 
-static Type* type_ulong(Parser* p) {
+Type* type_ulong(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_ULONG;
     t->base = 0;
@@ -134,7 +161,7 @@ static Type* type_ulong(Parser* p) {
     return t;
 }
 
-static Type* type_char(Parser* p) {
+Type* type_char(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_CHAR;
     t->base = 0;
@@ -142,7 +169,7 @@ static Type* type_char(Parser* p) {
     return t;
 }
 
- static Type* type_uchar(Parser* p) {
+ Type* type_uchar(Parser* p) {
      Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
      t->kind = TYPE_UCHAR;
      t->base = 0;
@@ -150,7 +177,7 @@ static Type* type_char(Parser* p) {
      return t;
  }
 
-static Type* type_bool(Parser* p) {
+Type* type_bool(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_BOOL;
     t->base = 0;
@@ -158,7 +185,7 @@ static Type* type_bool(Parser* p) {
     return t;
 }
 
-static Type* type_void(Parser* p) {
+Type* type_void(Parser* p) {
     Type* t = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     t->kind = TYPE_VOID;
     t->base = 0;
@@ -166,7 +193,7 @@ static Type* type_void(Parser* p) {
     return t;
 }
 
-static Type* type_ptr_to(Parser* p, Type* base) {
+Type* type_ptr_to(Parser* p, Type* base) {
     Type* pt = (Type*)arena_alloc(p->arena, sizeof(Type), 8);
     pt->kind = TYPE_PTR;
     pt->base = base;
@@ -174,7 +201,7 @@ static Type* type_ptr_to(Parser* p, Type* base) {
     return pt;
 }
 
-static Type* parse_type(Parser* p) {
+Type* parse_type(Parser* p) {
     int saw_const = 0;
     while (parser_match(p, TOK_KW_CONST)) saw_const = 1;
 
@@ -294,14 +321,14 @@ static Type* parse_type(Parser* p) {
     return base;
 }
 
-static Var* scope_find(Parser* p, const char* name) {
+Var* scope_find(Parser* p, const char* name) {
     for (Var* v = p->scope_vars; v; v = v->next) {
         if (strcmp(v->name, name) == 0) return v;
     }
     return 0;
 }
 
-static Var* scope_find_current(Parser* p, const char* name) {
+Var* scope_find_current(Parser* p, const char* name) {
     Var* stop = 0;
     if (p->scope_frames) stop = p->scope_frames->prev_vars;
     for (Var* v = p->scope_vars; v && v != stop; v = v->next) {
@@ -310,7 +337,7 @@ static Var* scope_find_current(Parser* p, const char* name) {
     return 0;
 }
 
-static void scope_enter(Parser* p) {
+void scope_enter(Parser* p) {
     ScopeFrame* f = (ScopeFrame*)arena_alloc(p->arena, sizeof(ScopeFrame), 8);
     memset(f, 0, sizeof(*f));
     f->prev_vars = p->scope_vars;
@@ -318,13 +345,13 @@ static void scope_enter(Parser* p) {
     p->scope_frames = f;
 }
 
-static void scope_leave(Parser* p) {
+void scope_leave(Parser* p) {
     if (!p->scope_frames) return;
     p->scope_vars = p->scope_frames->prev_vars;
     p->scope_frames = p->scope_frames->next;
 }
 
-static Var* scope_add_param(Parser* p, const char* name, Type* ty, int index) {
+Var* scope_add_param(Parser* p, const char* name, Type* ty, int index) {
     if (!name) return 0;
     if (scope_find_current(p, name)) {
         scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Duplicate parameter name");
@@ -340,7 +367,7 @@ static Var* scope_add_param(Parser* p, const char* name, Type* ty, int index) {
     return v;
 }
 
-static Var* scope_add_local(Parser* p, const char* name, Type* ty) {
+Var* scope_add_local(Parser* p, const char* name, Type* ty) {
     if (scope_find_current(p, name)) {
         scc_fatal_at(p->file, p->src, p->tok.line, p->tok.col, "Duplicate local name");
     }
@@ -356,7 +383,7 @@ static Var* scope_add_local(Parser* p, const char* name, Type* ty) {
     return v;
 }
 
-static char* decode_string(Parser* p, Token t, int* out_len) {
+char* decode_string(Parser* p, Token t, int* out_len) {
     const char* s = t.begin;
     const char* e = t.begin + t.len;
     char* out = (char*)arena_alloc(p->arena, (uint32_t)t.len + 1, 1);
@@ -381,5 +408,7 @@ static char* decode_string(Parser* p, Token t, int* out_len) {
     *out_len = n;
     return out;
 }
+
+#endif
 
 #endif
