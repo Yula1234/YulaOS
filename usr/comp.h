@@ -158,7 +158,7 @@ static inline int comp_try_recv_raw(comp_conn_t* c, comp_ipc_hdr_t* out_hdr, voi
     int saw_eof = 0;
 
     for (;;) {
-        uint8_t tmp[128];
+        uint8_t tmp[512];
         int rn = pipe_try_read(c->fd_s2c_r, tmp, (uint32_t)sizeof(tmp));
         if (rn < 0) {
             saw_eof = 1;

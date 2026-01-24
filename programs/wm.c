@@ -480,12 +480,9 @@ static void wm_ui_draw_bar(wm_state_t* st) {
         }
     }
 
-    uint16_t err = 0;
-    int r = comp_send_commit_sync(&ui->c, ui->surface_id, 0, 0, 0u, 500u, &err);
+    int r = comp_send_commit(&ui->c, ui->surface_id, 0, 0, 0u);
     if (r != 0) {
-        char tmp[96];
-        (void)snprintf(tmp, sizeof(tmp), "wm_ui: draw commit failed r=%d err=%u\n", r, (unsigned)err);
-        dbg_write(tmp);
+        dbg_write("wm_ui: draw commit send failed\n");
         wm_ui_cleanup(ui);
         return;
     }

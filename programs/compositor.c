@@ -162,8 +162,23 @@ static void fill_rect(uint32_t* fb, int stride, int w, int h, int x, int y, int 
 
     for (int yy = y0; yy < y1; yy++) {
         uint32_t* row = fb + (size_t)yy * (size_t)stride;
-        for (int xx = x0; xx < x1; xx++) {
-            row[xx] = color;
+
+        int xx = x0;
+        int n = x1 - x0;
+        while (n >= 8) {
+            row[xx + 0] = color;
+            row[xx + 1] = color;
+            row[xx + 2] = color;
+            row[xx + 3] = color;
+            row[xx + 4] = color;
+            row[xx + 5] = color;
+            row[xx + 6] = color;
+            row[xx + 7] = color;
+            xx += 8;
+            n -= 8;
+        }
+        while (n--) {
+            row[xx++] = color;
         }
     }
 }
@@ -192,6 +207,138 @@ static void draw_frame_rect(uint32_t* fb, int stride, int w, int h, int x, int y
     fill_rect(fb, stride, w, h, x, y + rh - t, rw, t, color);
     fill_rect(fb, stride, w, h, x, y, t, rh, color);
     fill_rect(fb, stride, w, h, x + rw - t, y, t, rh, color);
+}
+
+typedef struct {
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+} comp_rect_t;
+
+#define COMP_MAX_DAMAGE_RECTS 32
+
+typedef struct {
+    comp_rect_t rects[COMP_MAX_DAMAGE_RECTS];
+    int n;
+} comp_damage_t;
+
+static inline int rect_empty(const comp_rect_t* r) {
+    return !r || r->x1 >= r->x2 || r->y1 >= r->y2;
+}
+
+static inline comp_rect_t rect_make(int x, int y, int w, int h) {
+    comp_rect_t r;
+    r.x1 = x;
+    r.y1 = y;
+    r.x2 = x + w;
+    r.y2 = y + h;
+    return r;
+}
+
+static inline comp_rect_t rect_intersect(comp_rect_t a, comp_rect_t b) {
+    comp_rect_t r;
+    r.x1 = (a.x1 > b.x1) ? a.x1 : b.x1;
+    r.y1 = (a.y1 > b.y1) ? a.y1 : b.y1;
+    r.x2 = (a.x2 < b.x2) ? a.x2 : b.x2;
+    r.y2 = (a.y2 < b.y2) ? a.y2 : b.y2;
+    return r;
+}
+
+static inline comp_rect_t rect_union(comp_rect_t a, comp_rect_t b) {
+    comp_rect_t r;
+    r.x1 = (a.x1 < b.x1) ? a.x1 : b.x1;
+    r.y1 = (a.y1 < b.y1) ? a.y1 : b.y1;
+    r.x2 = (a.x2 > b.x2) ? a.x2 : b.x2;
+    r.y2 = (a.y2 > b.y2) ? a.y2 : b.y2;
+    return r;
+}
+
+static inline int rect_overlaps_or_touches(comp_rect_t a, comp_rect_t b) {
+    if (a.x2 < b.x1 - 1) return 0;
+    if (b.x2 < a.x1 - 1) return 0;
+    if (a.y2 < b.y1 - 1) return 0;
+    if (b.y2 < a.y1 - 1) return 0;
+    return 1;
+}
+
+static inline comp_rect_t rect_clip_to_screen(comp_rect_t r, int w, int h) {
+    comp_rect_t s = rect_make(0, 0, w, h);
+    return rect_intersect(r, s);
+}
+
+static inline void damage_reset(comp_damage_t* d) {
+    if (!d) return;
+    d->n = 0;
+}
+
+static void damage_add(comp_damage_t* d, comp_rect_t r, int w, int h) {
+    if (!d) return;
+
+    r = rect_clip_to_screen(r, w, h);
+    if (rect_empty(&r)) return;
+
+    for (;;) {
+        int merged = 0;
+        for (int i = 0; i < d->n; i++) {
+            if (rect_overlaps_or_touches(d->rects[i], r)) {
+                r = rect_union(d->rects[i], r);
+                d->rects[i] = d->rects[d->n - 1];
+                d->n--;
+                merged = 1;
+                break;
+            }
+        }
+        if (!merged) break;
+    }
+
+    if (d->n < COMP_MAX_DAMAGE_RECTS) {
+        d->rects[d->n++] = r;
+    } else {
+        comp_rect_t u = d->rects[0];
+        for (int i = 1; i < d->n; i++) u = rect_union(u, d->rects[i]);
+        u = rect_union(u, r);
+        d->rects[0] = u;
+        d->n = 1;
+    }
+}
+
+static inline void put_pixel_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, uint32_t color, comp_rect_t clip) {
+    if (x < clip.x1 || x >= clip.x2 || y < clip.y1 || y >= clip.y2) return;
+    put_pixel(fb, stride, w, h, x, y, color);
+}
+
+static inline void fill_rect_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int rh, uint32_t color, comp_rect_t clip) {
+    comp_rect_t r = rect_make(x, y, rw, rh);
+    r = rect_intersect(r, clip);
+    if (rect_empty(&r)) return;
+    fill_rect(fb, stride, w, h, r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1, color);
+}
+
+static void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip) {
+    const uint32_t c1 = 0xFFFFFF;
+    const uint32_t c2 = 0x000000;
+
+    for (int i = -7; i <= 7; i++) {
+        put_pixel_clipped(fb, stride, w, h, x + i, y, c1, clip);
+        put_pixel_clipped(fb, stride, w, h, x, y + i, c1, clip);
+        put_pixel_clipped(fb, stride, w, h, x + i, y + 1, c2, clip);
+        put_pixel_clipped(fb, stride, w, h, x + 1, y + i, c2, clip);
+    }
+
+    fill_rect_clipped(fb, stride, w, h, x - 1, y - 1, 3, 3, 0xFF0000, clip);
+}
+
+static void draw_frame_rect_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int rh, int t, uint32_t color, comp_rect_t clip) {
+    if (!fb) return;
+    if (rw <= 0 || rh <= 0) return;
+    if (t <= 0) return;
+    if (rw <= t * 2 || rh <= t * 2) return;
+
+    fill_rect_clipped(fb, stride, w, h, x, y, rw, t, color, clip);
+    fill_rect_clipped(fb, stride, w, h, x, y + rh - t, rw, t, color, clip);
+    fill_rect_clipped(fb, stride, w, h, x, y, t, rh, color, clip);
+    fill_rect_clipped(fb, stride, w, h, x + rw - t, y, t, rh, color, clip);
 }
 
 typedef struct {
@@ -277,6 +424,46 @@ static void blit_surface(uint32_t* dst, int dst_stride, int dst_w, int dst_h, in
         uint32_t* drow = dst + (size_t)(dy + y) * (size_t)dst_stride + (size_t)dx;
         const uint32_t* srow = src + (size_t)y * (size_t)src_stride;
         memcpy(drow, srow, (size_t)copy_w * 4u);
+    }
+}
+
+static void blit_surface_clipped(uint32_t* dst, int dst_stride, int dst_w, int dst_h, int dx, int dy,
+                                 const uint32_t* src, int src_stride, int src_w, int src_h, comp_rect_t clip) {
+    if (!dst || !src) return;
+    if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
+
+    comp_rect_t srect = rect_make(dx, dy, src_w, src_h);
+    comp_rect_t drect = rect_make(0, 0, dst_w, dst_h);
+    comp_rect_t r = rect_intersect(srect, clip);
+    r = rect_intersect(r, drect);
+    if (rect_empty(&r)) return;
+
+    int off_x = r.x1 - dx;
+    int off_y = r.y1 - dy;
+    int copy_w = r.x2 - r.x1;
+    int copy_h = r.y2 - r.y1;
+
+    for (int y = 0; y < copy_h; y++) {
+        uint32_t* drow = dst + (size_t)(r.y1 + y) * (size_t)dst_stride + (size_t)r.x1;
+        const uint32_t* srow = src + (size_t)(off_y + y) * (size_t)src_stride + (size_t)off_x;
+        memcpy(drow, srow, (size_t)copy_w * 4u);
+    }
+}
+
+static void present_damage_to_fb(uint32_t* fb, const uint32_t* src, int stride, comp_damage_t* dmg) {
+    if (!fb || !src || !dmg || dmg->n <= 0) return;
+
+    for (int ri = 0; ri < dmg->n; ri++) {
+        const comp_rect_t r = dmg->rects[ri];
+        const int w = r.x2 - r.x1;
+        const int h = r.y2 - r.y1;
+        if (w <= 0 || h <= 0) continue;
+
+        for (int y = r.y1; y < r.y2; y++) {
+            uint32_t* drow = fb + (size_t)y * (size_t)stride + (size_t)r.x1;
+            const uint32_t* srow = src + (size_t)y * (size_t)stride + (size_t)r.x1;
+            memcpy(drow, srow, (size_t)w * 4u);
+        }
     }
 }
 
@@ -464,7 +651,7 @@ static void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_inp
     int saw_eof = 0;
 
     for (;;) {
-        uint8_t tmp[128];
+        uint8_t tmp[1024];
         int rn = pipe_try_read(w->fd_c2s, tmp, (uint32_t)sizeof(tmp));
         if (rn < 0) {
             saw_eof = 1;
@@ -1101,7 +1288,7 @@ static void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_
     int saw_eof = 0;
 
     for (;;) {
-        uint8_t tmp[128];
+        uint8_t tmp[1024];
         int rn = pipe_try_read(c->fd_c2s, tmp, (uint32_t)sizeof(tmp));
         if (rn < 0) {
             saw_eof = 1;
@@ -1600,14 +1787,33 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     int32_t draw_mx = 0x7FFFFFFF;
     int32_t draw_my = 0x7FFFFFFF;
-    int prev_focus_client = -2;
-    uint32_t prev_focus_sid = 0xFFFFFFFFu;
-    uint64_t prev_sigs[COMP_MAX_CLIENTS * COMP_MAX_SURFACES];
-    for (int i = 0; i < (int)(sizeof(prev_sigs) / sizeof(prev_sigs[0])); i++) prev_sigs[i] = 0;
+
+    typedef struct {
+        int valid;
+        int x;
+        int y;
+        int w;
+        int h;
+        int stride;
+        uint32_t z;
+        const uint32_t* pixels;
+        uint32_t commit_gen;
+    } draw_surface_state_t;
+
+    draw_surface_state_t prev_state[COMP_MAX_CLIENTS * COMP_MAX_SURFACES];
+    memset(prev_state, 0, sizeof(prev_state));
+
+    comp_rect_t prev_preview_rect;
+    prev_preview_rect.x1 = 0;
+    prev_preview_rect.y1 = 0;
+    prev_preview_rect.x2 = 0;
+    prev_preview_rect.y2 = 0;
 
     comp_preview_t preview;
     memset(&preview, 0, sizeof(preview));
     int preview_dirty = 0;
+
+    int first_frame = 1;
 
     while (!g_should_exit) {
         if (wm_spawn_retry_wait > 0) wm_spawn_retry_wait--;
@@ -1809,52 +2015,92 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
-        int need_redraw = 0;
-        if (ms.x != draw_mx || ms.y != draw_my) need_redraw = 1;
-        if (input.focus_client != prev_focus_client || input.focus_surface_id != prev_focus_sid) need_redraw = 1;
-        if (preview_dirty) need_redraw = 1;
+        comp_damage_t dmg;
+        damage_reset(&dmg);
 
-        for (int ci = 0; ci < COMP_MAX_CLIENTS; ci++) {
-            for (int si = 0; si < COMP_MAX_SURFACES; si++) {
-                const comp_surface_t* s = &clients[ci].surfaces[si];
-                const int valid = (clients[ci].connected && s->in_use && s->attached && s->committed && s->pixels && s->w > 0 && s->h > 0 && s->stride > 0);
+        if (first_frame) {
+            damage_add(&dmg, rect_make(0, 0, w, h), w, h);
+        }
 
-                uint64_t sig = 0;
-                if (valid) {
-                    uint64_t h1 = (uint64_t)(uint32_t)s->x;
-                    uint64_t h2 = (uint64_t)(uint32_t)s->y;
-                    uint64_t h3 = (uint64_t)(uint32_t)s->w;
-                    uint64_t h4 = (uint64_t)(uint32_t)s->h;
-                    uint64_t h5 = (uint64_t)(uint32_t)s->stride;
-                    uint64_t h6 = (uint64_t)(uint32_t)s->z;
-                    uint64_t h7 = (uint64_t)(uintptr_t)s->pixels;
-                    uint64_t h8 = (uint64_t)s->commit_gen;
-                    sig = h1;
-                    sig ^= (h2 * 0x9E3779B97F4A7C15ull);
-                    sig ^= (h3 * 0xC2B2AE3D27D4EB4Full);
-                    sig ^= (h4 * 0x165667B19E3779F9ull);
-                    sig ^= (h5 * 0x85EBCA77C2B2AE63ull);
-                    sig ^= (h6 * 0x27D4EB2F165667C5ull);
-                    sig ^= (h7 * 0x9E3779B97F4A7C15ull);
-                    sig ^= (h8 * 0xC2B2AE3D27D4EB4Full);
+        if (ms.x != draw_mx || ms.y != draw_my) {
+            if (draw_mx != 0x7FFFFFFF && draw_my != 0x7FFFFFFF) {
+                damage_add(&dmg, rect_make(draw_mx - 8, draw_my - 8, 17, 17), w, h);
+            }
+            damage_add(&dmg, rect_make(ms.x - 8, ms.y - 8, 17, 17), w, h);
+        }
+
+        comp_rect_t new_preview_rect;
+        new_preview_rect.x1 = 0;
+        new_preview_rect.y1 = 0;
+        new_preview_rect.x2 = 0;
+        new_preview_rect.y2 = 0;
+        if (preview.active && preview.client_id < (uint32_t)COMP_MAX_CLIENTS && preview.w > 0 && preview.h > 0) {
+            comp_client_t* pc = &clients[(int)preview.client_id];
+            if (pc->connected) {
+                comp_surface_t* ps = comp_client_surface_find(pc, preview.surface_id);
+                if (ps && ps->in_use && ps->attached && ps->committed) {
+                    const int t = 2;
+                    new_preview_rect = rect_make(ps->x - t, ps->y - t, (int)preview.w + t * 2, (int)preview.h + t * 2);
+                    new_preview_rect = rect_clip_to_screen(new_preview_rect, w, h);
                 }
-
-                const int idx = ci * COMP_MAX_SURFACES + si;
-                if (prev_sigs[idx] != sig) need_redraw = 1;
-                prev_sigs[idx] = sig;
+            }
+        }
+        if (preview_dirty || !rect_empty(&prev_preview_rect) || !rect_empty(&new_preview_rect)) {
+            if (preview_dirty || prev_preview_rect.x1 != new_preview_rect.x1 || prev_preview_rect.y1 != new_preview_rect.y1 || prev_preview_rect.x2 != new_preview_rect.x2 || prev_preview_rect.y2 != new_preview_rect.y2) {
+                if (!rect_empty(&prev_preview_rect)) damage_add(&dmg, prev_preview_rect, w, h);
+                if (!rect_empty(&new_preview_rect)) damage_add(&dmg, new_preview_rect, w, h);
             }
         }
 
-        if (need_redraw) {
+        for (int ci = 0; ci < COMP_MAX_CLIENTS; ci++) {
+            for (int si = 0; si < COMP_MAX_SURFACES; si++) {
+                const int idx = ci * COMP_MAX_SURFACES + si;
+                const comp_surface_t* s = &clients[ci].surfaces[si];
+                const int curr_valid = (clients[ci].connected && s->in_use && s->attached && s->committed && s->pixels && s->w > 0 && s->h > 0 && s->stride > 0);
+
+                draw_surface_state_t cur;
+                memset(&cur, 0, sizeof(cur));
+                cur.valid = curr_valid;
+                if (curr_valid) {
+                    cur.x = s->x;
+                    cur.y = s->y;
+                    cur.w = s->w;
+                    cur.h = s->h;
+                    cur.stride = s->stride;
+                    cur.z = s->z;
+                    cur.pixels = s->pixels;
+                    cur.commit_gen = s->commit_gen;
+                }
+
+                const draw_surface_state_t* prev = &prev_state[idx];
+                int changed = 0;
+                if (prev->valid != cur.valid) {
+                    changed = 1;
+                } else if (cur.valid) {
+                    if (prev->x != cur.x || prev->y != cur.y || prev->w != cur.w || prev->h != cur.h) changed = 1;
+                    else if (prev->stride != cur.stride) changed = 1;
+                    else if (prev->z != cur.z) changed = 1;
+                    else if (prev->pixels != cur.pixels) changed = 1;
+                    else if (prev->commit_gen != cur.commit_gen) changed = 1;
+                }
+
+                if (changed) {
+                    if (prev->valid) damage_add(&dmg, rect_make(prev->x, prev->y, prev->w, prev->h), w, h);
+                    if (cur.valid) damage_add(&dmg, rect_make(cur.x, cur.y, cur.w, cur.h), w, h);
+                }
+
+                prev_state[idx] = cur;
+            }
+        }
+
+        if (dmg.n > 0) {
             preview_dirty = 0;
             draw_mx = ms.x;
             draw_my = ms.y;
-            prev_focus_client = input.focus_client;
-            prev_focus_sid = input.focus_surface_id;
+            prev_preview_rect = new_preview_rect;
 
             uint32_t bg = 0x101010;
             uint32_t* out = frame_pixels ? frame_pixels : fb;
-            fill_rect(out, stride, w, h, 0, 0, w, h, bg);
 
             struct draw_item {
                 uint32_t z;
@@ -1875,42 +2121,44 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     order_n++;
                 }
             }
-            for (int i = 0; i < order_n; i++) {
-                for (int j = i + 1; j < order_n; j++) {
-                    if (order[i].z > order[j].z) {
-                        struct draw_item tmp = order[i];
-                        order[i] = order[j];
-                        order[j] = tmp;
-                    }
+
+            for (int i = 1; i < order_n; i++) {
+                struct draw_item key = order[i];
+                int j = i - 1;
+                while (j >= 0 && order[j].z > key.z) {
+                    order[j + 1] = order[j];
+                    j--;
                 }
-            }
-            for (int k = 0; k < order_n; k++) {
-                comp_surface_t* s = &clients[order[k].ci].surfaces[order[k].si];
-                blit_surface(out, stride, w, h, s->x, s->y, s->pixels, s->stride, s->w, s->h);
+                order[j + 1] = key;
             }
 
-            if (preview.active && preview.client_id < (uint32_t)COMP_MAX_CLIENTS) {
-                comp_client_t* pc = &clients[(int)preview.client_id];
-                if (pc->connected) {
-                    comp_surface_t* ps = comp_client_surface_find(pc, preview.surface_id);
-                    if (ps && ps->in_use && ps->attached && ps->committed) {
-                        const int t = 2;
-                        const uint32_t col = 0x007ACC;
-                        draw_frame_rect(out, stride, w, h, ps->x - t, ps->y - t, (int)preview.w + t * 2, (int)preview.h + t * 2, t, col);
-                    } else {
-                        preview.active = 0;
-                    }
-                } else {
-                    preview.active = 0;
-                }
-            }
+            const uint32_t preview_col = 0x007ACC;
 
-            draw_cursor(out, stride, w, h, ms.x, ms.y);
+            for (int ri = 0; ri < dmg.n; ri++) {
+                const comp_rect_t clip = dmg.rects[ri];
+                if (rect_empty(&clip)) continue;
+
+                fill_rect(out, stride, w, h, clip.x1, clip.y1, clip.x2 - clip.x1, clip.y2 - clip.y1, bg);
+
+                for (int k = 0; k < order_n; k++) {
+                    comp_surface_t* s = &clients[order[k].ci].surfaces[order[k].si];
+                    blit_surface_clipped(out, stride, w, h, s->x, s->y, s->pixels, s->stride, s->w, s->h, clip);
+                }
+
+                if (!rect_empty(&new_preview_rect)) {
+                    const int t = 2;
+                    draw_frame_rect_clipped(out, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
+                }
+
+                draw_cursor_clipped(out, stride, w, h, ms.x, ms.y, clip);
+            }
 
             if (frame_pixels) {
-                memcpy((void*)fb, (const void*)frame_pixels, (size_t)frame_size_bytes);
+                present_damage_to_fb(fb, frame_pixels, stride, &dmg);
             }
         }
+
+        first_frame = 0;
 
         usleep(16000);
     }

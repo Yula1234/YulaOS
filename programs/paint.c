@@ -1348,6 +1348,11 @@ int main(int argc, char** argv) {
             g_dbg_stage = 400;
             render_all();
             g_dbg_stage = 401;
+            if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
+                dbg_write("paint: commit failed\n");
+                running = 0;
+                break;
+            }
         }
         usleep(16000);
     }

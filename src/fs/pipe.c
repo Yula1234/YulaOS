@@ -10,7 +10,7 @@
 
 #define PIPE_SIZE 4096
 
-#define PIPE_BATCH 128
+#define PIPE_BATCH 1024
 
 typedef struct {
     char buffer[PIPE_SIZE];
@@ -43,6 +43,42 @@ static void sem_give_n(semaphore_t* sem, uint32_t n) {
     while (n--) {
         sem_signal(sem);
     }
+}
+
+static uint32_t sem_try_take_up_to(semaphore_t* sem, uint32_t max) {
+    if (!sem || max == 0) return 0;
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    int c = sem->count;
+    if (c <= 0) {
+        spinlock_release_safe(&sem->lock, flags);
+        return 0;
+    }
+    uint32_t avail = (uint32_t)c;
+    uint32_t take = (avail < max) ? avail : max;
+    sem->count -= (int)take;
+    spinlock_release_safe(&sem->lock, flags);
+    return take;
+}
+
+static void sem_signal_n(semaphore_t* sem, uint32_t n) {
+    if (!sem || n == 0) return;
+
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    sem->count += (int)n;
+
+    while (n-- && !dlist_empty(&sem->wait_list)) {
+        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+        dlist_del(&t->sem_node);
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
+        t->blocked_on_sem = 0;
+        if (t->state != TASK_ZOMBIE) {
+            t->state = TASK_RUNNABLE;
+            sched_add(t);
+        }
+    }
+
+    spinlock_release_safe(&sem->lock, flags);
 }
 
 static int sem_try_take_n(semaphore_t* sem, uint32_t n) {
@@ -158,10 +194,7 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
     uint32_t want = size;
     if (want > PIPE_BATCH) want = PIPE_BATCH;
 
-    uint32_t take = 0;
-    while (take < want && sem_try_acquire(&p->sem_read)) {
-        take++;
-    }
+    uint32_t take = sem_try_take_up_to(&p->sem_read, want);
     if (take == 0) return 0;
 
     flags = spinlock_acquire_safe(&p->lock);
@@ -193,9 +226,9 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
     spinlock_release_safe(&p->lock, flags);
 
     if (n < take) {
-        sem_give_n(&p->sem_read, take - n);
+        sem_signal_n(&p->sem_read, take - n);
     }
-    sem_give_n(&p->sem_write, n);
+    sem_signal_n(&p->sem_write, n);
     return (int)n;
 }
 
@@ -219,7 +252,7 @@ int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
     flags = spinlock_acquire_safe(&p->lock);
     if (p->readers == 0) {
         spinlock_release_safe(&p->lock, flags);
-        sem_give_n(&p->sem_write, size);
+        sem_signal_n(&p->sem_write, size);
         return -1;
     }
 
@@ -238,7 +271,7 @@ int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
     }
 
     spinlock_release_safe(&p->lock, flags);
-    sem_give_n(&p->sem_read, size);
+    sem_signal_n(&p->sem_read, size);
     return (int)size;
 }
 
