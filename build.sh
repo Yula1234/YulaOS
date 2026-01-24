@@ -111,6 +111,10 @@ for APP in "${USER_APPS[@]}"; do
 done
 
 "$TOOL" "$DISK_IMG" import bin/usr/start.o /bin/start.o > /dev/null
+"$TOOL" "$DISK_IMG" import bin/obj/malloc.o /bin/malloc.o > /dev/null
+"$TOOL" "$DISK_IMG" import bin/obj/string.o /bin/string.o > /dev/null
+"$TOOL" "$DISK_IMG" import bin/obj/stdlib.o /bin/stdlib.o > /dev/null
+"$TOOL" "$DISK_IMG" import bin/obj/stdio.o /bin/stdio.o > /dev/null
 "$TOOL" "$DISK_IMG" import programs/loop.asm /home/loop.asm > /dev/null
 
 cp bin/kernel.bin "$ISODIR/boot/kernel.bin"
