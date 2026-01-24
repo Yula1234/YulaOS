@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "compositor" "comp_client" "wm" "wm_test")
+USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "compositor" "comp_client" "wm")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -79,10 +79,23 @@ USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o
 bin/obj/string.o bin/obj/stdlib.o"
 
 echo "[user] compiling apps..."
+declare -A USER_APP_OBJS
 for APP in "${USER_APPS[@]}"; do
-    (
-        $CC $CFLAGS_USER -c "programs/$APP.c" -o "bin/usr/$APP.o"
-    ) &
+    if [ -d "programs/$APP" ] && [ -n "$(find "programs/$APP" -name "*.c" -print -quit)" ]; then
+        OBJS=""
+        for FILE in $(find "programs/$APP" -name "*.c" | sort); do
+            REL="${FILE#programs/$APP/}"
+            FLAT="${REL//\//_}"
+            OBJ="bin/usr/${APP}_${FLAT%.*}.o"
+            $CC $CFLAGS_USER -c "$FILE" -o "$OBJ" &
+            OBJS="$OBJS $OBJ"
+        done
+        USER_APP_OBJS["$APP"]="$OBJS"
+    else
+        OBJ="bin/usr/$APP.o"
+        $CC $CFLAGS_USER -c "programs/$APP.c" -o "$OBJ" &
+        USER_APP_OBJS["$APP"]="$OBJ"
+    fi
 done
 
 wait
@@ -93,7 +106,8 @@ $LD -T src/linker.ld -o bin/kernel.bin $SORTED_K_OBJS &
 
 for APP in "${USER_APPS[@]}"; do
     (
-        $LD $LDFLAGS_USER -o "bin/usr/$APP.exe" $USER_LIBS "bin/usr/$APP.o"
+        read -r -a OBJS <<< "${USER_APP_OBJS[$APP]}"
+        $LD $LDFLAGS_USER -o "bin/usr/$APP.exe" $USER_LIBS "${OBJS[@]}"
         strip --strip-all "bin/usr/$APP.exe"
     ) &
 done
