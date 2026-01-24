@@ -57,8 +57,6 @@ done
 
 echo "[kernel] compiling C..."
 for FILE in $(find src -name "*.c"); do
-    if [[ "$FILE" == src/usr* ]]; then continue; fi
-    if [[ "$FILE" == src/kernel/window.c || "$FILE" == src/kernel/gui_task.c || "$FILE" == src/kernel/monitor_task.c ]]; then continue; fi
     
     REL="${FILE#src/}"
     FLAT="${REL//\//_}"
