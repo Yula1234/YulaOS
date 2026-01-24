@@ -3,6 +3,8 @@
 
 #include <yula.h>
 
+#error "programs/asmc.c is retired; build programs/asmc/*.c (entrypoint: programs/asmc/asmc_main.c)"
+
 #define MAX_LINE_LEN   1024
 #define MAX_TOKEN_LEN   64
 #define MAX_TOKENS      256
