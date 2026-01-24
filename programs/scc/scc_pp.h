@@ -24,7 +24,9 @@ typedef struct {
     char* text;
 } SccPPResult;
 
-static SccPPResult scc_preprocess_file(const SccPPConfig* cfg, const char* input_path);
+SccPPResult scc_preprocess_file(const SccPPConfig* cfg, const char* input_path);
+
+#ifdef SCC_PP_IMPLEMENTATION
 
 typedef struct {
     const char* begin;
@@ -2399,6 +2401,7 @@ static void scc_pp_process_file_internal(SccPP* pp, const char* path, Buffer* ou
 
                 if (scc_pp_slice_eq(dir, "define")) {
                     while (i < line_count && line_toks[i].kind == SCC_PP_TOK_WS) i++;
+
                     if (i >= line_count || line_toks[i].kind != SCC_PP_TOK_IDENT) {
                         scc_pp_fatal_at(pp, logical_file, src, line_no, 1, "Preprocessor: expected identifier after #define");
                     }
@@ -2533,7 +2536,7 @@ static void scc_pp_process_file_internal(SccPP* pp, const char* path, Buffer* ou
     scc_pp_include_pop(pp);
 }
 
-static SccPPResult scc_preprocess_file(const SccPPConfig* cfg, const char* input_path) {
+SccPPResult scc_preprocess_file(const SccPPConfig* cfg, const char* input_path) {
     SccPPResult r;
     memset(&r, 0, sizeof(r));
     r.ok = 0;
@@ -2566,5 +2569,9 @@ static SccPPResult scc_preprocess_file(const SccPPConfig* cfg, const char* input
     scc_pp_free(&pp);
     return r;
 }
+
+#undef SCC_PP_IMPLEMENTATION
+
+#endif
 
 #endif

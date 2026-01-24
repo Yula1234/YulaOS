@@ -5,6 +5,7 @@
 #define SCC_IR_X86_H_INCLUDED
 
 #include "scc_ir.h"
+#include "scc_elf.h"
 #include "scc_diag.h"
 #include "scc_x86.h"
 
@@ -15,6 +16,10 @@ typedef struct {
     Buffer* rel_data;
     SymTable* syms;
 } IrX86Ctx;
+
+void ir_x86_codegen_module_stub(IrX86Ctx* cx, IrModule* m);
+
+#ifdef SCC_IR_X86_IMPLEMENTATION
 
 typedef struct {
     uint32_t imm_off;
@@ -1093,7 +1098,7 @@ static uint32_t ir_x86_codegen_func(IrX86Ctx* cx, IrFunc* f) {
     return func_start;
 }
 
-static void ir_x86_codegen_module_stub(IrX86Ctx* cx, IrModule* m) {
+void ir_x86_codegen_module_stub(IrX86Ctx* cx, IrModule* m) {
     if (!cx || !m || !cx->text) return;
 
     for (uint32_t i = 0; i < m->func_count; i++) {
@@ -1112,5 +1117,9 @@ static void ir_x86_codegen_module_stub(IrX86Ctx* cx, IrModule* m) {
         f->sym->size = func_size;
     }
 }
+
+#undef SCC_IR_X86_IMPLEMENTATION
+
+#endif
 
 #endif

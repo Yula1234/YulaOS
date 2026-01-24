@@ -5,40 +5,46 @@
 #define SCC_CODEGEN_H_INCLUDED
 
 #include "scc_parser_base.h"
+#include "scc_elf.h"
 #include "scc_x86.h"
 
- typedef struct {
-     uint32_t start_off;
-     uint32_t break_fixups[64];
-     int break_count;
- } LoopCtx;
+typedef struct {
+    uint32_t start_off;
+    uint32_t break_fixups[64];
+    int break_count;
+} LoopCtx;
 
- typedef struct {
-     Buffer* text;
-     Buffer* rel_text;
-     SymTable* syms;
-     Parser* p;
+typedef struct {
+    Buffer* text;
+    Buffer* rel_text;
+    SymTable* syms;
+    Parser* p;
 
-     Buffer* data;
-     Buffer* rel_data;
+    Buffer* data;
+    Buffer* rel_data;
 
-     Var* vars;
-     uint32_t str_id;
+    Var* vars;
+    uint32_t str_id;
 
-     LoopCtx loops[16];
-     int loop_depth;
- } Codegen;
+    LoopCtx loops[16];
+    int loop_depth;
+} Codegen;
 
- static void gen_expr(Codegen* cg, AstExpr* e);
+void emit_reloc_text(Codegen* cg, uint32_t offset, int sym_index, int type);
+void emit_reloc_data(Codegen* cg, uint32_t offset, int sym_index, int type);
 
- static void emit_reloc_text(Codegen* cg, uint32_t offset, int sym_index, int type) {
-     Elf32_Rel r;
-     r.r_offset = (Elf32_Addr)offset;
-     r.r_info = ELF32_R_INFO((Elf32_Word)sym_index, (Elf32_Word)type);
-     buf_write(cg->rel_text, &r, sizeof(r));
- }
+#ifdef SCC_CODEGEN_IMPLEMENTATION
 
-static void emit_reloc_data(Codegen* cg, uint32_t offset, int sym_index, int type) {
+static void gen_expr(Codegen* cg, AstExpr* e);
+
+void emit_reloc_text(Codegen* cg, uint32_t offset, int sym_index, int type) {
+    Elf32_Rel r;
+    r.r_offset = (Elf32_Addr)offset;
+    r.r_info = ELF32_R_INFO((Elf32_Word)sym_index, (Elf32_Word)type);
+    buf_write(cg->rel_text, &r, sizeof(r));
+}
+
+void emit_reloc_data(Codegen* cg, uint32_t offset, int sym_index, int type) {
     Elf32_Rel r;
     r.r_offset = (Elf32_Addr)offset;
     r.r_info = ELF32_R_INFO((Elf32_Word)sym_index, (Elf32_Word)type);
@@ -875,4 +881,7 @@ static int gen_stmt(Codegen* cg, AstStmt* s) {
     return 0;
 }
 
+#undef SCC_CODEGEN_IMPLEMENTATION
+
+#endif
 #endif

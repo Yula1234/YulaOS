@@ -14,6 +14,10 @@ typedef struct {
     uint32_t str_id;
 } SccConstEval;
 
+void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, Symbol** out_reloc_sym);
+
+#ifdef SCC_CONSTEVAL_IMPLEMENTATION
+
 static void scc_u32_to_dec(char out[16], uint32_t v) {
     char tmp[16];
     int n = 0;
@@ -53,7 +57,7 @@ static Symbol* scc_intern_string(SccConstEval* ce, const char* bytes, int len) {
     return symtab_add_local_data(ce->syms, ce->p->arena, namebuf, off, (uint32_t)len + 1u);
 }
 
-static void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, Symbol** out_reloc_sym) {
+void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, Symbol** out_reloc_sym) {
     *out_val = 0;
     *out_reloc_sym = 0;
 
@@ -161,5 +165,9 @@ static void scc_eval_const_u32(SccConstEval* ce, AstExpr* e, uint32_t* out_val, 
 
     scc_fatal_at(ce->p->file, ce->p->src, e->tok.line, e->tok.col, "Non-constant global initializer");
 }
+
+#undef SCC_CONSTEVAL_IMPLEMENTATION
+
+#endif
 
 #endif

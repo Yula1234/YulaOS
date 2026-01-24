@@ -8,7 +8,11 @@
 #include "scc_buffer.h"
 #include "scc_elf.h"
 
-static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, uint32_t bss_size, Buffer* rel_text, Buffer* rel_data, SymTable* syms) {
+void write_elf_object(const char* out_path, Buffer* text, Buffer* data, uint32_t bss_size, Buffer* rel_text, Buffer* rel_data, SymTable* syms);
+
+#ifdef SCC_OBJ_WRITER_IMPLEMENTATION
+
+void write_elf_object(const char* out_path, Buffer* text, Buffer* data, uint32_t bss_size, Buffer* rel_text, Buffer* rel_data, SymTable* syms) {
     Buffer strtab; buf_init(&strtab, 128);
     buf_push_u8(&strtab, 0);
 
@@ -280,5 +284,9 @@ static void write_elf_object(const char* out_path, Buffer* text, Buffer* data, u
     free(ordered);
     free(old_to_new);
 }
+
+#undef SCC_OBJ_WRITER_IMPLEMENTATION
+
+#endif
 
 #endif

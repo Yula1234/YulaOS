@@ -8,6 +8,10 @@
 #include "scc_parser_base.h"
 #include "scc_buffer.h"
 
+void ir_lower_unit_stub(IrModule* m, Parser* p, SymTable* syms, Buffer* data, uint32_t* io_str_id, AstUnit* u);
+
+#ifdef SCC_IR_LOWER_IMPLEMENTATION
+
 typedef struct {
     Parser* p;
     SymTable* syms;
@@ -1435,7 +1439,7 @@ static void ir_lower_func_stub_body(IrLowerCtx* lc, IrFunc* f, AstFunc* af) {
     }
 }
 
-static void ir_lower_unit_stub(IrModule* m, Parser* p, SymTable* syms, Buffer* data, uint32_t* io_str_id, AstUnit* u) {
+void ir_lower_unit_stub(IrModule* m, Parser* p, SymTable* syms, Buffer* data, uint32_t* io_str_id, AstUnit* u) {
     IrLowerCtx lc;
     memset(&lc, 0, sizeof(lc));
     lc.p = p;
@@ -1456,5 +1460,9 @@ static void ir_lower_unit_stub(IrModule* m, Parser* p, SymTable* syms, Buffer* d
 
     if (io_str_id) *io_str_id = lc.str_id;
 }
+
+#undef SCC_IR_LOWER_IMPLEMENTATION
+
+#endif
 
 #endif
