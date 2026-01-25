@@ -1846,7 +1846,7 @@ int main(int argc, char** argv) {
                 ed.quit = 1;
             }
         }
-        usleep(4000);
+        comp_wait_events(&conn, 4000u);
     }
 
     (void)comp_send_destroy_surface(&conn, surface_id, 0u);

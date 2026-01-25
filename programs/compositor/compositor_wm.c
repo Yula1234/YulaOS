@@ -13,6 +13,8 @@ void wm_disconnect(wm_conn_t* w) {
     }
     ipc_rx_reset(&w->rx);
     w->seq_out = 1;
+    w->tx_r = 0;
+    w->tx_w = 0;
 }
 
 void wm_init(wm_conn_t* w, int fd_c2s, int fd_s2c) {
@@ -23,6 +25,40 @@ void wm_init(wm_conn_t* w, int fd_c2s, int fd_s2c) {
     w->fd_s2c = fd_s2c;
     ipc_rx_reset(&w->rx);
     w->seq_out = 1;
+    w->tx_r = 0;
+    w->tx_w = 0;
+}
+
+static inline uint32_t wm_tx_count(const wm_conn_t* w) {
+    return w ? (w->tx_w - w->tx_r) : 0u;
+}
+
+void wm_flush_tx(wm_conn_t* w) {
+    if (!w || !w->connected || w->fd_s2c < 0) return;
+
+    while (w->tx_r != w->tx_w) {
+        const uint32_t ri = w->tx_r % 128u;
+        uint32_t len = w->tx[ri].len;
+        uint32_t off = w->tx[ri].off;
+        if (off >= len) {
+            w->tx_r++;
+            continue;
+        }
+
+        int wn = pipe_try_write(w->fd_s2c, w->tx[ri].frame + off, len - off);
+        if (wn < 0) {
+            wm_disconnect(w);
+            return;
+        }
+        if (wn == 0) {
+            return;
+        }
+
+        w->tx[ri].off = off + (uint32_t)wn;
+        if (w->tx[ri].off >= w->tx[ri].len) {
+            w->tx_r++;
+        }
+    }
 }
 
 int wm_send_event(wm_conn_t* w, const comp_ipc_wm_event_t* ev, int essential) {
@@ -39,10 +75,32 @@ int wm_send_event(wm_conn_t* w, const comp_ipc_wm_event_t* ev, int essential) {
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), ev, sizeof(*ev));
 
-    int wr = pipe_try_write_frame(w->fd_s2c, frame, (uint32_t)sizeof(frame), essential);
-    if (wr < 0) return -1;
-    if (essential && wr == 0) return -1;
-    return 0;
+    if (!essential) {
+        wm_flush_tx(w);
+        if (!w->connected) return -1;
+        if (wm_tx_count(w) != 0u) {
+            return 0;
+        }
+        int wr = pipe_try_write_frame(w->fd_s2c, frame, (uint32_t)sizeof(frame), 0);
+        if (wr < 0) return -1;
+        return 0;
+    }
+
+    if (wm_tx_count(w) >= 128u) {
+        wm_flush_tx(w);
+        if (wm_tx_count(w) >= 128u) {
+            return -1;
+        }
+    }
+
+    const uint32_t wi = w->tx_w % 128u;
+    w->tx[wi].len = (uint32_t)sizeof(frame);
+    w->tx[wi].off = 0;
+    memcpy(w->tx[wi].frame, frame, (uint32_t)sizeof(frame));
+    w->tx_w++;
+
+    wm_flush_tx(w);
+    return w->connected ? 0 : -1;
 }
 
 void wm_replay_state(wm_conn_t* wm, const comp_client_t* clients, int nclients) {
@@ -74,15 +132,26 @@ void wm_replay_state(wm_conn_t* wm, const comp_client_t* clients, int nclients) 
     }
 }
 
-void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_state_t* input, uint32_t* z_counter, comp_preview_t* preview, int* preview_dirty) {
+void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_state_t* input, uint32_t* z_counter, comp_preview_t* preview, int* preview_dirty, int* scene_dirty) {
     if (!w || !w->connected || w->fd_c2s < 0) return;
     if (!clients || !input || !z_counter) return;
+
+    wm_flush_tx(w);
 
     int saw_eof = 0;
 
     for (;;) {
+        const uint32_t cap = (uint32_t)sizeof(w->rx.buf);
+        uint32_t count = ipc_rx_count(&w->rx);
+        uint32_t space = (count < cap) ? (cap - count) : 0u;
+        const uint32_t reserve = (uint32_t)sizeof(comp_ipc_hdr_t) + (uint32_t)COMP_IPC_MAX_PAYLOAD;
+        if (space <= reserve) break;
+        space -= reserve;
+
         uint8_t tmp[1024];
-        int rn = pipe_try_read(w->fd_c2s, tmp, (uint32_t)sizeof(tmp));
+        uint32_t want = space;
+        if (want > (uint32_t)sizeof(tmp)) want = (uint32_t)sizeof(tmp);
+        int rn = pipe_try_read(w->fd_c2s, tmp, want);
         if (rn < 0) {
             saw_eof = 1;
             break;
@@ -157,33 +226,42 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                 input->focus_surface_id = cmd.surface_id;
             } else if (cmd.kind == COMP_WM_CMD_RAISE) {
                 s->z = ++(*z_counter);
+                if (scene_dirty) *scene_dirty = 1;
             } else if (cmd.kind == COMP_WM_CMD_MOVE) {
                 s->x = (int)cmd.x;
                 s->y = (int)cmd.y;
+                if (scene_dirty) *scene_dirty = 1;
             } else if (cmd.kind == COMP_WM_CMD_RESIZE) {
                 if (cmd.x <= 0 || cmd.y <= 0) continue;
                 if (c->fd_s2c < 0) continue;
+
+                if (scene_dirty) *scene_dirty = 1;
+
+                {
+                    int32_t nw = cmd.x;
+                    int32_t nh = cmd.y;
+                    int new_w = s->w;
+                    int new_h = s->h;
+
+                    if (nw > 0 && nw < new_w) new_w = (int)nw;
+                    if (nh > 0 && nh < new_h) new_h = (int)nh;
+
+                    if (new_w != s->w || new_h != s->h) {
+                        s->w = new_w;
+                        s->h = new_h;
+                    }
+                }
 
                 comp_ipc_input_t in;
                 in.surface_id = cmd.surface_id;
                 in.kind = COMP_IPC_INPUT_RESIZE;
                 in.x = cmd.x;
-                in.y = cmd.y;
+                in.y = (int32_t)cmd.y;
                 in.buttons = 0;
                 in.keycode = 0;
                 in.key_state = 0;
 
-                comp_ipc_hdr_t oh;
-                oh.magic = COMP_IPC_MAGIC;
-                oh.version = (uint16_t)COMP_IPC_VERSION;
-                oh.type = (uint16_t)COMP_IPC_MSG_INPUT;
-                oh.len = (uint32_t)sizeof(in);
-                oh.seq = c->seq_out++;
-
-                uint8_t frame[sizeof(oh) + sizeof(in)];
-                memcpy(frame, &oh, sizeof(oh));
-                memcpy(frame + sizeof(oh), &in, sizeof(in));
-                (void)pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), 1);
+                (void)comp_client_send_input(c, &in, 1);
             } else if (cmd.kind == COMP_WM_CMD_PREVIEW_RECT) {
                 if (!preview) continue;
                 if (cmd.x <= 0 || cmd.y <= 0) continue;
@@ -198,12 +276,14 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                     preview->w = nw;
                     preview->h = nh;
                     if (preview_dirty) *preview_dirty = 1;
+                    if (scene_dirty) *scene_dirty = 1;
                 }
             } else if (cmd.kind == COMP_WM_CMD_PREVIEW_CLEAR) {
                 if (!preview) continue;
                 if (preview->active && preview->client_id == cmd.client_id && preview->surface_id == cmd.surface_id) {
                     preview->active = 0;
                     if (preview_dirty) *preview_dirty = 1;
+                    if (scene_dirty) *scene_dirty = 1;
                 }
             } else if (cmd.kind == COMP_WM_CMD_CLOSE) {
                 int pid = c->pid;

@@ -194,94 +194,161 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     uint32_t tick = 0;
     while (!g_should_exit) {
-        for (;;) {
-            uint8_t tmp[128];
-            int rn = pipe_try_read(s2c_r_fd, tmp, (uint32_t)sizeof(tmp));
-            if (rn < 0) {
-                g_should_exit = 1;
-                break;
-            }
-            if (rn == 0) break;
-            rx_push(&rx, tmp, (uint32_t)rn);
-        }
-
-        for (;;) {
-            uint32_t avail = rx_count(&rx);
-            if (avail < 4) break;
-
-            uint32_t magic;
-            rx_peek(&rx, 0, &magic, 4);
-            if (magic != COMP_IPC_MAGIC) {
-                rx_drop(&rx, 1);
-                continue;
-            }
-            if (avail < (uint32_t)sizeof(comp_ipc_hdr_t)) break;
-
-            comp_ipc_hdr_t hdr;
-            rx_peek(&rx, 0, &hdr, (uint32_t)sizeof(hdr));
-            if (hdr.version != COMP_IPC_VERSION || hdr.len > COMP_IPC_MAX_PAYLOAD) {
-                rx_drop(&rx, 1);
-                continue;
+        if (legacy_mode) {
+            for (;;) {
+                uint8_t tmp[128];
+                int rn = pipe_try_read(s2c_r_fd, tmp, (uint32_t)sizeof(tmp));
+                if (rn < 0) {
+                    g_should_exit = 1;
+                    break;
+                }
+                if (rn == 0) break;
+                rx_push(&rx, tmp, (uint32_t)rn);
             }
 
-            uint32_t frame_len = (uint32_t)sizeof(hdr) + hdr.len;
-            if (avail < frame_len) break;
+            for (;;) {
+                uint32_t avail = rx_count(&rx);
+                if (avail < 4) break;
 
-            rx_drop(&rx, (uint32_t)sizeof(hdr));
-            uint8_t payload[COMP_IPC_MAX_PAYLOAD];
-            if (hdr.len) {
-                rx_peek(&rx, 0, payload, hdr.len);
-                rx_drop(&rx, hdr.len);
-            }
+                uint32_t magic;
+                rx_peek(&rx, 0, &magic, 4);
+                if (magic != COMP_IPC_MAGIC) {
+                    rx_drop(&rx, 1);
+                    continue;
+                }
+                if (avail < (uint32_t)sizeof(comp_ipc_hdr_t)) break;
 
-            if (hdr.type == COMP_IPC_MSG_INPUT && hdr.len == (uint32_t)sizeof(comp_ipc_input_t)) {
-                comp_ipc_input_t in;
-                memcpy(&in, payload, sizeof(in));
-                if (in.kind == COMP_IPC_INPUT_MOUSE) {
-                    if (in.buttons & 1u) dragging = 1;
-                    else dragging = 0;
+                comp_ipc_hdr_t hdr;
+                rx_peek(&rx, 0, &hdr, (uint32_t)sizeof(hdr));
+                if (hdr.version != COMP_IPC_VERSION || hdr.len > COMP_IPC_MAX_PAYLOAD) {
+                    rx_drop(&rx, 1);
+                    continue;
+                }
 
-                    if (dragging) {
-                        const int gx = last_commit_x + (int)in.x;
-                        const int gy = last_commit_y + (int)in.y;
-                        int nx = gx - (width / 2);
-                        int ny = gy - (height / 2);
-                        if (nx < 0) nx = 0;
-                        if (ny < 0) ny = 0;
-                        if (nx != last_commit_x || ny != last_commit_y) {
-                            last_commit_x = nx;
-                            last_commit_y = ny;
-                            commit.x = nx;
-                            commit.y = ny;
-                            if (comp_ipc_send(c2s_w_fd, (uint16_t)COMP_IPC_MSG_COMMIT, seq++, &commit, (uint32_t)sizeof(commit)) < 0) {
-                                g_should_exit = 1;
-                                break;
+                uint32_t frame_len = (uint32_t)sizeof(hdr) + hdr.len;
+                if (avail < frame_len) break;
+
+                rx_drop(&rx, (uint32_t)sizeof(hdr));
+                uint8_t payload[COMP_IPC_MAX_PAYLOAD];
+                if (hdr.len) {
+                    rx_peek(&rx, 0, payload, hdr.len);
+                    rx_drop(&rx, hdr.len);
+                }
+
+                if (hdr.type == COMP_IPC_MSG_INPUT && hdr.len == (uint32_t)sizeof(comp_ipc_input_t)) {
+                    comp_ipc_input_t in;
+                    memcpy(&in, payload, sizeof(in));
+                    if (in.kind == COMP_IPC_INPUT_MOUSE) {
+                        if (in.buttons & 1u) dragging = 1;
+                        else dragging = 0;
+
+                        if (dragging) {
+                            const int gx = last_commit_x + (int)in.x;
+                            const int gy = last_commit_y + (int)in.y;
+                            int nx = gx - (width / 2);
+                            int ny = gy - (height / 2);
+                            if (nx < 0) nx = 0;
+                            if (ny < 0) ny = 0;
+                            if (nx != last_commit_x || ny != last_commit_y) {
+                                last_commit_x = nx;
+                                last_commit_y = ny;
+                                commit.x = nx;
+                                commit.y = ny;
+                                if (comp_ipc_send(c2s_w_fd, (uint16_t)COMP_IPC_MSG_COMMIT, seq++, &commit, (uint32_t)sizeof(commit)) < 0) {
+                                    g_should_exit = 1;
+                                    break;
+                                }
+                            }
+                        }
+                    } else if (in.kind == COMP_IPC_INPUT_KEY) {
+                        if (in.key_state == 1u) {
+                            int step = 8;
+                            int nx = last_commit_x;
+                            int ny = last_commit_y;
+
+                            uint32_t kc = in.keycode;
+                            if (kc == 'a' || kc == 'A' || kc == 0x11u) nx -= step;
+                            if (kc == 'd' || kc == 'D' || kc == 0x12u) nx += step;
+                            if (kc == 'w' || kc == 'W' || kc == 0x13u) ny -= step;
+                            if (kc == 's' || kc == 'S' || kc == 0x14u) ny += step;
+                            if (kc == 'r' || kc == 'R') { nx = 64; ny = 64; }
+
+                            if (nx < 0) nx = 0;
+                            if (ny < 0) ny = 0;
+                            if (nx != last_commit_x || ny != last_commit_y) {
+                                last_commit_x = nx;
+                                last_commit_y = ny;
+                                commit.x = nx;
+                                commit.y = ny;
+                                if (comp_ipc_send(c2s_w_fd, (uint16_t)COMP_IPC_MSG_COMMIT, seq++, &commit, (uint32_t)sizeof(commit)) < 0) {
+                                    g_should_exit = 1;
+                                    break;
+                                }
                             }
                         }
                     }
-                } else if (in.kind == COMP_IPC_INPUT_KEY) {
-                    if (in.key_state == 1u) {
-                        int step = 8;
-                        int nx = last_commit_x;
-                        int ny = last_commit_y;
+                }
+            }
+        } else {
+            for (;;) {
+                comp_ipc_hdr_t hdr;
+                uint8_t payload[COMP_IPC_MAX_PAYLOAD];
+                int r = comp_try_recv(&conn, &hdr, payload, (uint32_t)sizeof(payload));
+                if (r < 0) {
+                    g_should_exit = 1;
+                    break;
+                }
+                if (r == 0) break;
 
-                        uint32_t kc = in.keycode;
-                        if (kc == 'a' || kc == 'A' || kc == 0x11u) nx -= step;
-                        if (kc == 'd' || kc == 'D' || kc == 0x12u) nx += step;
-                        if (kc == 'w' || kc == 'W' || kc == 0x13u) ny -= step;
-                        if (kc == 's' || kc == 'S' || kc == 0x14u) ny += step;
-                        if (kc == 'r' || kc == 'R') { nx = 64; ny = 64; }
+                if (hdr.type == (uint16_t)COMP_IPC_MSG_INPUT && hdr.len == (uint32_t)sizeof(comp_ipc_input_t)) {
+                    comp_ipc_input_t in;
+                    memcpy(&in, payload, sizeof(in));
+                    if (in.kind == COMP_IPC_INPUT_MOUSE) {
+                        if (in.buttons & 1u) dragging = 1;
+                        else dragging = 0;
 
-                        if (nx < 0) nx = 0;
-                        if (ny < 0) ny = 0;
-                        if (nx != last_commit_x || ny != last_commit_y) {
-                            last_commit_x = nx;
-                            last_commit_y = ny;
-                            commit.x = nx;
-                            commit.y = ny;
-                            if (comp_ipc_send(c2s_w_fd, (uint16_t)COMP_IPC_MSG_COMMIT, seq++, &commit, (uint32_t)sizeof(commit)) < 0) {
-                                g_should_exit = 1;
-                                break;
+                        if (dragging) {
+                            const int gx = last_commit_x + (int)in.x;
+                            const int gy = last_commit_y + (int)in.y;
+                            int nx = gx - (width / 2);
+                            int ny = gy - (height / 2);
+                            if (nx < 0) nx = 0;
+                            if (ny < 0) ny = 0;
+                            if (nx != last_commit_x || ny != last_commit_y) {
+                                last_commit_x = nx;
+                                last_commit_y = ny;
+                                commit.x = nx;
+                                commit.y = ny;
+                                if (comp_send_commit(&conn, 1u, nx, ny, 0u) != 0) {
+                                    g_should_exit = 1;
+                                    break;
+                                }
+                            }
+                        }
+                    } else if (in.kind == COMP_IPC_INPUT_KEY) {
+                        if (in.key_state == 1u) {
+                            int step = 8;
+                            int nx = last_commit_x;
+                            int ny = last_commit_y;
+
+                            uint32_t kc = in.keycode;
+                            if (kc == 'a' || kc == 'A' || kc == 0x11u) nx -= step;
+                            if (kc == 'd' || kc == 'D' || kc == 0x12u) nx += step;
+                            if (kc == 'w' || kc == 'W' || kc == 0x13u) ny -= step;
+                            if (kc == 's' || kc == 'S' || kc == 0x14u) ny += step;
+                            if (kc == 'r' || kc == 'R') { nx = 64; ny = 64; }
+
+                            if (nx < 0) nx = 0;
+                            if (ny < 0) ny = 0;
+                            if (nx != last_commit_x || ny != last_commit_y) {
+                                last_commit_x = nx;
+                                last_commit_y = ny;
+                                commit.x = nx;
+                                commit.y = ny;
+                                if (comp_send_commit(&conn, 1u, nx, ny, 0u) != 0) {
+                                    g_should_exit = 1;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -304,7 +371,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
 
         tick++;
-        usleep(16000);
+        if (!legacy_mode) {
+            comp_wait_events(&conn, 16000u);
+        } else {
+            usleep(16000);
+        }
     }
 
     munmap((void*)pixels, size_bytes);

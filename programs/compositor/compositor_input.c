@@ -1,5 +1,101 @@
 #include "compositor_internal.h"
 
+int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential) {
+    if (!c || !in) return 0;
+    if (!c->connected || c->fd_s2c < 0) return 0;
+
+    if (c->input_ring_enabled && c->input_ring && (c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) {
+        comp_input_ring_t* ring = c->input_ring;
+
+        if (c->input_ring_mouse_pending) {
+            for (;;) {
+                const uint32_t r = ring->r;
+                const uint32_t w = ring->w;
+                const uint32_t used = w - r;
+                if (used >= ring->cap) break;
+
+                const uint32_t wi = w & ring->mask;
+                ring->events[wi] = c->input_ring_mouse_pending_ev;
+                __sync_synchronize();
+                ring->w = w + 1u;
+                __sync_synchronize();
+
+                if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
+                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+                    futex_wake(&ring->w, 1u);
+                }
+
+                c->input_ring_mouse_pending = 0;
+                break;
+            }
+        }
+
+        for (;;) {
+            const uint32_t r = ring->r;
+            const uint32_t w = ring->w;
+            const uint32_t used = w - r;
+            if (used >= ring->cap) {
+                if (in->kind == COMP_IPC_INPUT_MOUSE) {
+                    ring->dropped++;
+                    c->input_ring_mouse_pending_ev = *in;
+                    c->input_ring_mouse_pending = 1;
+                    if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
+                        (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+                        futex_wake(&ring->w, 1u);
+                    }
+                    return 0;
+                }
+
+                if (essential) {
+                    (void)__sync_fetch_and_or(&ring->flags, COMP_INPUT_RING_FLAG_WAIT_W);
+                    __sync_synchronize();
+
+                    const uint32_t r2 = ring->r;
+                    const uint32_t w2 = ring->w;
+                    if ((w2 - r2) < ring->cap) {
+                        (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
+                        continue;
+                    }
+
+                    (void)futex_wait(&ring->r, r);
+                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
+                    continue;
+                }
+
+                ring->dropped++;
+                return 0;
+            }
+
+            const uint32_t wi = w & ring->mask;
+            ring->events[wi] = *in;
+            __sync_synchronize();
+            ring->w = w + 1u;
+            __sync_synchronize();
+
+            if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
+                (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+                futex_wake(&ring->w, 1u);
+            }
+            return 0;
+        }
+    }
+
+    comp_ipc_hdr_t hdr;
+    hdr.magic = COMP_IPC_MAGIC;
+    hdr.version = (uint16_t)COMP_IPC_VERSION;
+    hdr.type = (uint16_t)COMP_IPC_MSG_INPUT;
+    hdr.len = (uint32_t)sizeof(*in);
+    hdr.seq = c->seq_out++;
+
+    uint8_t frame[sizeof(hdr) + sizeof(*in)];
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), in, sizeof(*in));
+
+    int wr = pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), essential);
+    if (wr < 0) return -1;
+    return 0;
+}
+
 void comp_input_state_init(comp_input_state_t* st) {
     if (!st) return;
     memset(st, 0, sizeof(*st));
@@ -269,19 +365,7 @@ int comp_send_mouse(comp_client_t* clients, int nclients, comp_input_state_t* st
     in.keycode = 0;
     in.key_state = 0;
 
-    comp_ipc_hdr_t hdr;
-    hdr.magic = COMP_IPC_MAGIC;
-    hdr.version = (uint16_t)COMP_IPC_VERSION;
-    hdr.type = (uint16_t)COMP_IPC_MSG_INPUT;
-    hdr.len = (uint32_t)sizeof(in);
-    hdr.seq = c->seq_out++;
-
-    uint8_t frame[sizeof(hdr) + sizeof(in)];
-    memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), &in, sizeof(in));
-
-    int wr = pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), 0);
-    if (wr < 0) {
+    if (comp_client_send_input(c, &in, 0) < 0) {
         st->prev_buttons = mb;
         return -1;
     }
@@ -313,18 +397,6 @@ int comp_send_key(comp_client_t* clients, int nclients, comp_input_state_t* st, 
     in.keycode = keycode;
     in.key_state = key_state;
 
-    comp_ipc_hdr_t hdr;
-    hdr.magic = COMP_IPC_MAGIC;
-    hdr.version = (uint16_t)COMP_IPC_VERSION;
-    hdr.type = (uint16_t)COMP_IPC_MSG_INPUT;
-    hdr.len = (uint32_t)sizeof(in);
-    hdr.seq = c->seq_out++;
-
-    uint8_t frame[sizeof(hdr) + sizeof(in)];
-    memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), &in, sizeof(in));
-
-    int wr = pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), 1);
-    if (wr < 0) return -1;
+    if (comp_client_send_input(c, &in, 1) < 0) return -1;
     return 0;
 }

@@ -51,14 +51,14 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 dbg_write("wm: connected\n");
                 wm_reset_session_state(&st);
             } else {
-                usleep(100000);
+                comp_wait_events(&c, 100000u);
                 continue;
             }
         }
 
         if (!st.ui.connected) {
             if (wm_ui_init(&st) != 0) {
-                usleep(100000);
+                comp_wait_events(&c, 100000u);
             }
         }
 
@@ -73,14 +73,14 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             dbg_write("wm: disconnected\n");
             comp_disconnect(&c);
             wm_reset_session_state(&st);
-            usleep(100000);
+            comp_wait_events(&c, 100000u);
             continue;
         }
         if (r == 0) {
             if (st.ui.connected) {
                 wm_ui_pump(&st.ui);
             }
-            usleep(1000);
+            comp_wait_events(&c, 1000u);
             continue;
         }
 

@@ -30,6 +30,9 @@ volatile uint32_t g_dbg_bar_err_detail = 0;
 
 uint32_t g_commit_gen = 1;
 
+int g_screen_w = 0;
+int g_screen_h = 0;
+
 void dbg_write(const char* s) {
     if (!s) return;
     write(1, s, (uint32_t)strlen(s));

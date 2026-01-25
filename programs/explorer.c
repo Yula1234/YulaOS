@@ -551,7 +551,7 @@ int main(int argc, char** argv) {
                 running = 0;
             }
         }
-        usleep(10000);
+        comp_wait_events(&conn, 10000u);
     }
 
     (void)comp_send_destroy_surface(&conn, surface_id, 0u);

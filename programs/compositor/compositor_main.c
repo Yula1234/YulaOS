@@ -75,6 +75,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int stride = (int)(info.pitch / 4u);
     if (stride <= 0) stride = w;
 
+    g_screen_w = w;
+    g_screen_h = h;
+
     int frame_shm_fd = -1;
     uint32_t* frame_pixels = 0;
     uint32_t frame_size_bytes = 0;
@@ -249,6 +252,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int first_frame = 1;
 
     while (!g_should_exit) {
+        int scene_dirty = 0;
         if (wm_spawn_retry_wait > 0) wm_spawn_retry_wait--;
         if (!wm.connected && wm_pid > 0) {
             if (wm_spawn_cooldown > 0) {
@@ -286,7 +290,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
 
         if (wm.connected) {
-            wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty);
+            wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
             if (!wm.connected) {
                 input.focus_client = -1;
                 input.focus_surface_id = 0;
@@ -331,7 +335,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
 
         if (wm.connected) {
-            wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty);
+            wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
         }
 
         mouse_state_t ms;
@@ -347,7 +351,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         if (wm.connected) {
             comp_send_wm_pointer(&wm, clients, COMP_MAX_CLIENTS, &input, &ms);
             if (wm.connected) {
-                wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty);
+                wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
             }
             if (!wm.connected) {
                 input.focus_client = -1;
@@ -450,6 +454,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
         comp_damage_t dmg;
         damage_reset(&dmg);
+        int any_surface_changed = 0;
+
+        if (scene_dirty) {
+            damage_add(&dmg, rect_make(0, 0, w, h), w, h);
+        }
 
         if (first_frame) {
             damage_add(&dmg, rect_make(0, 0, w, h), w, h);
@@ -518,6 +527,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 }
 
                 if (changed) {
+                    any_surface_changed = 1;
                     if (prev->valid) damage_add(&dmg, rect_make(prev->x, prev->y, prev->w, prev->h), w, h);
                     if (cur.valid) damage_add(&dmg, rect_make(cur.x, cur.y, cur.w, cur.h), w, h);
                 }
@@ -547,7 +557,17 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 for (int si = 0; si < COMP_MAX_SURFACES; si++) {
                     comp_surface_t* s = &clients[ci].surfaces[si];
                     if (!s->in_use || !s->attached || !s->committed) continue;
-                    if (!s->pixels || s->w <= 0 || s->h <= 0 || s->stride <= 0) continue;
+                    const uint32_t* src = 0;
+                    int src_stride = 0;
+                    if (s->shadow_valid && s->shadow_active >= 0 && s->shadow_active < COMP_SURFACE_SHADOW_BUFS) {
+                        src = s->shadow_pixels[s->shadow_active];
+                        src_stride = s->shadow_stride;
+                    }
+                    if (!src) {
+                        src = s->pixels;
+                        src_stride = s->stride;
+                    }
+                    if (!src || s->w <= 0 || s->h <= 0 || src_stride <= 0) continue;
                     order[order_n].z = s->z;
                     order[order_n].ci = ci;
                     order[order_n].si = si;
@@ -571,23 +591,49 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 const comp_rect_t clip = dmg.rects[ri];
                 if (rect_empty(&clip)) continue;
 
-                fill_rect(out, stride, w, h, clip.x1, clip.y1, clip.x2 - clip.x1, clip.y2 - clip.y1, bg);
+                if (!frame_pixels || first_frame || any_surface_changed || scene_dirty) {
+                    fill_rect(out, stride, w, h, clip.x1, clip.y1, clip.x2 - clip.x1, clip.y2 - clip.y1, bg);
 
-                for (int k = 0; k < order_n; k++) {
-                    comp_surface_t* s = &clients[order[k].ci].surfaces[order[k].si];
-                    blit_surface_clipped(out, stride, w, h, s->x, s->y, s->pixels, s->stride, s->w, s->h, clip);
+                    for (int k = 0; k < order_n; k++) {
+                        comp_surface_t* s = &clients[order[k].ci].surfaces[order[k].si];
+                        const uint32_t* src = 0;
+                        int src_stride = 0;
+                        if (s->shadow_valid && s->shadow_active >= 0 && s->shadow_active < COMP_SURFACE_SHADOW_BUFS) {
+                            src = s->shadow_pixels[s->shadow_active];
+                            src_stride = s->shadow_stride;
+                        }
+                        if (!src) {
+                            src = s->pixels;
+                            src_stride = s->stride;
+                        }
+                        if (!src || src_stride <= 0) continue;
+                        blit_surface_clipped(out, stride, w, h, s->x, s->y, src, src_stride, s->w, s->h, clip);
+                    }
                 }
 
-                if (!rect_empty(&new_preview_rect)) {
-                    const int t = 2;
-                    draw_frame_rect_clipped(out, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
-                }
+                if (!frame_pixels) {
+                    if (!rect_empty(&new_preview_rect)) {
+                        const int t = 2;
+                        draw_frame_rect_clipped(out, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
+                    }
 
-                draw_cursor_clipped(out, stride, w, h, ms.x, ms.y, clip);
+                    draw_cursor_clipped(out, stride, w, h, ms.x, ms.y, clip);
+                }
             }
 
             if (frame_pixels) {
                 present_damage_to_fb(fb, frame_pixels, stride, &dmg);
+
+                for (int ri = 0; ri < dmg.n; ri++) {
+                    const comp_rect_t clip = dmg.rects[ri];
+                    if (rect_empty(&clip)) continue;
+
+                    if (!rect_empty(&new_preview_rect)) {
+                        const int t = 2;
+                        draw_frame_rect_clipped(fb, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
+                    }
+                    draw_cursor_clipped(fb, stride, w, h, ms.x, ms.y, clip);
+                }
             }
         }
 

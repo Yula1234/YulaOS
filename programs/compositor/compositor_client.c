@@ -27,6 +27,22 @@ void comp_client_disconnect(comp_client_t* c) {
         close(c->fd_s2c);
         c->fd_s2c = -1;
     }
+
+    if (c->input_ring) {
+        munmap((void*)c->input_ring, c->input_ring_size_bytes);
+        c->input_ring = 0;
+    }
+    if (c->input_ring_shm_fd >= 0) {
+        close(c->input_ring_shm_fd);
+        c->input_ring_shm_fd = -1;
+    }
+    if (c->input_ring_shm_name[0]) {
+        shm_unlink_named(c->input_ring_shm_name);
+        c->input_ring_shm_name[0] = '\0';
+    }
+    c->input_ring_size_bytes = 0;
+    c->input_ring_enabled = 0;
+
     ipc_rx_reset(&c->rx);
     c->focus_surface_id = 0;
     c->pointer_grab_surface_id = 0;
@@ -40,6 +56,20 @@ void comp_client_disconnect(comp_client_t* c) {
     c->z_counter = 1;
     for (int i = 0; i < COMP_MAX_SURFACES; i++) {
         comp_surface_t* s = &c->surfaces[i];
+        for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
+            if (s->shadow_pixels[bi] && s->shadow_size_bytes) {
+                munmap((void*)s->shadow_pixels[bi], s->shadow_size_bytes);
+            }
+            s->shadow_pixels[bi] = 0;
+            if (s->shadow_shm_fd[bi] >= 0) {
+                close(s->shadow_shm_fd[bi]);
+            }
+            s->shadow_shm_fd[bi] = -1;
+        }
+        s->shadow_size_bytes = 0;
+        s->shadow_stride = 0;
+        s->shadow_active = 0;
+        s->shadow_valid = 0;
         if (s->owns_buffer) {
             if (s->pixels && s->size_bytes) {
                 munmap((void*)s->pixels, s->size_bytes);
@@ -50,6 +80,9 @@ void comp_client_disconnect(comp_client_t* c) {
         }
         memset(s, 0, sizeof(*s));
         s->shm_fd = -1;
+        for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
+            s->shadow_shm_fd[bi] = -1;
+        }
     }
 }
 
@@ -71,6 +104,9 @@ comp_surface_t* comp_client_surface_get(comp_client_t* c, uint32_t id, int creat
             s->in_use = 1;
             s->id = id;
             s->shm_fd = -1;
+            for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
+                s->shadow_shm_fd[bi] = -1;
+            }
             return s;
         }
     }
@@ -85,6 +121,13 @@ void comp_client_init(comp_client_t* c, int pid, int fd_c2s, int fd_s2c) {
     c->fd_c2s = fd_c2s;
     c->fd_s2c = fd_s2c;
     ipc_rx_reset(&c->rx);
+
+    c->input_ring_shm_fd = -1;
+    c->input_ring_size_bytes = 0;
+    c->input_ring_shm_name[0] = '\0';
+    c->input_ring = 0;
+    c->input_ring_enabled = 0;
+
     c->focus_surface_id = 0;
     c->pointer_grab_surface_id = 0;
     c->pointer_grab_active = 0;
@@ -95,6 +138,13 @@ void comp_client_init(comp_client_t* c, int pid, int fd_c2s, int fd_s2c) {
     c->last_input_surface_id = 0xFFFFFFFFu;
     c->seq_out = 1;
     c->z_counter = 1;
+
+    for (int i = 0; i < COMP_MAX_SURFACES; i++) {
+        c->surfaces[i].shm_fd = -1;
+        for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
+            c->surfaces[i].shadow_shm_fd[bi] = -1;
+        }
+    }
 }
 
 static int comp_surface_can_receive(const comp_surface_t* s) {

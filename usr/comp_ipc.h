@@ -24,6 +24,8 @@ typedef enum {
     COMP_IPC_MSG_ERROR      = 8,
     COMP_IPC_MSG_WM_EVENT   = 9,
     COMP_IPC_MSG_WM_CMD     = 10,
+    COMP_IPC_MSG_INPUT_RING_NAME = 11,
+    COMP_IPC_MSG_INPUT_RING_ACK  = 12,
 } comp_ipc_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -151,6 +153,36 @@ typedef struct __attribute__((packed)) {
 #define COMP_IPC_INPUT_MOUSE 1u
 #define COMP_IPC_INPUT_KEY   2u
 #define COMP_IPC_INPUT_RESIZE 3u
+
+
+#define COMP_INPUT_RING_MAGIC 0x49525043u
+#define COMP_INPUT_RING_VERSION 1u
+
+#define COMP_INPUT_RING_CAP 2048u
+#define COMP_INPUT_RING_MASK (COMP_INPUT_RING_CAP - 1u)
+
+#define COMP_INPUT_RING_FLAG_READY  1u
+#define COMP_INPUT_RING_FLAG_WAIT_W 2u
+#define COMP_INPUT_RING_FLAG_WAIT_R 4u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t cap;
+    uint32_t mask;
+    volatile uint32_t r;
+    volatile uint32_t w;
+    volatile uint32_t dropped;
+    volatile uint32_t flags;
+    comp_ipc_input_t events[COMP_INPUT_RING_CAP];
+} comp_input_ring_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t size_bytes;
+    uint32_t cap;
+    uint32_t reserved;
+    char shm_name[32];
+} comp_ipc_input_ring_name_t;
 
 static inline int comp_ipc_write_full(int fd, const void* buf, uint32_t size) {
     const uint8_t* p = (const uint8_t*)buf;

@@ -31,6 +31,9 @@ extern volatile uint32_t g_dbg_bar_err_detail;
 
 extern uint32_t g_commit_gen;
 
+extern int g_screen_w;
+extern int g_screen_h;
+
 void dbg_write(const char* s);
 int pipe_try_write_frame(int fd, const void* buf, uint32_t size, int essential);
 
@@ -84,6 +87,8 @@ void ipc_rx_drop(ipc_rx_ring_t* q, uint32_t n);
 #define COMP_MAX_SURFACES 8
 #define COMP_MAX_CLIENTS  8
 
+#define COMP_SURFACE_SHADOW_BUFS 2
+
 typedef struct {
     int shm_fd;
     uint32_t* pixels;
@@ -110,6 +115,13 @@ typedef struct {
     int h;
     int stride;
 
+    uint32_t* shadow_pixels[COMP_SURFACE_SHADOW_BUFS];
+    int shadow_stride;
+    uint32_t shadow_size_bytes;
+    int shadow_shm_fd[COMP_SURFACE_SHADOW_BUFS];
+    int shadow_active;
+    int shadow_valid;
+
     int owns_buffer;
     int shm_fd;
     uint32_t size_bytes;
@@ -122,6 +134,17 @@ typedef struct {
     int fd_c2s;
     int fd_s2c;
     ipc_rx_ring_t rx;
+
+    int input_ring_shm_fd;
+    uint32_t input_ring_size_bytes;
+    char input_ring_shm_name[32];
+    comp_input_ring_t* input_ring;
+    int input_ring_enabled;
+
+    uint32_t input_ring_mouse_seq;
+    int input_ring_mouse_seq_valid;
+    int input_ring_mouse_pending;
+    comp_ipc_input_t input_ring_mouse_pending_ev;
 
     uint32_t focus_surface_id;
     uint32_t pointer_grab_surface_id;
@@ -181,13 +204,22 @@ typedef struct {
     int fd_s2c;
     ipc_rx_ring_t rx;
     uint32_t seq_out;
+
+    uint32_t tx_r;
+    uint32_t tx_w;
+    struct {
+        uint32_t len;
+        uint32_t off;
+        uint8_t frame[sizeof(comp_ipc_hdr_t) + sizeof(comp_ipc_wm_event_t)];
+    } tx[128];
 } wm_conn_t;
 
 void wm_disconnect(wm_conn_t* w);
 void wm_init(wm_conn_t* w, int fd_c2s, int fd_s2c);
 int wm_send_event(wm_conn_t* w, const comp_ipc_wm_event_t* ev, int essential);
+void wm_flush_tx(wm_conn_t* w);
 void wm_replay_state(wm_conn_t* wm, const comp_client_t* clients, int nclients);
-void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_state_t* input, uint32_t* z_counter, comp_preview_t* preview, int* preview_dirty);
+void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_state_t* input, uint32_t* z_counter, comp_preview_t* preview, int* preview_dirty, int* scene_dirty);
 
 void comp_buffer_destroy(comp_buffer_t* b);
 void comp_client_disconnect(comp_client_t* c);
@@ -202,5 +234,6 @@ void comp_send_wm_pointer(wm_conn_t* wm, comp_client_t* clients, int nclients, c
 void comp_update_focus(comp_client_t* clients, int nclients, comp_input_state_t* st, const mouse_state_t* ms, uint32_t* z_counter, wm_conn_t* wm);
 int comp_send_mouse(comp_client_t* clients, int nclients, comp_input_state_t* st, const mouse_state_t* ms);
 int comp_send_key(comp_client_t* clients, int nclients, comp_input_state_t* st, uint32_t keycode, uint32_t key_state);
+int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential);
 
 void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_t* z_counter, wm_conn_t* wm, uint32_t client_id);

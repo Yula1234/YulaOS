@@ -1354,7 +1354,7 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-        usleep(16000);
+        comp_wait_events(&conn, 16000u);
     }
 
     for (int i = 0; i < undo_count; i++) snapshot_free(&undo_stack[i]);

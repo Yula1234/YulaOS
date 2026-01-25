@@ -169,6 +169,14 @@ static inline int shm_unlink_named(const char* name) {
     return syscall(53, (int)name, 0, 0);
 }
 
+static inline int futex_wait(volatile uint32_t* uaddr, uint32_t expected) {
+    return syscall(54, (int)uaddr, (int)expected, 0);
+}
+
+static inline int futex_wake(volatile uint32_t* uaddr, uint32_t max_wake) {
+    return syscall(55, (int)uaddr, (int)max_wake, 0);
+}
+
 static inline void* mmap(int fd, uint32_t size, int flags) {
     return (void*)syscall(31, fd, size, flags);
 }

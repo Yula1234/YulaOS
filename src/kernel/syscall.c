@@ -213,6 +213,134 @@ static mmap_area_t* mmap_find_overlap(task_t* t, uint32_t start, uint32_t end_ex
 }
 
 
+#define FUTEX_TABLE_CAP 256u
+
+typedef struct {
+    uint32_t in_use;
+    uint32_t key;
+    semaphore_t sem;
+} futex_entry_t;
+
+static spinlock_t futex_table_lock;
+static futex_entry_t futex_table[FUTEX_TABLE_CAP];
+
+static semaphore_t* futex_get_sem(uint32_t key) {
+    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
+
+    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
+        if (!futex_table[i].in_use) continue;
+        if (futex_table[i].key == key) {
+            spinlock_release_safe(&futex_table_lock, flags);
+            return &futex_table[i].sem;
+        }
+    }
+
+    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
+        if (futex_table[i].in_use) continue;
+        futex_table[i].in_use = 1u;
+        futex_table[i].key = key;
+        sem_init(&futex_table[i].sem, 0);
+        spinlock_release_safe(&futex_table_lock, flags);
+        return &futex_table[i].sem;
+    }
+
+    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
+        if (!futex_table[i].in_use) continue;
+        semaphore_t* sem = &futex_table[i].sem;
+        uint32_t sflags = spinlock_acquire_safe(&sem->lock);
+        const int reusable = (sem->count == 0) && dlist_empty(&sem->wait_list);
+        spinlock_release_safe(&sem->lock, sflags);
+        if (!reusable) continue;
+
+        sem_init(&futex_table[i].sem, 0);
+        futex_table[i].key = key;
+        spinlock_release_safe(&futex_table_lock, flags);
+        return &futex_table[i].sem;
+    }
+
+    spinlock_release_safe(&futex_table_lock, flags);
+    return 0;
+}
+
+static semaphore_t* futex_lookup_sem(uint32_t key) {
+    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
+    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
+        if (!futex_table[i].in_use) continue;
+        if (futex_table[i].key == key) {
+            spinlock_release_safe(&futex_table_lock, flags);
+            return &futex_table[i].sem;
+        }
+    }
+    spinlock_release_safe(&futex_table_lock, flags);
+    return 0;
+}
+
+static int futex_sem_wait(semaphore_t* sem, volatile const uint32_t* uaddr, uint32_t expected) {
+    if (!sem || !uaddr) return -1;
+
+    for (;;) {
+        prefault_user_read((const void*)uaddr, 4u);
+        uint32_t v = *(volatile const uint32_t*)uaddr;
+        if (v != expected) return 0;
+
+        uint32_t flags = spinlock_acquire_safe(&sem->lock);
+
+        v = *(volatile const uint32_t*)uaddr;
+        if (v != expected) {
+            spinlock_release_safe(&sem->lock, flags);
+            return 0;
+        }
+
+        if (sem->count > 0) {
+            sem->count--;
+            task_t* curr = proc_current();
+            if (curr) curr->blocked_on_sem = 0;
+            spinlock_release_safe(&sem->lock, flags);
+            return 0;
+        }
+
+        task_t* curr = proc_current();
+        if (!curr) {
+            spinlock_release_safe(&sem->lock, flags);
+            return -1;
+        }
+
+        curr->blocked_on_sem = (void*)sem;
+        dlist_add_tail(&curr->sem_node, &sem->wait_list);
+        curr->state = TASK_WAITING;
+
+        spinlock_release_safe(&sem->lock, flags);
+        sched_yield();
+    }
+}
+
+static int futex_sem_wake(semaphore_t* sem, uint32_t max_wake) {
+    if (!sem || max_wake == 0) return 0;
+
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+
+    uint32_t woken = 0;
+    while (woken < max_wake && !dlist_empty(&sem->wait_list)) {
+        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+
+        dlist_del(&t->sem_node);
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
+        t->blocked_on_sem = 0;
+
+        sem->count++;
+        if (t->state != TASK_ZOMBIE) {
+            t->state = TASK_RUNNABLE;
+            sched_add(t);
+        }
+        woken++;
+    }
+
+    spinlock_release_safe(&sem->lock, flags);
+    return (int)woken;
+}
+
+
 #define MAX_TASKS 32
 
 typedef struct {
@@ -388,6 +516,70 @@ void syscall_handler(registers_t* regs) {
             }
 
             regs->eax = shm_unlink_named(name);
+        }
+        break;
+
+        case 54:
+        {
+            volatile const uint32_t* uaddr = (volatile const uint32_t*)regs->ebx;
+            uint32_t expected = (uint32_t)regs->ecx;
+
+            if (((uint32_t)uaddr & 3u) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!check_user_buffer_present(curr, (const void*)uaddr, 4u)) {
+                regs->eax = -1;
+                break;
+            }
+
+            uint32_t phys = paging_get_phys(curr->page_dir, (uint32_t)uaddr);
+            if (!phys) {
+                regs->eax = -1;
+                break;
+            }
+            uint32_t key = phys & ~3u;
+
+            semaphore_t* sem = futex_get_sem(key);
+            if (!sem) {
+                regs->eax = -1;
+                break;
+            }
+
+            regs->eax = futex_sem_wait(sem, uaddr, expected);
+        }
+        break;
+
+        case 55:
+        {
+            volatile const uint32_t* uaddr = (volatile const uint32_t*)regs->ebx;
+            uint32_t max_wake = (uint32_t)regs->ecx;
+
+            if (((uint32_t)uaddr & 3u) != 0) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (!check_user_buffer_present(curr, (const void*)uaddr, 4u)) {
+                regs->eax = -1;
+                break;
+            }
+
+            uint32_t phys = paging_get_phys(curr->page_dir, (uint32_t)uaddr);
+            if (!phys) {
+                regs->eax = -1;
+                break;
+            }
+            uint32_t key = phys & ~3u;
+
+            semaphore_t* sem = futex_lookup_sem(key);
+            if (!sem) {
+                regs->eax = 0;
+                break;
+            }
+
+            regs->eax = futex_sem_wake(sem, max_wake);
         }
         break;
 

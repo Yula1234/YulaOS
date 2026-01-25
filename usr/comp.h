@@ -68,6 +68,12 @@ typedef struct {
     uint32_t seq;
     comp_rx_ring_t rx;
 
+    int input_ring_shm_fd;
+    uint32_t input_ring_size_bytes;
+    char input_ring_shm_name[32];
+    comp_input_ring_t* input_ring;
+    int input_ring_enabled;
+
     uint32_t pending_r;
     uint32_t pending_w;
     struct {
@@ -75,6 +81,76 @@ typedef struct {
         uint8_t payload[COMP_IPC_MAX_PAYLOAD];
     } pending[COMP_PENDING_MAX];
 } comp_conn_t;
+
+static inline void comp_input_ring_close(comp_conn_t* c) {
+    if (!c) return;
+    if (c->input_ring) {
+        munmap((void*)c->input_ring, c->input_ring_size_bytes);
+        c->input_ring = 0;
+    }
+    if (c->input_ring_shm_fd >= 0) {
+        close(c->input_ring_shm_fd);
+        c->input_ring_shm_fd = -1;
+    }
+    c->input_ring_size_bytes = 0;
+    c->input_ring_shm_name[0] = '\0';
+    c->input_ring_enabled = 0;
+}
+
+static inline int comp_input_ring_try_pop(comp_conn_t* c, comp_ipc_input_t* out_ev) {
+    if (!c || !out_ev) return 0;
+    if (!c->input_ring_enabled || !c->input_ring) return 0;
+    comp_input_ring_t* ring = c->input_ring;
+    if ((ring->flags & COMP_INPUT_RING_FLAG_READY) == 0) return 0;
+
+    const uint32_t r = ring->r;
+    const uint32_t w = ring->w;
+    if (r == w) return 0;
+
+    const uint32_t ri = r & ring->mask;
+    __sync_synchronize();
+    *out_ev = ring->events[ri];
+    __sync_synchronize();
+    ring->r = r + 1u;
+    __sync_synchronize();
+
+    if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_W) {
+        (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
+        futex_wake(&ring->r, 1u);
+    }
+    return 1;
+}
+
+static inline void comp_wait_events(comp_conn_t* c, uint32_t fallback_us) {
+    if (!c || !c->connected) {
+        if (fallback_us) usleep(fallback_us);
+        return;
+    }
+
+    if (c->input_ring_enabled && c->input_ring && (c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) {
+        comp_input_ring_t* ring = c->input_ring;
+        for (;;) {
+            uint32_t r = ring->r;
+            uint32_t w = ring->w;
+            if (r != w) return;
+
+            (void)__sync_fetch_and_or(&ring->flags, COMP_INPUT_RING_FLAG_WAIT_R);
+            __sync_synchronize();
+
+            r = ring->r;
+            w = ring->w;
+            if (r != w) {
+                (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+                return;
+            }
+
+            (void)futex_wait(&ring->w, w);
+            (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+        }
+    }
+
+    if (fallback_us) usleep(fallback_us);
+}
 
 static inline uint32_t comp_pending_count(const comp_conn_t* c) {
     if (!c) return 0;
@@ -158,8 +234,18 @@ static inline int comp_try_recv_raw(comp_conn_t* c, comp_ipc_hdr_t* out_hdr, voi
     int saw_eof = 0;
 
     for (;;) {
+        const uint32_t cap = (uint32_t)sizeof(c->rx.buf);
+        uint32_t count = comp_rx_count(&c->rx);
+        uint32_t space = (count < cap) ? (cap - count) : 0u;
+        const uint32_t reserve = (uint32_t)sizeof(comp_ipc_hdr_t) + (uint32_t)COMP_IPC_MAX_PAYLOAD;
+        if (space <= reserve) break;
+        space -= reserve;
+
         uint8_t tmp[512];
-        int rn = pipe_try_read(c->fd_s2c_r, tmp, (uint32_t)sizeof(tmp));
+        uint32_t want = space;
+        if (want > (uint32_t)sizeof(tmp)) want = (uint32_t)sizeof(tmp);
+
+        int rn = pipe_try_read(c->fd_s2c_r, tmp, want);
         if (rn < 0) {
             saw_eof = 1;
             break;
@@ -201,6 +287,33 @@ static inline int comp_try_recv_raw(comp_conn_t* c, comp_ipc_hdr_t* out_hdr, voi
             }
             comp_rx_peek(&c->rx, 0, out_payload, hdr.len);
             comp_rx_drop(&c->rx, hdr.len);
+        }
+
+        if (hdr.type == (uint16_t)COMP_IPC_MSG_INPUT_RING_NAME && hdr.len == (uint32_t)sizeof(comp_ipc_input_ring_name_t)) {
+            comp_ipc_input_ring_name_t msg;
+            memcpy(&msg, out_payload, sizeof(msg));
+            msg.shm_name[sizeof(msg.shm_name) - 1u] = '\0';
+
+            if (!c->input_ring && msg.size_bytes >= (uint32_t)sizeof(comp_input_ring_t) && msg.shm_name[0]) {
+                int fd = shm_open_named(msg.shm_name);
+                if (fd >= 0) {
+                    comp_input_ring_t* ring = (comp_input_ring_t*)mmap(fd, msg.size_bytes, MAP_SHARED);
+                    if (ring && ring->magic == COMP_INPUT_RING_MAGIC && ring->version == COMP_INPUT_RING_VERSION) {
+                        c->input_ring_shm_fd = fd;
+                        c->input_ring_size_bytes = msg.size_bytes;
+                        memcpy(c->input_ring_shm_name, msg.shm_name, sizeof(c->input_ring_shm_name));
+                        c->input_ring = ring;
+                        c->input_ring_enabled = 1;
+                        if (c->fd_c2s_w >= 0) {
+                            (void)comp_ipc_send(c->fd_c2s_w, (uint16_t)COMP_IPC_MSG_INPUT_RING_ACK, c->seq++, 0, 0);
+                        }
+                    } else {
+                        if (ring) munmap((void*)ring, msg.size_bytes);
+                        close(fd);
+                    }
+                }
+            }
+            continue;
         }
 
         if (out_hdr) *out_hdr = hdr;
@@ -248,6 +361,11 @@ static inline void comp_conn_reset(comp_conn_t* c) {
     c->connected = 0;
     c->fd_c2s_w = -1;
     c->fd_s2c_r = -1;
+    c->input_ring_shm_fd = -1;
+    c->input_ring_size_bytes = 0;
+    c->input_ring_shm_name[0] = '\0';
+    c->input_ring = 0;
+    c->input_ring_enabled = 0;
     c->seq = 1;
     c->rx.r = 0;
     c->rx.w = 0;
@@ -258,6 +376,7 @@ static inline void comp_conn_reset(comp_conn_t* c) {
 static inline void comp_disconnect(comp_conn_t* c) {
     if (!c) return;
     c->connected = 0;
+    comp_input_ring_close(c);
     if (c->fd_c2s_w >= 0) {
         close(c->fd_c2s_w);
         c->fd_c2s_w = -1;
@@ -369,6 +488,22 @@ static inline int comp_try_recv(comp_conn_t* c, comp_ipc_hdr_t* out_hdr, void* o
 
     int pr = comp_pending_pop(c, out_hdr, out_payload, payload_cap);
     if (pr != 0) return pr;
+
+    if (out_payload && payload_cap >= (uint32_t)sizeof(comp_ipc_input_t)) {
+        comp_ipc_input_t ev;
+        int rr = comp_input_ring_try_pop(c, &ev);
+        if (rr == 1) {
+            if (out_hdr) {
+                out_hdr->magic = COMP_IPC_MAGIC;
+                out_hdr->version = (uint16_t)COMP_IPC_VERSION;
+                out_hdr->type = (uint16_t)COMP_IPC_MSG_INPUT;
+                out_hdr->len = (uint32_t)sizeof(ev);
+                out_hdr->seq = 0;
+            }
+            memcpy(out_payload, &ev, sizeof(ev));
+            return 1;
+        }
+    }
 
     return comp_try_recv_raw(c, out_hdr, out_payload, payload_cap);
 }
