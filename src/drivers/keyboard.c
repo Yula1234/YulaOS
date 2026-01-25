@@ -144,11 +144,19 @@ void kbd_handle_scancode(uint8_t scancode) {
                 goto out_unlock;
             }
 
+            if (scancode == 0x0B) {
+                send_code = shift_pressed ? (char)0xA5 : (char)0x95;
+                goto out_unlock;
+            }
+
             if (scancode == 0x10) { send_code = (char)0xA8; goto out_unlock; }
-            if (scancode == 0x24) { send_code = (char)0xA9; goto out_unlock; }
-            if (scancode == 0x25) { send_code = (char)0xAA; goto out_unlock; }
-            if (scancode == 0x21) { send_code = (char)0xAB; goto out_unlock; }
-            if (scancode == 0x32) { send_code = (char)0xAC; goto out_unlock; }
+            if (scancode == 0x2E) { send_code = (char)0xA9; goto out_unlock; }
+            if (scancode == 0x12) { send_code = (char)0xAA; goto out_unlock; }
+            if (scancode == 0x13) { send_code = (char)0xAB; goto out_unlock; }
+            if (scancode == 0x2F) { send_code = (char)0xAC; goto out_unlock; }
+            if (scancode == 0x32) { send_code = (char)0xAD; goto out_unlock; }
+            if (scancode == 0x19) { send_code = (char)0xAE; goto out_unlock; }
+            if (scancode == 0x24) { send_code = (char)0xAF; goto out_unlock; }
         }
 
         if (ctrl_pressed) {

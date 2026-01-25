@@ -13,6 +13,13 @@ static void on_signal(int sig) {
     }
 }
 
+static void on_sigint_ignore(int sig) {
+    (void)sig;
+    sigreturn();
+    for (;;) {
+    }
+}
+
 typedef struct {
     int valid;
     int x;
@@ -129,7 +136,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     dbg_write("compositor: enter main\n");
 
     dbg_write("compositor: install signals\n");
-    signal(2, (void*)on_signal);
+    signal(2, (void*)on_sigint_ignore);
     signal(15, (void*)on_signal);
     dbg_write("compositor: signals ok\n");
 

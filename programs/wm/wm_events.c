@@ -288,7 +288,7 @@ static void wm_on_pointer(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_even
         return;
     }
 
-    if (right_pressed) {
+    if (right_pressed && st->super_down) {
         if (ev->flags & COMP_WM_EVENT_FLAG_BACKGROUND) return;
         if (ev->surface_id == 0) return;
         int idx = wm_find_view_idx(st, ev->client_id, ev->surface_id);
@@ -296,11 +296,11 @@ static void wm_on_pointer(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_even
         wm_focus_view_idx(c, st, idx);
         wm_view_t* v = &st->views[idx];
         uint32_t edges = wm_resize_edges_for_point(v, ev->px, ev->py);
-        if (edges) {
-            wm_start_resize(c, st, idx, ev->px, ev->py, right_mask, edges);
-        } else {
-            wm_start_drag(c, st, idx, ev->px, ev->py, right_mask, 0);
+        if (edges == 0) {
+            edges = WM_RESIZE_EDGE_RIGHT | WM_RESIZE_EDGE_BOTTOM;
         }
+        wm_start_resize(c, st, idx, ev->px, ev->py, right_mask, edges);
+        st->drag_requires_super = 1;
         return;
     }
 
@@ -311,16 +311,6 @@ static void wm_on_pointer(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_even
         if (idx < 0) return;
         wm_focus_view_idx(c, st, idx);
         wm_start_drag(c, st, idx, ev->px, ev->py, left_mask, 1);
-        return;
-    }
-
-    if (middle_pressed) {
-        if (ev->flags & COMP_WM_EVENT_FLAG_BACKGROUND) return;
-        if (ev->surface_id == 0) return;
-        int idx = wm_find_view_idx(st, ev->client_id, ev->surface_id);
-        if (idx < 0) return;
-        wm_focus_view_idx(c, st, idx);
-        wm_start_drag(c, st, idx, ev->px, ev->py, middle_mask, 0);
         return;
     }
 }
@@ -372,61 +362,72 @@ static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
         return;
     }
 
-    if (kc >= 0x90u && kc <= 0x94u) {
-        wm_switch_workspace(c, st, (uint32_t)(kc - 0x90u));
-        return;
-    }
-
-    if (kc >= 0xA0u && kc <= 0xA4u) {
-        wm_move_focused_to_ws(c, st, (uint32_t)(kc - 0xA0u));
-        return;
-    }
-
-    if (kc == 0xA8u) {
-        wm_close_focused(c, st);
-        return;
-    }
-
-    if (kc == 0xA9u) {
-        wm_focus_next(c, st, +1);
-        return;
-    }
-    if (kc == 0xAAu) {
-        wm_focus_next(c, st, -1);
-        return;
-    }
-
-    if (kc == 0xABu) {
-        wm_toggle_floating(c, st);
-        return;
-    }
-
-    if (kc == 0xACu) {
-        int idx = st->focused_idx;
-        if (idx >= 0 && idx < WM_MAX_VIEWS) {
-            wm_view_t* v = &st->views[idx];
-            if (wm_is_view_visible_on_active_ws(st, v) && !v->floating) {
-                wm_master_set_for_ws(st, st->active_ws, v->client_id, v->surface_id);
-                wm_apply_layout(c, st);
-            }
+    if (kc >= 0x90u && kc <= 0x95u) {
+        uint32_t ws = (uint32_t)(kc - 0x90u);
+        if (ws == 5u) ws = 0u;
+        if (ws < WM_MAX_WORKSPACES) {
+            wm_switch_workspace(c, st, ws);
         }
         return;
     }
 
+    if (kc >= 0xA0u && kc <= 0xA5u) {
+        uint32_t ws = (uint32_t)(kc - 0xA0u);
+        if (ws == 5u) ws = 0u;
+        if (ws < WM_MAX_WORKSPACES) {
+            wm_move_focused_to_ws(c, st, ws);
+        }
+        return;
+    }
+
+    if (kc == 0xA8u) {
+        (void)wm_spawn_app_by_name("comp_client");
+        return;
+    }
+
+    if (kc == 0xA9u) {
+        wm_close_focused(c, st);
+        return;
+    }
+
+    if (kc == 0xAAu) {
+        (void)wm_spawn_app_by_name("explorer");
+        return;
+    }
+
+    if (kc == 0xABu) {
+        st->run_mode = 1;
+        st->run_len = 0;
+        st->run_buf[0] = '\0';
+        wm_ui_draw_bar(st);
+        wm_ui_raise_and_place(c, st);
+        return;
+    }
+
+    if (kc == 0xACu) {
+        wm_toggle_floating(c, st);
+        return;
+    }
+
+    if (kc == 0xADu) {
+        (void)comp_wm_exit(c);
+        return;
+    }
+
     if (kc == 0xB1u) {
-        wm_move_focused_float(c, st, -st->float_step, 0);
+        wm_focus_next(c, st, -1);
         return;
     }
     if (kc == 0xB2u) {
-        wm_move_focused_float(c, st, st->float_step, 0);
+        wm_focus_next(c, st, +1);
         return;
     }
     if (kc == 0xB3u) {
-        wm_move_focused_float(c, st, 0, -st->float_step);
+        wm_focus_next(c, st, -1);
         return;
     }
     if (kc == 0xB4u) {
-        wm_move_focused_float(c, st, 0, st->float_step);
+        wm_focus_next(c, st, +1);
         return;
     }
 }

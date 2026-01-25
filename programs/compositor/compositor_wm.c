@@ -213,6 +213,12 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                 continue;
             }
 
+            if (cmd.kind == COMP_WM_CMD_EXIT) {
+                g_should_exit = 1;
+                wm_disconnect(w);
+                return;
+            }
+
             if (cmd.client_id >= (uint32_t)nclients || cmd.surface_id == 0) continue;
 
             comp_client_t* c = &clients[(int)cmd.client_id];

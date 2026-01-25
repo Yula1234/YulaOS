@@ -639,6 +639,10 @@ static inline int comp_wm_close(comp_conn_t* c, uint32_t client_id, uint32_t sur
     return comp_wm_send_cmd(c, COMP_WM_CMD_CLOSE, client_id, surface_id, 0, 0, 0);
 }
 
+static inline int comp_wm_exit(comp_conn_t* c) {
+    return comp_wm_send_cmd(c, COMP_WM_CMD_EXIT, COMP_WM_CLIENT_NONE, 0, 0, 0, 0);
+}
+
 static inline int comp_wm_pointer_grab(comp_conn_t* c, uint32_t client_id, uint32_t surface_id, int enable) {
     return comp_wm_send_cmd(c, COMP_WM_CMD_POINTER_GRAB, client_id, surface_id, 0, 0, enable ? 1u : 0u);
 }
