@@ -13,6 +13,116 @@ static void on_signal(int sig) {
     }
 }
 
+typedef struct {
+    int valid;
+    int x;
+    int y;
+    int w;
+    int h;
+    int stride;
+    uint32_t z;
+    const uint32_t* pixels;
+    uint32_t commit_gen;
+} draw_surface_state_t;
+
+typedef struct {
+    uint32_t z;
+    int ci;
+    int si;
+} draw_item_t;
+
+static void comp_client_slot_reset(comp_client_t* c) {
+    if (!c) return;
+    memset(c, 0, sizeof(*c));
+    c->connected = 0;
+    c->pid = -1;
+    c->fd_c2s = -1;
+    c->fd_s2c = -1;
+    ipc_rx_reset(&c->rx);
+    c->input_ring_shm_fd = -1;
+    c->input_ring_size_bytes = 0;
+    c->input_ring_shm_name[0] = '\0';
+    c->input_ring = 0;
+    c->input_ring_enabled = 0;
+    c->seq_out = 1;
+    c->z_counter = 1;
+    for (int i = 0; i < COMP_MAX_SURFACES; i++) {
+        c->surfaces[i].shm_fd = -1;
+        for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
+            c->surfaces[i].shadow_shm_fd[bi] = -1;
+        }
+    }
+}
+
+static int comp_clients_reserve(comp_client_t** clients,
+                                int* clients_cap,
+                                int want_cap,
+                                draw_surface_state_t** prev_state,
+                                int* prev_state_cap_clients,
+                                draw_item_t** order,
+                                int* order_cap) {
+    if (!clients || !clients_cap || !prev_state || !prev_state_cap_clients || !order || !order_cap) return -1;
+    if (want_cap <= 0) want_cap = 1;
+    if (*clients_cap >= want_cap) return 0;
+
+    int old_cap = *clients_cap;
+    int new_cap = old_cap > 0 ? old_cap : (int)COMP_CLIENTS_INIT;
+    while (new_cap < want_cap) {
+        if (new_cap > (1 << 20)) {
+            new_cap = want_cap;
+            break;
+        }
+        new_cap *= 2;
+        if (new_cap <= 0) {
+            new_cap = want_cap;
+            break;
+        }
+    }
+
+    size_t new_clients_bytes = (size_t)new_cap * sizeof(comp_client_t);
+    size_t new_prev_n = (size_t)new_cap * (size_t)COMP_MAX_SURFACES;
+    size_t new_prev_bytes = new_prev_n * sizeof(draw_surface_state_t);
+    size_t new_order_n = (size_t)new_cap * (size_t)COMP_MAX_SURFACES;
+    size_t new_order_bytes = new_order_n * sizeof(draw_item_t);
+
+    comp_client_t* new_clients = (comp_client_t*)malloc(new_clients_bytes);
+    draw_surface_state_t* new_prev = (draw_surface_state_t*)malloc(new_prev_bytes);
+    draw_item_t* new_order = (draw_item_t*)malloc(new_order_bytes);
+
+    if (!new_clients || !new_prev || !new_order) {
+        if (new_clients) free(new_clients);
+        if (new_prev) free(new_prev);
+        if (new_order) free(new_order);
+        return -1;
+    }
+
+    for (int i = 0; i < new_cap; i++) {
+        comp_client_slot_reset(&new_clients[i]);
+    }
+    if (*clients && old_cap > 0) {
+        memcpy(new_clients, *clients, (size_t)old_cap * sizeof(comp_client_t));
+    }
+
+    memset(new_prev, 0, new_prev_bytes);
+    if (*prev_state && *prev_state_cap_clients > 0) {
+        const int copy_clients = (*prev_state_cap_clients < new_cap) ? *prev_state_cap_clients : new_cap;
+        const size_t copy_n = (size_t)copy_clients * (size_t)COMP_MAX_SURFACES;
+        memcpy(new_prev, *prev_state, copy_n * sizeof(draw_surface_state_t));
+    }
+
+    if (*clients) free(*clients);
+    if (*prev_state) free(*prev_state);
+    if (*order) free(*order);
+
+    *clients = new_clients;
+    *clients_cap = new_cap;
+    *prev_state = new_prev;
+    *prev_state_cap_clients = new_cap;
+    *order = new_order;
+    *order_cap = (int)new_order_n;
+    return 0;
+}
+
 __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -177,16 +287,23 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         ipc_back[1] = -1;
     }
 
-    comp_client_t clients[COMP_MAX_CLIENTS];
-    memset(clients, 0, sizeof(clients));
+    comp_client_t* clients = 0;
+    int clients_cap = 0;
+    draw_surface_state_t* prev_state = 0;
+    int prev_state_cap_clients = 0;
+    draw_item_t* order = 0;
+    int order_cap = 0;
+
+    if (comp_clients_reserve(&clients, &clients_cap, (int)COMP_CLIENTS_INIT, &prev_state, &prev_state_cap_clients, &order, &order_cap) != 0) {
+        dbg_write("compositor: OOM: cannot allocate clients\n");
+        close(fd_mouse);
+        fb_release();
+        g_fb_released = 1;
+        return 1;
+    }
 
     if (have_ipc) {
         comp_client_init(&clients[0], child_pid, ipc_fds[0], ipc_back[1]);
-    } else {
-        clients[0].connected = 0;
-        clients[0].pid = -1;
-        clients[0].fd_c2s = -1;
-        clients[0].fd_s2c = -1;
     }
 
     comp_input_state_t input;
@@ -224,21 +341,6 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int32_t draw_mx = 0x7FFFFFFF;
     int32_t draw_my = 0x7FFFFFFF;
 
-    typedef struct {
-        int valid;
-        int x;
-        int y;
-        int w;
-        int h;
-        int stride;
-        uint32_t z;
-        const uint32_t* pixels;
-        uint32_t commit_gen;
-    } draw_surface_state_t;
-
-    draw_surface_state_t prev_state[COMP_MAX_CLIENTS * COMP_MAX_SURFACES];
-    memset(prev_state, 0, sizeof(prev_state));
-
     comp_rect_t prev_preview_rect;
     prev_preview_rect.x1 = 0;
     prev_preview_rect.y1 = 0;
@@ -273,7 +375,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 if (wm_pid < 0) {
                     wm_pid = 0;
                 }
-                wm_replay_state(&wm, clients, COMP_MAX_CLIENTS);
+                wm_replay_state(&wm, clients, clients_cap);
             }
         }
 
@@ -290,7 +392,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
 
         if (wm.connected) {
-            wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
+            wm_pump(&wm, clients, clients_cap, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
             if (!wm.connected) {
                 input.focus_client = -1;
                 input.focus_surface_id = 0;
@@ -311,31 +413,38 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 if (ar != 1) break;
 
                 int slot = -1;
-                for (int i = 0; i < COMP_MAX_CLIENTS; i++) {
+                for (int i = 0; i < clients_cap; i++) {
                     if (!clients[i].connected) {
                         slot = i;
                         break;
                     }
                 }
 
-                if (slot >= 0) {
+                if (slot < 0) {
+                    const int want = clients_cap + 1;
+                    if (comp_clients_reserve(&clients, &clients_cap, want, &prev_state, &prev_state_cap_clients, &order, &order_cap) == 0) {
+                        slot = want - 1;
+                    }
+                }
+
+                if (slot >= 0 && slot < clients_cap) {
                     comp_client_init(&clients[slot], -1, fds[0], fds[1]);
                     dbg_write("compositor: accepted client\n");
                 } else {
-                    dbg_write("compositor: reject client (no slots)\n");
+                    dbg_write("compositor: reject client (OOM)\n");
                     if (fds[0] >= 0) close(fds[0]);
                     if (fds[1] >= 0) close(fds[1]);
                 }
             }
         }
 
-        for (int ci = 0; ci < COMP_MAX_CLIENTS; ci++) {
+        for (int ci = 0; ci < clients_cap; ci++) {
             if (!clients[ci].connected) continue;
             comp_client_pump(&clients[ci], &buf, &z_counter, &wm, (uint32_t)ci);
         }
 
         if (wm.connected) {
-            wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
+            wm_pump(&wm, clients, clients_cap, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
         }
 
         mouse_state_t ms;
@@ -346,12 +455,12 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             ms_last = ms;
         }
 
-        comp_update_focus(clients, COMP_MAX_CLIENTS, &input, &ms, &z_counter, &wm);
+        comp_update_focus(clients, clients_cap, &input, &ms, &z_counter, &wm);
 
         if (wm.connected) {
-            comp_send_wm_pointer(&wm, clients, COMP_MAX_CLIENTS, &input, &ms);
+            comp_send_wm_pointer(&wm, clients, clients_cap, &input, &ms);
             if (wm.connected) {
-                wm_pump(&wm, clients, COMP_MAX_CLIENTS, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
+                wm_pump(&wm, clients, clients_cap, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
             }
             if (!wm.connected) {
                 input.focus_client = -1;
@@ -366,9 +475,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
-        if (comp_send_mouse(clients, COMP_MAX_CLIENTS, &input, &ms) < 0) {
+        if (comp_send_mouse(clients, clients_cap, &input, &ms) < 0) {
             int dc = input.last_client;
-            if (dc >= 0 && dc < COMP_MAX_CLIENTS && clients[dc].connected) {
+            if (dc >= 0 && dc < clients_cap && clients[dc].connected) {
                 dbg_write("compositor: client disconnected\n");
                 if (wm.connected) {
                     for (int si = 0; si < COMP_MAX_SURFACES; si++) {
@@ -406,7 +515,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 ev.keycode = (uint32_t)(uint8_t)kc;
                 ev.key_state = 1u;
 
-                if (input.focus_client >= 0 && input.focus_client < COMP_MAX_CLIENTS) {
+                if (input.focus_client >= 0 && input.focus_client < clients_cap) {
                     comp_client_t* c = &clients[input.focus_client];
                     comp_surface_t* s = comp_client_surface_find(c, input.focus_surface_id);
                     if (s && s->attached && s->committed) {
@@ -424,9 +533,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 }
             }
 
-            if (comp_send_key(clients, COMP_MAX_CLIENTS, &input, (uint32_t)(uint8_t)kc, 1u) < 0) {
+            if (comp_send_key(clients, clients_cap, &input, (uint32_t)(uint8_t)kc, 1u) < 0) {
                 int dc = input.focus_client;
-                if (dc >= 0 && dc < COMP_MAX_CLIENTS && clients[dc].connected) {
+                if (dc >= 0 && dc < clients_cap && clients[dc].connected) {
                     dbg_write("compositor: client disconnected\n");
                     if (wm.connected) {
                         for (int si = 0; si < COMP_MAX_SURFACES; si++) {
@@ -476,7 +585,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         new_preview_rect.y1 = 0;
         new_preview_rect.x2 = 0;
         new_preview_rect.y2 = 0;
-        if (preview.active && preview.client_id < (uint32_t)COMP_MAX_CLIENTS && preview.w > 0 && preview.h > 0) {
+        if (preview.active && preview.client_id < (uint32_t)clients_cap && preview.w > 0 && preview.h > 0) {
             comp_client_t* pc = &clients[(int)preview.client_id];
             if (pc->connected) {
                 comp_surface_t* ps = comp_client_surface_find(pc, preview.surface_id);
@@ -494,7 +603,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
-        for (int ci = 0; ci < COMP_MAX_CLIENTS; ci++) {
+        for (int ci = 0; ci < clients_cap; ci++) {
             for (int si = 0; si < COMP_MAX_SURFACES; si++) {
                 const int idx = ci * COMP_MAX_SURFACES + si;
                 const comp_surface_t* s = &clients[ci].surfaces[si];
@@ -545,14 +654,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             uint32_t bg = 0x101010;
             uint32_t* out = frame_pixels ? frame_pixels : fb;
 
-            struct draw_item {
-                uint32_t z;
-                int ci;
-                int si;
-            };
-            struct draw_item order[COMP_MAX_CLIENTS * COMP_MAX_SURFACES];
             int order_n = 0;
-            for (int ci = 0; ci < COMP_MAX_CLIENTS; ci++) {
+            for (int ci = 0; ci < clients_cap; ci++) {
                 if (!clients[ci].connected) continue;
                 for (int si = 0; si < COMP_MAX_SURFACES; si++) {
                     comp_surface_t* s = &clients[ci].surfaces[si];
@@ -576,7 +679,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
 
             for (int i = 1; i < order_n; i++) {
-                struct draw_item key = order[i];
+                draw_item_t key = order[i];
                 int j = i - 1;
                 while (j >= 0 && order[j].z > key.z) {
                     order[j + 1] = order[j];
@@ -653,10 +756,25 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         frame_shm_fd = -1;
     }
 
-    for (int i = 0; i < COMP_MAX_CLIENTS; i++) {
-        if (clients[i].connected) {
-            comp_client_disconnect(&clients[i]);
+    if (clients) {
+        for (int i = 0; i < clients_cap; i++) {
+            if (clients[i].connected) {
+                comp_client_disconnect(&clients[i]);
+            }
         }
+        free(clients);
+        clients = 0;
+        clients_cap = 0;
+    }
+    if (prev_state) {
+        free(prev_state);
+        prev_state = 0;
+        prev_state_cap_clients = 0;
+    }
+    if (order) {
+        free(order);
+        order = 0;
+        order_cap = 0;
     }
 
     if (wm_pid > 0) {

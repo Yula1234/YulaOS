@@ -85,7 +85,7 @@ void ipc_rx_peek(const ipc_rx_ring_t* q, uint32_t off, void* dst, uint32_t n);
 void ipc_rx_drop(ipc_rx_ring_t* q, uint32_t n);
 
 #define COMP_MAX_SURFACES 8
-#define COMP_MAX_CLIENTS  8
+#define COMP_CLIENTS_INIT 8
 
 #define COMP_SURFACE_SHADOW_BUFS 2
 
