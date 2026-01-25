@@ -573,13 +573,6 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             damage_add(&dmg, rect_make(0, 0, w, h), w, h);
         }
 
-        if (ms.x != draw_mx || ms.y != draw_my) {
-            if (draw_mx != 0x7FFFFFFF && draw_my != 0x7FFFFFFF) {
-                damage_add(&dmg, rect_make(draw_mx - 8, draw_my - 8, 17, 17), w, h);
-            }
-            damage_add(&dmg, rect_make(ms.x - 8, ms.y - 8, 17, 17), w, h);
-        }
-
         comp_rect_t new_preview_rect;
         new_preview_rect.x1 = 0;
         new_preview_rect.y1 = 0;
@@ -645,10 +638,13 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
+        const int cursor_moved = (ms.x != draw_mx || ms.y != draw_my);
+        if (cursor_moved || dmg.n > 0) {
+            comp_cursor_restore(fb, stride, w, h);
+        }
+
         if (dmg.n > 0) {
             preview_dirty = 0;
-            draw_mx = ms.x;
-            draw_my = ms.y;
             prev_preview_rect = new_preview_rect;
 
             uint32_t bg = 0x101010;
@@ -719,8 +715,6 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                         const int t = 2;
                         draw_frame_rect_clipped(out, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
                     }
-
-                    draw_cursor_clipped(out, stride, w, h, ms.x, ms.y, clip);
                 }
             }
 
@@ -735,9 +729,14 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                         const int t = 2;
                         draw_frame_rect_clipped(fb, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
                     }
-                    draw_cursor_clipped(fb, stride, w, h, ms.x, ms.y, clip);
                 }
             }
+        }
+
+        if (cursor_moved || dmg.n > 0) {
+            comp_cursor_save_under_draw(fb, stride, w, h, ms.x, ms.y);
+            draw_mx = ms.x;
+            draw_my = ms.y;
         }
 
         first_frame = 0;

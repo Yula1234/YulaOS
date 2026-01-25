@@ -55,6 +55,15 @@ static inline void fill_rect_clipped(uint32_t* fb, int stride, int w, int h, int
     fill_rect(fb, stride, w, h, r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1, color);
 }
 
+#define COMP_CURSOR_SAVE_W 17
+#define COMP_CURSOR_SAVE_H 17
+#define COMP_CURSOR_SAVE_HALF 8
+
+static uint32_t g_under_cursor_save[COMP_CURSOR_SAVE_W * COMP_CURSOR_SAVE_H];
+static int g_under_cursor_valid = 0;
+static int g_under_cursor_x = 0;
+static int g_under_cursor_y = 0;
+
 void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip) {
     const uint32_t c1 = 0xFFFFFF;
     const uint32_t c2 = 0x000000;
@@ -67,6 +76,65 @@ void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, c
     }
 
     fill_rect_clipped(fb, stride, w, h, x - 1, y - 1, 3, 3, 0xFF0000, clip);
+}
+
+void comp_cursor_restore(uint32_t* fb, int stride, int w, int h) {
+    if (!fb) return;
+    if (stride <= 0 || w <= 0 || h <= 0) return;
+    if (!g_under_cursor_valid) return;
+
+    const int x0 = g_under_cursor_x - COMP_CURSOR_SAVE_HALF;
+    const int y0 = g_under_cursor_y - COMP_CURSOR_SAVE_HALF;
+
+    for (int yy = 0; yy < COMP_CURSOR_SAVE_H; yy++) {
+        const int y = y0 + yy;
+        if ((unsigned)y >= (unsigned)h) continue;
+        uint32_t* row = fb + (size_t)y * (size_t)stride;
+        const uint32_t* srow = g_under_cursor_save + (size_t)yy * (size_t)COMP_CURSOR_SAVE_W;
+        for (int xx = 0; xx < COMP_CURSOR_SAVE_W; xx++) {
+            const int x = x0 + xx;
+            if ((unsigned)x >= (unsigned)w) continue;
+            row[x] = srow[xx];
+        }
+    }
+
+    g_under_cursor_valid = 0;
+}
+
+void comp_cursor_save_under_draw(uint32_t* fb, int stride, int w, int h, int x, int y) {
+    if (!fb) return;
+    if (stride <= 0 || w <= 0 || h <= 0) return;
+
+    const int x0 = x - COMP_CURSOR_SAVE_HALF;
+    const int y0 = y - COMP_CURSOR_SAVE_HALF;
+
+    for (int yy = 0; yy < COMP_CURSOR_SAVE_H; yy++) {
+        const int sy = y0 + yy;
+        uint32_t* drow = g_under_cursor_save + (size_t)yy * (size_t)COMP_CURSOR_SAVE_W;
+
+        if ((unsigned)sy >= (unsigned)h) {
+            for (int xx = 0; xx < COMP_CURSOR_SAVE_W; xx++) {
+                drow[xx] = 0;
+            }
+            continue;
+        }
+
+        const uint32_t* srow = fb + (size_t)sy * (size_t)stride;
+        for (int xx = 0; xx < COMP_CURSOR_SAVE_W; xx++) {
+            const int sx = x0 + xx;
+            if ((unsigned)sx >= (unsigned)w) {
+                drow[xx] = 0;
+            } else {
+                drow[xx] = srow[sx];
+            }
+        }
+    }
+
+    g_under_cursor_x = x;
+    g_under_cursor_y = y;
+    g_under_cursor_valid = 1;
+
+    draw_cursor_clipped(fb, stride, w, h, x, y, rect_make(0, 0, w, h));
 }
 
 void draw_frame_rect_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int rh, int t, uint32_t color, comp_rect_t clip) {

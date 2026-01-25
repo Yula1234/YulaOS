@@ -69,6 +69,8 @@ void blit_surface_clipped(uint32_t* dst, int dst_stride, int dst_w, int dst_h, i
 void present_damage_to_fb(uint32_t* fb, const uint32_t* src, int stride, comp_damage_t* dmg);
 
 void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip);
+void comp_cursor_restore(uint32_t* fb, int stride, int w, int h);
+void comp_cursor_save_under_draw(uint32_t* fb, int stride, int w, int h, int x, int y);
 
 void draw_frame_rect_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int rh, int t, uint32_t color, comp_rect_t clip);
 
