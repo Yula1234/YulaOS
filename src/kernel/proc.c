@@ -19,6 +19,7 @@
 
 #include "sched.h"
 #include "proc.h"
+#include "poll_waitq.h"
 #include "elf.h"
 #include "cpu.h"
 
@@ -264,6 +265,9 @@ static task_t* alloc_task(void) {
     memset(t, 0, sizeof(task_t));
     proc_fd_table_init(t);
 
+    spinlock_init(&t->poll_lock);
+    dlist_init(&t->poll_waiters);
+
     if (!initial_fpu_state) {
         spinlock_release_safe(&proc_lock, flags);
         kfree(t);
@@ -302,6 +306,8 @@ static task_t* alloc_task(void) {
 
 void proc_free_resources(task_t* t) {
     if (!t) return;
+
+    poll_task_cleanup(t);
 
     proc_fd_entry_t* e;
     proc_fd_entry_t* n;
@@ -449,6 +455,8 @@ void proc_kill(task_t* t) {
     }
 
     sem_remove_task(t);
+
+    poll_task_cleanup(t);
 
     proc_sleep_remove(t);
 

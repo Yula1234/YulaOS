@@ -6,7 +6,11 @@
 
 #include <stdint.h>
 
+#include <kernel/poll_waitq.h>
+
 #include <arch/i386/idt.h>
+
+struct task;
 
 typedef struct {
     int32_t x;
@@ -26,5 +30,9 @@ void mouse_wait(uint8_t type);
 void mouse_write(uint8_t a);
 
 void mouse_vfs_init(void);
+
+int mouse_poll_ready(struct task* task);
+int mouse_poll_waitq_register(poll_waiter_t* w, struct task* task);
+void mouse_poll_notify_focus_change(void);
 
 #endif

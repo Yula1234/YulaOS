@@ -7,6 +7,7 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/input_focus.h>
+#include <kernel/poll_waitq.h>
 
 #include <hal/io.h>
 #include <hal/irq.h>
@@ -31,6 +32,7 @@ static char kbd_buffer[KBD_BUF_SIZE];
 static uint32_t kbd_head = 0, kbd_tail = 0;
 
 static semaphore_t kbd_sem;
+static poll_waitq_t kbd_poll_waitq;
 
 static spinlock_t kbd_buf_lock;
 
@@ -41,8 +43,32 @@ static void kbd_put_char(char c) {
         kbd_buffer[kbd_head] = c;
         kbd_head = next;
         sem_signal(&kbd_sem); 
+        poll_waitq_wake_all(&kbd_poll_waitq);
     }
     spinlock_release_safe(&kbd_buf_lock, flags);
+}
+
+int kbd_poll_ready(task_t* task) {
+    if (!task) return 0;
+
+    uint32_t focus_pid = input_focus_get_pid();
+    if (focus_pid > 0 && task->pid != focus_pid) {
+        return 0;
+    }
+
+    uint32_t flags = spinlock_acquire_safe(&kbd_buf_lock);
+    int ready = (kbd_head != kbd_tail);
+    spinlock_release_safe(&kbd_buf_lock, flags);
+    return ready;
+}
+
+int kbd_poll_waitq_register(poll_waiter_t* w, task_t* task) {
+    if (!w || !task) return -1;
+    return poll_waitq_register(&kbd_poll_waitq, w, task);
+}
+
+void kbd_poll_notify_focus_change(void) {
+    poll_waitq_wake_all(&kbd_poll_waitq);
 }
 
 extern volatile uint32_t timer_ticks;
@@ -349,6 +375,7 @@ void kbd_vfs_init() {
 
 void kbd_init(void) {
     sem_init(&kbd_sem, 0);
+    poll_waitq_init(&kbd_poll_waitq);
     spinlock_init(&kbd_scancode_lock);
     spinlock_init(&kbd_buf_lock);
     irq_install_handler(1, keyboard_irq_handler);

@@ -5,6 +5,7 @@
 #include <lib/string.h>
 #include <hal/lock.h>
 #include <mm/heap.h>
+#include <kernel/poll_waitq.h>
 
 #include "pipe.h"
 
@@ -19,6 +20,8 @@ typedef struct {
     
     semaphore_t sem_read; 
     semaphore_t sem_write;
+
+    poll_waitq_t poll_waitq;
     
     int readers;
     int writers;
@@ -170,6 +173,9 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
             sem_give_n(&p->sem_read, take - n);
         }
         sem_give_n(&p->sem_write, n);
+        if (n > 0) {
+            poll_waitq_wake_all(&p->poll_waitq);
+        }
     }
     return (int)read_count;
 }
@@ -229,6 +235,9 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
         sem_signal_n(&p->sem_read, take - n);
     }
     sem_signal_n(&p->sem_write, n);
+    if (n > 0) {
+        poll_waitq_wake_all(&p->poll_waitq);
+    }
     return (int)n;
 }
 
@@ -272,6 +281,7 @@ int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
 
     spinlock_release_safe(&p->lock, flags);
     sem_signal_n(&p->sem_read, size);
+    poll_waitq_wake_all(&p->poll_waitq);
     return (int)size;
 }
 
@@ -322,8 +332,45 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
         spinlock_release_safe(&p->lock, flags);
 
         sem_give_n(&p->sem_read, n);
+        if (n > 0) {
+            poll_waitq_wake_all(&p->poll_waitq);
+        }
     }
     return (int)written_count;
+}
+
+int pipe_poll_waitq_register(vfs_node_t* node, poll_waiter_t* w, task_t* task) {
+    if (!node || !w || !task) return -1;
+    if ((node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) == 0) return -1;
+    pipe_t* p = (pipe_t*)node->private_data;
+    if (!p) return -1;
+    return poll_waitq_register(&p->poll_waitq, w, task);
+}
+
+int pipe_poll_info(vfs_node_t* node, uint32_t* out_available, uint32_t* out_space, int* out_readers, int* out_writers) {
+    if (out_available) *out_available = 0;
+    if (out_space) *out_space = 0;
+    if (out_readers) *out_readers = 0;
+    if (out_writers) *out_writers = 0;
+
+    if (!node) return -1;
+    if ((node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) == 0) return -1;
+
+    pipe_t* p = (pipe_t*)node->private_data;
+    if (!p) return -1;
+
+    uint32_t flags = spinlock_acquire_safe(&p->lock);
+    uint32_t available = p->write_ptr - p->read_ptr;
+    uint32_t space = PIPE_SIZE - available;
+    int readers = p->readers;
+    int writers = p->writers;
+    spinlock_release_safe(&p->lock, flags);
+
+    if (out_available) *out_available = available;
+    if (out_space) *out_space = space;
+    if (out_readers) *out_readers = readers;
+    if (out_writers) *out_writers = writers;
+    return 0;
 }
 
 static int pipe_close(vfs_node_t* node) {
@@ -340,7 +387,10 @@ static int pipe_close(vfs_node_t* node) {
     sem_wake_all(&p->sem_read);
     sem_wake_all(&p->sem_write);
 
+    poll_waitq_wake_all(&p->poll_waitq);
+
     if (readers == 0 && writers == 0) {
+        poll_waitq_detach_all(&p->poll_waitq);
         kfree(p);
     }
     kfree(node);
@@ -360,6 +410,7 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     
     memset(p, 0, sizeof(pipe_t));
     spinlock_init(&p->lock);
+    poll_waitq_init(&p->poll_waitq);
     
     sem_init(&p->sem_read, 0);          
     sem_init(&p->sem_write, PIPE_SIZE); 

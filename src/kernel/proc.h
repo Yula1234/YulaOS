@@ -130,6 +130,9 @@ typedef struct task {
     dlist_head_t sem_node;
     void* blocked_on_sem;
 
+    spinlock_t poll_lock;
+    dlist_head_t poll_waiters;
+
     volatile uint32_t exit_waiters;
     int exit_status;
     semaphore_t exit_sem; 

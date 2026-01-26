@@ -56,6 +56,18 @@ typedef struct {
     int32_t buttons;
 } mouse_state_t;
 
+typedef struct {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+} __attribute__((packed)) pollfd_t;
+
+#define POLLIN   0x001
+#define POLLOUT  0x004
+#define POLLERR  0x008
+#define POLLHUP  0x010
+#define POLLNVAL 0x020
+
 
 static inline void signal(int sig, void* handler) {
     syscall(17, sig, (int)handler, 0);
@@ -84,6 +96,10 @@ void* realloc(void* ptr, size_t size);
 
 static inline void usleep(uint32_t us) {
     syscall(11, us, 0, 0);
+}
+
+static inline int poll(pollfd_t* fds, uint32_t nfds, int timeout_ms) {
+    return syscall(56, (int)(uintptr_t)fds, (int)nfds, (int)timeout_ms);
 }
 
 static inline int create_window(int w, int h, const char* title) {

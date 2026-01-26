@@ -7,6 +7,7 @@
 #include <fs/pipe.h>
 
 #include <kernel/proc.h>
+#include <kernel/poll_waitq.h>
 
 #include <hal/lock.h>
 #include <lib/dlist.h>
@@ -33,6 +34,8 @@ typedef struct ipc_endpoint {
     spinlock_t lock;
     dlist_head_t pending;
 
+    poll_waitq_t poll_waitq;
+
     vfs_node_t* listen_node;
 } ipc_endpoint_t;
 
@@ -48,9 +51,30 @@ static void ipc_init_once(void) {
             g_ipc_eps[i].listen_node = 0;
             spinlock_init(&g_ipc_eps[i].lock);
             dlist_init(&g_ipc_eps[i].pending);
+            poll_waitq_init(&g_ipc_eps[i].poll_waitq);
             memset(g_ipc_eps[i].name, 0, sizeof(g_ipc_eps[i].name));
         }
     }
+}
+
+int ipc_listen_poll_ready(struct vfs_node* listen_node) {
+    if (!listen_node) return 0;
+    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) return 0;
+    ipc_endpoint_t* ep = (ipc_endpoint_t*)listen_node->private_data;
+    if (!ep) return 0;
+
+    uint32_t ep_flags = spinlock_acquire_safe(&ep->lock);
+    int ready = !dlist_empty(&ep->pending);
+    spinlock_release_safe(&ep->lock, ep_flags);
+    return ready;
+}
+
+int ipc_listen_poll_waitq_register(struct vfs_node* listen_node, poll_waiter_t* w, task_t* task) {
+    if (!listen_node || !w || !task) return -1;
+    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) return -1;
+    ipc_endpoint_t* ep = (ipc_endpoint_t*)listen_node->private_data;
+    if (!ep) return -1;
+    return poll_waitq_register(&ep->poll_waitq, w, task);
 }
 
 static inline void vfs_node_release(vfs_node_t* node) {
@@ -89,6 +113,8 @@ static int ipc_listen_close(vfs_node_t* node) {
         kfree(node);
         return 0;
     }
+
+    poll_waitq_detach_all(&ep->poll_waitq);
 
     uint32_t gl_flags = spinlock_acquire_safe(&g_ipc_lock);
 
@@ -251,6 +277,8 @@ int ipc_connect(const char* name,
     uint32_t ep_flags = spinlock_acquire_safe(&ep->lock);
     dlist_add_tail(&p->node, &ep->pending);
     spinlock_release_safe(&ep->lock, ep_flags);
+
+    poll_waitq_wake_all(&ep->poll_waitq);
 
     *out_c2s_w = c2s_w;
     *out_s2c_r = s2c_r;

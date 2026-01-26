@@ -8,6 +8,7 @@
 
 #include <kernel/input_focus.h>
 #include <kernel/proc.h>
+#include <kernel/poll_waitq.h>
 
 #include <hal/io.h>
 #include <hal/irq.h>
@@ -16,6 +17,8 @@
 
 int mouse_x = 512, mouse_y = 384;
 int mouse_buttons = 0;
+
+static poll_waitq_t mouse_poll_waitq;
 
 static uint8_t mouse_cycle = 0;
 static uint8_t mouse_byte[3];
@@ -50,10 +53,29 @@ static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
     return (int)sizeof(mouse_state_t);
 }
 
+int mouse_poll_ready(task_t* task) {
+    if (!task) return 0;
+    uint32_t focus_pid = input_focus_get_pid();
+    if (focus_pid > 0 && task->pid != focus_pid) {
+        return 0;
+    }
+    return 1;
+}
+
+int mouse_poll_waitq_register(poll_waiter_t* w, task_t* task) {
+    if (!w || !task) return -1;
+    return poll_waitq_register(&mouse_poll_waitq, w, task);
+}
+
+void mouse_poll_notify_focus_change(void) {
+    poll_waitq_wake_all(&mouse_poll_waitq);
+}
+
 static vfs_ops_t mouse_ops = { .read = mouse_vfs_read };
 static vfs_node_t mouse_node = { .name = "mouse", .ops = &mouse_ops, .size = sizeof(mouse_state_t) };
 
 void mouse_vfs_init(void) {
+    poll_waitq_init(&mouse_poll_waitq);
     devfs_register(&mouse_node);
 }
 
@@ -185,5 +207,7 @@ void mouse_process_byte(uint8_t data) {
         if (mouse_y < 0) mouse_y = 0;
         if (mouse_x >= (int)fb_width)  mouse_x = fb_width - 1;
         if (mouse_y >= (int)fb_height) mouse_y = fb_height - 1;
+
+        poll_waitq_wake_all(&mouse_poll_waitq);
     }
 }

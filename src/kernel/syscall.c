@@ -368,6 +368,18 @@ typedef struct {
     uint32_t rect_count;
 } __attribute__((packed)) fb_present_req_t;
 
+typedef struct {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+} __attribute__((packed)) pollfd_t;
+
+#define POLLIN   0x001
+#define POLLOUT  0x004
+#define POLLERR  0x008
+#define POLLHUP  0x010
+#define POLLNVAL 0x020
+
 void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti"); 
     uint32_t sys_num = regs->eax;
@@ -580,6 +592,116 @@ void syscall_handler(registers_t* regs) {
             }
 
             regs->eax = futex_sem_wake(sem, max_wake);
+        }
+        break;
+
+        case 56: // poll(pollfd_t* fds, nfds, timeout_ms)
+        {
+            pollfd_t* u_fds = (pollfd_t*)regs->ebx;
+            uint32_t nfds = (uint32_t)regs->ecx;
+            int timeout_ms = (int)regs->edx;
+
+            if (nfds > 4096u) {
+                regs->eax = -1;
+                break;
+            }
+
+            if (nfds > 0) {
+                uint32_t bytes;
+                if (__builtin_mul_overflow(nfds, (uint32_t)sizeof(pollfd_t), &bytes)) {
+                    regs->eax = -1;
+                    break;
+                }
+                if (!check_user_buffer_present(curr, u_fds, bytes)) {
+                    regs->eax = -1;
+                    break;
+                }
+            }
+
+            uint32_t end_tick = 0;
+            if (timeout_ms > 0) {
+                uint64_t t = (uint64_t)timer_ticks + (uint64_t)((uint32_t)timeout_ms) * 15ull;
+                if (t > 0xFFFFFFFFull) t = 0xFFFFFFFFull;
+                end_tick = (uint32_t)t;
+            }
+
+            for (;;) {
+                int ready = 0;
+
+                for (uint32_t i = 0; i < nfds; i++) {
+                    pollfd_t* p = &u_fds[i];
+                    prefault_user_read(p, (uint32_t)sizeof(*p));
+
+                    int32_t fd = p->fd;
+                    int16_t ev = p->events;
+                    int16_t rev = 0;
+
+                    if (fd < 0) {
+                        rev = POLLNVAL;
+                    } else {
+                        file_t* f = proc_fd_get(curr, fd);
+                        if (!f || !f->used || !f->node) {
+                            rev = POLLNVAL;
+                        } else {
+                            vfs_node_t* node = f->node;
+                            if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+                                uint32_t avail = 0;
+                                uint32_t space = 0;
+                                int readers = 0;
+                                int writers = 0;
+                                if (pipe_poll_info(node, &avail, &space, &readers, &writers) == 0) {
+                                    if (node->flags & VFS_FLAG_PIPE_READ) {
+                                        if ((ev & POLLIN) && avail > 0) rev |= POLLIN;
+                                        if (writers == 0) rev |= POLLHUP;
+                                    }
+                                    if (node->flags & VFS_FLAG_PIPE_WRITE) {
+                                        if ((ev & POLLOUT) && readers > 0 && space > 0) rev |= POLLOUT;
+                                        if (readers == 0) rev |= POLLHUP;
+                                    }
+                                }
+                            } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
+                                if ((ev & POLLIN) && ipc_listen_poll_ready(node)) {
+                                    rev |= POLLIN;
+                                }
+                            }
+                        }
+                    }
+
+                    p->revents = rev;
+                    if (rev != 0) ready++;
+                }
+
+                if (ready > 0) {
+                    regs->eax = ready;
+                    break;
+                }
+
+                if (timeout_ms == 0) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                if (timeout_ms > 0) {
+                    if (timer_ticks >= end_tick) {
+                        regs->eax = 0;
+                        break;
+                    }
+                }
+
+                uint32_t sleep_ticks = 15u;
+                if (timeout_ms > 0) {
+                    uint32_t now = timer_ticks;
+                    uint32_t remain = end_tick - now;
+                    if (remain < sleep_ticks) sleep_ticks = remain;
+                    if (sleep_ticks == 0) {
+                        regs->eax = 0;
+                        break;
+                    }
+                }
+
+                extern void proc_sleep_add(task_t* t, uint32_t tick);
+                proc_sleep_add(curr, timer_ticks + sleep_ticks);
+            }
         }
         break;
 
