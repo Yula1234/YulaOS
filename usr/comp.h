@@ -129,6 +129,23 @@ static inline void comp_wait_events(comp_conn_t* c, uint32_t fallback_us) {
 
     if (c->input_ring_enabled && c->input_ring && (c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) {
         comp_input_ring_t* ring = c->input_ring;
+        if (fallback_us) {
+            const uint32_t r = ring->r;
+            const uint32_t w = ring->w;
+            if (r != w) return;
+
+            (void)__sync_fetch_and_or(&ring->flags, COMP_INPUT_RING_FLAG_WAIT_R);
+            __sync_synchronize();
+
+            if (ring->r != ring->w) {
+                (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+                return;
+            }
+
+            usleep(fallback_us);
+            (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+            return;
+        }
         for (;;) {
             uint32_t r = ring->r;
             uint32_t w = ring->w;

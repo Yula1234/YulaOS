@@ -219,6 +219,56 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                 return;
             }
 
+            if (cmd.kind == COMP_WM_CMD_CLOSE) {
+                if (cmd.client_id >= (uint32_t)nclients || cmd.surface_id == 0) continue;
+                comp_client_t* c = &clients[(int)cmd.client_id];
+                if (!c->connected) continue;
+
+                int pid = c->pid;
+                if (pid > 0) {
+                    if (input->focus_client == (int)cmd.client_id) {
+                        input->focus_client = -1;
+                        input->focus_surface_id = 0;
+                    }
+
+                    comp_ipc_input_t in;
+                    memset(&in, 0, sizeof(in));
+                    in.surface_id = cmd.surface_id;
+                    in.kind = COMP_IPC_INPUT_CLOSE;
+
+                    int sent = 0;
+                    if (c->input_ring_enabled && c->input_ring && (c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) {
+                        if (comp_client_send_input(c, &in, 1) < 0) {
+                            sent = 0;
+                        } else {
+                            sent = 1;
+                        }
+                    } else {
+                        if (c->connected && c->fd_s2c >= 0) {
+                            comp_ipc_hdr_t hdr;
+                            hdr.magic = COMP_IPC_MAGIC;
+                            hdr.version = (uint16_t)COMP_IPC_VERSION;
+                            hdr.type = (uint16_t)COMP_IPC_MSG_INPUT;
+                            hdr.len = (uint32_t)sizeof(in);
+                            hdr.seq = c->seq_out++;
+
+                            uint8_t frame[sizeof(hdr) + sizeof(in)];
+                            memcpy(frame, &hdr, (uint32_t)sizeof(hdr));
+                            memcpy(frame + sizeof(hdr), &in, (uint32_t)sizeof(in));
+
+                            int wr = pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), 1);
+                            sent = (wr == 1);
+                        }
+                    }
+
+                    if (!sent) {
+                        (void)syscall(9, pid, 0, 0);
+                    }
+                }
+
+                continue;
+            }
+
             if (cmd.client_id >= (uint32_t)nclients || cmd.surface_id == 0) continue;
 
             comp_client_t* c = &clients[(int)cmd.client_id];
@@ -290,15 +340,6 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                     preview->active = 0;
                     if (preview_dirty) *preview_dirty = 1;
                     if (scene_dirty) *scene_dirty = 1;
-                }
-            } else if (cmd.kind == COMP_WM_CMD_CLOSE) {
-                int pid = c->pid;
-                if (pid > 0) {
-                    if (input->focus_client == (int)cmd.client_id) {
-                        input->focus_client = -1;
-                        input->focus_surface_id = 0;
-                    }
-                    (void)syscall(9, pid, 0, 0);
                 }
             }
         }

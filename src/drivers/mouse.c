@@ -5,6 +5,7 @@
 
 #include <fs/vfs.h>
 #include <drivers/mouse.h>
+#include <drivers/fbdev.h>
 
 #include <kernel/input_focus.h>
 #include <kernel/proc.h>
@@ -34,9 +35,16 @@ static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
     if (size < sizeof(mouse_state_t)) return -1;
 
     task_t* curr = proc_current();
-    uint32_t focus_pid = input_focus_get_pid();
-    if (focus_pid > 0 && curr && curr->pid != focus_pid) {
-        return 0;
+    uint32_t owner_pid = fb_get_owner_pid();
+    if (owner_pid != 0) {
+        if (!curr || curr->pid != owner_pid) {
+            return 0;
+        }
+    } else {
+        uint32_t focus_pid = input_focus_get_pid();
+        if (focus_pid > 0 && curr && curr->pid != focus_pid) {
+            return 0;
+        }
     }
 
     uint32_t flags;
@@ -55,6 +63,10 @@ static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
 
 int mouse_poll_ready(task_t* task) {
     if (!task) return 0;
+    uint32_t owner_pid = fb_get_owner_pid();
+    if (owner_pid != 0) {
+        return task->pid == owner_pid;
+    }
     uint32_t focus_pid = input_focus_get_pid();
     if (focus_pid > 0 && task->pid != focus_pid) {
         return 0;

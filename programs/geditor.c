@@ -1716,8 +1716,6 @@ int main(int argc, char** argv) {
                 if (in.key_state != 1u) continue;
 
                 unsigned char c = (unsigned char)(uint8_t)in.keycode;
-
-                if (c == 0x17) { ed.quit = 1; update = 1; continue; } // Ctrl+Q
                 if (c == 0x15) { save_file(); update = 1; continue; } // Ctrl+S
                 if (c == 0x1A) { editor_undo(); update = 1; continue; } // Ctrl+Z
                 if (c == 0x19) { editor_redo(); update = 1; continue; } // Ctrl+Y
@@ -1775,6 +1773,12 @@ int main(int argc, char** argv) {
                 
                 update = 1;
                 continue;
+            }
+
+            if (in.kind == COMP_IPC_INPUT_CLOSE) {
+                ed.quit = 1;
+                update = 1;
+                break;
             }
 
             if (in.kind == COMP_IPC_INPUT_MOUSE) {

@@ -1,5 +1,19 @@
 #include "wm_internal.h"
 
+int wm_pick_next_focus_idx(const wm_state_t* st, int start_idx) {
+    if (!st) return -1;
+    if (start_idx < 0 || start_idx >= WM_MAX_VIEWS) start_idx = 0;
+
+    for (int step = 1; step <= WM_MAX_VIEWS; step++) {
+        int idx = (start_idx + step) % WM_MAX_VIEWS;
+        const wm_view_t* v = &st->views[idx];
+        if (wm_is_view_visible_on_active_ws(st, v) && !v->ui) {
+            return idx;
+        }
+    }
+    return -1;
+}
+
 static void wm_on_map(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t* ev) {
     if (!c || !st || !ev) return;
     if (ev->surface_id == 0) return;
@@ -122,14 +136,15 @@ static void wm_on_unmap(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_
         wm_reselect_master_for_ws(st, ws);
     }
 
-    if (was_focused) {
-        for (int i = 0; i < WM_MAX_VIEWS; i++) {
-            if (wm_is_view_visible_on_active_ws(st, &st->views[i]) && !st->views[i].ui) {
-                wm_focus_view_idx(c, st, i);
-                break;
-            }
+    if (was_focused || st->focused_idx < 0) {
+        int next_idx = wm_pick_next_focus_idx(st, idx);
+        if (next_idx >= 0) {
+            wm_focus_view_idx(c, st, next_idx);
+        } else {
+            wm_clear_focus(st);
+            wm_ui_draw_bar(st);
+            wm_ui_raise_and_place(c, st);
         }
-        wm_ui_draw_bar(st);
     }
 }
 

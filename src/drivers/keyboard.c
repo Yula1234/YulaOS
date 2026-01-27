@@ -8,6 +8,7 @@
 #include <kernel/proc.h>
 #include <kernel/input_focus.h>
 #include <kernel/poll_waitq.h>
+#include <drivers/fbdev.h>
 
 #include <hal/io.h>
 #include <hal/irq.h>
@@ -39,21 +40,34 @@ static spinlock_t kbd_buf_lock;
 static void kbd_put_char(char c) {
     uint32_t flags = spinlock_acquire_safe(&kbd_buf_lock);
     uint32_t next = (kbd_head + 1) % KBD_BUF_SIZE;
-    if (next != kbd_tail) {
-        kbd_buffer[kbd_head] = c;
-        kbd_head = next;
-        sem_signal(&kbd_sem); 
-        poll_waitq_wake_all(&kbd_poll_waitq);
+    const int was_full = (next == kbd_tail);
+    if (was_full) {
+        kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
+        next = (kbd_head + 1) % KBD_BUF_SIZE;
     }
+
+    kbd_buffer[kbd_head] = c;
+    kbd_head = next;
+    if (!was_full) {
+        sem_signal(&kbd_sem);
+    }
+    poll_waitq_wake_all(&kbd_poll_waitq);
     spinlock_release_safe(&kbd_buf_lock, flags);
 }
 
 int kbd_poll_ready(task_t* task) {
     if (!task) return 0;
 
-    uint32_t focus_pid = input_focus_get_pid();
-    if (focus_pid > 0 && task->pid != focus_pid) {
-        return 0;
+    uint32_t owner_pid = fb_get_owner_pid();
+    if (owner_pid != 0) {
+        if (task->pid != owner_pid) {
+            return 0;
+        }
+    } else {
+        uint32_t focus_pid = input_focus_get_pid();
+        if (focus_pid > 0 && task->pid != focus_pid) {
+            return 0;
+        }
     }
 
     uint32_t flags = spinlock_acquire_safe(&kbd_buf_lock);
@@ -280,6 +294,7 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     (void)node; (void)offset; (void)size;
     char* b = (char*)buffer;
     task_t* curr = proc_current();
+    int focus_pid = 0;
 
     while (1) {
         if (curr->pending_signals & (1 << 2)) { // SIGINT
@@ -287,14 +302,62 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
             return -2; // EINTR
         }
 
-        int focus_pid = (int)input_focus_get_pid();
-        if (focus_pid > 0 && curr && (int)curr->pid != focus_pid) {
-            uint32_t target = timer_ticks + 5;
-            proc_sleep_add(curr, target);
+        uint32_t owner_pid = fb_get_owner_pid();
+        if (owner_pid != 0) {
+            if (!curr || curr->pid != owner_pid) {
+                uint32_t target = timer_ticks + 5;
+                proc_sleep_add(curr, target);
+                continue;
+            }
+        } else {
+            focus_pid = (int)input_focus_get_pid();
+            if (focus_pid > 0 && curr && (int)curr->pid != focus_pid) {
+                uint32_t target = timer_ticks + 5;
+                proc_sleep_add(curr, target);
+                continue;
+            }
+        }
+
+        if (owner_pid == 0) {
+            while (1) {
+                task_t* focused_task = 0;
+                focus_pid = (int)input_focus_get_pid();
+                if (focus_pid > 0) {
+                    focused_task = proc_find_by_pid((uint32_t)focus_pid);
+                }
+
+                int block_for_focus = 0;
+                if (focused_task &&
+                    focused_task->term_mode == 1 &&
+                    curr->term_mode == 1 &&
+                    focused_task->terminal &&
+                    curr->terminal &&
+                    focused_task->terminal != curr->terminal) {
+                    block_for_focus = 1;
+                }
+
+                if (!block_for_focus) {
+                    break;
+                }
+
+                uint32_t target = timer_ticks + 5;
+                proc_sleep_add(curr, target);
+
+                if (curr->pending_signals & (1 << 2)) {
+                    curr->pending_signals &= ~(1 << 2);
+                    return -2;
+                }
+            }
+        }
+
+        sem_wait(&kbd_sem);
+
+        char c;
+        if (!kbd_try_read_char(&c)) {
             continue;
         }
 
-        while (1) {
+        if (owner_pid == 0) {
             task_t* focused_task = 0;
             focus_pid = (int)input_focus_get_pid();
             if (focus_pid > 0) {
@@ -311,54 +374,19 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
                 block_for_focus = 1;
             }
 
-            if (!block_for_focus) {
-                break;
+            if (block_for_focus) {
+                kbd_put_char(c);
+
+                uint32_t target = timer_ticks + 5;
+                proc_sleep_add(curr, target);
+
+                if (curr->pending_signals & (1 << 2)) {
+                    curr->pending_signals &= ~(1 << 2);
+                    return -2;
+                }
+
+                continue;
             }
-
-            uint32_t target = timer_ticks + 5;
-            proc_sleep_add(curr, target);
-
-            if (curr->pending_signals & (1 << 2)) {
-                curr->pending_signals &= ~(1 << 2);
-                return -2;
-            }
-        }
-
-        sem_wait(&kbd_sem);
-
-        char c;
-        if (!kbd_try_read_char(&c)) {
-            continue;
-        }
-
-        task_t* focused_task = 0;
-        focus_pid = (int)input_focus_get_pid();
-        if (focus_pid > 0) {
-            focused_task = proc_find_by_pid((uint32_t)focus_pid);
-        }
-
-        int block_for_focus = 0;
-        if (focused_task &&
-            focused_task->term_mode == 1 &&
-            curr->term_mode == 1 &&
-            focused_task->terminal &&
-            curr->terminal &&
-            focused_task->terminal != curr->terminal) {
-            block_for_focus = 1;
-        }
-
-        if (block_for_focus) {
-            kbd_put_char(c);
-
-            uint32_t target = timer_ticks + 5;
-            proc_sleep_add(curr, target);
-
-            if (curr->pending_signals & (1 << 2)) {
-                curr->pending_signals &= ~(1 << 2);
-                return -2;
-            }
-
-            continue;
         }
 
         b[0] = c;

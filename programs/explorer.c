@@ -508,11 +508,6 @@ int main(int argc, char** argv) {
             if (in.kind == COMP_IPC_INPUT_KEY) {
                 if (in.key_state != 1u) continue;
                 const unsigned char c = (unsigned char)(uint8_t)in.keycode;
-
-                if (c == 'q' || c == 'Q') {
-                    running = 0;
-                    break;
-                }
                 if (c == 'd' || c == 'D') {
                     if (selected_idx != -1 && entries[selected_idx].type != 2) {
                         char full[300];
@@ -525,6 +520,11 @@ int main(int argc, char** argv) {
                     }
                 }
                 continue;
+            }
+
+            if (in.kind == COMP_IPC_INPUT_CLOSE) {
+                running = 0;
+                break;
             }
 
             if (in.kind == COMP_IPC_INPUT_RESIZE) {

@@ -160,5 +160,13 @@ void wm_close_focused(comp_conn_t* c, wm_state_t* st) {
     if (idx < 0 || idx >= WM_MAX_VIEWS) return;
     wm_view_t* v = &st->views[idx];
     if (!wm_is_view_visible_on_active_ws(st, v)) return;
-    (void)comp_wm_close(c, v->client_id, v->surface_id);
+
+    const uint32_t closing_client_id = v->client_id;
+    const uint32_t closing_surface_id = v->surface_id;
+    const int next_idx = wm_pick_next_focus_idx(st, idx);
+
+    (void)comp_wm_close(c, closing_client_id, closing_surface_id);
+    if (next_idx >= 0) {
+        wm_focus_view_idx(c, st, next_idx);
+    }
 }

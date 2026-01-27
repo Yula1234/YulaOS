@@ -568,6 +568,21 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
+        if (wm.connected) {
+            wm_flush_tx(&wm);
+            if (!wm.connected) {
+                input.focus_client = -1;
+                input.focus_surface_id = 0;
+                input.wm_pointer_grab_active = 0;
+                input.wm_pointer_grab_client = -1;
+                input.wm_pointer_grab_surface_id = 0;
+                if (preview.active) {
+                    preview.active = 0;
+                    preview_dirty = 1;
+                }
+            }
+        }
+
         comp_damage_t dmg;
         damage_reset(&dmg);
         int any_surface_changed = 0;

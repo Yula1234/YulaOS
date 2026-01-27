@@ -154,7 +154,7 @@ typedef struct __attribute__((packed)) {
 #define COMP_IPC_INPUT_MOUSE 1u
 #define COMP_IPC_INPUT_KEY   2u
 #define COMP_IPC_INPUT_RESIZE 3u
-
+#define COMP_IPC_INPUT_CLOSE 4u
 
 #define COMP_INPUT_RING_MAGIC 0x49525043u
 #define COMP_INPUT_RING_VERSION 1u

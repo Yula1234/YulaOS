@@ -8,11 +8,13 @@
 
 #include <drivers/vga.h>
 #include <drivers/keyboard.h>
+#include <drivers/mouse.h>
 #include <drivers/fbdev.h>
 #include <kernel/input_focus.h>
 #include <kernel/rtc.h>
 #include <kernel/shm.h>
 #include <kernel/ipc_endpoint.h>
+#include <kernel/poll_waitq.h>
 
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
@@ -606,8 +608,9 @@ void syscall_handler(registers_t* regs) {
                 break;
             }
 
+            uint32_t bytes = 0;
+
             if (nfds > 0) {
-                uint32_t bytes;
                 if (__builtin_mul_overflow(nfds, (uint32_t)sizeof(pollfd_t), &bytes)) {
                     regs->eax = -1;
                     break;
@@ -618,19 +621,67 @@ void syscall_handler(registers_t* regs) {
                 }
             }
 
+            pollfd_t* k_fds = 0;
+            poll_waiter_t* waiters = 0;
+
+            if (nfds > 0) {
+                k_fds = (pollfd_t*)kmalloc(bytes);
+                waiters = (poll_waiter_t*)kmalloc((uint32_t)sizeof(poll_waiter_t) * nfds);
+                if (!k_fds || !waiters) {
+                    if (k_fds) kfree(k_fds);
+                    if (waiters) kfree(waiters);
+                    regs->eax = -1;
+                    break;
+                }
+                memset(waiters, 0, (uint32_t)sizeof(poll_waiter_t) * nfds);
+                prefault_user_read(u_fds, bytes);
+                memcpy(k_fds, u_fds, bytes);
+            }
+
             uint32_t end_tick = 0;
+            int have_deadline = 0;
             if (timeout_ms > 0) {
                 uint64_t t = (uint64_t)timer_ticks + (uint64_t)((uint32_t)timeout_ms) * 15ull;
                 if (t > 0xFFFFFFFFull) t = 0xFFFFFFFFull;
                 end_tick = (uint32_t)t;
+                have_deadline = 1;
             }
 
+            int result = 0;
+
             for (;;) {
-                int ready = 0;
+                if (curr->pending_signals & (1u << 2)) {
+                    curr->pending_signals &= ~(1u << 2);
+                    result = -2;
+                    break;
+                }
+
+                if (nfds == 0) {
+                    if (timeout_ms == 0) {
+                        result = 0;
+                        break;
+                    }
+                    if (have_deadline && timer_ticks >= end_tick) {
+                        result = 0;
+                        break;
+                    }
+
+                    if (have_deadline) {
+                        proc_sleep_add(curr, end_tick);
+                    } else {
+                        curr->state = TASK_WAITING;
+                        sched_yield();
+                    }
+                    continue;
+                }
 
                 for (uint32_t i = 0; i < nfds; i++) {
-                    pollfd_t* p = &u_fds[i];
-                    prefault_user_read(p, (uint32_t)sizeof(*p));
+                    poll_waitq_unregister(&waiters[i]);
+                }
+
+                int ready = 0;
+                for (uint32_t i = 0; i < nfds; i++) {
+                    pollfd_t* p = &k_fds[i];
 
                     int32_t fd = p->fd;
                     int16_t ev = p->events;
@@ -663,6 +714,12 @@ void syscall_handler(registers_t* regs) {
                                 if ((ev & POLLIN) && ipc_listen_poll_ready(node)) {
                                     rev |= POLLIN;
                                 }
+                            } else if (ev & POLLIN) {
+                                if (node->name[0] == 'k' && strcmp(node->name, "kbd") == 0) {
+                                    if (kbd_poll_ready(curr)) rev |= POLLIN;
+                                } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
+                                    if (mouse_poll_ready(curr)) rev |= POLLIN;
+                                }
                             }
                         }
                     }
@@ -672,36 +729,78 @@ void syscall_handler(registers_t* regs) {
                 }
 
                 if (ready > 0) {
-                    regs->eax = ready;
+                    result = ready;
                     break;
                 }
 
                 if (timeout_ms == 0) {
-                    regs->eax = 0;
+                    result = 0;
                     break;
                 }
 
-                if (timeout_ms > 0) {
-                    if (timer_ticks >= end_tick) {
-                        regs->eax = 0;
-                        break;
+                if (have_deadline && timer_ticks >= end_tick) {
+                    result = 0;
+                    break;
+                }
+
+                for (uint32_t i = 0; i < nfds; i++) {
+                    pollfd_t* p = &k_fds[i];
+
+                    if (p->revents != 0) continue;
+
+                    int32_t fd = p->fd;
+                    int16_t ev = p->events;
+
+                    if (fd < 0) continue;
+                    if ((ev & (POLLIN | POLLOUT)) == 0) continue;
+
+                    file_t* f = proc_fd_get(curr, fd);
+                    if (!f || !f->used || !f->node) continue;
+
+                    vfs_node_t* node = f->node;
+                    if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+                        (void)pipe_poll_waitq_register(node, &waiters[i], curr);
+                    } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
+                        if (ev & POLLIN) {
+                            (void)ipc_listen_poll_waitq_register(node, &waiters[i], curr);
+                        }
+                    } else if (ev & POLLIN) {
+                        if (node->name[0] == 'k' && strcmp(node->name, "kbd") == 0) {
+                            (void)kbd_poll_waitq_register(&waiters[i], curr);
+                        } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
+                            (void)mouse_poll_waitq_register(&waiters[i], curr);
+                        }
                     }
                 }
 
-                uint32_t sleep_ticks = 15u;
-                if (timeout_ms > 0) {
-                    uint32_t now = timer_ticks;
-                    uint32_t remain = end_tick - now;
-                    if (remain < sleep_ticks) sleep_ticks = remain;
-                    if (sleep_ticks == 0) {
-                        regs->eax = 0;
-                        break;
-                    }
+                if (have_deadline) {
+                    proc_sleep_add(curr, end_tick);
+                } else {
+                    curr->state = TASK_WAITING;
+                    sched_yield();
                 }
-
-                extern void proc_sleep_add(task_t* t, uint32_t tick);
-                proc_sleep_add(curr, timer_ticks + sleep_ticks);
             }
+
+            if (waiters) {
+                for (uint32_t i = 0; i < nfds; i++) {
+                    poll_waitq_unregister(&waiters[i]);
+                }
+            }
+
+            if (result < 0 && k_fds) {
+                for (uint32_t i = 0; i < nfds; i++) {
+                    k_fds[i].revents = 0;
+                }
+            }
+
+            if (k_fds && bytes) {
+                memcpy(u_fds, k_fds, bytes);
+            }
+
+            if (k_fds) kfree(k_fds);
+            if (waiters) kfree(waiters);
+
+            regs->eax = result;
         }
         break;
 
@@ -1207,10 +1306,18 @@ fb_present_done:
                 break;
             }
 
-            uint32_t focus_pid = input_focus_get_pid();
-            if (focus_pid > 0 && curr && curr->pid != focus_pid) {
-                regs->eax = 0;
-                break;
+            uint32_t owner_pid = fb_get_owner_pid();
+            if (owner_pid != 0) {
+                if (!curr || curr->pid != owner_pid) {
+                    regs->eax = 0;
+                    break;
+                }
+            } else {
+                uint32_t focus_pid = input_focus_get_pid();
+                if (focus_pid > 0 && curr && curr->pid != focus_pid) {
+                    regs->eax = 0;
+                    break;
+                }
             }
 
             char c = 0;

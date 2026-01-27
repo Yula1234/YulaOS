@@ -984,10 +984,6 @@ static void handle_mouse_up() {
 }
 
 static int handle_key(unsigned char c) {
-    if (c == 'q' || c == 'Q' || c == 0x17) {
-        return 1;
-    }
-
     if (c == 'b' || c == 'B') tool = TOOL_BRUSH;
     else if (c == 'e' || c == 'E') tool = TOOL_ERASER;
     else if (c == 'l' || c == 'L') tool = TOOL_LINE;
@@ -1007,7 +1003,7 @@ static int handle_key(unsigned char c) {
     else if (c >= '1' && c <= '8') {
         cur_color = palette[(int)(c - '1')];
     }
-
+ 
     return 0;
 }
 
@@ -1296,13 +1292,15 @@ int main(int argc, char** argv) {
 
             if (in.kind == COMP_IPC_INPUT_KEY) {
                 if (in.key_state == 1u) {
-                    if (handle_key((unsigned char)(uint8_t)in.keycode)) {
-                        running = 0;
-                        break;
-                    }
+                    (void)handle_key((unsigned char)(uint8_t)in.keycode);
                     need_update = 1;
                 }
                 continue;
+            }
+
+            if (in.kind == COMP_IPC_INPUT_CLOSE) {
+                running = 0;
+                break;
             }
 
             if (in.kind == COMP_IPC_INPUT_MOUSE) {
