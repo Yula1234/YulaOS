@@ -24,7 +24,7 @@ fi
 LD="ld -m elf_i386 --gc-sections"
 ASM="fasm"
 
-CFLAGS_BASE="-ffreestanding -fno-pie -fno-stack-protector -fno-builtin -pipe -march=i686"
+CFLAGS_BASE="-ffreestanding -fno-pie -fno-stack-protector -fno-builtin -pipe -march=i686 -I include"
 
 CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O2 -Wall -Wextra -I src -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fomit-frame-pointer
 -fno-strict-aliasing -fno-delete-null-pointer-checks -fno-strict-overflow -fwrapv -fno-common -Wstack-usage=16384 -mno-avx"

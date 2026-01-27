@@ -12,6 +12,7 @@
 #include <lib/string.h>
 #include <lib/stdlib.h>
 #include <lib/stdio.h>
+ #include <yos/ioctl.h>
 
 #define YULA_EVENT_NONE       0
 #define YULA_EVENT_MOUSE_MOVE 1
@@ -100,6 +101,10 @@ static inline void usleep(uint32_t us) {
 
 static inline int poll(pollfd_t* fds, uint32_t nfds, int timeout_ms) {
     return syscall(56, (int)(uintptr_t)fds, (int)nfds, (int)timeout_ms);
+}
+
+static inline int ioctl(int fd, uint32_t req, void* arg) {
+    return syscall(57, fd, (int)req, (int)arg);
 }
 
 static inline int create_window(int w, int h, const char* title) {

@@ -6,18 +6,108 @@
 #include "../kernel/proc.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include <hal/lock.h>
 
-static vfs_node_t* dev_nodes[16];
-static int dev_count = 0;
+typedef struct devfs_entry {
+    vfs_node_t* node;
+    struct devfs_entry* next;
+} devfs_entry_t;
+
+#define DEVFS_BUCKETS 256u
+
+static devfs_entry_t* devfs_buckets[DEVFS_BUCKETS];
+static spinlock_t devfs_locks[DEVFS_BUCKETS];
+static volatile uint32_t devfs_init_done;
+
+static uint32_t devfs_hash_name(const char* s) {
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; s[i] != '\0'; i++) {
+        h ^= (uint8_t)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void devfs_init_once(void) {
+    if (__sync_lock_test_and_set(&devfs_init_done, 1u) == 0u) {
+        memset(devfs_buckets, 0, sizeof(devfs_buckets));
+        for (uint32_t i = 0; i < DEVFS_BUCKETS; i++) {
+            spinlock_init(&devfs_locks[i]);
+        }
+    }
+}
 
 void devfs_register(vfs_node_t* node) {
-    if (dev_count < 16) dev_nodes[dev_count++] = node;
+    if (!node || node->name[0] == '\0') return;
+    devfs_init_once();
+
+    uint32_t idx = devfs_hash_name(node->name) & (DEVFS_BUCKETS - 1u);
+    uint32_t flags = spinlock_acquire_safe(&devfs_locks[idx]);
+
+    for (devfs_entry_t* e = devfs_buckets[idx]; e; e = e->next) {
+        vfs_node_t* n = e->node;
+        if (n && n->name[0] == node->name[0] && strcmp(n->name, node->name) == 0) {
+            e->node = node;
+            spinlock_release_safe(&devfs_locks[idx], flags);
+            return;
+        }
+    }
+
+    devfs_entry_t* e = (devfs_entry_t*)kmalloc(sizeof(*e));
+    if (!e) {
+        spinlock_release_safe(&devfs_locks[idx], flags);
+        return;
+    }
+
+    e->node = node;
+    e->next = devfs_buckets[idx];
+    devfs_buckets[idx] = e;
+
+    spinlock_release_safe(&devfs_locks[idx], flags);
+}
+
+int devfs_unregister(const char* name) {
+    if (!name || name[0] == '\0') return -1;
+    devfs_init_once();
+
+    uint32_t idx = devfs_hash_name(name) & (DEVFS_BUCKETS - 1u);
+    uint32_t flags = spinlock_acquire_safe(&devfs_locks[idx]);
+
+    devfs_entry_t* prev = 0;
+    devfs_entry_t* cur = devfs_buckets[idx];
+    while (cur) {
+        vfs_node_t* n = cur->node;
+        if (n && name[0] == n->name[0] && strcmp(n->name, name) == 0) {
+            if (prev) prev->next = cur->next;
+            else devfs_buckets[idx] = cur->next;
+            spinlock_release_safe(&devfs_locks[idx], flags);
+            kfree(cur);
+            return 0;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    spinlock_release_safe(&devfs_locks[idx], flags);
+    return -1;
 }
 
 vfs_node_t* devfs_fetch(const char* name) {
-    for (int i = 0; i < dev_count; i++) {
-        if (name[0] == dev_nodes[i]->name[0] && strcmp(dev_nodes[i]->name, name) == 0) return dev_nodes[i];
+    if (!name || name[0] == '\0') return 0;
+    devfs_init_once();
+
+    uint32_t idx = devfs_hash_name(name) & (DEVFS_BUCKETS - 1u);
+    uint32_t flags = spinlock_acquire_safe(&devfs_locks[idx]);
+
+    for (devfs_entry_t* e = devfs_buckets[idx]; e; e = e->next) {
+        vfs_node_t* n = e->node;
+        if (n && name[0] == n->name[0] && strcmp(n->name, name) == 0) {
+            spinlock_release_safe(&devfs_locks[idx], flags);
+            return n;
+        }
     }
+
+    spinlock_release_safe(&devfs_locks[idx], flags);
     return 0;
 }
 
@@ -172,6 +262,14 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
     int res = f->node->ops->write(f->node, f->offset, size, buf);
     if (res > 0) f->offset += res;
     return res;
+}
+
+int vfs_ioctl(int fd, uint32_t req, void* arg) {
+    task_t* curr = proc_current();
+    file_t* f = proc_fd_get(curr, fd);
+    if (!f || !f->used || !f->node || !f->node->ops) return -1;
+    if (!f->node->ops->ioctl) return -1;
+    return f->node->ops->ioctl(f->node, req, arg);
 }
 
 int vfs_close(int fd) {

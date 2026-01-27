@@ -20,6 +20,7 @@ typedef struct vfs_ops {
     int (*write)(struct vfs_node* node, uint32_t offset, uint32_t size, const void* buffer);
     int (*open)(struct vfs_node* node);
     int (*close)(struct vfs_node* node);
+    int (*ioctl)(struct vfs_node* node, uint32_t req, void* arg);
 } vfs_ops_t;
 
 typedef struct vfs_node {
@@ -42,10 +43,12 @@ int vfs_open(const char* path, int flags);
 int vfs_read(int fd, void* buf, uint32_t size);
 int vfs_write(int fd, const void* buf, uint32_t size);
 int vfs_close(int fd);
+int vfs_ioctl(int fd, uint32_t req, void* arg);
 int vfs_getdents(int fd, void* buf, uint32_t size);
 int vfs_fstatat(int dirfd, const char* name, void* stat_buf);
 
 void devfs_register(vfs_node_t* node);
+int devfs_unregister(const char* name);
 vfs_node_t* devfs_fetch(const char* name);
 vfs_node_t* vfs_create_node_from_path(const char* path);
 

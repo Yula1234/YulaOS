@@ -15,6 +15,7 @@
 #include <kernel/shm.h>
 #include <kernel/ipc_endpoint.h>
 #include <kernel/poll_waitq.h>
+ #include <yos/ioctl.h>
 
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
@@ -161,6 +162,25 @@ static int check_user_buffer_present(task_t* task, const void* buf, uint32_t siz
         uint32_t pte;
         if (!paging_get_present_pte(task->page_dir, v, &pte)) return 0;
         if ((pte & 4u) == 0) return 0;
+    }
+    return 1;
+}
+
+static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size) {
+    if (!check_user_buffer(task, buf, size)) return 0;
+    if (size == 0) return 1;
+
+    uint32_t start = (uint32_t)buf;
+    uint32_t end = start + size;
+    if (end < start) return 0;
+
+    uint32_t v = start & ~0xFFFu;
+    uint32_t v_end = (end + 0xFFFu) & ~0xFFFu;
+    for (; v < v_end; v += 4096u) {
+        uint32_t pte;
+        if (!paging_get_present_pte(task->page_dir, v, &pte)) return 0;
+        if ((pte & 4u) == 0) return 0;
+        if ((pte & 2u) == 0) return 0;
     }
     return 1;
 }
@@ -801,6 +821,38 @@ void syscall_handler(registers_t* regs) {
             if (waiters) kfree(waiters);
 
             regs->eax = result;
+        }
+        break;
+
+        case 57: // ioctl(fd, req, arg)
+        {
+            int fd = (int)regs->ebx;
+            uint32_t req = (uint32_t)regs->ecx;
+            void* arg = (void*)regs->edx;
+
+            uint32_t sz = _YOS_IOC_SIZE(req);
+            uint32_t dir = _YOS_IOC_DIR(req);
+
+            if (sz != 0u) {
+                if (!arg) {
+                    regs->eax = -1;
+                    break;
+                }
+
+                if (dir & _YOS_IOC_READ) {
+                    if (!check_user_buffer_writable_present(curr, arg, sz)) {
+                        regs->eax = -1;
+                        break;
+                    }
+                } else {
+                    if (!check_user_buffer_present(curr, arg, sz)) {
+                        regs->eax = -1;
+                        break;
+                    }
+                }
+            }
+
+            regs->eax = vfs_ioctl(fd, req, arg);
         }
         break;
 
