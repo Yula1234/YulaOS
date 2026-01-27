@@ -122,12 +122,16 @@ void print_hex(uint32_t n) {
 }
 
 static char* number(char* str, char* end, long num, int base, int size, int precision, int type) {
-    char c, sign, tmp[66];
+    char sign, tmp[66];
     const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
     int i;
 
     if (type & 16) digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    if (type & 4) size--;
+    sign = 0;
+    if (base == 10 && num < 0) {
+        sign = '-';
+    }
+    if (sign) size--;
     if (type & 2) {
         if (base == 16 && (type & 8)) size -= 2;
     }
@@ -135,15 +139,17 @@ static char* number(char* str, char* end, long num, int base, int size, int prec
     i = 0;
     if (num == 0) tmp[i++] = '0';
     else {
-        if (base == 10 && num < 0) { sign = '-'; num = -num; } else sign = 0;
-        unsigned long unum = (unsigned long)num;
-        if (base == 10 && sign) unum = (unsigned long)num;
+        unsigned long unum;
+        if (sign) {
+            unum = 0u - (unsigned long)num;
+        } else {
+            unum = (unsigned long)num;
+        }
 
         while (unum != 0) {
             tmp[i++] = digits[unum % base];
             unum /= base;
         }
-        if (sign) tmp[i++] = sign;
     }
 
     if (i > precision) precision = i;

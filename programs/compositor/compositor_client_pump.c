@@ -450,10 +450,8 @@ void comp_client_pump(comp_client_t* c,
                 s->commit_gen = g_commit_gen++;
 
                 if (first_commit && input && cm.surface_id != 0x80000001u) {
-                    if (input->focus_client < 0 || input->focus_surface_id == 0) {
-                        input->focus_client = (int)client_id;
-                        input->focus_surface_id = cm.surface_id;
-                    }
+                    input->focus_client = (int)client_id;
+                    input->focus_surface_id = cm.surface_id;
                 }
 
                 if (cm.surface_id == 0x80000001u) {

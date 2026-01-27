@@ -68,8 +68,13 @@ char* itoa(int value, char* str, int base) {
     }
     
     low = ptr;
-    
-    unsigned int num = (value < 0 && base == 10) ? -value : (unsigned int)value;
+
+    unsigned int num;
+    if (value < 0 && base == 10) {
+        num = 0u - (unsigned int)value;
+    } else {
+        num = (unsigned int)value;
+    }
     
     do {
         *ptr++ = "0123456789abcdefghijklmnopqrstuvwxyz"[num % base];

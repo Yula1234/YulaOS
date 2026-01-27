@@ -216,10 +216,21 @@ void comp_update_focus(comp_client_t* clients, int nclients, comp_input_state_t*
         }
     }
 
-    if (st->focus_client >= 0 && st->focus_client < nclients) {
-        if (!clients[st->focus_client].connected || !comp_client_surface_id_valid(&clients[st->focus_client], st->focus_surface_id)) {
+    if (st->focus_client >= 0 && st->focus_client < nclients && st->focus_surface_id != 0) {
+        comp_client_t* fc = &clients[st->focus_client];
+        if (!fc->connected) {
             st->focus_client = -1;
             st->focus_surface_id = 0;
+        } else if (wm && wm->connected) {
+            if (!comp_client_surface_find(fc, st->focus_surface_id)) {
+                st->focus_client = -1;
+                st->focus_surface_id = 0;
+            }
+        } else {
+            if (!comp_client_surface_id_valid(fc, st->focus_surface_id)) {
+                st->focus_client = -1;
+                st->focus_surface_id = 0;
+            }
         }
     } else {
         st->focus_client = -1;
