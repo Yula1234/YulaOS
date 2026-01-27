@@ -135,6 +135,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     (void)argv;
     dbg_write("compositor: enter main\n");
 
+    set_term_mode(0);
+
     dbg_write("compositor: install signals\n");
     signal(2, (void*)on_sigint_ignore);
     signal(15, (void*)on_signal);
@@ -447,7 +449,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
         for (int ci = 0; ci < clients_cap; ci++) {
             if (!clients[ci].connected) continue;
-            comp_client_pump(&clients[ci], &buf, &z_counter, &wm, (uint32_t)ci);
+            comp_client_pump(&clients[ci], &buf, &z_counter, &wm, (uint32_t)ci, &input);
         }
 
         if (wm.connected) {

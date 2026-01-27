@@ -80,6 +80,7 @@ enum {
     MODE_EDIT = 0,
     MODE_FIND = 1,
     MODE_GOTO = 2,
+    MODE_OPEN = 3,
 };
 
 enum {
@@ -102,8 +103,10 @@ typedef struct {
 
     int lang;
     int mode;
-    char mini[64];
+    char mini[256];
     int mini_len;
+
+    int open_confirm;
 
     char find[64];
     int find_len;
@@ -216,6 +219,10 @@ static void fmt_title_ellipsis(const char* s, char* out, int out_cap, int max_ch
 
 static int gb_len(const GapBuf* g);
 static char gb_char_at(const GapBuf* g, int pos);
+
+static int load_file(void);
+static int load_file_silent(void);
+static int load_file_impl(int show_status);
 
 static int lines_ensure(LineIndex* li, int need);
 static void lines_rebuild(LineIndex* li, const GapBuf* g, int lang);
@@ -726,12 +733,41 @@ static void mini_backspace(void) {
     if (ed.mini_len <= 0) return;
     ed.mini_len--;
     ed.mini[ed.mini_len] = 0;
+    ed.open_confirm = 0;
 }
 
 static void mini_putc(char c) {
     if (ed.mini_len >= (int)sizeof(ed.mini) - 1) return;
     ed.mini[ed.mini_len++] = c;
     ed.mini[ed.mini_len] = 0;
+    ed.open_confirm = 0;
+}
+
+static void editor_update_lang_from_filename(void) {
+    ed.lang = LANG_ASM;
+    const char* ext = path_ext(ed.filename);
+    if (ext) {
+        if (ext_eq_ci(ext, "c") || ext_eq_ci(ext, "h")) {
+            ed.lang = LANG_C;
+        } else if (ext_eq_ci(ext, "asm") || ext_eq_ci(ext, "s") || ext_eq_ci(ext, "inc")) {
+            ed.lang = LANG_ASM;
+        }
+    }
+}
+
+static void status_set_col(const char* s, uint32_t col);
+
+static int editor_set_filename(const char* path) {
+    if (!path) return 0;
+    int n = (int)strlen(path);
+    if (n <= 0) return 0;
+    if (n >= (int)sizeof(ed.filename)) {
+        status_set_col("Path too long", C_UI_ERROR);
+        return 0;
+    }
+    for (int i = 0; i < n; i++) ed.filename[i] = path[i];
+    ed.filename[n] = 0;
+    return 1;
 }
 
 static void status_set(const char* s) {
@@ -772,6 +808,14 @@ static void enter_goto_mode(void) {
     mini_clear();
 }
 
+static void enter_open_mode(void) {
+    ed.mode = MODE_OPEN;
+    int n = (int)strlen(ed.filename);
+    if (n > 0) mini_set(ed.filename, n);
+    else mini_clear();
+    ed.open_confirm = 0;
+}
+
 static void apply_find_mode(void) {
     ed.find_len = ed.mini_len;
     if (ed.find_len > (int)sizeof(ed.find) - 1) ed.find_len = (int)sizeof(ed.find) - 1;
@@ -801,6 +845,60 @@ static void apply_goto_mode(void) {
     ed.cursor = ed.lines.starts[line - 1];
     ed.sel_bound = -1;
     update_pref_col();
+}
+
+static void apply_open_mode(void) {
+    char path[256];
+    int n = ed.mini_len;
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(path)) n = (int)sizeof(path) - 1;
+    for (int i = 0; i < n; i++) path[i] = ed.mini[i];
+    path[n] = 0;
+
+    char* p = path;
+    while (*p == ' ' || *p == '\t') p++;
+    int pn = (int)strlen(p);
+    while (pn > 0 && (p[pn - 1] == ' ' || p[pn - 1] == '\t')) {
+        p[pn - 1] = 0;
+        pn--;
+    }
+    if (p[0] == 0) {
+        status_set_col("Empty path", C_UI_ERROR);
+        ed.open_confirm = 0;
+        return;
+    }
+
+    if (ed.dirty && !ed.open_confirm) {
+        status_set_col("Unsaved changes: press Enter again", C_UI_ERROR);
+        ed.open_confirm = 1;
+        return;
+    }
+
+    char old_filename[256];
+    int old_fn_len = (int)strlen(ed.filename);
+    if (old_fn_len < 0) old_fn_len = 0;
+    if (old_fn_len >= (int)sizeof(old_filename)) old_fn_len = (int)sizeof(old_filename) - 1;
+    for (int i = 0; i < old_fn_len; i++) old_filename[i] = ed.filename[i];
+    old_filename[old_fn_len] = 0;
+    const int old_lang = ed.lang;
+
+    if (!editor_set_filename(p)) {
+        ed.open_confirm = 0;
+        return;
+    }
+    editor_update_lang_from_filename();
+
+    int ok = load_file();
+    if (ok) {
+        ed.mode = MODE_EDIT;
+        ed.open_confirm = 0;
+        return;
+    }
+
+    (void)editor_set_filename(old_filename);
+    ed.lang = old_lang;
+    ed.mode = MODE_OPEN;
+    ed.open_confirm = 0;
 }
 
 static int editor_insert_with_undo_at(int pos, const char* s, int len) {
@@ -1165,32 +1263,69 @@ void move_word_right(int select) {
     update_pref_col();
 }
 
-void load_file() {
+static int load_file(void) {
+    return load_file_impl(1);
+}
+
+static int load_file_silent(void) {
+    return load_file_impl(0);
+}
+
+static int load_file_impl(int show_status) {
     int fd = open(ed.filename, 0);
-    if (fd >= 0) {
-        gb_delete_range(&ed.text, 0, gb_len(&ed.text));
-        ed.cursor = 0;
-
-        char* tmp = (char*)malloc(8192);
-        if (tmp) {
-            int r;
-            while ((r = read(fd, tmp, 8192)) > 0) {
-                gb_insert_at(&ed.text, gb_len(&ed.text), tmp, r);
-            }
-            free(tmp);
-        }
-        close(fd);
-
-        lines_rebuild(&ed.lines, &ed.text, ed.lang);
-        ed.cursor = 0;
-        ed.sel_bound = -1;
-        ed.scroll_y = 0;
-        ed.dirty = 0;
-        update_pref_col();
-
-        ustack_reset(&ed.undo);
-        ustack_reset(&ed.redo);
+    if (fd < 0) {
+        if (show_status) status_set_col("Open failed", C_UI_ERROR);
+        return 0;
     }
+
+    GapBuf new_text;
+    gb_init(&new_text, 4096);
+    if (!new_text.buf) {
+        close(fd);
+        if (show_status) status_set_col("Out of memory", C_UI_ERROR);
+        return 0;
+    }
+
+    int ok = 1;
+    char* tmp = (char*)malloc(8192);
+    if (!tmp) ok = 0;
+
+    if (ok) {
+        int r = 0;
+        while ((r = read(fd, tmp, 8192)) > 0) {
+            if (!gb_insert_at(&new_text, gb_len(&new_text), tmp, r)) {
+                ok = 0;
+                break;
+            }
+        }
+        if (r < 0) ok = 0;
+    }
+
+    if (tmp) free(tmp);
+    close(fd);
+
+    if (!ok) {
+        gb_destroy(&new_text);
+        if (show_status) status_set_col("Open failed", C_UI_ERROR);
+        return 0;
+    }
+
+    GapBuf old_text = ed.text;
+    ed.text = new_text;
+    gb_destroy(&old_text);
+
+    lines_rebuild(&ed.lines, &ed.text, ed.lang);
+    ed.cursor = 0;
+    ed.sel_bound = -1;
+    ed.scroll_y = 0;
+    ed.dirty = 0;
+    update_pref_col();
+
+    ustack_reset(&ed.undo);
+    ustack_reset(&ed.redo);
+
+    if (show_status) status_set_col("Opened", C_UI_OK);
+    return 1;
 }
 
 void save_file() {
@@ -1457,11 +1592,20 @@ void render_ui() {
     int col = (ed.cursor - line_start) + 1;
     
     char l[8], c[8]; fmt_int(line, l); fmt_int(col, c);
-    render_string(WIN_W - 190, status_text_y, (ed.lang == LANG_C) ? "C" : "ASM", C_UI_MUTED);
-    render_string(WIN_W - 150, status_text_y, "Ln", C_UI_MUTED);
-    render_string(WIN_W - 130, status_text_y, l, C_STATUS_FG);
-    render_string(WIN_W - 80, status_text_y, "Col", C_UI_MUTED);
-    render_string(WIN_W - 50, status_text_y, c, C_STATUS_FG);
+ 
+    if (ed.mode == MODE_EDIT) {
+        render_string(WIN_W - 190, status_text_y, (ed.lang == LANG_C) ? "C" : "ASM", C_UI_MUTED);
+        render_string(WIN_W - 150, status_text_y, "Ln", C_UI_MUTED);
+        render_string(WIN_W - 130, status_text_y, l, C_STATUS_FG);
+        render_string(WIN_W - 80, status_text_y, "Col", C_UI_MUTED);
+        render_string(WIN_W - 50, status_text_y, c, C_STATUS_FG);
+    } else if (ed.status_len > 0) {
+        int st_max_chars = (210 - 20) / CHAR_W;
+        if (st_max_chars < 4) st_max_chars = 4;
+        char disp_status[64];
+        fmt_title_ellipsis(ed.status, disp_status, (int)sizeof(disp_status), st_max_chars);
+        render_string(WIN_W - 210 + 10, status_text_y, disp_status, ed.status_color ? ed.status_color : C_UI_MUTED);
+    }
 
     if (ed.mode == MODE_FIND) {
         int right_w = 210;
@@ -1514,6 +1658,41 @@ void render_ui() {
         int ix = bx + 6;
         render_string(ix, text_y, ed.mini, C_STATUS_FG);
         int cx = ix + ed.mini_len * CHAR_W;
+        if (cx > bx + bw - 4) cx = bx + bw - 4;
+        int cy = glyph_top;
+        int ch = 8;
+        draw_rect(cx, cy, 2, ch, C_CURSOR);
+    }
+    else if (ed.mode == MODE_OPEN) {
+        int right_w = 210;
+        int px = 10;
+        render_string(px, status_text_y, "Open:", C_UI_MUTED);
+        int bx = px + 6 * CHAR_W + 8;
+        int bw = (WIN_W - right_w) - bx - 10;
+        if (bw < 80) bw = 80;
+
+        int max_chars = (bw - 12) / CHAR_W;
+        if (max_chars < 4) max_chars = 4;
+        if (max_chars > (int)sizeof(ed.mini) - 1) max_chars = (int)sizeof(ed.mini) - 1;
+        char disp[256];
+        fmt_title_ellipsis(ed.mini, disp, (int)sizeof(disp), max_chars);
+
+        int text_y = status_text_y;
+        int glyph_top = text_y + 5;
+        int pad_y = 2;
+        int box_shift = 1;
+        int by = glyph_top - pad_y + box_shift;
+        int bh = 8 + pad_y * 2;
+        draw_rect(bx, by, bw, bh, C_MINI_BG);
+        draw_rect(bx, by, bw, 1, C_MINI_BORDER);
+        draw_rect(bx, by + bh - 1, bw, 1, C_MINI_BORDER);
+        draw_rect(bx, by, 1, bh, C_MINI_BORDER);
+        draw_rect(bx + bw - 1, by, 1, bh, C_MINI_BORDER);
+
+        int ix = bx + 6;
+        render_string(ix, text_y, disp, C_STATUS_FG);
+        int disp_len = (int)strlen(disp);
+        int cx = ix + disp_len * CHAR_W;
         if (cx > bx + bw - 4) cx = bx + bw - 4;
         int cy = glyph_top;
         int ch = 8;
@@ -1594,15 +1773,7 @@ int main(int argc, char** argv) {
 
     set_term_mode(0);
 
-    ed.lang = LANG_ASM;
-    const char* ext = path_ext(ed.filename);
-    if (ext) {
-        if (ext_eq_ci(ext, "c") || ext_eq_ci(ext, "h")) {
-            ed.lang = LANG_C;
-        } else if (ext_eq_ci(ext, "asm") || ext_eq_ci(ext, "s") || ext_eq_ci(ext, "inc")) {
-            ed.lang = LANG_ASM;
-        }
-    }
+    editor_update_lang_from_filename();
 
     gb_init(&ed.text, 4096);
     lines_init(&ed.lines);
@@ -1612,13 +1783,14 @@ int main(int argc, char** argv) {
     ustack_init(&ed.redo);
     
     ed.sel_bound = -1;
-    ed.dirty = 1;
+    ed.dirty = 0;
     ed.is_dragging = 0;
     ed.scroll_y = 0;
     ed.cursor = 0;
     ed.pref_col = 0;
     ed.mode = MODE_EDIT;
     ed.mini_len = 0;
+    ed.open_confirm = 0;
 
     ed.find_len = 0;
     ed.find[0] = 0;
@@ -1627,7 +1799,7 @@ int main(int argc, char** argv) {
     ed.status[0] = 0;
     ed.status_color = C_UI_MUTED;
     
-    load_file();
+    (void)load_file_silent();
 
     comp_conn_reset(&conn);
     if (comp_connect(&conn, "compositor") != 0) return 1;
@@ -1721,11 +1893,12 @@ int main(int argc, char** argv) {
                 if (c == 0x19) { editor_redo(); update = 1; continue; } // Ctrl+Y
 
                 if (ed.mode != MODE_EDIT) {
-                    if (c == 0x1B) { ed.mode = MODE_EDIT; update = 1; continue; }
+                    if (c == 0x1B) { ed.mode = MODE_EDIT; ed.open_confirm = 0; update = 1; continue; }
                     if (c == 0x08) { mini_backspace(); update = 1; continue; }
-                    if (c == 0x0A) {
+                    if (c == 0x0A || c == 0x0D) {
                         if (ed.mode == MODE_FIND) apply_find_mode();
                         else if (ed.mode == MODE_GOTO) apply_goto_mode();
+                        else if (ed.mode == MODE_OPEN) apply_open_mode();
                         update = 1;
                         continue;
                     }
@@ -1750,13 +1923,14 @@ int main(int argc, char** argv) {
                 else if (c == 0x87) move_word_right(1);
                 
                 else if (c == 0x08) backspace();
-                else if (c == 0x0A) editor_insert_newline_autoindent();
+                else if (c == 0x0A || c == 0x0D) editor_insert_newline_autoindent();
                 else if (c == 0x09) editor_insert_tab_smart();
                 else if (c == 0x03) copy_selection(); // Ctrl+C
                 else if (c == 0x16) paste_clipboard(); // Ctrl+V
 
                 else if (c == 0x06) enter_find_mode(); // Ctrl+F
                 else if (c == 0x07) enter_goto_mode(); // Ctrl+G
+                else if (c == 0x0F) enter_open_mode();
                 else if (c == 0x0E) {
                     if (ed.find_len > 0) {
                         int start = ed.cursor;

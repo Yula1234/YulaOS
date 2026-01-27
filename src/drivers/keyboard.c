@@ -208,6 +208,7 @@ void kbd_handle_scancode(uint8_t scancode) {
 
             if (scancode == 0x21) { send_code_term0 = 0x06; } // Ctrl+F
             if (scancode == 0x22) { send_code_term0 = 0x07; } // Ctrl+G
+            if (scancode == 0x18) { send_code_term0 = 0x0F; } // Ctrl+O
             if (scancode == 0x2C) { send_code_term0 = 0x1A; } // Ctrl+Z
             if (scancode == 0x15) { send_code_term0 = 0x19; } // Ctrl+Y
             if (scancode == 0x31) { send_code_term0 = 0x0E; } // Ctrl+N

@@ -238,4 +238,9 @@ int comp_send_mouse(comp_client_t* clients, int nclients, comp_input_state_t* st
 int comp_send_key(comp_client_t* clients, int nclients, comp_input_state_t* st, uint32_t keycode, uint32_t key_state);
 int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential);
 
-void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_t* z_counter, wm_conn_t* wm, uint32_t client_id);
+void comp_client_pump(comp_client_t* c,
+                       const comp_buffer_t* buf,
+                       uint32_t* z_counter,
+                       wm_conn_t* wm,
+                       uint32_t client_id,
+                       comp_input_state_t* input);

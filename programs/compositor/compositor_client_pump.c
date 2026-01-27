@@ -193,7 +193,12 @@ static void comp_client_send_input_ring_name(comp_client_t* c, uint32_t seq) {
     (void)comp_send_reply(c->fd_s2c, (uint16_t)COMP_IPC_MSG_INPUT_RING_NAME, seq, &msg, (uint32_t)sizeof(msg));
 }
 
-void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_t* z_counter, wm_conn_t* wm, uint32_t client_id) {
+void comp_client_pump(comp_client_t* c,
+                      const comp_buffer_t* buf,
+                      uint32_t* z_counter,
+                      wm_conn_t* wm,
+                      uint32_t client_id,
+                      comp_input_state_t* input) {
     if (!c || !c->connected || c->fd_c2s < 0) return;
     if (!z_counter) return;
 
@@ -443,6 +448,13 @@ void comp_client_pump(comp_client_t* c, const comp_buffer_t* buf, uint32_t* z_co
                 }
                 s->committed = 1;
                 s->commit_gen = g_commit_gen++;
+
+                if (first_commit && input && cm.surface_id != 0x80000001u) {
+                    if (input->focus_client < 0 || input->focus_surface_id == 0) {
+                        input->focus_client = (int)client_id;
+                        input->focus_surface_id = cm.surface_id;
+                    }
+                }
 
                 if (cm.surface_id == 0x80000001u) {
                     s->z = ++(*z_counter);
