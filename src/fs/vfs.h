@@ -11,6 +11,9 @@
 #define VFS_FLAG_YULAFS      4u
 #define VFS_FLAG_SHM         8u
 #define VFS_FLAG_IPC_LISTEN  16u
+#define VFS_FLAG_DEVFS_ALLOC 32u
+#define VFS_FLAG_PTY_MASTER  64u
+#define VFS_FLAG_PTY_SLAVE   128u
 #define VFS_FLAG_EXEC_NODE   0x80000000u
 
 struct vfs_node;
@@ -31,6 +34,8 @@ typedef struct vfs_node {
     uint32_t refs;      
     vfs_ops_t* ops;     
     void* private_data; 
+    void (*private_retain)(void* private_data);
+    void (*private_release)(void* private_data);
 } vfs_node_t;
 
 typedef struct {
@@ -47,9 +52,14 @@ int vfs_ioctl(int fd, uint32_t req, void* arg);
 int vfs_getdents(int fd, void* buf, uint32_t size);
 int vfs_fstatat(int dirfd, const char* name, void* stat_buf);
 
+void vfs_node_retain(vfs_node_t* node);
+void vfs_node_release(vfs_node_t* node);
+
 void devfs_register(vfs_node_t* node);
 int devfs_unregister(const char* name);
 vfs_node_t* devfs_fetch(const char* name);
+vfs_node_t* devfs_clone(const char* name);
+vfs_node_t* devfs_take(const char* name);
 vfs_node_t* vfs_create_node_from_path(const char* path);
 
 #endif

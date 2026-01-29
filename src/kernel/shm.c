@@ -35,9 +35,21 @@ static volatile uint32_t shm_named_init_done;
 static shm_named_entry_t shm_named[SHM_NAMED_MAX];
 
 static void shm_named_init_once(void) {
-    if (__sync_lock_test_and_set(&shm_named_init_done, 1u) == 0u) {
-        spinlock_init(&shm_named_lock);
-        memset(shm_named, 0, sizeof(shm_named));
+    uint32_t st = __atomic_load_n(&shm_named_init_done, __ATOMIC_ACQUIRE);
+    if (st == 2u) return;
+
+    if (st == 0u) {
+        uint32_t expected = 0u;
+        if (__atomic_compare_exchange_n(&shm_named_init_done, &expected, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            spinlock_init(&shm_named_lock);
+            memset(shm_named, 0, sizeof(shm_named));
+            __atomic_store_n(&shm_named_init_done, 2u, __ATOMIC_RELEASE);
+            return;
+        }
+    }
+
+    while (__atomic_load_n(&shm_named_init_done, __ATOMIC_ACQUIRE) != 2u) {
+        __asm__ volatile("pause");
     }
 }
 

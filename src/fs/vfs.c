@@ -29,11 +29,23 @@ static uint32_t devfs_hash_name(const char* s) {
 }
 
 static void devfs_init_once(void) {
-    if (__sync_lock_test_and_set(&devfs_init_done, 1u) == 0u) {
-        memset(devfs_buckets, 0, sizeof(devfs_buckets));
-        for (uint32_t i = 0; i < DEVFS_BUCKETS; i++) {
-            spinlock_init(&devfs_locks[i]);
+    uint32_t st = __atomic_load_n(&devfs_init_done, __ATOMIC_ACQUIRE);
+    if (st == 2u) return;
+
+    if (st == 0u) {
+        uint32_t expected = 0u;
+        if (__atomic_compare_exchange_n(&devfs_init_done, &expected, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            memset(devfs_buckets, 0, sizeof(devfs_buckets));
+            for (uint32_t i = 0; i < DEVFS_BUCKETS; i++) {
+                spinlock_init(&devfs_locks[i]);
+            }
+            __atomic_store_n(&devfs_init_done, 2u, __ATOMIC_RELEASE);
+            return;
         }
+    }
+
+    while (__atomic_load_n(&devfs_init_done, __ATOMIC_ACQUIRE) != 2u) {
+        __asm__ volatile("pause");
     }
 }
 
@@ -111,6 +123,90 @@ vfs_node_t* devfs_fetch(const char* name) {
     return 0;
 }
 
+vfs_node_t* devfs_clone(const char* name) {
+    if (!name || name[0] == '\0') return 0;
+    devfs_init_once();
+
+    uint32_t idx = devfs_hash_name(name) & (DEVFS_BUCKETS - 1u);
+    uint32_t flags = spinlock_acquire_safe(&devfs_locks[idx]);
+
+    for (devfs_entry_t* e = devfs_buckets[idx]; e; e = e->next) {
+        vfs_node_t* src = e->node;
+        if (src && name[0] == src->name[0] && strcmp(src->name, name) == 0) {
+            vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(*node));
+            if (!node) {
+                spinlock_release_safe(&devfs_locks[idx], flags);
+                return 0;
+            }
+
+            memcpy(node, src, sizeof(*node));
+            node->refs = 1;
+            node->flags |= VFS_FLAG_DEVFS_ALLOC;
+
+            if (node->private_retain && node->private_data) {
+                node->private_retain(node->private_data);
+            }
+
+            spinlock_release_safe(&devfs_locks[idx], flags);
+            return node;
+        }
+    }
+
+    spinlock_release_safe(&devfs_locks[idx], flags);
+    return 0;
+}
+
+vfs_node_t* devfs_take(const char* name) {
+    if (!name || name[0] == '\0') return 0;
+    devfs_init_once();
+
+    uint32_t idx = devfs_hash_name(name) & (DEVFS_BUCKETS - 1u);
+    uint32_t flags = spinlock_acquire_safe(&devfs_locks[idx]);
+
+    devfs_entry_t* prev = 0;
+    devfs_entry_t* cur = devfs_buckets[idx];
+    while (cur) {
+        vfs_node_t* n = cur->node;
+        if (n && name[0] == n->name[0] && strcmp(n->name, name) == 0) {
+            if (prev) prev->next = cur->next;
+            else devfs_buckets[idx] = cur->next;
+            spinlock_release_safe(&devfs_locks[idx], flags);
+            vfs_node_t* out = cur->node;
+            kfree(cur);
+            return out;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    spinlock_release_safe(&devfs_locks[idx], flags);
+    return 0;
+}
+
+void vfs_node_retain(vfs_node_t* node) {
+    if (!node) return;
+    __sync_fetch_and_add(&node->refs, 1);
+}
+
+void vfs_node_release(vfs_node_t* node) {
+    if (!node) return;
+    if (__sync_sub_and_fetch(&node->refs, 1) != 0) {
+        return;
+    }
+
+    if (node->ops && node->ops->close) {
+        node->ops->close(node);
+        return;
+    }
+
+    if (node->private_release && node->private_data) {
+        node->private_release(node->private_data);
+        node->private_data = 0;
+    }
+
+    kfree(node);
+}
+
 int vfs_getdents(int fd, void* buf, uint32_t size) {
     task_t* curr = proc_current();
     file_t* f = proc_fd_get(curr, fd);
@@ -178,12 +274,8 @@ int vfs_open(const char* path, int flags) {
     }
     
     if (strncmp(target_path, "dev/", 4) == 0) {
-        vfs_node_t* dev = devfs_fetch(target_path + 4);
-        if (dev) {
-            node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-            if (node) memcpy(node, dev, sizeof(vfs_node_t));
-        }
-    } 
+        node = devfs_clone(target_path + 4);
+    }
     else {
         int inode = yulafs_lookup(path); 
         
@@ -222,16 +314,17 @@ int vfs_open(const char* path, int flags) {
     node->refs = 1;
 
     if (node->ops && node->ops->open) {
-        node->ops->open(node);
+        int rc = node->ops->open(node);
+        if (rc != 0) {
+            vfs_node_release(node);
+            return -1;
+        }
     }
 
     file_t* f = 0;
     int fd = proc_fd_alloc(curr, &f);
     if (fd < 0 || !f) {
-        if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
-            if (node->ops && node->ops->close) node->ops->close(node);
-            else kfree(node);
-        }
+        vfs_node_release(node);
         return -1;
     }
 
@@ -281,16 +374,7 @@ int vfs_close(int fd) {
 
     vfs_node_t* node = f.node;
 
-    if (node) {
-        if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
-            if (node->ops && node->ops->close) {
-                node->ops->close(node);
-            } 
-            else {
-                kfree(node);
-            }
-        }
-    }
+    vfs_node_release(node);
     return 0;
 }
 
@@ -312,6 +396,6 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
     }
     strlcpy(node->name, path, sizeof(node->name));
     
-    node->refs = 0;
+    node->refs = 1;
     return node;
 }

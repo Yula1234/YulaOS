@@ -5,6 +5,7 @@
 
 #include <fs/yulafs.h>
 #include <fs/bcache.h>
+#include <fs/pty.h>
 
 #include <drivers/pc_speaker.h>
 #include <drivers/keyboard.h>
@@ -392,6 +393,10 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
                     level_trigger = 0;
                 }
                 ioapic_route_gsi(gsi, (uint8_t)(32 + 12), (uint8_t)cpus[0].id, active_low, level_trigger);
+                outb(0x22, 0x70);
+                io_wait();
+                outb(0x23, 0x01);
+                io_wait();
 
                 irq_set_legacy_pic_enabled(0);
                 outb(0x21, 0xFF);
@@ -409,6 +414,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     console_init();
     mouse_vfs_init();
     fb_vfs_init();
+
+    pty_init();
  
     proc_init();
     sched_init();

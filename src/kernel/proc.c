@@ -16,6 +16,7 @@
 #include <hal/io.h>
 #include <hal/simd.h>
  #include <drivers/fbdev.h>
+ #include <kernel/input_focus.h>
 
 #include "sched.h"
 #include "proc.h"
@@ -318,30 +319,14 @@ void proc_free_resources(task_t* t) {
 
         if (f.used) {
             vfs_node_t* node = f.node;
-            if (node) {
-                if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
-                    if (node->ops && node->ops->close) {
-                        node->ops->close(node);
-                    } else {
-                        kfree(node);
-                    }
-                }
-            }
+            vfs_node_release(node);
         }
     }
 
     mmap_area_t* m = t->mmap_list;
     while (m) {
         mmap_area_t* next = m->next;
-        if (m->file) {
-            if (__sync_sub_and_fetch(&m->file->refs, 1) == 0) {
-                if (m->file->ops && m->file->ops->close) {
-                    m->file->ops->close(m->file);
-                } else {
-                    kfree(m->file);
-                }
-            }
-        }
+        vfs_node_release(m->file);
         kfree(m);
         m = next;
     }
@@ -411,6 +396,10 @@ void proc_kill(task_t* t) {
     uint32_t pid_to_clean = t->pid;
 
     fb_release_by_pid(pid_to_clean);
+
+    if (input_focus_get_pid() == pid_to_clean) {
+        input_focus_set_pid(0);
+    }
 
     if (t->fbmap_pages > 0 && t->page_dir) {
         const uint32_t user_vaddr_start = 0xB1000000u;
@@ -560,7 +549,7 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     area->map_flags   = MAP_PRIVATE;
     area->file        = node;
     
-    __sync_fetch_and_add(&node->refs, 1);
+    vfs_node_retain(node);
 
     area->next = t->mmap_list;
     t->mmap_list = area;
@@ -575,34 +564,34 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     uint32_t max_vaddr = 0;
 
     if (exec_node->ops->read(exec_node, 0, sizeof(Elf32_Ehdr), &header) < (int)sizeof(Elf32_Ehdr)) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     
     if (header.e_ident[0] != 0x7F || header.e_ident[1] != 'E' || header.e_ident[2] != 'L' || header.e_ident[3] != 'F') {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_ident[EI_CLASS] != ELFCLASS32 || header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_ident[EI_VERSION] != EV_CURRENT) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_type != ET_EXEC || header.e_machine != EM_386 || header.e_version != EV_CURRENT) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_ehsize != sizeof(Elf32_Ehdr) || header.e_phentsize != sizeof(Elf32_Phdr)) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_phnum == 0 || header.e_phnum > 64) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     {
         uint64_t ph_end = (uint64_t)header.e_phoff + (uint64_t)header.e_phnum * (uint64_t)sizeof(Elf32_Phdr);
         if (header.e_phoff == 0 || ph_end > (uint64_t)exec_node->size) {
-            kfree(exec_node);
+            vfs_node_release(exec_node);
             return 0;
         }
     }
@@ -610,12 +599,12 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     size_t phdr_bytes = (size_t)header.e_phnum * sizeof(Elf32_Phdr);
     phdrs = (Elf32_Phdr*)kmalloc(phdr_bytes);
     if (!phdrs) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     if (exec_node->ops->read(exec_node, header.e_phoff, (uint32_t)phdr_bytes, phdrs) < (int)phdr_bytes) {
         kfree(phdrs);
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
 
@@ -629,17 +618,17 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         uint32_t file_off= phdrs[i].p_offset;
         uint32_t file_sz = phdrs[i].p_filesz;
 
-        if (mem_sz < file_sz) { kfree(phdrs); kfree(exec_node); return 0; }
+        if (mem_sz < file_sz) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
 
         uint32_t end_v = start_v + mem_sz;
-        if (end_v < start_v) { kfree(phdrs); kfree(exec_node); return 0; }
-        if (start_v < USER_ELF_MIN_VADDR || end_v > USER_ELF_MAX_VADDR) { kfree(phdrs); kfree(exec_node); return 0; }
+        if (end_v < start_v) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
+        if (start_v < USER_ELF_MIN_VADDR || end_v > USER_ELF_MAX_VADDR) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
 
         uint32_t diff = start_v & 0xFFFu;
-        if (file_off < diff) { kfree(phdrs); kfree(exec_node); return 0; }
+        if (file_off < diff) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
 
         uint64_t file_end = (uint64_t)file_off + (uint64_t)file_sz;
-        if (file_end > (uint64_t)exec_node->size) { kfree(phdrs); kfree(exec_node); return 0; }
+        if (file_end > (uint64_t)exec_node->size) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
 
         have_load = 1;
         if (end_v > max_vaddr) max_vaddr = end_v;
@@ -647,14 +636,14 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     }
     if (!have_load || !entry_ok || max_vaddr == 0) {
         kfree(phdrs);
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
 
     char** k_argv = (char**)kmalloc((argc + 1) * sizeof(char*));
     if (!k_argv) {
         kfree(phdrs);
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
     
@@ -670,7 +659,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         kfree(k_argv);
         kfree(phdrs);
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         return 0;
     }
 
@@ -693,7 +682,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
             if (nf) {
                 *nf = pe->file;
                 if (nf->node) {
-                    __sync_fetch_and_add(&nf->node->refs, 1);
+                    vfs_node_retain(nf->node);
                 }
             }
         }
@@ -702,35 +691,19 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         file_t* f1 = 0;
         file_t* f2 = 0;
         if (proc_fd_add_at(t, 0, &f0) >= 0 && f0) {
-            vfs_node_t* dev = devfs_fetch("kbd");
-            if (dev) {
-                vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-                if (node) {
-                    memcpy(node, dev, sizeof(vfs_node_t));
-                    node->refs = 1;
-                    f0->node = node;
-                }
-            }
+            f0->node = devfs_clone("kbd");
             f0->offset = 0;
             f0->used = (f0->node != 0);
         }
         if (proc_fd_add_at(t, 1, &f1) >= 0 && f1) {
-            vfs_node_t* dev = devfs_fetch("console");
-            if (dev) {
-                vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-                if (node) {
-                    memcpy(node, dev, sizeof(vfs_node_t));
-                    node->refs = 1;
-                    f1->node = node;
-                }
-            }
+            f1->node = devfs_clone("console");
             f1->offset = 0;
             f1->used = (f1->node != 0);
         }
         if (proc_fd_add_at(t, 2, &f2) >= 0 && f2 && f1 && f1->used) {
             *f2 = *f1;
             if (f2->node) {
-                __sync_fetch_and_add(&f2->node->refs, 1);
+                vfs_node_retain(f2->node);
             }
         } else if (f2) {
             f2->used = 0;
@@ -744,7 +717,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     t->kstack_size = KSTACK_SIZE;
     t->kstack = kmalloc_a(t->kstack_size);
     if (!t->kstack) {
-        kfree(exec_node);
+        vfs_node_release(exec_node);
         for(int i=0; i<argc; i++) kfree(k_argv[i]);
         kfree(k_argv);
         kfree(phdrs);
@@ -772,6 +745,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     }
     
     kfree(phdrs);
+    vfs_node_release(exec_node);
 
     uint32_t start_pde_idx = 0x08000000 >> 22;
     uint32_t end_pde_idx   = (max_vaddr - 1) >> 22;

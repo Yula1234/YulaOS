@@ -20,6 +20,7 @@
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
 #include <fs/pipe.h>
+#include <fs/pty.h>
 
 #include <mm/pmm.h>
 #include <mm/heap.h>
@@ -86,6 +87,7 @@ static inline void irq_restore(uint32_t flags) {
 }
 
 static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr);
+static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size);
 
 static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
     if (!t || !t->page_dir) return 0;
@@ -120,15 +122,18 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
     return 1;
 }
 
-static void vfs_node_release(vfs_node_t* node) {
-    if (!node) return;
-    if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
-        if (node->ops && node->ops->close) {
-            node->ops->close(node);
-        } else {
-            kfree(node);
-        }
-    }
+static int ensure_user_buffer_writable_mappable(task_t* task, void* buf, uint32_t size) {
+    if (!check_user_buffer(task, buf, size)) return 0;
+    if (size == 0) return 1;
+
+    uintptr_t start = (uintptr_t)buf;
+    uintptr_t end = start + (uintptr_t)size;
+    if (end < start) return 0;
+
+    if (!user_range_mappable(task, start, end)) return 0;
+
+    prefault_user_read((const void*)buf, size);
+    return check_user_buffer_writable_present(task, buf, size);
 }
 
 static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
@@ -451,10 +456,7 @@ void syscall_handler(registers_t* regs) {
             file_t* f = 0;
             int fd = proc_fd_alloc(curr, &f);
             if (fd < 0 || !f) {
-                if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
-                    if (node->ops && node->ops->close) node->ops->close(node);
-                    else kfree(node);
-                }
+                vfs_node_release(node);
                 regs->eax = -1;
                 break;
             }
@@ -730,6 +732,15 @@ void syscall_handler(registers_t* regs) {
                                         if (readers == 0) rev |= POLLHUP;
                                     }
                                 }
+                            } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
+                                uint32_t avail = 0;
+                                uint32_t space = 0;
+                                int peer_open = 0;
+                                if (pty_poll_info(node, &avail, &space, &peer_open) == 0) {
+                                    if ((ev & POLLIN) && avail > 0) rev |= POLLIN;
+                                    if ((ev & POLLOUT) && peer_open > 0 && space > 0) rev |= POLLOUT;
+                                    if (peer_open == 0) rev |= POLLHUP;
+                                }
                             } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
                                 if ((ev & POLLIN) && ipc_listen_poll_ready(node)) {
                                     rev |= POLLIN;
@@ -780,6 +791,8 @@ void syscall_handler(registers_t* regs) {
                     vfs_node_t* node = f->node;
                     if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
                         (void)pipe_poll_waitq_register(node, &waiters[i], curr);
+                    } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
+                        (void)pty_poll_waitq_register(node, &waiters[i], curr);
                     } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
                         if (ev & POLLIN) {
                             (void)ipc_listen_poll_waitq_register(node, &waiters[i], curr);
@@ -1263,7 +1276,7 @@ fb_present_done:
         case 29: // pipe(int fds[2])
         {
             int* user_fds = (int*)regs->ebx;
-            if (!check_user_buffer(curr, user_fds, sizeof(int) * 2)) {
+            if (!ensure_user_buffer_writable_mappable(curr, user_fds, (uint32_t)sizeof(int) * 2u)) {
                 regs->eax = -1; break;
             }
 
@@ -1419,7 +1432,7 @@ fb_present_done:
             int listen_fd = (int)regs->ebx;
             int* out_fds = (int*)regs->ecx;
 
-            if (!check_user_buffer_present(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
+            if (!ensure_user_buffer_writable_mappable(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
                 regs->eax = -1;
                 break;
             }
@@ -1484,7 +1497,7 @@ fb_present_done:
             const char* u_name = (const char*)regs->ebx;
             int* out_fds = (int*)regs->ecx;
 
-            if (!check_user_buffer_present(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
+            if (!ensure_user_buffer_writable_mappable(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
                 regs->eax = -1;
                 break;
             }
@@ -1547,17 +1560,20 @@ fb_present_done:
             int oldfd = (int)regs->ebx;
             int newfd = (int)regs->ecx;
 
-            if (oldfd < 0 || newfd < 0) {
-                regs->eax = -1; break;
+            if (newfd < 0) {
+                regs->eax = -1;
+                break;
             }
 
             file_t* of = proc_fd_get(curr, oldfd);
             if (!of || !of->used) {
-                regs->eax = -1; break;
+                regs->eax = -1;
+                break;
             }
 
             if (oldfd == newfd) {
-                regs->eax = newfd; break;
+                regs->eax = newfd;
+                break;
             }
 
             if (proc_fd_get(curr, newfd)) {
@@ -1569,10 +1585,9 @@ fb_present_done:
                 regs->eax = -1;
                 break;
             }
+
             *nf = *of;
-            if (nf->node) {
-                __sync_fetch_and_add(&nf->node->refs, 1);
-            }
+            if (nf->node) vfs_node_retain(nf->node);
 
             regs->eax = newfd;
         }
@@ -1609,6 +1624,11 @@ fb_present_done:
             }
 
             if (f->node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+                regs->eax = 0;
+                break;
+            }
+
+            if (f->node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
                 regs->eax = 0;
                 break;
             }
@@ -1702,7 +1722,7 @@ fb_present_done:
                 break;
             }
 
-            __sync_fetch_and_add(&area->file->refs, 1);
+            vfs_node_retain(area->file);
 
             area->next = curr->mmap_list;
             curr->mmap_list = area;
@@ -1783,7 +1803,7 @@ fb_present_done:
 
                     if (m->file) {
                         new_right->file_offset = m->file_offset + cut_before_right;
-                        __sync_fetch_and_add(&m->file->refs, 1);
+                        vfs_node_retain(m->file);
                     } else {
                         new_right->file_offset = 0;
                     }
@@ -1840,11 +1860,7 @@ fb_present_done:
                     else curr->mmap_list = next_node;
 
                     if (m->file) {
-                        uint32_t new_refs = __sync_sub_and_fetch(&m->file->refs, 1);
-                        if (new_refs == 0) {
-                            if (m->file->ops && m->file->ops->close) m->file->ops->close(m->file);
-                            else kfree(m->file);
-                        }
+                        vfs_node_release(m->file);
                     }
                     kfree(m);
 

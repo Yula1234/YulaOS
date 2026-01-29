@@ -40,20 +40,32 @@ typedef struct ipc_endpoint {
 } ipc_endpoint_t;
 
 static spinlock_t g_ipc_lock;
-static int g_ipc_inited;
+static volatile uint32_t g_ipc_inited;
 static ipc_endpoint_t g_ipc_eps[IPC_MAX_ENDPOINTS];
 
 static void ipc_init_once(void) {
-    if (__sync_bool_compare_and_swap(&g_ipc_inited, 0, 1)) {
-        spinlock_init(&g_ipc_lock);
-        for (int i = 0; i < IPC_MAX_ENDPOINTS; i++) {
-            g_ipc_eps[i].in_use = 0;
-            g_ipc_eps[i].listen_node = 0;
-            spinlock_init(&g_ipc_eps[i].lock);
-            dlist_init(&g_ipc_eps[i].pending);
-            poll_waitq_init(&g_ipc_eps[i].poll_waitq);
-            memset(g_ipc_eps[i].name, 0, sizeof(g_ipc_eps[i].name));
+    uint32_t st = __atomic_load_n(&g_ipc_inited, __ATOMIC_ACQUIRE);
+    if (st == 2u) return;
+
+    if (st == 0u) {
+        uint32_t expected = 0u;
+        if (__atomic_compare_exchange_n(&g_ipc_inited, &expected, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            spinlock_init(&g_ipc_lock);
+            for (int i = 0; i < IPC_MAX_ENDPOINTS; i++) {
+                g_ipc_eps[i].in_use = 0;
+                g_ipc_eps[i].listen_node = 0;
+                spinlock_init(&g_ipc_eps[i].lock);
+                dlist_init(&g_ipc_eps[i].pending);
+                poll_waitq_init(&g_ipc_eps[i].poll_waitq);
+                memset(g_ipc_eps[i].name, 0, sizeof(g_ipc_eps[i].name));
+            }
+            __atomic_store_n(&g_ipc_inited, 2u, __ATOMIC_RELEASE);
+            return;
         }
+    }
+
+    while (__atomic_load_n(&g_ipc_inited, __ATOMIC_ACQUIRE) != 2u) {
+        __asm__ volatile("pause");
     }
 }
 
@@ -75,17 +87,6 @@ int ipc_listen_poll_waitq_register(struct vfs_node* listen_node, poll_waiter_t* 
     ipc_endpoint_t* ep = (ipc_endpoint_t*)listen_node->private_data;
     if (!ep) return -1;
     return poll_waitq_register(&ep->poll_waitq, w, task);
-}
-
-static inline void vfs_node_release(vfs_node_t* node) {
-    if (!node) return;
-    if (__sync_sub_and_fetch(&node->refs, 1) == 0) {
-        if (node->ops && node->ops->close) {
-            node->ops->close(node);
-        } else {
-            kfree(node);
-        }
-    }
 }
 
 static inline uint32_t ipc_name_len_bounded(const char* s) {
