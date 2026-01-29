@@ -46,7 +46,7 @@ typedef struct {
 static spinlock_t pty_id_lock;
 static uint32_t pty_next_id = 1u;
 
-static uint32_t pty_alloc_id(void) {
+__attribute__((unused)) static uint32_t pty_alloc_id(void) {
     uint32_t flags = spinlock_acquire_safe(&pty_id_lock);
     uint32_t id = pty_next_id++;
     if (pty_next_id == 0u) pty_next_id = 1u;
@@ -295,12 +295,16 @@ static int pty_chan_read(pty_pair_t* p, pty_chan_t* ch, uint32_t size, void* buf
         if (n > 0) {
             poll_waitq_wake_all(&p->poll_waitq);
         }
+
+        if (read_count > 0) {
+            return (int)read_count;
+        }
     }
 
     return (int)read_count;
 }
 
-static int pty_chan_read_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, void* buffer, const int* peer_open_field) {
+__attribute__((unused)) static int pty_chan_read_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, void* buffer, const int* peer_open_field) {
     if (!p || !ch || !buffer || size == 0) return 0;
 
     char* buf = (char*)buffer;
@@ -347,7 +351,7 @@ static int pty_chan_read_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, 
     return (int)n;
 }
 
-static int pty_chan_write_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, const void* buffer, const int* peer_open_field) {
+__attribute__((unused)) static int pty_chan_write_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, const void* buffer, const int* peer_open_field) {
     if (!p || !ch || !buffer || size == 0) return 0;
     if (size > PTY_BUF_SIZE) return 0;
 
@@ -470,6 +474,9 @@ static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     switch (req) {
+        case YOS_TIOCGPTN:
+            *(uint32_t*)arg = p->id;
+            break;
         case YOS_TCGETS:
             memcpy(arg, &p->termios, sizeof(p->termios));
             break;

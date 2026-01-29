@@ -59,5 +59,6 @@ typedef struct {
 #define YOS_TCSETS     _YOS_IOW('T', 0x1A, yos_termios_t)
 #define YOS_TIOCGWINSZ _YOS_IOR('T', 0x13, yos_winsize_t)
 #define YOS_TIOCSWINSZ _YOS_IOW('T', 0x14, yos_winsize_t)
+#define YOS_TIOCGPTN   _YOS_IOR('T', 0x15, uint32_t)
 
 #endif

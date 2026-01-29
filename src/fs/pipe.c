@@ -176,6 +176,10 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
         if (n > 0) {
             poll_waitq_wake_all(&p->poll_waitq);
         }
+
+        if (read_count > 0) {
+            return (int)read_count;
+        }
     }
     return (int)read_count;
 }

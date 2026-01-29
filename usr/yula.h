@@ -171,6 +171,14 @@ static inline int ipc_connect(const char* name, int out_fds[2]) {
     return syscall(49, (int)name, (int)out_fds, 0);
 }
 
+static inline int chdir(const char* path) {
+    return syscall(58, (int)path, 0, 0);
+}
+
+static inline int getcwd(char* buf, uint32_t size) {
+    return syscall(59, (int)buf, (int)size, 0);
+}
+
 #define MAP_SHARED  1
 #define MAP_PRIVATE 2
 

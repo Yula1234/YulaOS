@@ -200,6 +200,9 @@ void kbd_handle_scancode(uint8_t scancode) {
         }
 
         if (ctrl_pressed) {
+            if (scancode == 0x0C) { send_code = (char)0x8A; goto out_unlock; }
+            if (scancode == 0x0D) { send_code = (char)0x8B; goto out_unlock; }
+            if (scancode == 0x0B) { send_code = (char)0x8C; goto out_unlock; }
             if (scancode == 0x1F) { send_code = 0x15; goto out_unlock; } // Ctrl+S
             if (scancode == 0x10) { send_code = 0x17; goto out_unlock; } // Ctrl+Q
             if (scancode == 0x2F) { send_code = 0x16; goto out_unlock; } // Ctrl+V
