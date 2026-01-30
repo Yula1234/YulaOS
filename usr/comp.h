@@ -664,6 +664,10 @@ static inline int comp_wm_pointer_grab(comp_conn_t* c, uint32_t client_id, uint3
     return comp_wm_send_cmd(c, COMP_WM_CMD_POINTER_GRAB, client_id, surface_id, 0, 0, enable ? 1u : 0u);
 }
 
+static inline int comp_wm_keyboard_grab(comp_conn_t* c, int enable) {
+    return comp_wm_send_cmd(c, COMP_WM_CMD_KEYBOARD_GRAB, COMP_WM_CLIENT_NONE, 0, 0, 0, enable ? 1u : 0u);
+}
+
 static inline int comp_wm_is_event(const comp_ipc_hdr_t* hdr) {
     return hdr && hdr->type == (uint16_t)COMP_IPC_MSG_WM_EVENT && hdr->len == (uint32_t)sizeof(comp_ipc_wm_event_t);
 }

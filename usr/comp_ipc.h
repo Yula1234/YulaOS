@@ -131,6 +131,7 @@ typedef struct __attribute__((packed)) {
 #define COMP_WM_CMD_PREVIEW_RECT 7u
 #define COMP_WM_CMD_PREVIEW_CLEAR 8u
 #define COMP_WM_CMD_EXIT 9u
+#define COMP_WM_CMD_KEYBOARD_GRAB 10u
 
 typedef struct __attribute__((packed)) {
     uint32_t kind;

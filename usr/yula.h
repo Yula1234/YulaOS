@@ -12,7 +12,8 @@
 #include <lib/string.h>
 #include <lib/stdlib.h>
 #include <lib/stdio.h>
- #include <yos/ioctl.h>
+#include <yos/ioctl.h>
+#include <yos/proc.h>
 
 #define YULA_EVENT_NONE       0
 #define YULA_EVENT_MOUSE_MOVE 1
@@ -80,6 +81,10 @@ static inline void sigreturn() {
 
 static inline int getpid() {
     return syscall(2, 0, 0, 0);
+}
+
+static inline int kill(int pid) {
+    return syscall(9, pid, 0, 0);
 }
 
 static inline void sleep(int ms) {
@@ -177,6 +182,22 @@ static inline int chdir(const char* path) {
 
 static inline int getcwd(char* buf, uint32_t size) {
     return syscall(59, (int)buf, (int)size, 0);
+}
+
+static inline int mkdir(const char* path) {
+    return syscall(13, (int)(uintptr_t)path, 0, 0);
+}
+
+static inline int unlink(const char* path) {
+    return syscall(14, (int)(uintptr_t)path, 0, 0);
+}
+
+static inline uint32_t uptime_ms(void) {
+    return (uint32_t)syscall(60, 0, 0, 0);
+}
+
+static inline int proc_list(yos_proc_info_t* buf, uint32_t cap) {
+    return syscall(61, (int)(uintptr_t)buf, (int)cap, 0);
 }
 
 #define MAP_SHARED  1

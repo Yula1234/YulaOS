@@ -380,6 +380,24 @@ static void term_scrollback_scroll(term_t* t, int delta_lines, uint32_t view_row
     t->sb_view_offset = (t->sb_view_offset > d) ? (t->sb_view_offset - d) : 0u;
 }
 
+static void term_scrollback_reset(term_t* t) {
+    if (!t) return;
+    if (t->sb_lines && !ptr_is_invalid(t->sb_lines)) {
+        for (uint32_t i = 0; i < t->sb_cap; i++) {
+            if (t->sb_lines[i] && !ptr_is_invalid(t->sb_lines[i])) {
+                free(t->sb_lines[i]);
+            }
+            t->sb_lines[i] = 0;
+        }
+    }
+    if (t->sb_cols && !ptr_is_invalid(t->sb_cols)) {
+        memset(t->sb_cols, 0, (size_t)t->sb_cap * sizeof(*t->sb_cols));
+    }
+    t->sb_start = 0;
+    t->sb_count = 0;
+    t->sb_view_offset = 0;
+}
+
 static void term_free(term_t* t) {
     if (!t) return;
     if (t->cells && !ptr_is_invalid(t->cells)) {
@@ -582,6 +600,12 @@ static void term_put_cell(term_t* t, int x, int y, char ch, uint32_t fg, uint32_
 
 static void term_put_char(term_t* t, char ch) {
     if (!t || !t->cells) return;
+
+    if ((uint8_t)ch == 0x0Cu) {
+        term_scrollback_reset(t);
+        term_clear(t);
+        return;
+    }
 
     if (ch == '\r') {
         term_set_cursor(t, 0, t->cur_y);

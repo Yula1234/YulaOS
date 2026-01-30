@@ -38,6 +38,14 @@ typedef struct {
     int si;
 } draw_item_t;
 
+static int is_wm_reserved_key(uint8_t kc) {
+    if (kc == 0xC0u || kc == 0xC1u) return 1;
+    if (kc >= 0x90u && kc <= 0x95u) return 1;
+    if (kc >= 0xA0u && kc <= 0xAFu) return 1;
+    if (kc >= 0xB1u && kc <= 0xB4u) return 1;
+    return 0;
+}
+
 static void comp_client_slot_reset(comp_client_t* c) {
     if (!c) return;
     memset(c, 0, sizeof(*c));
@@ -408,6 +416,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 input.wm_pointer_grab_active = 0;
                 input.wm_pointer_grab_client = -1;
                 input.wm_pointer_grab_surface_id = 0;
+                input.wm_keyboard_grab_active = 0;
                 if (preview.active) {
                     preview.active = 0;
                     preview_dirty = 1;
@@ -477,6 +486,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 input.wm_pointer_grab_active = 0;
                 input.wm_pointer_grab_client = -1;
                 input.wm_pointer_grab_surface_id = 0;
+                input.wm_keyboard_grab_active = 0;
                 if (preview.active) {
                     preview.active = 0;
                     preview_dirty = 1;
@@ -502,6 +512,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                             wm_disconnect(&wm);
                             input.focus_client = -1;
                             input.focus_surface_id = 0;
+                            input.wm_pointer_grab_active = 0;
+                            input.wm_pointer_grab_client = -1;
+                            input.wm_pointer_grab_surface_id = 0;
+                            input.wm_keyboard_grab_active = 0;
                             break;
                         }
                     }
@@ -515,13 +529,15 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             int kr = kbd_try_read(&kc);
             if (kr <= 0) break;
 
+            uint8_t kcu = (uint8_t)kc;
+
             if (wm.connected) {
                 comp_ipc_wm_event_t ev;
                 memset(&ev, 0, sizeof(ev));
                 ev.kind = COMP_WM_EVENT_KEY;
                 ev.client_id = input.focus_client >= 0 ? (uint32_t)input.focus_client : COMP_WM_CLIENT_NONE;
                 ev.surface_id = input.focus_surface_id;
-                ev.keycode = (uint32_t)(uint8_t)kc;
+                ev.keycode = (uint32_t)kcu;
                 ev.key_state = 1u;
 
                 if (input.focus_client >= 0 && input.focus_client < clients_cap) {
@@ -539,10 +555,18 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     wm_disconnect(&wm);
                     input.focus_client = -1;
                     input.focus_surface_id = 0;
+                    input.wm_pointer_grab_active = 0;
+                    input.wm_pointer_grab_client = -1;
+                    input.wm_pointer_grab_surface_id = 0;
+                    input.wm_keyboard_grab_active = 0;
                 }
             }
 
-            if (comp_send_key(clients, clients_cap, &input, (uint32_t)(uint8_t)kc, 1u) < 0) {
+            if (wm.connected && is_wm_reserved_key(kcu)) {
+                continue;
+            }
+
+            if (comp_send_key(clients, clients_cap, &input, (uint32_t)kcu, 1u) < 0) {
                 int dc = input.focus_client;
                 if (dc >= 0 && dc < clients_cap && clients[dc].connected) {
                     dbg_write("compositor: client disconnected\n");
@@ -560,6 +584,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                                 wm_disconnect(&wm);
                                 input.focus_client = -1;
                                 input.focus_surface_id = 0;
+                                input.wm_pointer_grab_active = 0;
+                                input.wm_pointer_grab_client = -1;
+                                input.wm_pointer_grab_surface_id = 0;
+                                input.wm_keyboard_grab_active = 0;
                                 break;
                             }
                         }
@@ -578,6 +606,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 input.wm_pointer_grab_active = 0;
                 input.wm_pointer_grab_client = -1;
                 input.wm_pointer_grab_surface_id = 0;
+                input.wm_keyboard_grab_active = 0;
                 if (preview.active) {
                     preview.active = 0;
                     preview_dirty = 1;

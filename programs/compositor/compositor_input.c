@@ -105,6 +105,7 @@ void comp_input_state_init(comp_input_state_t* st) {
     st->wm_pointer_grab_active = 0;
     st->wm_pointer_grab_client = -1;
     st->wm_pointer_grab_surface_id = 0;
+    st->wm_keyboard_grab_active = 0;
     st->last_client = -1;
     st->wm_last_client = -1;
     st->last_mx = 0xFFFFFFFFu;
@@ -393,6 +394,7 @@ int comp_send_mouse(comp_client_t* clients, int nclients, comp_input_state_t* st
 
 int comp_send_key(comp_client_t* clients, int nclients, comp_input_state_t* st, uint32_t keycode, uint32_t key_state) {
     if (!st) return 0;
+    if (st->wm_keyboard_grab_active) return 0;
     if (st->focus_client < 0 || st->focus_client >= nclients) return 0;
 
     comp_client_t* c = &clients[st->focus_client];

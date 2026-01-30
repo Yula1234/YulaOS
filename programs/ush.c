@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
         }
 
         if (strcmp(args[0], "clear") == 0) {
-            write_str(1, "\x1b[2J\x1b[H");
+            write_str(1, "\x0C");
             continue;
         }
 

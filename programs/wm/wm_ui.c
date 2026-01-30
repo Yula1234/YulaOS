@@ -208,6 +208,7 @@ void wm_ui_handle_bar_click(comp_conn_t* c, wm_state_t* st, int32_t x) {
         st->run_mode = !st->run_mode;
         st->run_len = 0;
         st->run_buf[0] = '\0';
+        (void)comp_wm_keyboard_grab(c, st->run_mode ? 1 : 0);
         wm_ui_draw_bar(st);
         wm_ui_raise_and_place(c, st);
         return;

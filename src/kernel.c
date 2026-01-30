@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
 
-#include <shell/shell.h>
+#include <lib/string.h>
 
 #include <fs/yulafs.h>
 #include <fs/bcache.h>
 #include <fs/pty.h>
+#include <fs/vfs.h>
 
 #include <drivers/pc_speaker.h>
 #include <drivers/keyboard.h>
@@ -23,6 +24,7 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
+#include <kernel/input_focus.h>
 
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
@@ -30,6 +32,7 @@
 
 #include <hal/apic.h>
 #include <hal/irq.h>
+#include <hal/lock.h>
 #include <hal/simd.h>
 #include <hal/pit.h>
 #include <hal/io.h>
@@ -186,6 +189,67 @@ static void usb_quiesce_early(void) {
 
 static inline void sys_usleep(uint32_t us) {
     __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
+}
+
+static void init_task(void* arg) {
+    (void)arg;
+
+    if (yulafs_lookup("/bin") == -1) (void)yulafs_mkdir("/bin");
+    if (yulafs_lookup("/home") == -1) (void)yulafs_mkdir("/home");
+
+    task_t* self = proc_current();
+    if (!self) return;
+
+    term_instance_t* term = (term_instance_t*)kmalloc(sizeof(*term));
+    if (!term) return;
+    memset(term, 0, sizeof(*term));
+
+    int cols = (int)(fb_width / 8);
+    int view_rows = (int)(fb_height / 16);
+    if (cols < 1) cols = 1;
+    if (view_rows < 1) view_rows = 1;
+    term->cols = cols;
+    term->view_rows = view_rows;
+    term->curr_fg = 0xD4D4D4;
+    term->curr_bg = 0x141414;
+    term_init(term);
+
+    self->terminal = term;
+    self->term_mode = 1;
+    tty_set_terminal(term);
+
+    (void)vfs_open("/dev/kbd", 0);
+    (void)vfs_open("/dev/console", 0);
+    (void)vfs_open("/dev/console", 0);
+
+    spinlock_acquire(&term->lock);
+    term_putc(term, 0x0C);
+    spinlock_release(&term->lock);
+
+    uint32_t home_inode = (uint32_t)yulafs_lookup("/home");
+    if ((int)home_inode == -1) home_inode = 1;
+    self->cwd_inode = home_inode;
+
+    for (;;) {
+        char* argv[] = { "ush", 0 };
+        task_t* child = proc_spawn_elf("/bin/ush.exe", 1, argv);
+        if (!child) {
+            spinlock_acquire(&term->lock);
+            term_print(term, "init: failed to spawn /bin/ush.exe\n");
+            spinlock_release(&term->lock);
+            sys_usleep(200000);
+            continue;
+        }
+
+        input_focus_set_pid(child->pid);
+        proc_wait(child->pid);
+        input_focus_set_pid(self->pid);
+
+        spinlock_acquire(&term->lock);
+        term_print(term, "[ush exited]\n");
+        spinlock_release(&term->lock);
+        sys_usleep(200000);
+    }
 }
 
 static void uhci_late_init_task(void* arg) {
@@ -428,8 +492,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     }
      
     task_t* tty_t = proc_spawn_kthread("tty", PRIO_GUI, tty_task, 0);
-    task_t* sh_t = proc_spawn_kthread("shell", PRIO_USER, shell_task, 0);
-    if (!tty_t || !sh_t) {
+    task_t* init_t = proc_spawn_kthread("init", PRIO_USER, init_task, 0);
+    if (!tty_t || !init_t) {
         vga_set_target(0, 0, 0);
         vga_draw_rect(0, 0, (int)fb_width, (int)fb_height, 0x000000);
         vga_print_at("BOOT ERROR: kthread spawn failed", 16, 16, COLOR_RED);

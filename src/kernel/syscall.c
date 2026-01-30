@@ -15,7 +15,8 @@
 #include <kernel/shm.h>
 #include <kernel/ipc_endpoint.h>
 #include <kernel/poll_waitq.h>
- #include <yos/ioctl.h>
+#include <yos/ioctl.h>
+#include <yos/proc.h>
 
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
@@ -1020,6 +1021,39 @@ void syscall_handler(registers_t* regs) {
             kbuf[len] = '\0';
             memcpy(u_buf, kbuf, len + 1u);
             regs->eax = (int)len;
+        }
+        break;
+
+        case 60: // uptime_ms()
+        {
+            uint64_t ms64 = ((uint64_t)timer_ticks * 1000ull) / 15000ull;
+            if (ms64 > 0xFFFFFFFFull) ms64 = 0xFFFFFFFFull;
+            regs->eax = (uint32_t)ms64;
+        }
+        break;
+
+        case 61: // proc_list(yos_proc_info_t* buf, uint32_t cap)
+        {
+            yos_proc_info_t* u_buf = (yos_proc_info_t*)regs->ebx;
+            uint32_t cap = (uint32_t)regs->ecx;
+
+            if (!u_buf || cap == 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+
+            if (cap > (0xFFFFFFFFu / (uint32_t)sizeof(*u_buf))) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+
+            uint32_t bytes = cap * (uint32_t)sizeof(*u_buf);
+            if (!check_user_buffer_writable_present(curr, (void*)u_buf, bytes)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+
+            regs->eax = (uint32_t)proc_list_snapshot(u_buf, cap);
         }
         break;
 

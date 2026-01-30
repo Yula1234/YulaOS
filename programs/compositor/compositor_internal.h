@@ -177,6 +177,8 @@ typedef struct {
     int wm_pointer_grab_client;
     uint32_t wm_pointer_grab_surface_id;
 
+    int wm_keyboard_grab_active;
+
     uint32_t prev_buttons;
 
     uint32_t wm_last_mx;

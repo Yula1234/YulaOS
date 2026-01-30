@@ -58,6 +58,31 @@ static uint32_t initial_fpu_state_size = 0;
 
 extern void irq_return(void);
 
+uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
+    if (!out || cap == 0) return 0;
+
+    uint32_t count = 0;
+    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+
+    task_t* t = tasks_head;
+    while (t && count < cap) {
+        if (t->state != TASK_UNUSED) {
+            yos_proc_info_t* e = &out[count++];
+            e->pid = t->pid;
+            e->parent_pid = t->parent_pid;
+            e->state = (uint32_t)t->state;
+            e->priority = (uint32_t)t->priority;
+            e->mem_pages = t->mem_pages;
+            e->term_mode = (uint32_t)t->term_mode;
+            strlcpy(e->name, t->name, sizeof(e->name));
+        }
+        t = t->next;
+    }
+
+    spinlock_release_safe(&proc_lock, flags);
+    return count;
+}
+
 static void pid_hash_insert(task_t* t) {
     uint32_t idx = t->pid % PID_HASH_SIZE;
     uint32_t lock_idx = t->pid % PID_HASH_LOCKS_COUNT;

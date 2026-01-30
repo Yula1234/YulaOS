@@ -8,6 +8,7 @@
 #include <fs/vfs.h>
 #include <hal/lock.h>
 #include <lib/dlist.h>
+#include <yos/proc.h>
 
 #include <stdint.h>
 
@@ -147,6 +148,8 @@ int proc_fd_remove(task_t* t, int fd, file_t* out_file);
 
 void proc_init(void);
 task_t* proc_current(void);
+
+uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap);
 
 task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(void*), void* arg);
 task_t* proc_spawn_elf(const char* filename, int argc, char** argv);

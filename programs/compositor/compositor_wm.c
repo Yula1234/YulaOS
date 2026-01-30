@@ -213,6 +213,15 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                 continue;
             }
 
+            if (cmd.kind == COMP_WM_CMD_KEYBOARD_GRAB) {
+                if (cmd.flags & 1u) {
+                    input->wm_keyboard_grab_active = 1;
+                } else {
+                    input->wm_keyboard_grab_active = 0;
+                }
+                continue;
+            }
+
             if (cmd.kind == COMP_WM_CMD_EXIT) {
                 g_should_exit = 1;
                 wm_disconnect(w);
@@ -349,6 +358,7 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
         input->wm_pointer_grab_active = 0;
         input->wm_pointer_grab_client = -1;
         input->wm_pointer_grab_surface_id = 0;
+        input->wm_keyboard_grab_active = 0;
         wm_disconnect(w);
     }
 }
