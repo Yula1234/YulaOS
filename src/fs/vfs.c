@@ -265,6 +265,11 @@ int vfs_open(const char* path, int flags) {
     task_t* curr = proc_current();
     if (!curr) return -1;
 
+    if ((flags & ~3) != 0) return -1;
+
+    const int open_append = (flags & 2) != 0;
+    const int open_write = ((flags & 1) != 0) || open_append;
+
     vfs_node_t* node = 0;
 
     const char* target_path = path;
@@ -279,12 +284,12 @@ int vfs_open(const char* path, int flags) {
     else {
         int inode = yulafs_lookup(path); 
         
-        if (inode == -1 && flags == 1) {
+        if (inode == -1 && open_write) {
             inode = yulafs_create(path);
         }
 
         if (inode != -1) {
-            if (flags == 1) {
+            if (open_write && !open_append) {
                 yfs_inode_t info;
                 yulafs_stat(inode, &info);
                 
@@ -330,6 +335,7 @@ int vfs_open(const char* path, int flags) {
 
     f->node = node;
     f->offset = 0;
+    f->flags = open_append ? FILE_FLAG_APPEND : 0u;
     f->used = 1;
 
     return fd;
@@ -351,6 +357,13 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
     file_t* f = proc_fd_get(curr, fd);
     if (!f || !f->used) return -1;
     if (!f->node->ops->write) return -1;
+
+    if ((f->flags & FILE_FLAG_APPEND) != 0 && (f->node->flags & VFS_FLAG_YULAFS) != 0) {
+        yfs_off_t start = 0;
+        int res = yulafs_append(f->node->inode_idx, buf, size, &start);
+        if (res > 0) f->offset = (uint32_t)start + (uint32_t)res;
+        return res;
+    }
 
     int res = f->node->ops->write(f->node, f->offset, size, buf);
     if (res > 0) f->offset += res;

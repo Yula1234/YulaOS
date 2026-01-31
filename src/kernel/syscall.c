@@ -493,6 +493,7 @@ void syscall_handler(registers_t* regs) {
 
             f->node = node;
             f->offset = 0;
+            f->flags = 0;
             f->used = 1;
             regs->eax = fd;
         }
@@ -535,6 +536,7 @@ void syscall_handler(registers_t* regs) {
 
             f->node = node;
             f->offset = 0;
+            f->flags = 0;
             f->used = 1;
             regs->eax = fd;
         }
@@ -566,6 +568,7 @@ void syscall_handler(registers_t* regs) {
 
             f->node = node;
             f->offset = 0;
+            f->flags = 0;
             f->used = 1;
             regs->eax = fd;
         }
@@ -1497,10 +1500,12 @@ fb_present_done:
 
             fr->node = r_node;
             fr->offset = 0;
+            fr->flags = 0;
             fr->used = 1;
 
             fw->node = w_node;
             fw->offset = 0;
+            fw->flags = 0;
             fw->used = 1;
 
             user_fds[0] = fd_r;
@@ -1610,6 +1615,7 @@ fb_present_done:
 
             f->node = node;
             f->offset = 0;
+            f->flags = 0;
             f->used = 1;
             regs->eax = fd;
         }
@@ -1668,10 +1674,12 @@ fb_present_done:
 
             fr->node = in_r;
             fr->offset = 0;
+            fr->flags = 0;
             fr->used = 1;
 
             fw->node = out_w;
             fw->offset = 0;
+            fw->flags = 0;
             fw->used = 1;
 
             out_fds[0] = fd_r;
@@ -1731,10 +1739,12 @@ fb_present_done:
 
             fr->node = out_r;
             fr->offset = 0;
+            fr->flags = 0;
             fr->used = 1;
 
             fw->node = in_w;
             fw->offset = 0;
+            fw->flags = 0;
             fw->used = 1;
 
             out_fds[0] = fd_r;

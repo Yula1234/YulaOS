@@ -41,8 +41,11 @@ typedef struct vfs_node {
 typedef struct {
     vfs_node_t* node;
     uint32_t offset;
+    uint32_t flags;
     uint8_t  used;
 } file_t;
+
+#define FILE_FLAG_APPEND 1u
 
 int vfs_open(const char* path, int flags);
 int vfs_read(int fd, void* buf, uint32_t size);

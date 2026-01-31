@@ -74,6 +74,7 @@ void yulafs_format(uint32_t disk_size_sectors);
 
 int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size);
 int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size);
+int yulafs_append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off);
 
 int yulafs_open(const char* path, int flags);
 int yulafs_mkdir(const char* path);

@@ -718,11 +718,13 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         if (proc_fd_add_at(t, 0, &f0) >= 0 && f0) {
             f0->node = devfs_clone("kbd");
             f0->offset = 0;
+            f0->flags = 0;
             f0->used = (f0->node != 0);
         }
         if (proc_fd_add_at(t, 1, &f1) >= 0 && f1) {
             f1->node = devfs_clone("console");
             f1->offset = 0;
+            f1->flags = 0;
             f1->used = (f1->node != 0);
         }
         if (proc_fd_add_at(t, 2, &f2) >= 0 && f2 && f1 && f1->used) {

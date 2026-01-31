@@ -502,12 +502,26 @@ static int term_resize(term_t* t, int cols, int rows) {
         new_cells[i].bg = t->cur_bg;
     }
 
-    const int copy_cols = (old_cols < cols) ? old_cols : cols;
-    const int copy_rows = (old_rows < rows) ? old_rows : rows;
+    int copy_cols = (old_cols < cols) ? old_cols : cols;
+    int copy_rows = (old_rows < rows) ? old_rows : rows;
+    int old_y_start = 0;
 
-    for (int y = 0; y < copy_rows; y++) {
-        for (int x = 0; x < copy_cols; x++) {
-            new_cells[y * cols + x] = old_cells[y * old_cols + x];
+    if (old_cells && old_cols > 0 && old_rows > 0) {
+        if (rows < old_rows) {
+            const int removed = old_rows - rows;
+            for (int y = 0; y < removed; y++) {
+                term_scrollback_push_line(t, &old_cells[y * old_cols], (uint16_t)old_cols);
+            }
+            term_scrollback_on_append(t, (uint32_t)removed, (uint32_t)rows);
+            old_y_start = removed;
+            copy_rows = rows;
+        }
+
+        for (int y = 0; y < copy_rows; y++) {
+            const int oy = old_y_start + y;
+            for (int x = 0; x < copy_cols; x++) {
+                new_cells[y * cols + x] = old_cells[oy * old_cols + x];
+            }
         }
     }
 
@@ -518,6 +532,11 @@ static int term_resize(term_t* t, int cols, int rows) {
     t->dirty_rows = new_dirty;
     t->cols = cols;
     t->rows = rows;
+
+    if (old_rows > 0 && rows < old_rows) {
+        t->cur_y -= (old_rows - rows);
+        if (t->cur_y < 0) t->cur_y = 0;
+    }
     if (t->cur_x >= cols) t->cur_x = cols - 1;
     if (t->cur_y >= rows) t->cur_y = rows - 1;
     t->scroll_pending_lines = 0;
@@ -1176,6 +1195,7 @@ static int term_run(void) {
                         ws.ws_xpixel = 0;
                         ws.ws_ypixel = 0;
                         (void)ioctl(master_fd, YOS_TIOCSWINSZ, &ws);
+                        (void)ioctl(0, YOS_TIOCSWINSZ, &ws);
 
                         need_update = 1;
                     }
@@ -1233,6 +1253,7 @@ static int term_run(void) {
                         ws.ws_xpixel = 0;
                         ws.ws_ypixel = 0;
                         (void)ioctl(master_fd, YOS_TIOCSWINSZ, &ws);
+                        (void)ioctl(0, YOS_TIOCSWINSZ, &ws);
 
                         need_update = 1;
                     }
@@ -1264,7 +1285,7 @@ static int term_run(void) {
         if (pr < 0) {
             running = 0;
         } else if (pr > 0) {
-            if (pfds[0].revents & (POLLERR | POLLNVAL | POLLHUP)) {
+            if (pfds[0].revents & (POLLERR | POLLNVAL)) {
                 running = 0;
             } else if (pfds[0].revents & POLLIN) {
                 for (;;) {
@@ -1279,6 +1300,8 @@ static int term_run(void) {
                     running = 0;
                     break;
                 }
+            } else if (pfds[0].revents & POLLHUP) {
+                running = 0;
             }
 
             if (nfds > 1 && (pfds[1].revents & (POLLERR | POLLNVAL | POLLHUP))) {
