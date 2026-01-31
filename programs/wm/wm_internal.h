@@ -111,10 +111,6 @@ typedef struct {
     uint32_t drag_preview_last_h;
 
     wm_ui_t ui;
-
-    int run_mode;
-    char run_buf[32];
-    int run_len;
 } wm_state_t;
 
 static inline void dbg_write(const char* s) {

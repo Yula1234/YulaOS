@@ -1135,10 +1135,7 @@ static int term_run(void) {
     {
         char* sh_argv[1];
         sh_argv[0] = (char*)"ush";
-        child_pid = spawn_process("/bin/ush.exe", 1, sh_argv);
-        if (child_pid < 0) {
-            child_pid = spawn_process("/bin/usr/ush.exe", 1, sh_argv);
-        }
+        child_pid = spawn_process_resolved("ush", 1, sh_argv);
     }
 
     int running = 1;

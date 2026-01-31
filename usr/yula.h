@@ -273,6 +273,61 @@ static inline int spawn_process(const char* path, int argc, char** argv) {
     return syscall(36, (int)path, argc, (int)argv);
 }
 
+static inline int spawn_process_resolved(const char* name, int argc, char** argv) {
+    if (!name || !*name) return -1;
+
+    if (name[0] == '/') {
+        return spawn_process(name, argc, argv);
+    }
+
+    size_t n = strlen(name);
+    const int has_exe = (n >= 4 && strcmp(name + (n - 4u), ".exe") == 0);
+
+    int has_slash = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (name[i] == '/') {
+            has_slash = 1;
+            break;
+        }
+    }
+
+    char path[256];
+
+    if (has_slash) {
+        if (has_exe) {
+            return spawn_process(name, argc, argv);
+        }
+        (void)snprintf(path, sizeof(path), "%s.exe", name);
+        int pid = spawn_process(path, argc, argv);
+        if (pid >= 0) return pid;
+        return spawn_process(name, argc, argv);
+    }
+
+    if (!has_exe) {
+        (void)snprintf(path, sizeof(path), "%s.exe", name);
+        int pid = spawn_process(path, argc, argv);
+        if (pid >= 0) return pid;
+    } else {
+        int pid = spawn_process(name, argc, argv);
+        if (pid >= 0) return pid;
+    }
+
+    if (has_exe) {
+        (void)snprintf(path, sizeof(path), "/bin/%s", name);
+    } else {
+        (void)snprintf(path, sizeof(path), "/bin/%s.exe", name);
+    }
+    int pid = spawn_process(path, argc, argv);
+    if (pid >= 0) return pid;
+
+    if (has_exe) {
+        (void)snprintf(path, sizeof(path), "/bin/usr/%s", name);
+    } else {
+        (void)snprintf(path, sizeof(path), "/bin/usr/%s.exe", name);
+    }
+    return spawn_process(path, argc, argv);
+}
+
 static inline int waitpid(int pid, int* status) {
     return syscall(37, pid, (int)status, 0);
 }

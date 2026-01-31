@@ -86,26 +86,7 @@ int wm_spawn_app_by_name(const char* name) {
     char* argv[1];
     argv[0] = argv0;
 
-    if (name[0] == '/') {
-        return spawn_process(name, 1, argv);
-    }
-
-    const int has_exe = (n >= 4 && strcmp(name + (n - 4u), ".exe") == 0);
-
-    char path1[96];
-    char path2[96];
-    if (has_exe) {
-        (void)snprintf(path1, sizeof(path1), "/bin/%s", name);
-        (void)snprintf(path2, sizeof(path2), "/bin/usr/%s", name);
-    } else {
-        (void)snprintf(path1, sizeof(path1), "/bin/%s.exe", name);
-        (void)snprintf(path2, sizeof(path2), "/bin/usr/%s.exe", name);
-    }
-
-    int pid = spawn_process(path1, 1, argv);
-    if (pid < 0) {
-        pid = spawn_process(path2, 1, argv);
-    }
+    int pid = spawn_process_resolved(name, 1, argv);
 
     {
         char tmp[128];
@@ -113,79 +94,6 @@ int wm_spawn_app_by_name(const char* name) {
         dbg_write(tmp);
     }
     return pid;
-}
-
-static int wm_ui_bar_run_hit(int32_t x) {
-    const int32_t base_x = 6;
-    const int32_t slot_w = 12;
-    const int32_t start_x = base_x + (int32_t)WM_MAX_WORKSPACES * slot_w + 14;
-    const char* label = "Run";
-    const int32_t w = (int32_t)strlen(label) * 8 + 12;
-    return x >= start_x && x < start_x + w;
-}
-
-static int wm_ui_bar_launcher_pick(int32_t x) {
-    const int32_t base_x = 6;
-    const int32_t slot_w = 12;
-    const int32_t run_w = (int32_t)strlen("Run") * 8 + 12;
-    const int32_t start_x = base_x + (int32_t)WM_MAX_WORKSPACES * slot_w + 14 + run_w + 8;
-
-    if (x < start_x) return -1;
-
-    const char* labels[] = {"Paint", "Explorer", "GEditor"};
-    const int n = (int)(sizeof(labels) / sizeof(labels[0]));
-
-    int32_t bx = start_x;
-    for (int i = 0; i < n; i++) {
-        const int32_t w = (int32_t)strlen(labels[i]) * 8 + 12;
-        if (x >= bx && x < bx + w) return i;
-        bx += w + 8;
-    }
-    return -1;
-}
-
-static void wm_spawn_app(int idx) {
-    char* argv[1];
-    if (idx == 0) {
-        argv[0] = (char*)"paint";
-        const char* path = "/bin/paint.exe";
-        int pid = spawn_process(path, 1, argv);
-        if (pid < 0) {
-            path = "/bin/usr/paint.exe";
-            pid = spawn_process(path, 1, argv);
-        }
-        {
-            char tmp[96];
-            (void)snprintf(tmp, sizeof(tmp), "wm: spawn paint pid=%d path=%s\n", pid, path);
-            dbg_write(tmp);
-        }
-    } else if (idx == 1) {
-        argv[0] = (char*)"explorer";
-        const char* path = "/bin/explorer.exe";
-        int pid = spawn_process(path, 1, argv);
-        if (pid < 0) {
-            path = "/bin/usr/explorer.exe";
-            pid = spawn_process(path, 1, argv);
-        }
-        {
-            char tmp[96];
-            (void)snprintf(tmp, sizeof(tmp), "wm: spawn explorer pid=%d path=%s\n", pid, path);
-            dbg_write(tmp);
-        }
-    } else if (idx == 2) {
-        argv[0] = (char*)"geditor";
-        const char* path = "/bin/geditor.exe";
-        int pid = spawn_process(path, 1, argv);
-        if (pid < 0) {
-            path = "/bin/usr/geditor.exe";
-            pid = spawn_process(path, 1, argv);
-        }
-        {
-            char tmp[96];
-            (void)snprintf(tmp, sizeof(tmp), "wm: spawn geditor pid=%d path=%s\n", pid, path);
-            dbg_write(tmp);
-        }
-    }
 }
 
 void wm_ui_handle_bar_click(comp_conn_t* c, wm_state_t* st, int32_t x) {
@@ -201,28 +109,6 @@ void wm_ui_handle_bar_click(comp_conn_t* c, wm_state_t* st, int32_t x) {
             if (ws < WM_MAX_WORKSPACES) {
                 wm_switch_workspace(c, st, ws);
             }
-        }
-    }
-
-    if (wm_ui_bar_run_hit(x)) {
-        st->run_mode = !st->run_mode;
-        st->run_len = 0;
-        st->run_buf[0] = '\0';
-        (void)comp_wm_keyboard_grab(c, st->run_mode ? 1 : 0);
-        wm_ui_draw_bar(st);
-        wm_ui_raise_and_place(c, st);
-        return;
-    }
-
-    {
-        const int app = wm_ui_bar_launcher_pick(x);
-        {
-            char tmp[64];
-            (void)snprintf(tmp, sizeof(tmp), "wm: bar click x=%d app=%d\n", (int)x, app);
-            dbg_write(tmp);
-        }
-        if (app >= 0) {
-            wm_spawn_app(app);
         }
     }
 
@@ -250,37 +136,6 @@ void wm_ui_draw_bar(wm_state_t* st) {
         const uint32_t col = (i == st->active_ws) ? 0xE0E0E0u : 0x808080u;
         draw_string(ui->pixels, (int)ui->w, (int)ui->h, x, 6, tmp, col);
         x += 12;
-    }
-
-    {
-        int bx = 6 + (int)WM_MAX_WORKSPACES * 12 + 14;
-        const uint32_t col = st->run_mode ? 0xE0E0E0u : 0xB8B8B8u;
-        draw_string(ui->pixels, (int)ui->w, (int)ui->h, bx + 6, 6, "Run", col);
-        bx += (int)strlen("Run") * 8 + 12 + 8;
-
-        if (st->run_mode) {
-            char tmp[64];
-            (void)snprintf(tmp, sizeof(tmp), "> %s", st->run_buf);
-            draw_string(ui->pixels, (int)ui->w, (int)ui->h, bx + 2, 6, tmp, 0xE0E0E0u);
-        } else {
-            const char* labels[] = {"Paint", "Explorer", "GEditor"};
-            const int n = (int)(sizeof(labels) / sizeof(labels[0]));
-            for (int i = 0; i < n; i++) {
-                draw_string(ui->pixels, (int)ui->w, (int)ui->h, bx + 6, 6, labels[i], 0xB8B8B8u);
-                bx += (int)strlen(labels[i]) * 8 + 12 + 8;
-            }
-        }
-    }
-
-    if (st->focused_idx >= 0 && st->focused_idx < WM_MAX_VIEWS) {
-        const wm_view_t* v = &st->views[st->focused_idx];
-        if (wm_is_view_visible_on_active_ws(st, v) && !v->ui) {
-            char info[64];
-            (void)snprintf(info, sizeof(info), "c%u:s%u", (unsigned)v->client_id, (unsigned)v->surface_id);
-            int sx = (int)ui->w - ((int)strlen(info) * 8 + 6);
-            if (sx < 0) sx = 0;
-            draw_string(ui->pixels, (int)ui->w, (int)ui->h, sx, 6, info, 0xB8B8B8u);
-        }
     }
 
     int r = comp_send_commit(&ui->c, ui->surface_id, 0, 0, 0u);

@@ -346,39 +346,6 @@ static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
         return;
     }
 
-    if (st->run_mode) {
-        if (kc == 0x1Bu) {
-            st->run_mode = 0;
-            st->run_len = 0;
-            st->run_buf[0] = '\0';
-            (void)comp_wm_keyboard_grab(c, 0);
-        } else if (kc == 0x08u) {
-            if (st->run_len > 0) {
-                st->run_len--;
-                st->run_buf[st->run_len] = '\0';
-            }
-        } else if (kc == 0x0Au) {
-            if (st->run_len > 0) {
-                (void)wm_spawn_app_by_name(st->run_buf);
-            }
-            st->run_mode = 0;
-            st->run_len = 0;
-            st->run_buf[0] = '\0';
-            (void)comp_wm_keyboard_grab(c, 0);
-        } else if (kc >= 32u && kc <= 126u) {
-            if (kc != ' ') {
-                if (st->run_len < (int)sizeof(st->run_buf) - 1) {
-                    st->run_buf[st->run_len++] = (char)kc;
-                    st->run_buf[st->run_len] = '\0';
-                }
-            }
-        }
-
-        wm_ui_draw_bar(st);
-        wm_ui_raise_and_place(c, st);
-        return;
-    }
-
     if (kc >= 0x90u && kc <= 0x95u) {
         uint32_t ws = (uint32_t)(kc - 0x90u);
         if (ws == 5u) ws = 0u;
@@ -413,12 +380,7 @@ static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
     }
 
     if (kc == 0xABu) {
-        st->run_mode = 1;
-        st->run_len = 0;
-        st->run_buf[0] = '\0';
-        (void)comp_wm_keyboard_grab(c, 1);
-        wm_ui_draw_bar(st);
-        wm_ui_raise_and_place(c, st);
+        (void)wm_spawn_app_by_name("launcher");
         return;
     }
 

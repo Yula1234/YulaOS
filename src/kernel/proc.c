@@ -449,23 +449,16 @@ void proc_kill(task_t* t) {
         t->wait_for_pid = 0;
     }
 
-    while (1) {
-        int found_child = 0;
+    {
         uint32_t flags = spinlock_acquire_safe(&proc_lock);
         task_t* child = tasks_head;
         while (child) {
-            if (child->parent_pid == pid_to_clean && child->state != TASK_ZOMBIE && child->state != TASK_UNUSED) {
-                found_child = 1;
-                spinlock_release_safe(&proc_lock, flags);
-                proc_kill(child);
-                break; 
+            if (child->parent_pid == pid_to_clean && child->state != TASK_UNUSED) {
+                child->parent_pid = 0;
             }
             child = child->next;
         }
-        if (!found_child) {
-            spinlock_release_safe(&proc_lock, flags);
-            break;
-        }
+        spinlock_release_safe(&proc_lock, flags);
     }
 
     sem_remove_task(t);

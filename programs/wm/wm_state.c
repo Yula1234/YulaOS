@@ -47,10 +47,6 @@ void wm_reset_session_state(wm_state_t* st) {
     st->drag_preview_last_h = 0;
     wm_ui_cleanup(&st->ui);
 
-    st->run_mode = 0;
-    st->run_len = 0;
-    st->run_buf[0] = '\0';
-
     st->ui.client_id = COMP_WM_CLIENT_NONE;
     st->ui.surface_id = WM_UI_BAR_SURFACE_ID;
     st->ui.shm_fd = -1;
