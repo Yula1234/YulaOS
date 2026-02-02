@@ -125,6 +125,11 @@ typedef struct task {
 
     uint32_t fbmap_pages;
 
+    uint32_t fbmap_user_ptr;
+    uint32_t fbmap_size_bytes;
+    uint8_t fbmap_is_virtio;
+    uint8_t fbmap_pad[3];
+
     uint8_t* fpu_state;
     uint32_t fpu_state_size;
 

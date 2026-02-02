@@ -43,6 +43,37 @@ void fill_rect(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int
     }
 }
 
+void draw_text(uint32_t* fb, int stride, int w, int h, int x, int y, const char* s, uint32_t color) {
+    if (!fb || !s) return;
+    if (stride <= 0 || w <= 0 || h <= 0) return;
+
+    int cx = x;
+    const char* p = s;
+    while (*p) {
+        unsigned char uc = (unsigned char)*p;
+        if (uc >= 128u) uc = (unsigned char)'?';
+        const uint8_t* glyph = font8x8_basic[(int)uc];
+
+        for (int row = 0; row < 8; row++) {
+            int py = y + row;
+            if (py < 0 || py >= h) continue;
+            uint8_t bits = glyph[row];
+            if (!bits) continue;
+            uint32_t* rowp = fb + (size_t)py * (size_t)stride;
+            for (int col = 0; col < 8; col++) {
+                if ((bits & (uint8_t)(1u << (7 - col))) == 0u) continue;
+                int px = cx + col;
+                if (px < 0 || px >= w) continue;
+                rowp[px] = color;
+            }
+        }
+
+        cx += 8;
+        if (cx >= w) break;
+        p++;
+    }
+}
+
 static inline void put_pixel_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, uint32_t color, comp_rect_t clip) {
     if (x < clip.x1 || x >= clip.x2 || y < clip.y1 || y >= clip.y2) return;
     put_pixel(fb, stride, w, h, x, y, color);
@@ -55,9 +86,15 @@ static inline void fill_rect_clipped(uint32_t* fb, int stride, int w, int h, int
     fill_rect(fb, stride, w, h, r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1, color);
 }
 
+#ifndef COMP_CURSOR_SAVE_W
 #define COMP_CURSOR_SAVE_W 17
+#endif
+#ifndef COMP_CURSOR_SAVE_H
 #define COMP_CURSOR_SAVE_H 17
+#endif
+#ifndef COMP_CURSOR_SAVE_HALF
 #define COMP_CURSOR_SAVE_HALF 8
+#endif
 
 static uint32_t g_under_cursor_save[COMP_CURSOR_SAVE_W * COMP_CURSOR_SAVE_H];
 static int g_under_cursor_valid = 0;

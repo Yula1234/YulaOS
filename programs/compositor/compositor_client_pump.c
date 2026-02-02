@@ -126,18 +126,6 @@ static void comp_send_error(int fd, uint32_t seq, uint16_t req_type, uint16_t co
     e.code = code;
     e.surface_id = surface_id;
     e.detail = detail;
-    g_dbg_last_err_pid = g_dbg_curr_pid;
-    g_dbg_last_err_req_type = req_type;
-    g_dbg_last_err_code = code;
-    g_dbg_last_err_surface_id = surface_id;
-    g_dbg_last_err_detail = detail;
-    if (surface_id == 0x80000001u) {
-        g_dbg_bar_err_pid = g_dbg_curr_pid;
-        g_dbg_bar_err_req_type = req_type;
-        g_dbg_bar_err_code = code;
-        g_dbg_bar_err_seq = seq;
-        g_dbg_bar_err_detail = detail;
-    }
     (void)comp_send_reply(fd, (uint16_t)COMP_IPC_MSG_ERROR, seq, &e, (uint32_t)sizeof(e));
 }
 
@@ -259,12 +247,6 @@ void comp_client_pump(comp_client_t* c,
             ipc_rx_drop(&c->rx, hdr.len);
         }
 
-        g_dbg_curr_pid = c->pid;
-        g_dbg_last_rx_pid = c->pid;
-        g_dbg_last_rx_type = (uint16_t)hdr.type;
-        g_dbg_last_rx_seq = hdr.seq;
-        g_dbg_last_rx_surface_id = 0;
-
         if (hdr.type == COMP_IPC_MSG_HELLO && hdr.len == (uint32_t)sizeof(comp_ipc_hello_t)) {
             comp_ipc_hello_t h;
             memcpy(&h, payload, sizeof(h));
@@ -284,8 +266,6 @@ void comp_client_pump(comp_client_t* c,
         } else if (hdr.type == COMP_IPC_MSG_ATTACH_SHM && hdr.len == (uint32_t)sizeof(comp_ipc_attach_shm_t)) {
             comp_ipc_attach_shm_t a;
             memcpy(&a, payload, sizeof(a));
-
-            g_dbg_last_rx_surface_id = a.surface_id;
 
             comp_surface_t* s = comp_client_surface_get(c, a.surface_id, 1);
             if (!s) {
@@ -318,13 +298,6 @@ void comp_client_pump(comp_client_t* c,
         } else if (hdr.type == COMP_IPC_MSG_ATTACH_SHM_NAME && hdr.len == (uint32_t)sizeof(comp_ipc_attach_shm_name_t)) {
             comp_ipc_attach_shm_name_t a;
             memcpy(&a, payload, sizeof(a));
-
-            g_dbg_last_rx_surface_id = a.surface_id;
-            if (a.surface_id == 0x80000001u) {
-                g_dbg_bar_rx_pid = c->pid;
-                g_dbg_bar_rx_type = (uint16_t)hdr.type;
-                g_dbg_bar_rx_seq = hdr.seq;
-            }
 
             comp_surface_t* s = comp_client_surface_get(c, a.surface_id, 1);
             if (!s) {
@@ -409,13 +382,6 @@ void comp_client_pump(comp_client_t* c,
             comp_ipc_commit_t cm;
             memcpy(&cm, payload, sizeof(cm));
 
-            g_dbg_last_rx_surface_id = cm.surface_id;
-            if (cm.surface_id == 0x80000001u) {
-                g_dbg_bar_rx_pid = c->pid;
-                g_dbg_bar_rx_type = (uint16_t)hdr.type;
-                g_dbg_bar_rx_seq = hdr.seq;
-            }
-
             comp_surface_t* s = comp_client_surface_get(c, cm.surface_id, 0);
             if (!(s && s->attached)) {
                 comp_send_error(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, (uint16_t)COMP_IPC_ERR_NO_SURFACE, cm.surface_id, 0);
@@ -487,8 +453,6 @@ void comp_client_pump(comp_client_t* c,
         } else if (hdr.type == COMP_IPC_MSG_DESTROY_SURFACE && hdr.len == (uint32_t)sizeof(comp_ipc_destroy_surface_t)) {
             comp_ipc_destroy_surface_t d;
             memcpy(&d, payload, sizeof(d));
-
-            g_dbg_last_rx_surface_id = d.surface_id;
 
             comp_surface_t* s = comp_client_surface_get(c, d.surface_id, 0);
             if (!s) {

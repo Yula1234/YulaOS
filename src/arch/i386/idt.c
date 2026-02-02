@@ -47,6 +47,7 @@ extern void isr_stub_0xFF(void);
 extern void isr_stub_0xF0(void);
 extern void isr_stub_0xF1(void);
 extern void isr_stub_0xA1(void);
+extern void isr_stub_0xA2(void);
 extern uint32_t* kernel_page_directory;
 
 extern void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
@@ -553,6 +554,7 @@ void idt_init(void) {
     idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
     idt_set_gate(IPI_BLIT_VECTOR, (uint32_t)isr_stub_0xF1, 0x08, 0x8E);
     idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
+    idt_set_gate(0xA2, (uint32_t)isr_stub_0xA2, 0x08, 0x8E);
 
     outb(0x20, 0x11); io_wait();
     outb(0xA0, 0x11); io_wait();

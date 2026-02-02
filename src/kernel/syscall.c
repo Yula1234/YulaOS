@@ -10,6 +10,7 @@
 #include <drivers/keyboard.h>
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
+#include <drivers/virtio_gpu.h>
 #include <kernel/input_focus.h>
 #include <kernel/rtc.h>
 #include <kernel/shm.h>
@@ -1313,9 +1314,41 @@ void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) {
-                regs->eax = -1;
-                break;
+            const int virtio_active = virtio_gpu_is_active();
+            const virtio_gpu_fb_t* virtio_fb = virtio_active ? virtio_gpu_get_fb() : 0;
+
+            uint32_t dst_width = fb_width;
+            uint32_t dst_height = fb_height;
+            uint32_t dst_pitch = fb_pitch;
+            uint32_t* dst_ptr = fb_ptr;
+
+            if (virtio_active) {
+                if (!virtio_fb || !virtio_fb->fb_ptr || virtio_fb->width == 0 || virtio_fb->height == 0 || virtio_fb->pitch == 0) {
+                    regs->eax = -1;
+                    break;
+                }
+
+                uint64_t virtio_min_pitch64 = (uint64_t)virtio_fb->width * 4ull;
+                if (virtio_min_pitch64 > 0xFFFFFFFFu || virtio_fb->pitch < (uint32_t)virtio_min_pitch64) {
+                    regs->eax = -1;
+                    break;
+                }
+
+                uint64_t dst_size64 = (uint64_t)virtio_fb->pitch * (uint64_t)virtio_fb->height;
+                if (dst_size64 == 0 || dst_size64 > 0xFFFFFFFFu || virtio_fb->size_bytes < (uint32_t)dst_size64) {
+                    regs->eax = -1;
+                    break;
+                }
+
+                dst_width = virtio_fb->width;
+                dst_height = virtio_fb->height;
+                dst_pitch = virtio_fb->pitch;
+                dst_ptr = virtio_fb->fb_ptr;
+            } else {
+                if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) {
+                    regs->eax = -1;
+                    break;
+                }
             }
 
             if (!check_user_buffer(curr, u_req, (uint32_t)sizeof(*u_req))) {
@@ -1350,7 +1383,7 @@ void syscall_handler(registers_t* regs) {
                 break;
             }
 
-            uint32_t min_stride = fb_width * 4u;
+            uint32_t min_stride = dst_width * 4u;
             if (req.src_stride < min_stride) {
                 regs->eax = -1;
                 break;
@@ -1370,10 +1403,22 @@ void syscall_handler(registers_t* regs) {
                 }
             }
 
-            uint32_t fpu_sz = fpu_state_size();
-            if (fpu_sz == 0 || fpu_sz > 4096u) {
-                regs->eax = -1;
-                break;
+            if (!virtio_active) {
+                const int src_is_mapped_fb = !curr->fbmap_is_virtio && curr->fbmap_user_ptr != 0 &&
+                                             (uintptr_t)req.src == (uintptr_t)curr->fbmap_user_ptr &&
+                                             req.src_stride == dst_pitch;
+                if (src_is_mapped_fb) {
+                    regs->eax = 0;
+                    break;
+                }
+            }
+
+            if (!virtio_active) {
+                uint32_t fpu_sz = fpu_state_size();
+                if (fpu_sz == 0 || fpu_sz > 4096u) {
+                    regs->eax = -1;
+                    break;
+                }
             }
 
             const fb_rect_t* rects = req.rects;
@@ -1387,7 +1432,7 @@ void syscall_handler(registers_t* regs) {
                 int64_t y2_64 = (int64_t)r.y + (int64_t)r.h;
 
                 if (x2_64 <= 0 || y2_64 <= 0) continue;
-                if (x1_64 >= (int64_t)fb_width || y1_64 >= (int64_t)fb_height) continue;
+                if (x1_64 >= (int64_t)dst_width || y1_64 >= (int64_t)dst_height) continue;
 
                 int x1 = (int)x1_64;
                 int y1 = (int)y1_64;
@@ -1396,49 +1441,83 @@ void syscall_handler(registers_t* regs) {
 
                 if (x1 < 0) x1 = 0;
                 if (y1 < 0) y1 = 0;
-                if (x2 > (int)fb_width) x2 = (int)fb_width;
-                if (y2 > (int)fb_height) y2 = (int)fb_height;
+                if (x2 > (int)dst_width) x2 = (int)dst_width;
+                if (y2 > (int)dst_height) y2 = (int)dst_height;
                 if (x1 >= x2 || y1 >= y2) continue;
 
                 x1 &= ~3;
                 x2 = (x2 + 3) & ~3;
-                if (x2 > (int)fb_width) x2 = (int)fb_width;
+                if (x2 > (int)dst_width) x2 = (int)dst_width;
                 if (x1 >= x2) continue;
 
                 uint32_t row_bytes = (uint32_t)((uint32_t)(x2 - x1) * 4u);
                 const uint8_t* src_base = (const uint8_t*)req.src;
-                for (int y = y1; y < y2; y++) {
-                    uint64_t row_off = (uint64_t)(uint32_t)y * (uint64_t)req.src_stride + (uint64_t)(uint32_t)x1 * 4ull;
-                    uint64_t row_addr = (uint64_t)(uintptr_t)src_base + row_off;
-                    uint64_t row_end_excl = row_addr + (uint64_t)row_bytes;
 
-                    if (row_end_excl < row_addr || row_addr < 0x08000000ull || row_end_excl > 0xC0000000ull) {
+                if (virtio_active) {
+                    const int flush_only = curr->fbmap_is_virtio && curr->fbmap_user_ptr != 0 && (uintptr_t)req.src == (uintptr_t)curr->fbmap_user_ptr && req.src_stride == dst_pitch;
+
+                    if (!flush_only) {
+                        uint8_t* dst_base = (uint8_t*)dst_ptr;
+                        for (int y = y1; y < y2; y++) {
+                            uint64_t src_row_off = (uint64_t)(uint32_t)y * (uint64_t)req.src_stride + (uint64_t)(uint32_t)x1 * 4ull;
+                            uint64_t src_row_addr = (uint64_t)(uintptr_t)src_base + src_row_off;
+                            uint64_t src_row_end_excl = src_row_addr + (uint64_t)row_bytes;
+
+                            if (src_row_end_excl < src_row_addr || src_row_addr < 0x08000000ull || src_row_end_excl > 0xC0000000ull) {
+                                regs->eax = -1;
+                                goto fb_present_done;
+                            }
+
+                            if (!user_range_mappable(curr, (uintptr_t)src_row_addr, (uintptr_t)src_row_end_excl)) {
+                                regs->eax = -1;
+                                goto fb_present_done;
+                            }
+
+                            prefault_user_read((const void*)(uintptr_t)src_row_addr, row_bytes);
+
+                            uint64_t dst_row_off = (uint64_t)(uint32_t)y * (uint64_t)dst_pitch + (uint64_t)(uint32_t)x1 * 4ull;
+                            memcpy(dst_base + dst_row_off, (const void*)(uintptr_t)src_row_addr, row_bytes);
+                        }
+                    }
+
+                    if (virtio_gpu_flush_rect(x1, y1, x2 - x1, y2 - y1) != 0) {
+                        regs->eax = -1;
+                        goto fb_present_done;
+                    }
+                } else {
+                    for (int y = y1; y < y2; y++) {
+                        uint64_t row_off = (uint64_t)(uint32_t)y * (uint64_t)req.src_stride + (uint64_t)(uint32_t)x1 * 4ull;
+                        uint64_t row_addr = (uint64_t)(uintptr_t)src_base + row_off;
+                        uint64_t row_end_excl = row_addr + (uint64_t)row_bytes;
+
+                        if (row_end_excl < row_addr || row_addr < 0x08000000ull || row_end_excl > 0xC0000000ull) {
+                            regs->eax = -1;
+                            goto fb_present_done;
+                        }
+
+                        if (!user_range_mappable(curr, (uintptr_t)row_addr, (uintptr_t)row_end_excl)) {
+                            regs->eax = -1;
+                            goto fb_present_done;
+                        }
+
+                        prefault_user_read((const void*)(uintptr_t)row_addr, row_bytes);
+                    }
+
+                    cpu_t* cpu = cpu_current();
+                    if (!cpu || cpu->index < 0 || cpu->index >= MAX_CPUS) {
                         regs->eax = -1;
                         goto fb_present_done;
                     }
 
-                    if (!user_range_mappable(curr, (uintptr_t)row_addr, (uintptr_t)row_end_excl)) {
-                        regs->eax = -1;
-                        goto fb_present_done;
-                    }
+                    uint8_t* fpu_tmp = &fb_present_fpu_tmp[cpu->index][0];
+                    uint32_t irq_flags = irq_save_disable();
+                    fpu_save(fpu_tmp);
 
-                    prefault_user_read((const void*)(uintptr_t)row_addr, row_bytes);
+                    smp_fb_present_rect(curr, req.src, req.src_stride, x1, y1, x2 - x1, y2 - y1);
+
+                    fpu_restore(fpu_tmp);
+                    irq_restore(irq_flags);
                 }
-
-                cpu_t* cpu = cpu_current();
-                if (!cpu || cpu->index < 0 || cpu->index >= MAX_CPUS) {
-                    regs->eax = -1;
-                    goto fb_present_done;
-                }
-
-                uint8_t* fpu_tmp = &fb_present_fpu_tmp[cpu->index][0];
-                uint32_t irq_flags = irq_save_disable();
-                fpu_save(fpu_tmp);
-
-                smp_fb_present_rect(curr, req.src, req.src_stride, x1, y1, x2 - x1, y2 - y1);
-
-                fpu_restore(fpu_tmp);
-                irq_restore(irq_flags);
             }
 
 fb_present_done:
@@ -1592,8 +1671,14 @@ fb_present_done:
         case 47:
         {
             const char* u_name = (const char*)regs->ebx;
-            char name[32];
+            int* out_fds = (int*)regs->ecx;
 
+            if (out_fds && !ensure_user_buffer_writable_mappable(curr, out_fds, (uint32_t)sizeof(int) * 2u)) {
+                regs->eax = -1;
+                break;
+            }
+
+            char name[32];
             if (copy_user_str_bounded(curr, name, (uint32_t)sizeof(name), u_name) != 0) {
                 regs->eax = -1;
                 break;
@@ -2260,22 +2345,92 @@ fb_present_done:
                 break;
             }
 
+            const uint32_t user_vaddr_start = 0xB1000000u;
+
+            if (virtio_gpu_is_active()) {
+                const virtio_gpu_fb_t* vfb = virtio_gpu_get_fb();
+                if (!vfb || !vfb->fb_ptr || vfb->width == 0 || vfb->height == 0 || vfb->pitch == 0) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                uint64_t virtio_min_pitch64 = (uint64_t)vfb->width * 4ull;
+                if (virtio_min_pitch64 > 0xFFFFFFFFu || vfb->pitch < (uint32_t)virtio_min_pitch64) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                uint64_t fb_size64 = (uint64_t)vfb->pitch * (uint64_t)vfb->height;
+                if (fb_size64 == 0 || fb_size64 > 0xFFFFFFFFu || vfb->size_bytes < (uint32_t)fb_size64) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                uint32_t fb_base = vfb->fb_phys;
+                uint32_t page_off = fb_base & 0xFFFu;
+                uint32_t fb_page = fb_base & ~0xFFFu;
+                uint32_t fb_size = (uint32_t)fb_size64;
+
+                if (fb_size > 0xFFFFFFFFu - page_off) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                uint32_t map_size = fb_size + page_off;
+                uint32_t pages = (map_size + 0xFFFu) / 4096u;
+
+                if (curr->fbmap_pages > 0) {
+                    for (uint32_t i = 0; i < curr->fbmap_pages; i++) {
+                        uint32_t v = user_vaddr_start + i * 4096u;
+                        if (paging_is_user_accessible(curr->page_dir, v)) {
+                            paging_map(curr->page_dir, v, 0, 0);
+                        }
+                    }
+                    if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
+                    else curr->mem_pages = 0;
+                    curr->fbmap_pages = 0;
+                    curr->fbmap_user_ptr = 0;
+                    curr->fbmap_size_bytes = 0;
+                    curr->fbmap_is_virtio = 0;
+                }
+
+                uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
+                if (paging_pat_is_supported()) {
+                    flags |= PTE_PAT;
+                }
+
+                for (uint32_t i = 0; i < pages; i++) {
+                    uint32_t offset = i * 4096u;
+                    paging_map(curr->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
+                    curr->mem_pages++;
+                }
+
+                curr->fbmap_pages = pages;
+                curr->fbmap_user_ptr = user_vaddr_start + page_off;
+                curr->fbmap_size_bytes = fb_size;
+                curr->fbmap_is_virtio = 1;
+
+                __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
+                regs->eax = user_vaddr_start + page_off;
+                break;
+            }
+
             if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) {
                 regs->eax = 0;
                 break;
             }
 
-            const uint32_t user_vaddr_start = 0xB1000000u;
-
             uint32_t fb_base = (uint32_t)fb_ptr;
             uint32_t page_off = fb_base & 0xFFFu;
             uint32_t fb_page = fb_base & ~0xFFFu;
 
-            uint32_t fb_size = fb_pitch * fb_height;
-            if (fb_size == 0) {
+            uint64_t fb_size64 = (uint64_t)fb_pitch * (uint64_t)fb_height;
+            if (fb_size64 == 0 || fb_size64 > 0xFFFFFFFFu) {
                 regs->eax = 0;
                 break;
             }
+
+            uint32_t fb_size = (uint32_t)fb_size64;
 
             if (fb_size > 0xFFFFFFFFu - page_off) {
                 regs->eax = 0;
@@ -2295,6 +2450,9 @@ fb_present_done:
                 if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
                 else curr->mem_pages = 0;
                 curr->fbmap_pages = 0;
+                curr->fbmap_user_ptr = 0;
+                curr->fbmap_size_bytes = 0;
+                curr->fbmap_is_virtio = 0;
             }
 
             uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
@@ -2309,6 +2467,9 @@ fb_present_done:
             }
 
             curr->fbmap_pages = pages;
+            curr->fbmap_user_ptr = user_vaddr_start + page_off;
+            curr->fbmap_size_bytes = fb_size;
+            curr->fbmap_is_virtio = 0;
 
             __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
             regs->eax = user_vaddr_start + page_off;
@@ -2336,6 +2497,10 @@ fb_present_done:
                 else curr->mem_pages = 0;
                 curr->fbmap_pages = 0;
             }
+
+            curr->fbmap_user_ptr = 0;
+            curr->fbmap_size_bytes = 0;
+            curr->fbmap_is_virtio = 0;
 
             __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
             regs->eax = fb_release(curr->pid);

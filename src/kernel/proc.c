@@ -435,6 +435,9 @@ void proc_kill(task_t* t) {
         if (t->mem_pages >= t->fbmap_pages) t->mem_pages -= t->fbmap_pages;
         else t->mem_pages = 0;
         t->fbmap_pages = 0;
+        t->fbmap_user_ptr = 0;
+        t->fbmap_size_bytes = 0;
+        t->fbmap_is_virtio = 0;
     }
 
     uint32_t waited_pid = t->wait_for_pid;

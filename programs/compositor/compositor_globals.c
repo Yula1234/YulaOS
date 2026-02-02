@@ -6,28 +6,6 @@
 volatile int g_should_exit;
 volatile int g_fb_released;
 
-volatile int g_dbg_curr_pid = -1;
-volatile int g_dbg_last_rx_pid = -1;
-volatile uint16_t g_dbg_last_rx_type = 0;
-volatile uint32_t g_dbg_last_rx_seq = 0;
-volatile uint32_t g_dbg_last_rx_surface_id = 0;
-
-volatile int g_dbg_last_err_pid = -1;
-volatile uint16_t g_dbg_last_err_req_type = 0;
-volatile uint16_t g_dbg_last_err_code = 0;
-volatile uint32_t g_dbg_last_err_surface_id = 0;
-volatile uint32_t g_dbg_last_err_detail = 0;
-
-volatile int g_dbg_bar_rx_pid = -1;
-volatile uint16_t g_dbg_bar_rx_type = 0;
-volatile uint32_t g_dbg_bar_rx_seq = 0;
-
-volatile int g_dbg_bar_err_pid = -1;
-volatile uint16_t g_dbg_bar_err_req_type = 0;
-volatile uint16_t g_dbg_bar_err_code = 0;
-volatile uint32_t g_dbg_bar_err_seq = 0;
-volatile uint32_t g_dbg_bar_err_detail = 0;
-
 uint32_t g_commit_gen = 1;
 
 int g_screen_w = 0;

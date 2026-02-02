@@ -6,6 +6,7 @@
 #include <fs/vfs.h>
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
+#include <drivers/virtio_gpu.h>
 
 #include <kernel/input_focus.h>
 #include <kernel/proc.h>
@@ -215,10 +216,22 @@ void mouse_process_byte(uint8_t data) {
         mouse_x += rel_x;
         mouse_y -= rel_y;
 
+        int max_w = (int)fb_width;
+        int max_h = (int)fb_height;
+        if (virtio_gpu_is_active()) {
+            const virtio_gpu_fb_t* fb = virtio_gpu_get_fb();
+            if (fb && fb->width > 0u && fb->height > 0u) {
+                max_w = (int)fb->width;
+                max_h = (int)fb->height;
+            }
+        }
+        if (max_w < 1) max_w = 1;
+        if (max_h < 1) max_h = 1;
+
         if (mouse_x < 0) mouse_x = 0;
         if (mouse_y < 0) mouse_y = 0;
-        if (mouse_x >= (int)fb_width)  mouse_x = fb_width - 1;
-        if (mouse_y >= (int)fb_height) mouse_y = fb_height - 1;
+        if (mouse_x >= max_w) mouse_x = max_w - 1;
+        if (mouse_y >= max_h) mouse_y = max_h - 1;
 
         poll_waitq_wake_all(&mouse_poll_waitq);
     }

@@ -18,6 +18,7 @@
 #include <drivers/acpi.h> 
 #include <drivers/vga.h>
 #include <drivers/pci.h>
+#include <drivers/virtio_gpu.h>
 
 #include <kernel/clipboard.h>
 #include <kernel/tty.h>
@@ -189,6 +190,16 @@ static void usb_quiesce_early(void) {
 
 static inline void sys_usleep(uint32_t us) {
     __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
+}
+
+static void fb_select_active(void) {
+    if (!virtio_gpu_is_active()) return;
+    const virtio_gpu_fb_t* fb = virtio_gpu_get_fb();
+    if (!fb || !fb->fb_ptr || fb->width == 0 || fb->height == 0 || fb->pitch == 0) return;
+    fb_ptr = fb->fb_ptr;
+    fb_width = fb->width;
+    fb_height = fb->height;
+    fb_pitch = fb->pitch;
 }
 
 static void init_task(void* arg) {
@@ -385,20 +396,31 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     heap_init();
 
- 
-     // mapping video memory
-     uint32_t fb_size = fb_pitch * fb_height;
-     uint32_t fb_flags = PTE_PRESENT | PTE_RW;
-     if (paging_pat_is_supported()) {
-         fb_flags |= PTE_PAT;
-     }
-     uint32_t fb_base = (uint32_t)fb_ptr;
-     paging_init_mtrr_wc(fb_base, fb_size);
-     uint32_t fb_page = fb_base & ~0xFFFu;
-     uint32_t fb_end = fb_base + fb_size;
-     uint32_t fb_map_size = (fb_end - fb_page + 0xFFFu) & ~0xFFFu;
-     for (uint32_t i = 0; i < fb_map_size; i += 4096) {
-        paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
+    virtio_gpu_init();
+    fb_select_active();
+
+    // mapping video memory
+    uint64_t fb_size64 = (uint64_t)fb_pitch * (uint64_t)fb_height;
+    if (fb_size64 != 0 && fb_size64 <= 0xFFFFFFFFu) {
+        uint32_t fb_size = (uint32_t)fb_size64;
+        uint32_t fb_flags = PTE_PRESENT | PTE_RW;
+        if (paging_pat_is_supported()) {
+            fb_flags |= PTE_PAT;
+        }
+
+        uint32_t fb_base = (uint32_t)fb_ptr;
+        if (fb_base >= memory_end_addr) {
+            paging_init_mtrr_wc(fb_base, fb_size);
+        }
+
+        uint32_t fb_page = fb_base & ~0xFFFu;
+        uint32_t fb_end = fb_base + fb_size;
+        if (fb_end >= fb_base) {
+            uint32_t fb_map_size = (fb_end - fb_page + 0xFFFu) & ~0xFFFu;
+            for (uint32_t i = 0; i < fb_map_size; i += 4096) {
+                paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
+            }
+        }
     }
 
     g_fb_mapped = 1;

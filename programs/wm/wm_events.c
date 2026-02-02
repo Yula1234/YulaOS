@@ -390,7 +390,10 @@ static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
     }
 
     if (kc == 0xADu) {
-        (void)comp_wm_exit(c);
+        int r = comp_wm_exit(c);
+        char tmp[64];
+        (void)snprintf(tmp, sizeof(tmp), "wm: exit cmd r=%d\n", r);
+        dbg_write(tmp);
         return;
     }
 

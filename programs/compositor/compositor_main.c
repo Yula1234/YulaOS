@@ -38,12 +38,65 @@ typedef struct {
     int si;
 } draw_item_t;
 
+static fb_rect_t fb_rect_make(int32_t x, int32_t y, int32_t w, int32_t h) {
+    fb_rect_t r;
+    r.x = x;
+    r.y = y;
+    r.w = w;
+    r.h = h;
+    return r;
+}
+
+static fb_rect_t fb_rect_from_comp(comp_rect_t r) {
+    return fb_rect_make((int32_t)r.x1, (int32_t)r.y1, (int32_t)(r.x2 - r.x1), (int32_t)(r.y2 - r.y1));
+}
+
 static int is_wm_reserved_key(uint8_t kc) {
     if (kc == 0xC0u || kc == 0xC1u) return 1;
     if (kc >= 0x90u && kc <= 0x95u) return 1;
     if (kc >= 0xA0u && kc <= 0xAFu) return 1;
     if (kc >= 0xB1u && kc <= 0xB4u) return 1;
     return 0;
+}
+
+static void comp_disconnect_client_with_wm(comp_client_t* clients, int clients_cap, int dc, wm_conn_t* wm, comp_input_state_t* input, comp_preview_t* preview, int* preview_dirty) {
+    if (dc < 0 || dc >= clients_cap) return;
+    if (!clients[dc].connected) return;
+
+    dbg_write("compositor: client disconnected\n");
+
+    if (wm && wm->connected) {
+        for (int si = 0; si < COMP_MAX_SURFACES; si++) {
+            comp_surface_t* s = &clients[dc].surfaces[si];
+            if (!s->in_use) continue;
+            comp_ipc_wm_event_t ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.kind = COMP_WM_EVENT_UNMAP;
+            ev.client_id = (uint32_t)dc;
+            ev.surface_id = s->id;
+            ev.flags = 0;
+            if (wm_send_event(wm, &ev, 1) < 0) {
+                wm_disconnect(wm);
+                if (input) {
+                    input->focus_client = -1;
+                    input->focus_surface_id = 0;
+                    input->wm_pointer_grab_active = 0;
+                    input->wm_pointer_grab_client = -1;
+                    input->wm_pointer_grab_surface_id = 0;
+                    input->wm_keyboard_grab_active = 0;
+                }
+                if (preview && preview_dirty) {
+                    if (preview->active) {
+                        preview->active = 0;
+                        *preview_dirty = 1;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    comp_client_disconnect(&clients[dc]);
 }
 
 static void comp_client_slot_reset(comp_client_t* c) {
@@ -277,7 +330,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         argv2[6] = c2s_r_s;
         argv2[7] = s2c_w_s;
 
-        child_pid = spawn_process("/bin/comp_client.exe", 8, argv2);
+        child_pid = spawn_process_resolved("comp_client", 8, argv2);
         if (child_pid >= 0) {
             have_ipc = 1;
             close(ipc_fds[1]);
@@ -372,6 +425,14 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     while (!g_should_exit) {
         int scene_dirty = 0;
+
+        if (listen_fd < 0) {
+            listen_fd = ipc_listen("compositor");
+            if (listen_fd >= 0) {
+                dbg_write("compositor: ipc_listen compositor ok\n");
+            }
+        }
+
         if (wm_spawn_retry_wait > 0) wm_spawn_retry_wait--;
         if (!wm.connected && wm_pid > 0) {
             if (wm_spawn_cooldown > 0) {
@@ -399,7 +460,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         if (!wm.connected && wm_pid < 0 && wm_spawn_retry_wait == 0 && listen_fd >= 0 && wm_listen_fd >= 0) {
             char* wargv[1];
             wargv[0] = (char*)"wm";
-            wm_pid = spawn_process("/bin/wm.exe", 1, wargv);
+            wm_pid = spawn_process_resolved("wm", 1, wargv);
             if (wm_pid < 0) {
                 dbg_write("compositor: spawn wm failed\n");
                 wm_spawn_retry_wait = 200;
@@ -495,33 +556,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
 
         if (comp_send_mouse(clients, clients_cap, &input, &ms) < 0) {
-            int dc = input.last_client;
-            if (dc >= 0 && dc < clients_cap && clients[dc].connected) {
-                dbg_write("compositor: client disconnected\n");
-                if (wm.connected) {
-                    for (int si = 0; si < COMP_MAX_SURFACES; si++) {
-                        comp_surface_t* s = &clients[dc].surfaces[si];
-                        if (!s->in_use) continue;
-                        comp_ipc_wm_event_t ev;
-                        memset(&ev, 0, sizeof(ev));
-                        ev.kind = COMP_WM_EVENT_UNMAP;
-                        ev.client_id = (uint32_t)dc;
-                        ev.surface_id = s->id;
-                        ev.flags = 0;
-                        if (wm_send_event(&wm, &ev, 1) < 0) {
-                            wm_disconnect(&wm);
-                            input.focus_client = -1;
-                            input.focus_surface_id = 0;
-                            input.wm_pointer_grab_active = 0;
-                            input.wm_pointer_grab_client = -1;
-                            input.wm_pointer_grab_surface_id = 0;
-                            input.wm_keyboard_grab_active = 0;
-                            break;
-                        }
-                    }
-                }
-                comp_client_disconnect(&clients[dc]);
-            }
+            const int dc = input.last_client;
+            comp_disconnect_client_with_wm(clients, clients_cap, dc, &wm, &input, &preview, &preview_dirty);
         }
 
         for (;;) {
@@ -530,6 +566,14 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             if (kr <= 0) break;
 
             uint8_t kcu = (uint8_t)kc;
+
+            if (kcu == 0x17u || (!wm.connected && kcu == 0x1Bu)) {
+                char tmp[64];
+                (void)snprintf(tmp, sizeof(tmp), "compositor: exit key %u\n", (unsigned)kcu);
+                dbg_write(tmp);
+                g_should_exit = 1;
+                break;
+            }
 
             if (wm.connected) {
                 comp_ipc_wm_event_t ev;
@@ -569,30 +613,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             if (comp_send_key(clients, clients_cap, &input, (uint32_t)kcu, 1u) < 0) {
                 int dc = input.focus_client;
                 if (dc >= 0 && dc < clients_cap && clients[dc].connected) {
-                    dbg_write("compositor: client disconnected\n");
-                    if (wm.connected) {
-                        for (int si = 0; si < COMP_MAX_SURFACES; si++) {
-                            comp_surface_t* s = &clients[dc].surfaces[si];
-                            if (!s->in_use) continue;
-                            comp_ipc_wm_event_t ev;
-                            memset(&ev, 0, sizeof(ev));
-                            ev.kind = COMP_WM_EVENT_UNMAP;
-                            ev.client_id = (uint32_t)dc;
-                            ev.surface_id = s->id;
-                            ev.flags = 0;
-                            if (wm_send_event(&wm, &ev, 1) < 0) {
-                                wm_disconnect(&wm);
-                                input.focus_client = -1;
-                                input.focus_surface_id = 0;
-                                input.wm_pointer_grab_active = 0;
-                                input.wm_pointer_grab_client = -1;
-                                input.wm_pointer_grab_surface_id = 0;
-                                input.wm_keyboard_grab_active = 0;
-                                break;
-                            }
-                        }
-                    }
-                    comp_client_disconnect(&clients[dc]);
+                    comp_disconnect_client_with_wm(clients, clients_cap, dc, &wm, &input, &preview, &preview_dirty);
                 }
                 break;
             }
@@ -612,6 +633,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     preview_dirty = 1;
                 }
             }
+        }
+
+        if (g_should_exit) {
+            break;
         }
 
         comp_damage_t dmg;
@@ -704,8 +729,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             uint32_t* out = frame_pixels ? frame_pixels : fb;
 
             int order_n = 0;
+            int connected_clients = 0;
             for (int ci = 0; ci < clients_cap; ci++) {
                 if (!clients[ci].connected) continue;
+                connected_clients++;
                 for (int si = 0; si < COMP_MAX_SURFACES; si++) {
                     comp_surface_t* s = &clients[ci].surfaces[si];
                     if (!s->in_use || !s->attached || !s->committed) continue;
@@ -786,10 +813,46 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
+        int32_t prev_draw_mx = draw_mx;
+        int32_t prev_draw_my = draw_my;
+
         if (cursor_moved || dmg.n > 0) {
             comp_cursor_save_under_draw(fb, stride, w, h, ms.x, ms.y);
             draw_mx = ms.x;
             draw_my = ms.y;
+        }
+
+        if (cursor_moved || dmg.n > 0) {
+            fb_rect_t rects[COMP_MAX_DAMAGE_RECTS + 2];
+            uint32_t rect_n = 0;
+
+            for (int ri = 0; ri < dmg.n && rect_n < (uint32_t)COMP_MAX_DAMAGE_RECTS; ri++) {
+                const comp_rect_t clip = dmg.rects[ri];
+                if (rect_empty(&clip)) continue;
+                rects[rect_n++] = fb_rect_from_comp(clip);
+            }
+
+            if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
+                comp_rect_t old_cursor = rect_make((int)prev_draw_mx - COMP_CURSOR_SAVE_HALF,
+                                                   (int)prev_draw_my - COMP_CURSOR_SAVE_HALF,
+                                                   COMP_CURSOR_SAVE_W,
+                                                   COMP_CURSOR_SAVE_H);
+                old_cursor = rect_clip_to_screen(old_cursor, w, h);
+                if (!rect_empty(&old_cursor) && rect_n < (uint32_t)(COMP_MAX_DAMAGE_RECTS + 2)) {
+                    rects[rect_n++] = fb_rect_from_comp(old_cursor);
+                }
+            }
+
+            comp_rect_t new_cursor = rect_make((int)ms.x - COMP_CURSOR_SAVE_HALF,
+                                               (int)ms.y - COMP_CURSOR_SAVE_HALF,
+                                               COMP_CURSOR_SAVE_W,
+                                               COMP_CURSOR_SAVE_H);
+            new_cursor = rect_clip_to_screen(new_cursor, w, h);
+            if (!rect_empty(&new_cursor) && rect_n < (uint32_t)(COMP_MAX_DAMAGE_RECTS + 2)) {
+                rects[rect_n++] = fb_rect_from_comp(new_cursor);
+            }
+
+            (void)fb_present(fb, info.pitch, rects, rect_n);
         }
 
         first_frame = 0;

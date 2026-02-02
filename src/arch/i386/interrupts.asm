@@ -75,6 +75,7 @@ gen_isr 0xFF
 gen_isr 0xF0
 gen_isr 0xF1
 gen_isr 0xA1
+gen_isr 0xA2
 
 section '.data' writeable
 

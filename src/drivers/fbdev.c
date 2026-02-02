@@ -7,6 +7,8 @@
 
 #include "fbdev.h"
 
+#include <drivers/virtio_gpu.h>
+
 extern uint32_t fb_width;
 extern uint32_t fb_height;
 extern uint32_t fb_pitch;
@@ -23,12 +25,22 @@ static int fb0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     if (size < sizeof(fb_info_t)) return -1;
 
     fb_info_t info;
-    info.width = fb_width;
-    info.height = fb_height;
-    info.pitch = fb_pitch;
-    info.stride = fb_width * 4u;
+
+    if (virtio_gpu_is_active()) {
+        const virtio_gpu_fb_t* fb = virtio_gpu_get_fb();
+        if (!fb) return -1;
+        info.width = fb->width;
+        info.height = fb->height;
+        info.pitch = fb->pitch;
+    } else {
+        info.width = fb_width;
+        info.height = fb_height;
+        info.pitch = fb_pitch;
+    }
+
+    info.stride = info.width * 4u;
     info.bpp = 32;
-    info.size_bytes = fb_pitch * fb_height;
+    info.size_bytes = info.pitch * info.height;
 
     *(fb_info_t*)buffer = info;
     return (int)sizeof(fb_info_t);

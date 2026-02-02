@@ -7,28 +7,6 @@
 extern volatile int g_should_exit;
 extern volatile int g_fb_released;
 
-extern volatile int g_dbg_curr_pid;
-extern volatile int g_dbg_last_rx_pid;
-extern volatile uint16_t g_dbg_last_rx_type;
-extern volatile uint32_t g_dbg_last_rx_seq;
-extern volatile uint32_t g_dbg_last_rx_surface_id;
-
-extern volatile int g_dbg_last_err_pid;
-extern volatile uint16_t g_dbg_last_err_req_type;
-extern volatile uint16_t g_dbg_last_err_code;
-extern volatile uint32_t g_dbg_last_err_surface_id;
-extern volatile uint32_t g_dbg_last_err_detail;
-
-extern volatile int g_dbg_bar_rx_pid;
-extern volatile uint16_t g_dbg_bar_rx_type;
-extern volatile uint32_t g_dbg_bar_rx_seq;
-
-extern volatile int g_dbg_bar_err_pid;
-extern volatile uint16_t g_dbg_bar_err_req_type;
-extern volatile uint16_t g_dbg_bar_err_code;
-extern volatile uint32_t g_dbg_bar_err_seq;
-extern volatile uint32_t g_dbg_bar_err_detail;
-
 extern uint32_t g_commit_gen;
 
 extern int g_screen_w;
@@ -71,6 +49,12 @@ void present_damage_to_fb(uint32_t* fb, const uint32_t* src, int stride, comp_da
 void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip);
 void comp_cursor_restore(uint32_t* fb, int stride, int w, int h);
 void comp_cursor_save_under_draw(uint32_t* fb, int stride, int w, int h, int x, int y);
+
+void draw_text(uint32_t* fb, int stride, int w, int h, int x, int y, const char* s, uint32_t color);
+
+#define COMP_CURSOR_SAVE_W 17
+#define COMP_CURSOR_SAVE_H 17
+#define COMP_CURSOR_SAVE_HALF 8
 
 void draw_frame_rect_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int rh, int t, uint32_t color, comp_rect_t clip);
 
