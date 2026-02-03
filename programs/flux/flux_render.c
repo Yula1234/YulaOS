@@ -1,4 +1,4 @@
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 static inline void put_pixel(uint32_t* fb, int stride, int w, int h, int x, int y, uint32_t color) {
     if ((unsigned)x >= (unsigned)w || (unsigned)y >= (unsigned)h) return;

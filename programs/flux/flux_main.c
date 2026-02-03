@@ -1,4 +1,4 @@
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 static void on_signal(int sig) {
     (void)sig;
@@ -63,7 +63,7 @@ static void comp_disconnect_client_with_wm(comp_client_t* clients, int clients_c
     if (dc < 0 || dc >= clients_cap) return;
     if (!clients[dc].connected) return;
 
-    dbg_write("compositor: client disconnected\n");
+    dbg_write("flux: client disconnected\n");
 
     if (wm && wm->connected) {
         for (int si = 0; si < COMP_MAX_SURFACES; si++) {
@@ -194,61 +194,61 @@ static int comp_clients_reserve(comp_client_t** clients,
 __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
-    dbg_write("compositor: enter main\n");
+    dbg_write("flux: enter main\n");
 
     set_term_mode(0);
 
-    dbg_write("compositor: install signals\n");
+    dbg_write("flux: install signals\n");
     signal(2, (void*)on_sigint_ignore);
     signal(15, (void*)on_signal);
-    dbg_write("compositor: signals ok\n");
+    dbg_write("flux: signals ok\n");
 
-    dbg_write("compositor: open /dev/fb0\n");
+    dbg_write("flux: open /dev/fb0\n");
     int fd_fb = open("/dev/fb0", 0);
     if (fd_fb < 0) {
-        dbg_write("compositor: cannot open /dev/fb0\n");
+        dbg_write("flux: cannot open /dev/fb0\n");
         return 1;
     }
 
-    dbg_write("compositor: read fb info\n");
+    dbg_write("flux: read fb info\n");
     fb_info_t info;
     int r = read(fd_fb, &info, sizeof(info));
     close(fd_fb);
-    dbg_write("compositor: fb info read done\n");
+    dbg_write("flux: fb info read done\n");
 
     if (r < (int)sizeof(info) || info.width == 0 || info.height == 0 || info.pitch == 0) {
-        dbg_write("compositor: bad fb info\n");
+        dbg_write("flux: bad fb info\n");
         return 1;
     }
 
-    dbg_write("compositor: open /dev/mouse\n");
+    dbg_write("flux: open /dev/mouse\n");
     int fd_mouse = open("/dev/mouse", 0);
     if (fd_mouse < 0) {
-        dbg_write("compositor: open mouse failed\n");
+        dbg_write("flux: open mouse failed\n");
         return 1;
     }
 
     int listen_fd = -1;
     int wm_listen_fd = -1;
 
-    dbg_write("compositor: fb_acquire\n");
+    dbg_write("flux: fb_acquire\n");
     if (fb_acquire() != 0) {
-        dbg_write("compositor: fb busy\n");
+        dbg_write("flux: fb busy\n");
         close(fd_mouse);
         return 1;
     }
-    dbg_write("compositor: fb acquired\n");
+    dbg_write("flux: fb acquired\n");
 
-    dbg_write("compositor: map_framebuffer\n");
+    dbg_write("flux: map_framebuffer\n");
     uint32_t* fb = (uint32_t*)map_framebuffer();
     if (!fb) {
         close(fd_mouse);
         fb_release();
         g_fb_released = 1;
-        dbg_write("compositor: map_framebuffer failed\n");
+        dbg_write("flux: map_framebuffer failed\n");
         return 1;
     }
-    dbg_write("compositor: fb mapped\n");
+    dbg_write("flux: fb mapped\n");
 
     int w = (int)info.width;
     int h = (int)info.height;
@@ -276,87 +276,6 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
     }
 
-    int shm_w = 320;
-    int shm_h = 240;
-    uint32_t shm_size = (uint32_t)shm_w * (uint32_t)shm_h * 4u;
-    int shm_fd = shm_create(shm_size);
-    if (shm_fd < 0) {
-        dbg_write("compositor: shm_create failed\n");
-    }
-
-    comp_buffer_t buf;
-    memset(&buf, 0, sizeof(buf));
-    buf.shm_fd = shm_fd;
-    buf.size_bytes = shm_size;
-    buf.w = shm_w;
-    buf.h = shm_h;
-    buf.stride = shm_w;
-    buf.pixels = 0;
-    if (buf.shm_fd >= 0) {
-        buf.pixels = (uint32_t*)mmap(buf.shm_fd, buf.size_bytes, MAP_SHARED);
-        if (!buf.pixels) {
-            dbg_write("compositor: mmap(shm) failed\n");
-        }
-    }
-
-    int ipc_fds[2] = { -1, -1 };
-    int ipc_back[2] = { -1, -1 };
-    int have_ipc = 0;
-    int child_pid = -1;
-    if (buf.shm_fd >= 0 && buf.pixels && pipe(ipc_fds) == 0 && pipe(ipc_back) == 0) {
-        char shm_s[16];
-        char w_s[16];
-        char h_s[16];
-        char c2s_w_s[16];
-        char s2c_r_s[16];
-        char c2s_r_s[16];
-        char s2c_w_s[16];
-
-        itoa(buf.shm_fd, shm_s, 10);
-        itoa(shm_w, w_s, 10);
-        itoa(shm_h, h_s, 10);
-        itoa(ipc_fds[1], c2s_w_s, 10);
-        itoa(ipc_back[0], s2c_r_s, 10);
-        itoa(ipc_fds[0], c2s_r_s, 10);
-        itoa(ipc_back[1], s2c_w_s, 10);
-
-        char* argv2[8];
-        argv2[0] = (char*)"comp_client";
-        argv2[1] = shm_s;
-        argv2[2] = w_s;
-        argv2[3] = h_s;
-        argv2[4] = c2s_w_s;
-        argv2[5] = s2c_r_s;
-        argv2[6] = c2s_r_s;
-        argv2[7] = s2c_w_s;
-
-        child_pid = spawn_process_resolved("comp_client", 8, argv2);
-        if (child_pid >= 0) {
-            have_ipc = 1;
-            close(ipc_fds[1]);
-            close(ipc_back[0]);
-        } else {
-            dbg_write("compositor: spawn comp_client failed\n");
-            close(ipc_fds[0]);
-            close(ipc_fds[1]);
-            close(ipc_back[0]);
-            close(ipc_back[1]);
-            ipc_fds[0] = -1;
-            ipc_fds[1] = -1;
-            ipc_back[0] = -1;
-            ipc_back[1] = -1;
-        }
-    } else {
-        if (ipc_fds[0] >= 0) close(ipc_fds[0]);
-        if (ipc_fds[1] >= 0) close(ipc_fds[1]);
-        if (ipc_back[0] >= 0) close(ipc_back[0]);
-        if (ipc_back[1] >= 0) close(ipc_back[1]);
-        ipc_fds[0] = -1;
-        ipc_fds[1] = -1;
-        ipc_back[0] = -1;
-        ipc_back[1] = -1;
-    }
-
     comp_client_t* clients = 0;
     int clients_cap = 0;
     draw_surface_state_t* prev_state = 0;
@@ -365,15 +284,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int order_cap = 0;
 
     if (comp_clients_reserve(&clients, &clients_cap, (int)COMP_CLIENTS_INIT, &prev_state, &prev_state_cap_clients, &order, &order_cap) != 0) {
-        dbg_write("compositor: OOM: cannot allocate clients\n");
+        dbg_write("flux: OOM: cannot allocate clients\n");
         close(fd_mouse);
         fb_release();
         g_fb_released = 1;
         return 1;
-    }
-
-    if (have_ipc) {
-        comp_client_init(&clients[0], child_pid, ipc_fds[0], ipc_back[1]);
     }
 
     comp_input_state_t input;
@@ -381,9 +296,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     uint32_t z_counter = 1;
 
-    listen_fd = ipc_listen("compositor");
+    listen_fd = ipc_listen("flux");
     if (listen_fd < 0) {
-        dbg_write("compositor: ipc_listen failed\n");
+        dbg_write("flux: ipc_listen failed\n");
     }
 
     wm_conn_t wm;
@@ -394,9 +309,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     ipc_rx_reset(&wm.rx);
     wm.seq_out = 1;
 
-    wm_listen_fd = ipc_listen("compositor_wm");
+    wm_listen_fd = ipc_listen("flux_wm");
     if (wm_listen_fd < 0) {
-        dbg_write("compositor: ipc_listen compositor_wm failed\n");
+        dbg_write("flux: ipc_listen flux_wm failed\n");
     }
 
     int wm_pid = -1;
@@ -427,9 +342,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         int scene_dirty = 0;
 
         if (listen_fd < 0) {
-            listen_fd = ipc_listen("compositor");
+            listen_fd = ipc_listen("flux");
             if (listen_fd >= 0) {
-                dbg_write("compositor: ipc_listen compositor ok\n");
+                dbg_write("flux: ipc_listen flux ok\n");
             }
         }
 
@@ -443,7 +358,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         }
 
         if (wm_listen_fd < 0) {
-            wm_listen_fd = ipc_listen("compositor_wm");
+            wm_listen_fd = ipc_listen("flux_wm");
         }
         if (!wm.connected && wm_listen_fd >= 0) {
             int fds[2] = { -1, -1 };
@@ -459,10 +374,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
         if (!wm.connected && wm_pid < 0 && wm_spawn_retry_wait == 0 && listen_fd >= 0 && wm_listen_fd >= 0) {
             char* wargv[1];
-            wargv[0] = (char*)"wm";
-            wm_pid = spawn_process_resolved("wm", 1, wargv);
+            wargv[0] = (char*)"axwm";
+            wm_pid = spawn_process_resolved("axwm", 1, wargv);
             if (wm_pid < 0) {
-                dbg_write("compositor: spawn wm failed\n");
+                dbg_write("flux: spawn axwm failed\n");
                 wm_spawn_retry_wait = 200;
             } else {
                 wm_spawn_cooldown = 200;
@@ -508,9 +423,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
                 if (slot >= 0 && slot < clients_cap) {
                     comp_client_init(&clients[slot], -1, fds[0], fds[1]);
-                    dbg_write("compositor: accepted client\n");
+                    dbg_write("flux: accepted client\n");
                 } else {
-                    dbg_write("compositor: reject client (OOM)\n");
+                    dbg_write("flux: reject client (OOM)\n");
                     if (fds[0] >= 0) close(fds[0]);
                     if (fds[1] >= 0) close(fds[1]);
                 }
@@ -519,7 +434,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
         for (int ci = 0; ci < clients_cap; ci++) {
             if (!clients[ci].connected) continue;
-            comp_client_pump(&clients[ci], &buf, &z_counter, &wm, (uint32_t)ci, &input);
+            comp_client_pump(&clients[ci], 0, &z_counter, &wm, (uint32_t)ci, &input);
         }
 
         if (wm.connected) {
@@ -569,7 +484,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
             if (kcu == 0x17u || (!wm.connected && kcu == 0x1Bu)) {
                 char tmp[64];
-                (void)snprintf(tmp, sizeof(tmp), "compositor: exit key %u\n", (unsigned)kcu);
+                (void)snprintf(tmp, sizeof(tmp), "flux: exit key %u\n", (unsigned)kcu);
                 dbg_write(tmp);
                 g_should_exit = 1;
                 break;
@@ -896,8 +811,6 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         (void)syscall(9, wm_pid, 0, 0);
         wm_pid = -1;
     }
-
-    comp_buffer_destroy(&buf);
 
     if (!g_fb_released) {
         fb_release();

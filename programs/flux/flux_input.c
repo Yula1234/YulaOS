@@ -1,4 +1,4 @@
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential) {
     if (!c || !in) return 0;

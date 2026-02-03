@@ -613,7 +613,7 @@ static inline int comp_send_destroy_surface_sync(comp_conn_t* c, uint32_t surfac
 }
 
 static inline int comp_wm_connect(comp_conn_t* c) {
-    return comp_connect(c, "compositor_wm");
+    return comp_connect(c, "flux_wm");
 }
 
 static inline int comp_wm_send_cmd(comp_conn_t* c, uint32_t kind, uint32_t client_id, uint32_t surface_id, int32_t x, int32_t y, uint32_t flags) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 volatile int g_should_exit;
 volatile int g_fb_released;

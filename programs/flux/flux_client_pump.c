@@ -1,4 +1,4 @@
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 static void comp_surface_shadow_free(comp_surface_t* s) {
     if (!s) return;

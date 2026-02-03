@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 int wm_pick_next_focus_idx(const wm_state_t* st, int start_idx) {
     if (!st) return -1;
@@ -82,7 +82,7 @@ static void wm_on_map(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
 
     if (!existed) {
         char tmp[96];
-        (void)snprintf(tmp, sizeof(tmp), "wm: map c=%u s=%u %ux%u at %d,%d\n", (unsigned)ev->client_id,
+        (void)snprintf(tmp, sizeof(tmp), "axwm: map c=%u s=%u %ux%u at %d,%d\n", (unsigned)ev->client_id,
                       (unsigned)ev->surface_id, (unsigned)ev->sw, (unsigned)ev->sh, (int)ev->sx, (int)ev->sy);
         dbg_write(tmp);
     }
@@ -365,7 +365,7 @@ static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
     }
 
     if (kc == 0xA8u) {
-        (void)wm_spawn_app_by_name("comp_client");
+        (void)wm_spawn_app_by_name("term");
         return;
     }
 
@@ -392,7 +392,7 @@ static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t*
     if (kc == 0xADu) {
         int r = comp_wm_exit(c);
         char tmp[64];
-        (void)snprintf(tmp, sizeof(tmp), "wm: exit cmd r=%d\n", r);
+        (void)snprintf(tmp, sizeof(tmp), "axwm: exit cmd r=%d\n", r);
         dbg_write(tmp);
         return;
     }

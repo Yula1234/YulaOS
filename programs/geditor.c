@@ -1802,7 +1802,7 @@ int main(int argc, char** argv) {
     (void)load_file_silent();
 
     comp_conn_reset(&conn);
-    if (comp_connect(&conn, "compositor") != 0) return 1;
+    if (comp_connect(&conn, "flux") != 0) return 1;
     if (comp_send_hello(&conn) != 0) {
         comp_disconnect(&conn);
         return 1;

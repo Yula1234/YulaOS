@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 static volatile int g_should_exit;
 
@@ -48,7 +48,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     while (!g_should_exit) {
         if (!c.connected) {
             if (comp_wm_connect(&c) == 0) {
-                dbg_write("wm: connected\n");
+                dbg_write("axwm: connected\n");
                 wm_reset_session_state(&st);
             } else {
                 comp_wait_events(&c, 100000u);
@@ -70,7 +70,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         uint8_t payload[COMP_IPC_MAX_PAYLOAD];
         int r = comp_try_recv(&c, &hdr, payload, (uint32_t)sizeof(payload));
         if (r < 0) {
-            dbg_write("wm: disconnected\n");
+            dbg_write("axwm: disconnected\n");
             comp_disconnect(&c);
             wm_reset_session_state(&st);
             comp_wait_events(&c, 100000u);

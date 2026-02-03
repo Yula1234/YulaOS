@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 void wm_stop_drag(comp_conn_t* c, wm_state_t* st) {
     if (!c || !st) return;

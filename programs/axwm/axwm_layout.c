@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 static inline int32_t wm_max_i32(int32_t a, int32_t b) {
     return a > b ? a : b;

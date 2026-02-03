@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 int rect_empty(const comp_rect_t* r) {
     return !r || r->x1 >= r->x2 || r->y1 >= r->y2;

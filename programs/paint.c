@@ -1026,7 +1026,7 @@ int main(int argc, char** argv) {
 
     comp_conn_t conn;
     comp_conn_reset(&conn);
-    if (comp_connect(&conn, "compositor") != 0) {
+    if (comp_connect(&conn, "flux") != 0) {
         dbg_write("paint: comp_connect failed\n");
         return 1;
     }

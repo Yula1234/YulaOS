@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("test" "edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "compositor" "comp_client" "wm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
+USER_APPS=("edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -114,7 +114,6 @@ wait
 
 if [ ! -f "$DISK_IMG" ]; then
     dd if=/dev/zero of="$DISK_IMG" bs=1M count=40 status=none
-    "$TOOL" "$DISK_IMG" format
 fi
 
 echo "[fs] importing files..."

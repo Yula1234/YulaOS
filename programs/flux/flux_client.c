@@ -1,4 +1,4 @@
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 void comp_buffer_destroy(comp_buffer_t* b) {
     if (!b) return;

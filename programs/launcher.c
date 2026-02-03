@@ -2,6 +2,11 @@
 #include <comp.h>
 #include <font.h>
 
+static inline void dbg_write(const char* s) {
+    if (!s) return;
+    write(1, s, (uint32_t)strlen(s));
+}
+
 static int WIN_W = 520;
 static int WIN_H = 260;
 
@@ -430,6 +435,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     set_term_mode(0);
 
+    dbg_write("launcher: start\n");
+
     g_apps = 0;
     g_app_count = 0;
     g_app_cap = 0;
@@ -448,7 +455,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     g_query_len = 0;
     g_query_cap = 0;
     query_reserve(32);
-    if (!g_query || !g_query_lc) return 1;
+    if (!g_query || !g_query_lc) {
+        dbg_write("launcher: query_reserve failed\n");
+        return 1;
+    }
     g_query[0] = '\0';
     g_query_lc[0] = '\0';
     g_selected = 0;
@@ -456,8 +466,12 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     rebuild_filter();
 
     comp_conn_reset(&conn);
-    if (comp_connect(&conn, "compositor") != 0) return 1;
+    if (comp_connect(&conn, "flux") != 0) {
+        dbg_write("launcher: comp_connect failed\n");
+        return 1;
+    }
     if (comp_send_hello(&conn) != 0) {
+        dbg_write("launcher: hello failed\n");
         comp_disconnect(&conn);
         return 1;
     }
@@ -470,12 +484,14 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         if (shm_fd >= 0) break;
     }
     if (shm_fd < 0) {
+        dbg_write("launcher: shm_create_named failed\n");
         comp_disconnect(&conn);
         return 1;
     }
 
     canvas = (uint32_t*)mmap(shm_fd, size_bytes, MAP_SHARED);
     if (ptr_is_invalid(canvas)) {
+        dbg_write("launcher: mmap failed\n");
         close(shm_fd);
         shm_fd = -1;
         shm_unlink_named(shm_name);
@@ -486,7 +502,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     {
         uint16_t err = 0;
-        if (comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, (uint32_t)WIN_W, (uint32_t)WIN_H, (uint32_t)WIN_W, 0u, 2000u, &err) != 0) {
+        int r = comp_send_attach_shm_name_sync(&conn, surface_id, shm_name, size_bytes, (uint32_t)WIN_W, (uint32_t)WIN_H, (uint32_t)WIN_W, 0u, 2000u, &err);
+        if (r != 0) {
+            char tmp[96];
+            (void)snprintf(tmp, sizeof(tmp), "launcher: attach failed r=%d err=%u\n", r, (unsigned)err);
+            dbg_write(tmp);
             munmap((void*)canvas, size_bytes);
             canvas = 0;
             close(shm_fd);
@@ -504,6 +524,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
     render();
     if (comp_send_commit(&conn, surface_id, init_x, init_y, 0u) != 0) {
+        dbg_write("launcher: initial commit failed\n");
         (void)comp_send_destroy_surface(&conn, surface_id, 0u);
         munmap((void*)canvas, size_bytes);
         canvas = 0;
@@ -525,6 +546,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         for (;;) {
             int rr = comp_try_recv(&conn, &hdr, payload, (uint32_t)sizeof(payload));
             if (rr < 0) {
+                dbg_write("launcher: comp_try_recv failed\n");
                 running = 0;
                 break;
             }
@@ -601,6 +623,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
 
             if (in.kind == COMP_IPC_INPUT_CLOSE) {
+                dbg_write("launcher: close event\n");
                 running = 0;
                 break;
             }

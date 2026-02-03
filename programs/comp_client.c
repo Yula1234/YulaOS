@@ -114,7 +114,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             if (shm_fd >= 0) {
                 created = 1;
                 have_shm_name = 1;
-                if (comp_connect(&conn, "compositor") != 0) {
+                if (comp_connect(&conn, "flux") != 0) {
                     close(shm_fd);
                     shm_fd = -1;
                     shm_unlink_named(shm_name);

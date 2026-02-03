@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 void wm_focus_next(comp_conn_t* c, wm_state_t* st, int dir) {
     if (!c || !st) return;

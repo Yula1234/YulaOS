@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 void wm_ui_cleanup(wm_ui_t* ui) {
     if (!ui) return;
@@ -90,7 +90,7 @@ int wm_spawn_app_by_name(const char* name) {
 
     {
         char tmp[128];
-        (void)snprintf(tmp, sizeof(tmp), "wm: spawn name='%s' pid=%d\n", name, pid);
+        (void)snprintf(tmp, sizeof(tmp), "axwm: spawn name='%s' pid=%d\n", name, pid);
         dbg_write(tmp);
     }
     return pid;
@@ -140,7 +140,7 @@ void wm_ui_draw_bar(wm_state_t* st) {
 
     int r = comp_send_commit(&ui->c, ui->surface_id, 0, 0, 0u);
     if (r != 0) {
-        dbg_write("wm_ui: draw commit send failed\n");
+        dbg_write("axwm_ui: draw commit send failed\n");
         wm_ui_cleanup(ui);
         return;
     }
@@ -151,7 +151,7 @@ int wm_ui_init(wm_state_t* st) {
     if (!st) return -1;
     if (st->ui.connected) return 0;
 
-    dbg_write("wm_ui: init\n");
+    dbg_write("axwm_ui: init\n");
 
     if (!st->have_screen) {
         uint32_t sw = 0, sh = 0;
@@ -162,7 +162,7 @@ int wm_ui_init(wm_state_t* st) {
         }
     }
     if (!st->have_screen || st->screen_w == 0) {
-        dbg_write("wm_ui: no screen\n");
+        dbg_write("axwm_ui: no screen\n");
         return -1;
     }
 
@@ -187,7 +187,7 @@ int wm_ui_init(wm_state_t* st) {
         }
     }
     if (!created) {
-        dbg_write("wm_ui: shm_create_named failed\n");
+        dbg_write("axwm_ui: shm_create_named failed\n");
         ui->shm_name[0] = '\0';
         ui->shm_fd = -1;
         return -1;
@@ -195,7 +195,7 @@ int wm_ui_init(wm_state_t* st) {
 
     ui->pixels = (uint32_t*)mmap(ui->shm_fd, ui->size_bytes, MAP_SHARED);
     if (!ui->pixels) {
-        dbg_write("wm_ui: mmap failed\n");
+        dbg_write("axwm_ui: mmap failed\n");
         close(ui->shm_fd);
         ui->shm_fd = -1;
         (void)shm_unlink_named(ui->shm_name);
@@ -204,8 +204,8 @@ int wm_ui_init(wm_state_t* st) {
     }
 
     comp_conn_reset(&ui->c);
-    if (comp_connect(&ui->c, "compositor") != 0) {
-        dbg_write("wm_ui: ipc_connect compositor failed\n");
+    if (comp_connect(&ui->c, "flux") != 0) {
+        dbg_write("axwm_ui: ipc_connect flux failed\n");
         wm_ui_cleanup(ui);
         return -1;
     }
@@ -214,7 +214,7 @@ int wm_ui_init(wm_state_t* st) {
     int r = comp_send_hello_sync(&ui->c, 2000u, &err);
     if (r != 0) {
         char tmp[96];
-        (void)snprintf(tmp, sizeof(tmp), "wm_ui: hello failed r=%d err=%u\n", r, (unsigned)err);
+        (void)snprintf(tmp, sizeof(tmp), "axwm_ui: hello failed r=%d err=%u\n", r, (unsigned)err);
         dbg_write(tmp);
         wm_ui_cleanup(ui);
         return -1;
@@ -225,7 +225,7 @@ int wm_ui_init(wm_state_t* st) {
                                       0u, 2000u, &err);
     if (r != 0) {
         char tmp[96];
-        (void)snprintf(tmp, sizeof(tmp), "wm_ui: attach failed r=%d err=%u\n", r, (unsigned)err);
+        (void)snprintf(tmp, sizeof(tmp), "axwm_ui: attach failed r=%d err=%u\n", r, (unsigned)err);
         dbg_write(tmp);
         wm_ui_cleanup(ui);
         return -1;
@@ -235,14 +235,14 @@ int wm_ui_init(wm_state_t* st) {
     r = comp_send_commit_sync(&ui->c, ui->surface_id, 0, 0, 0u, 2000u, &err);
     if (r != 0) {
         char tmp[96];
-        (void)snprintf(tmp, sizeof(tmp), "wm_ui: commit failed r=%d err=%u\n", r, (unsigned)err);
+        (void)snprintf(tmp, sizeof(tmp), "axwm_ui: commit failed r=%d err=%u\n", r, (unsigned)err);
         dbg_write(tmp);
         wm_ui_cleanup(ui);
         return -1;
     }
 
     ui->connected = 1;
-    dbg_write("wm_ui: ready\n");
+    dbg_write("axwm_ui: ready\n");
     wm_ui_draw_bar(st);
     return 0;
 }

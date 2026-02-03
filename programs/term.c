@@ -1069,7 +1069,7 @@ static int term_run(void) {
     int rc = 0;
 
     comp_conn_reset(&conn);
-    if (comp_connect(&conn, "compositor") != 0) {
+    if (comp_connect(&conn, "flux") != 0) {
         return 1;
     }
 

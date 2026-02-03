@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 void wm_reset_session_state(wm_state_t* st) {
     if (!st) return;

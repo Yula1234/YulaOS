@@ -1,4 +1,4 @@
-#include "wm_internal.h"
+#include "axwm_internal.h"
 
 static int wm_view_match(const wm_view_t* v, uint32_t client_id, uint32_t surface_id) {
     return v && v->mapped && v->client_id == client_id && v->surface_id == surface_id;

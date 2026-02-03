@@ -1,4 +1,4 @@
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 void wm_disconnect(wm_conn_t* w) {
     if (!w) return;
@@ -224,7 +224,7 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
 
             if (cmd.kind == COMP_WM_CMD_EXIT) {
                 char tmp[80];
-                (void)snprintf(tmp, sizeof(tmp), "compositor: wm exit cmd from %u\n", (unsigned)cmd.client_id);
+                (void)snprintf(tmp, sizeof(tmp), "flux: wm exit cmd from %u\n", (unsigned)cmd.client_id);
                 dbg_write(tmp);
                 g_should_exit = 1;
                 wm_disconnect(w);

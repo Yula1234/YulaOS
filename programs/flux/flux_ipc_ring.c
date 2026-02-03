@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include "compositor_internal.h"
+#include "flux_internal.h"
 
 uint32_t ipc_rx_count(const ipc_rx_ring_t* q) {
     return q->w - q->r;
