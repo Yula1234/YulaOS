@@ -239,23 +239,55 @@ static int vgpu_get_display_info(uint32_t* out_w, uint32_t* out_h, uint32_t* out
 
     const virtio_gpu_resp_display_info_t* info = (const virtio_gpu_resp_display_info_t*)g_vgpu.ctrl_resp;
 
-    if (info->pmodes[0].enabled && info->pmodes[0].r.width && info->pmodes[0].r.height) {
-        *out_scanout_id = 0;
-        *out_w = info->pmodes[0].r.width;
-        *out_h = info->pmodes[0].r.height;
-        return 1;
-    }
+    uint32_t best_scanout_any = 0;
+    uint32_t best_w_any = 0;
+    uint32_t best_h_any = 0;
+    uint64_t best_area_any = 0;
 
-    for (uint32_t i = 1; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
-        if (info->pmodes[i].enabled && info->pmodes[i].r.width && info->pmodes[i].r.height) {
-            *out_scanout_id = i;
-            *out_w = info->pmodes[i].r.width;
-            *out_h = info->pmodes[i].r.height;
-            return 1;
+    uint32_t best_scanout_land = 0;
+    uint32_t best_w_land = 0;
+    uint32_t best_h_land = 0;
+    uint64_t best_area_land = 0;
+
+    for (uint32_t i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
+        if (!info->pmodes[i].enabled) continue;
+
+        uint32_t w = info->pmodes[i].r.width;
+        uint32_t h = info->pmodes[i].r.height;
+        if (w == 0 || h == 0) continue;
+
+        uint64_t area = (uint64_t)w * (uint64_t)h;
+        const int landscape = (w >= h);
+
+        if (area > best_area_any || (area == best_area_any && best_area_any != 0 && i < best_scanout_any)) {
+            best_scanout_any = i;
+            best_w_any = w;
+            best_h_any = h;
+            best_area_any = area;
+        }
+
+        if (landscape) {
+            if (area > best_area_land || (area == best_area_land && best_area_land != 0 && i < best_scanout_land)) {
+                best_scanout_land = i;
+                best_w_land = w;
+                best_h_land = h;
+                best_area_land = area;
+            }
         }
     }
 
-    return 0;
+    if (best_area_land != 0) {
+        *out_scanout_id = best_scanout_land;
+        *out_w = best_w_land;
+        *out_h = best_h_land;
+        return 1;
+    }
+
+    if (best_area_any == 0) return 0;
+    *out_scanout_id = best_scanout_any;
+    *out_w = best_w_any;
+    *out_h = best_h_any;
+    return 1;
 }
 
 int virtio_gpu_init(void) {
