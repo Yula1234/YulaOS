@@ -101,6 +101,12 @@ static int g_under_cursor_valid = 0;
 static int g_under_cursor_x = 0;
 static int g_under_cursor_y = 0;
 
+void comp_cursor_reset(void) {
+    g_under_cursor_valid = 0;
+    g_under_cursor_x = 0;
+    g_under_cursor_y = 0;
+}
+
 void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip) {
     const uint32_t c1 = 0xFFFFFF;
     const uint32_t c2 = 0x000000;

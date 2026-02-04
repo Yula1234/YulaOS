@@ -49,6 +49,7 @@ void present_damage_to_fb(uint32_t* fb, const uint32_t* src, int stride, comp_da
 void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip);
 void comp_cursor_restore(uint32_t* fb, int stride, int w, int h);
 void comp_cursor_save_under_draw(uint32_t* fb, int stride, int w, int h, int x, int y);
+void comp_cursor_reset(void);
 
 void draw_text(uint32_t* fb, int stride, int w, int h, int x, int y, const char* s, uint32_t color);
 

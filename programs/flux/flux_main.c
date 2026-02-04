@@ -1,5 +1,7 @@
 #include "flux_internal.h"
 
+#include "flux_gpu_present.h"
+
 static void on_signal(int sig) {
     (void)sig;
     if (!g_fb_released) {
@@ -261,7 +263,20 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int frame_shm_fd = -1;
     uint32_t* frame_pixels = 0;
     uint32_t frame_size_bytes = 0;
-    {
+
+    flux_gpu_present_t gpu_present;
+    memset(&gpu_present, 0, sizeof(gpu_present));
+    uint32_t* gpu_pixels = 0;
+    int gpu_present_inited = 0;
+    int gpu_present_ok = 0;
+
+    if (flux_gpu_present_init(&gpu_present, (uint32_t)w, (uint32_t)h, info.pitch) == 0) {
+        gpu_present_inited = 1;
+        gpu_pixels = flux_gpu_present_pixels(&gpu_present);
+        gpu_present_ok = gpu_pixels != 0;
+    }
+
+    if (!gpu_present_ok) {
         uint64_t fb_bytes64 = (uint64_t)info.pitch * (uint64_t)info.height;
         if (fb_bytes64 > 0 && fb_bytes64 <= 0xFFFFFFFFu) {
             frame_size_bytes = (uint32_t)fb_bytes64;
@@ -631,9 +646,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
+        uint32_t* front = gpu_present_ok ? gpu_pixels : fb;
+
         const int cursor_moved = (ms.x != draw_mx || ms.y != draw_my);
         if (cursor_moved || dmg.n > 0) {
-            comp_cursor_restore(fb, stride, w, h);
+            comp_cursor_restore(front, stride, w, h);
         }
 
         if (dmg.n > 0) {
@@ -641,7 +658,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             prev_preview_rect = new_preview_rect;
 
             uint32_t bg = 0x101010;
-            uint32_t* out = frame_pixels ? frame_pixels : fb;
+            uint32_t* out = frame_pixels ? frame_pixels : front;
 
             int order_n = 0;
             int connected_clients = 0;
@@ -732,7 +749,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         int32_t prev_draw_my = draw_my;
 
         if (cursor_moved || dmg.n > 0) {
-            comp_cursor_save_under_draw(fb, stride, w, h, ms.x, ms.y);
+            comp_cursor_save_under_draw(front, stride, w, h, ms.x, ms.y);
             draw_mx = ms.x;
             draw_my = ms.y;
         }
@@ -767,7 +784,29 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 rects[rect_n++] = fb_rect_from_comp(new_cursor);
             }
 
-            (void)fb_present(fb, info.pitch, rects, rect_n);
+            if (gpu_present_ok) {
+                if (flux_gpu_present_present(&gpu_present, rects, rect_n) != 0) {
+                    uint64_t fb_bytes64 = (uint64_t)info.pitch * (uint64_t)info.height;
+                    if (front && fb && front != fb && fb_bytes64 > 0ull && fb_bytes64 <= 0xFFFFFFFFu) {
+                        memcpy(fb, front, (size_t)fb_bytes64);
+                    }
+
+                    comp_cursor_reset();
+
+                    if (gpu_present_inited) {
+                        flux_gpu_present_shutdown(&gpu_present);
+                        gpu_present_inited = 0;
+                    }
+
+                    gpu_present_ok = 0;
+                    gpu_pixels = 0;
+                    front = fb;
+
+                    (void)fb_present(fb, info.pitch, rects, rect_n);
+                }
+            } else {
+                (void)fb_present(fb, info.pitch, rects, rect_n);
+            }
         }
 
         first_frame = 0;
@@ -784,6 +823,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     if (frame_shm_fd >= 0) {
         close(frame_shm_fd);
         frame_shm_fd = -1;
+    }
+
+    if (gpu_present_inited) {
+        flux_gpu_present_shutdown(&gpu_present);
+        gpu_present_inited = 0;
     }
 
     if (clients) {

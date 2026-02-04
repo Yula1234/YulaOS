@@ -147,6 +147,29 @@ static vfs_ops_t shm_ops = {
     .close = shm_close,
 };
 
+int shm_get_phys_pages(struct vfs_node* node, const uint32_t** out_pages, uint32_t* out_page_count) {
+    if (!node || !out_pages || !out_page_count) return 0;
+
+    *out_pages = 0;
+    *out_page_count = 0;
+
+    if ((node->flags & VFS_FLAG_SHM) == 0) return 0;
+
+    shm_obj_t* obj = (shm_obj_t*)node->private_data;
+    if (!obj) return 0;
+
+    uint32_t flags = spinlock_acquire_safe(&obj->lock);
+    const uint32_t* pages = obj->pages;
+    uint32_t page_count = obj->page_count;
+    spinlock_release_safe(&obj->lock, flags);
+
+    if (!pages || page_count == 0) return 0;
+
+    *out_pages = pages;
+    *out_page_count = page_count;
+    return 1;
+}
+
 struct vfs_node* shm_create_node(uint32_t size) {
     shm_obj_t* obj = shm_obj_create(size);
     if (!obj) return 0;

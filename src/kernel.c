@@ -19,6 +19,7 @@
 #include <drivers/vga.h>
 #include <drivers/pci.h>
 #include <drivers/virtio_gpu.h>
+ #include <drivers/gpu0.h>
 
 #include <kernel/clipboard.h>
 #include <kernel/tty.h>
@@ -500,6 +501,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     console_init();
     mouse_vfs_init();
     fb_vfs_init();
+    gpu0_vfs_init();
 
     pty_init();
  
