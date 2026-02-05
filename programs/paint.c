@@ -75,6 +75,11 @@ typedef struct {
     uint32_t* pixels;
     int w;
     int h;
+    int shm_fd;
+    uint32_t cap_bytes;
+    char shm_name[32];
+    uint32_t shm_gen;
+    char tag;
 } snapshot_t;
 
 static uint32_t* canvas;
@@ -195,6 +200,15 @@ static int pt_in_rect(int x, int y, rect_t r) {
     return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
 
+static void snapshot_free(snapshot_t* s);
+
+static void snapshot_init(snapshot_t* s, char tag) {
+    if (!s) return;
+    memset(s, 0, sizeof(*s));
+    s->shm_fd = -1;
+    s->tag = tag;
+}
+
 static int snapshot_reserve(snapshot_t* s, int w, int h) {
     if (!s || w <= 0 || h <= 0) return 0;
     if (s->pixels && !ptr_is_invalid(s->pixels) && s->w == w && s->h == h) return 1;
@@ -202,29 +216,69 @@ static int snapshot_reserve(snapshot_t* s, int w, int h) {
     uint64_t bytes64 = (uint64_t)(uint32_t)w * (uint64_t)(uint32_t)h * 4ull;
     if (bytes64 == 0 || bytes64 > (uint64_t)PAINT_MAX_IMG_BYTES) return 0;
     if (bytes64 > (uint64_t)(size_t)-1) return 0;
-    size_t bytes = (size_t)bytes64;
 
-    g_dbg_stage = 3165;
-    void* p = malloc(bytes);
-    if (ptr_is_invalid(p)) return 0;
-    g_dbg_stage = 3166;
-
-    if (s->pixels && !ptr_is_invalid(s->pixels)) {
-        free(s->pixels);
+    if (s->pixels && !ptr_is_invalid(s->pixels) && s->cap_bytes >= (uint32_t)bytes64) {
+        s->w = w;
+        s->h = h;
+        return 1;
     }
 
-    s->pixels = (uint32_t*)p;
+    char name[32];
+    name[0] = '\0';
+    const int pid = getpid();
+
+    int fd = -1;
+    for (int i = 0; i < 16; i++) {
+        s->shm_gen++;
+        (void)snprintf(name, sizeof(name), "paintsnap_%d_%c_%u", pid, s->tag ? s->tag : 's', (unsigned)s->shm_gen);
+        fd = shm_create_named(name, (uint32_t)bytes64);
+        if (fd >= 0) break;
+    }
+    if (fd < 0) return 0;
+
+    g_dbg_stage = 3165;
+    uint32_t* px = (uint32_t*)mmap(fd, (uint32_t)bytes64, MAP_SHARED);
+    if (ptr_is_invalid(px)) {
+        close(fd);
+        shm_unlink_named(name);
+        return 0;
+    }
+    g_dbg_stage = 3166;
+
+    snapshot_free(s);
+
+    s->pixels = px;
     s->w = w;
     s->h = h;
+    s->shm_fd = fd;
+    s->cap_bytes = (uint32_t)bytes64;
+    {
+        size_t n = strlen(name);
+        if (n >= sizeof(s->shm_name)) n = sizeof(s->shm_name) - 1u;
+        memcpy(s->shm_name, name, n);
+        s->shm_name[n] = '\0';
+    }
     return 1;
 }
 
 static void snapshot_free(snapshot_t* s) {
     if (!s) return;
-    if (s->pixels && !ptr_is_invalid(s->pixels)) free(s->pixels);
+    if (s->pixels && !ptr_is_invalid(s->pixels) && s->cap_bytes) {
+        munmap((void*)s->pixels, s->cap_bytes);
+    }
+    if (s->shm_fd >= 0) {
+        close(s->shm_fd);
+    }
+    if (s->shm_name[0]) {
+        (void)shm_unlink_named(s->shm_name);
+    }
+
     s->pixels = 0;
     s->w = 0;
     s->h = 0;
+    s->cap_bytes = 0;
+    s->shm_fd = -1;
+    s->shm_name[0] = '\0';
 }
 
 static int snapshot_capture(snapshot_t* out) {
@@ -1020,6 +1074,9 @@ int main(int argc, char** argv) {
     (void)signal(SIGILL, (void*)paint_on_signal);
     (void)signal(SIGTERM, (void*)paint_on_signal);
     (void)signal(SIGINT, (void*)paint_on_signal);
+
+    snapshot_init(&undo_stack[0], 'u');
+    snapshot_init(&redo_stack[0], 'r');
 
     const uint32_t surface_id = 1u;
     uint32_t size_bytes = (uint32_t)WIN_W * (uint32_t)WIN_H * 4u;

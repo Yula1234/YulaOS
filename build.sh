@@ -150,7 +150,7 @@ QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
 -device ide-hd,drive=disk,bus=ahci.0 -machine pcspk-audiodev=snd0 -m 1G
 -device piix3-usb-uhci,id=uhci -device usb-kbd,bus=uhci.0,port=1
 -drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe,aio=io_uring
--accel kvm -vga virtio -display sdl,gl=on -smp 3 -mem-prealloc
+-accel kvm -device virtio-vga-gl,xres=1680,yres=1050 -display sdl,gl=on -smp 3 -mem-prealloc
 -cpu host,migratable=no,+invtsc,l3-cache=on -audiodev pa,id=snd0
 -device usb-mouse,bus=uhci.0,port=2
 "

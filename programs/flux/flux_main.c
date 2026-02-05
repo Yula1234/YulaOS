@@ -130,8 +130,10 @@ static int comp_clients_reserve(comp_client_t** clients,
                                 draw_surface_state_t** prev_state,
                                 int* prev_state_cap_clients,
                                 draw_item_t** order,
-                                int* order_cap) {
-    if (!clients || !clients_cap || !prev_state || !prev_state_cap_clients || !order || !order_cap) return -1;
+                                int* order_cap,
+                                flux_gpu_comp_surface_t** comp_surfaces,
+                                int* comp_surfaces_cap) {
+    if (!clients || !clients_cap || !prev_state || !prev_state_cap_clients || !order || !order_cap || !comp_surfaces || !comp_surfaces_cap) return -1;
     if (want_cap <= 0) want_cap = 1;
     if (*clients_cap >= want_cap) return 0;
 
@@ -154,15 +156,18 @@ static int comp_clients_reserve(comp_client_t** clients,
     size_t new_prev_bytes = new_prev_n * sizeof(draw_surface_state_t);
     size_t new_order_n = (size_t)new_cap * (size_t)COMP_MAX_SURFACES;
     size_t new_order_bytes = new_order_n * sizeof(draw_item_t);
+    size_t new_comp_bytes = new_order_n * sizeof(flux_gpu_comp_surface_t);
 
     comp_client_t* new_clients = (comp_client_t*)malloc(new_clients_bytes);
     draw_surface_state_t* new_prev = (draw_surface_state_t*)malloc(new_prev_bytes);
     draw_item_t* new_order = (draw_item_t*)malloc(new_order_bytes);
+    flux_gpu_comp_surface_t* new_comp = (flux_gpu_comp_surface_t*)malloc(new_comp_bytes);
 
-    if (!new_clients || !new_prev || !new_order) {
+    if (!new_clients || !new_prev || !new_order || !new_comp) {
         if (new_clients) free(new_clients);
         if (new_prev) free(new_prev);
         if (new_order) free(new_order);
+        if (new_comp) free(new_comp);
         return -1;
     }
 
@@ -180,9 +185,12 @@ static int comp_clients_reserve(comp_client_t** clients,
         memcpy(new_prev, *prev_state, copy_n * sizeof(draw_surface_state_t));
     }
 
+    memset(new_comp, 0, new_comp_bytes);
+
     if (*clients) free(*clients);
     if (*prev_state) free(*prev_state);
     if (*order) free(*order);
+    if (*comp_surfaces) free(*comp_surfaces);
 
     *clients = new_clients;
     *clients_cap = new_cap;
@@ -190,6 +198,8 @@ static int comp_clients_reserve(comp_client_t** clients,
     *prev_state_cap_clients = new_cap;
     *order = new_order;
     *order_cap = (int)new_order_n;
+    *comp_surfaces = new_comp;
+    *comp_surfaces_cap = (int)new_order_n;
     return 0;
 }
 
@@ -273,7 +283,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     if (flux_gpu_present_init(&gpu_present, (uint32_t)w, (uint32_t)h, info.pitch) == 0) {
         gpu_present_inited = 1;
         gpu_pixels = flux_gpu_present_pixels(&gpu_present);
-        gpu_present_ok = gpu_pixels != 0;
+        gpu_present_ok = flux_gpu_present_mode(&gpu_present) != (uint32_t)FLUX_GPU_PRESENT_MODE_NONE;
     }
 
     if (!gpu_present_ok) {
@@ -297,8 +307,18 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int prev_state_cap_clients = 0;
     draw_item_t* order = 0;
     int order_cap = 0;
+    flux_gpu_comp_surface_t* comp_surfaces = 0;
+    int comp_surfaces_cap = 0;
 
-    if (comp_clients_reserve(&clients, &clients_cap, (int)COMP_CLIENTS_INIT, &prev_state, &prev_state_cap_clients, &order, &order_cap) != 0) {
+    if (comp_clients_reserve(&clients,
+                              &clients_cap,
+                              (int)COMP_CLIENTS_INIT,
+                              &prev_state,
+                              &prev_state_cap_clients,
+                              &order,
+                              &order_cap,
+                              &comp_surfaces,
+                              &comp_surfaces_cap) != 0) {
         dbg_write("flux: OOM: cannot allocate clients\n");
         close(fd_mouse);
         fb_release();
@@ -431,7 +451,15 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
                 if (slot < 0) {
                     const int want = clients_cap + 1;
-                    if (comp_clients_reserve(&clients, &clients_cap, want, &prev_state, &prev_state_cap_clients, &order, &order_cap) == 0) {
+                    if (comp_clients_reserve(&clients,
+                                              &clients_cap,
+                                              want,
+                                              &prev_state,
+                                              &prev_state_cap_clients,
+                                              &order,
+                                              &order_cap,
+                                              &comp_surfaces,
+                                              &comp_surfaces_cap) == 0) {
                         slot = want - 1;
                     }
                 }
@@ -646,14 +674,19 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             }
         }
 
-        uint32_t* front = gpu_present_ok ? gpu_pixels : fb;
+        const uint32_t present_mode = gpu_present_ok ? flux_gpu_present_mode(&gpu_present) : (uint32_t)FLUX_GPU_PRESENT_MODE_NONE;
+        int virgl_mode = gpu_present_ok && present_mode == (uint32_t)FLUX_GPU_PRESENT_MODE_VIRGL_COMPOSE;
 
-        const int cursor_moved = (ms.x != draw_mx || ms.y != draw_my);
-        if (cursor_moved || dmg.n > 0) {
-            comp_cursor_restore(front, stride, w, h);
+        uint32_t* front = (gpu_present_ok && !virgl_mode) ? gpu_pixels : fb;
+
+        const int cursor_moved = ((int32_t)ms.x != draw_mx || (int32_t)ms.y != draw_my);
+        if (!virgl_mode) {
+            if (cursor_moved || dmg.n > 0) {
+                comp_cursor_restore(front, stride, w, h);
+            }
         }
 
-        if (dmg.n > 0) {
+        if (!virgl_mode && dmg.n > 0) {
             preview_dirty = 0;
             prev_preview_rect = new_preview_rect;
 
@@ -748,10 +781,12 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         int32_t prev_draw_mx = draw_mx;
         int32_t prev_draw_my = draw_my;
 
-        if (cursor_moved || dmg.n > 0) {
-            comp_cursor_save_under_draw(front, stride, w, h, ms.x, ms.y);
-            draw_mx = ms.x;
-            draw_my = ms.y;
+        if (!virgl_mode) {
+            if (cursor_moved || dmg.n > 0) {
+                comp_cursor_save_under_draw(front, stride, w, h, (int)ms.x, (int)ms.y);
+                draw_mx = (int32_t)ms.x;
+                draw_my = (int32_t)ms.y;
+            }
         }
 
         if (cursor_moved || dmg.n > 0) {
@@ -764,28 +799,193 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 rects[rect_n++] = fb_rect_from_comp(clip);
             }
 
-            if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
-                comp_rect_t old_cursor = rect_make((int)prev_draw_mx - COMP_CURSOR_SAVE_HALF,
-                                                   (int)prev_draw_my - COMP_CURSOR_SAVE_HALF,
+            if (!virgl_mode) {
+                if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
+                    comp_rect_t old_cursor = rect_make((int)prev_draw_mx - COMP_CURSOR_SAVE_HALF,
+                                                       (int)prev_draw_my - COMP_CURSOR_SAVE_HALF,
+                                                       COMP_CURSOR_SAVE_W,
+                                                       COMP_CURSOR_SAVE_H);
+                    old_cursor = rect_clip_to_screen(old_cursor, w, h);
+                    if (!rect_empty(&old_cursor) && rect_n < (uint32_t)(COMP_MAX_DAMAGE_RECTS + 2)) {
+                        rects[rect_n++] = fb_rect_from_comp(old_cursor);
+                    }
+                }
+
+                comp_rect_t new_cursor = rect_make((int)ms.x - COMP_CURSOR_SAVE_HALF,
+                                                   (int)ms.y - COMP_CURSOR_SAVE_HALF,
                                                    COMP_CURSOR_SAVE_W,
                                                    COMP_CURSOR_SAVE_H);
-                old_cursor = rect_clip_to_screen(old_cursor, w, h);
-                if (!rect_empty(&old_cursor) && rect_n < (uint32_t)(COMP_MAX_DAMAGE_RECTS + 2)) {
-                    rects[rect_n++] = fb_rect_from_comp(old_cursor);
+                new_cursor = rect_clip_to_screen(new_cursor, w, h);
+                if (!rect_empty(&new_cursor) && rect_n < (uint32_t)(COMP_MAX_DAMAGE_RECTS + 2)) {
+                    rects[rect_n++] = fb_rect_from_comp(new_cursor);
+                }
+            } else {
+                enum {
+                    FLUX_GPU_CURSOR_W = 12,
+                    FLUX_GPU_CURSOR_H = 17,
+                };
+
+                if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
+                    comp_rect_t old_cursor = rect_make((int)prev_draw_mx,
+                                                       (int)prev_draw_my,
+                                                       FLUX_GPU_CURSOR_W,
+                                                       FLUX_GPU_CURSOR_H);
+                    old_cursor = rect_intersect(old_cursor, rect_make(0, 0, w, h));
+                    if (!rect_empty(&old_cursor)) {
+                        rects[rect_n++] = fb_rect_from_comp(old_cursor);
+                    }
+                }
+
+                comp_rect_t new_cursor = rect_make((int)ms.x, (int)ms.y, FLUX_GPU_CURSOR_W, FLUX_GPU_CURSOR_H);
+                new_cursor = rect_intersect(new_cursor, rect_make(0, 0, w, h));
+                if (!rect_empty(&new_cursor)) {
+                    rects[rect_n++] = fb_rect_from_comp(new_cursor);
                 }
             }
 
-            comp_rect_t new_cursor = rect_make((int)ms.x - COMP_CURSOR_SAVE_HALF,
-                                               (int)ms.y - COMP_CURSOR_SAVE_HALF,
-                                               COMP_CURSOR_SAVE_W,
-                                               COMP_CURSOR_SAVE_H);
-            new_cursor = rect_clip_to_screen(new_cursor, w, h);
-            if (!rect_empty(&new_cursor) && rect_n < (uint32_t)(COMP_MAX_DAMAGE_RECTS + 2)) {
-                rects[rect_n++] = fb_rect_from_comp(new_cursor);
-            }
-
             if (gpu_present_ok) {
-                if (flux_gpu_present_present(&gpu_present, rects, rect_n) != 0) {
+                if (virgl_mode) {
+                    if (comp_surfaces && comp_surfaces_cap > 0) {
+                        uint32_t comp_n = 0u;
+                        int order_n = 0;
+                        for (int ci = 0; ci < clients_cap; ci++) {
+                            if (!clients[ci].connected) continue;
+                            for (int si = 0; si < COMP_MAX_SURFACES; si++) {
+                                comp_surface_t* s = &clients[ci].surfaces[si];
+                                if (!s->in_use || !s->attached || !s->committed) continue;
+                                if (s->id == 0u) continue;
+                                if (s->w <= 0 || s->h <= 0) continue;
+                                if (order_n >= order_cap) break;
+                                order[order_n].z = s->z;
+                                order[order_n].ci = ci;
+                                order[order_n].si = si;
+                                order_n++;
+                            }
+                        }
+
+                        for (int i = 1; i < order_n; i++) {
+                            draw_item_t key = order[i];
+                            int j = i - 1;
+                            while (j >= 0 && order[j].z > key.z) {
+                                order[j + 1] = order[j];
+                                j--;
+                            }
+                            order[j + 1] = key;
+                        }
+
+                        for (int i = 0; i < order_n; i++) {
+                            if (comp_n >= (uint32_t)comp_surfaces_cap) break;
+                            comp_surface_t* s = &clients[order[i].ci].surfaces[order[i].si];
+
+                            int shm_fd = -1;
+                            uint32_t shm_size_bytes = 0u;
+                            uint32_t stride_bytes = 0u;
+
+                            if (s->shadow_valid && s->shadow_active >= 0 && s->shadow_active < COMP_SURFACE_SHADOW_BUFS) {
+                                const int bi = s->shadow_active;
+                                if (s->shadow_shm_fd[bi] >= 0 && s->shadow_size_bytes != 0u && s->shadow_stride > 0) {
+                                    shm_fd = s->shadow_shm_fd[bi];
+                                    shm_size_bytes = s->shadow_size_bytes;
+                                    stride_bytes = (uint32_t)s->shadow_stride * 4u;
+                                }
+                            }
+
+                            if (shm_fd < 0) {
+                                if (s->owns_buffer && s->shm_fd >= 0 && s->size_bytes != 0u && s->stride > 0) {
+                                    shm_fd = s->shm_fd;
+                                    shm_size_bytes = s->size_bytes;
+                                    stride_bytes = (uint32_t)s->stride * 4u;
+                                }
+                            }
+
+                            if (shm_fd < 0 || shm_size_bytes == 0u || stride_bytes == 0u) continue;
+
+                            flux_gpu_comp_surface_t* cs = &comp_surfaces[comp_n++];
+                            cs->surface_id = s->id;
+                            cs->x = (int32_t)s->x;
+                            cs->y = (int32_t)s->y;
+                            cs->width = (uint32_t)s->w;
+                            cs->height = (uint32_t)s->h;
+                            cs->stride_bytes = stride_bytes;
+                            cs->shm_size_bytes = shm_size_bytes;
+                            cs->shm_fd = shm_fd;
+                            cs->commit_gen = s->commit_gen;
+                        }
+
+                        fb_rect_t preview_fb;
+                        fb_rect_t* preview_ptr = 0;
+                        if (!rect_empty(&new_preview_rect)) {
+                            preview_fb = fb_rect_from_comp(new_preview_rect);
+                            preview_ptr = &preview_fb;
+                        }
+
+                        preview_dirty = 0;
+                        prev_preview_rect = new_preview_rect;
+
+                        if (flux_gpu_present_compose(&gpu_present,
+                                                      rects,
+                                                      rect_n,
+                                                      comp_surfaces,
+                                                      comp_n,
+                                                      preview_ptr,
+                                                      (int32_t)ms.x,
+                                                      (int32_t)ms.y) != 0) {
+                            comp_cursor_reset();
+                            draw_mx = 0x7FFFFFFF;
+                            draw_my = 0x7FFFFFFF;
+                            if (gpu_present_inited) {
+                                flux_gpu_present_shutdown(&gpu_present);
+                                gpu_present_inited = 0;
+                            }
+                            gpu_present_ok = 0;
+                            gpu_pixels = 0;
+                            virgl_mode = 0;
+
+                            fill_rect(fb, stride, w, h, 0, 0, w, h, 0x101010u);
+                            for (uint32_t si = 0; si < comp_n; si++) {
+                                const flux_gpu_comp_surface_t* cs = &comp_surfaces[si];
+                                const int ci = (int)order[si].ci;
+                                const int sj = (int)order[si].si;
+                                if (ci < 0 || ci >= clients_cap) continue;
+                                comp_surface_t* s = &clients[ci].surfaces[sj];
+                                const uint32_t* src = 0;
+                                int src_stride = 0;
+                                if (s->shadow_valid && s->shadow_active >= 0 && s->shadow_active < COMP_SURFACE_SHADOW_BUFS) {
+                                    src = s->shadow_pixels[s->shadow_active];
+                                    src_stride = s->shadow_stride;
+                                }
+                                if (!src) {
+                                    src = s->pixels;
+                                    src_stride = s->stride;
+                                }
+                                if (!src || src_stride <= 0) continue;
+                                blit_surface_clipped(fb, stride, w, h, s->x, s->y, src, src_stride, s->w, s->h, rect_make(0, 0, w, h));
+                            }
+                            if (!rect_empty(&new_preview_rect)) {
+                                draw_frame_rect_clipped(fb,
+                                                        stride,
+                                                        w,
+                                                        h,
+                                                        new_preview_rect.x1,
+                                                        new_preview_rect.y1,
+                                                        new_preview_rect.x2 - new_preview_rect.x1,
+                                                        new_preview_rect.y2 - new_preview_rect.y1,
+                                                        2,
+                                                        0x007ACCu,
+                                                        rect_make(0, 0, w, h));
+                            }
+                            comp_cursor_save_under_draw(fb, stride, w, h, (int)ms.x, (int)ms.y);
+                            draw_mx = (int32_t)ms.x;
+                            draw_my = (int32_t)ms.y;
+
+                            fb_rect_t full = fb_rect_make(0, 0, w, h);
+                            (void)fb_present(fb, info.pitch, &full, 1);
+                        } else {
+                            draw_mx = (int32_t)ms.x;
+                            draw_my = (int32_t)ms.y;
+                        }
+                    }
+                } else if (flux_gpu_present_present(&gpu_present, rects, rect_n) != 0) {
                     uint64_t fb_bytes64 = (uint64_t)info.pitch * (uint64_t)info.height;
                     if (front && fb && front != fb && fb_bytes64 > 0ull && fb_bytes64 <= 0xFFFFFFFFu) {
                         memcpy(fb, front, (size_t)fb_bytes64);
@@ -849,6 +1049,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         free(order);
         order = 0;
         order_cap = 0;
+    }
+    if (comp_surfaces) {
+        free(comp_surfaces);
+        comp_surfaces = 0;
+        comp_surfaces_cap = 0;
     }
 
     if (wm_pid > 0) {
