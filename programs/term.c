@@ -266,6 +266,105 @@ typedef struct {
     int osc_esc;
 } term_t;
 
+static uint32_t term_collect_damage(const term_t* t, comp_ipc_rect_t* rects, uint32_t cap) {
+    if (!t || !rects || cap == 0u) return 0u;
+
+    if (t->full_redraw) {
+        rects[0].x = 0;
+        rects[0].y = 0;
+        rects[0].w = WIN_W;
+        rects[0].h = WIN_H;
+        return 1u;
+    }
+
+    int vx = 0, vy = 0, vw = 0, vh = 0;
+    term_calc_view(&vx, &vy, &vw, &vh);
+    if (vw <= 0 || vh <= 0) return 0u;
+
+    const int scale = (TERM_SCALE < TERM_SCALE_MIN) ? TERM_SCALE_MIN :
+                      (TERM_SCALE > TERM_SCALE_MAX) ? TERM_SCALE_MAX :
+                      TERM_SCALE;
+
+    const int cell_h = 8 * scale;
+    int view_rows = vh / cell_h;
+    if (view_rows <= 0) return 0u;
+
+    int rows = (t->rows < view_rows) ? t->rows : view_rows;
+    if (rows <= 0 || !t->dirty_rows) return 0u;
+
+    uint32_t n = 0u;
+    int run_start = -1;
+
+    for (int y = 0; y < rows; y++) {
+        if (t->dirty_rows[y]) {
+            if (run_start < 0) run_start = y;
+            continue;
+        }
+        if (run_start < 0) continue;
+
+        int run_len = y - run_start;
+        if (run_len > 0) {
+            int x0 = vx;
+            int y0 = vy + run_start * cell_h;
+            int x1 = vx + vw;
+            int y1 = y0 + run_len * cell_h;
+
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > WIN_W) x1 = WIN_W;
+            if (y1 > WIN_H) y1 = WIN_H;
+
+            if (x1 > x0 && y1 > y0) {
+                if (n >= cap) {
+                    rects[0].x = 0;
+                    rects[0].y = 0;
+                    rects[0].w = WIN_W;
+                    rects[0].h = WIN_H;
+                    return 1u;
+                }
+                rects[n].x = x0;
+                rects[n].y = y0;
+                rects[n].w = x1 - x0;
+                rects[n].h = y1 - y0;
+                n++;
+            }
+        }
+        run_start = -1;
+    }
+
+    if (run_start >= 0) {
+        int run_len = rows - run_start;
+        if (run_len > 0) {
+            int x0 = vx;
+            int y0 = vy + run_start * cell_h;
+            int x1 = vx + vw;
+            int y1 = y0 + run_len * cell_h;
+
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > WIN_W) x1 = WIN_W;
+            if (y1 > WIN_H) y1 = WIN_H;
+
+            if (x1 > x0 && y1 > y0) {
+                if (n >= cap) {
+                    rects[0].x = 0;
+                    rects[0].y = 0;
+                    rects[0].w = WIN_W;
+                    rects[0].h = WIN_H;
+                    return 1u;
+                }
+                rects[n].x = x0;
+                rects[n].y = y0;
+                rects[n].w = x1 - x0;
+                rects[n].h = y1 - y0;
+                n++;
+            }
+        }
+    }
+
+    return n;
+}
+
 static const uint32_t TERM_DEF_FG = 0xD4D4D4u;
 static const uint32_t TERM_DEF_BG = 0x111111u;
 
@@ -1092,7 +1191,14 @@ static int term_run(void) {
         term_calc_grid(&cols, &rows);
         term_init(&term, cols, rows);
         term.full_redraw = 1;
-        term_render(&term);
+        {
+            comp_ipc_rect_t rects[COMP_IPC_DAMAGE_MAX_RECTS];
+            uint32_t rect_n = term_collect_damage(&term, rects, COMP_IPC_DAMAGE_MAX_RECTS);
+            term_render(&term);
+            if (rect_n > 0u) {
+                (void)comp_send_damage(&conn, surface_id, rects, rect_n);
+            }
+        }
         (void)comp_send_commit(&conn, surface_id, 0, 0, 0u);
     }
 
@@ -1307,7 +1413,12 @@ static int term_run(void) {
         }
 
         if (need_update) {
+            comp_ipc_rect_t rects[COMP_IPC_DAMAGE_MAX_RECTS];
+            uint32_t rect_n = term_collect_damage(&term, rects, COMP_IPC_DAMAGE_MAX_RECTS);
             term_render(&term);
+            if (rect_n > 0u) {
+                (void)comp_send_damage(&conn, surface_id, rects, rect_n);
+            }
             (void)comp_send_commit(&conn, surface_id, 0, 0, 0u);
             need_update = 0;
         }

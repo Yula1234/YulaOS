@@ -726,16 +726,16 @@ static void hist_add(ush_history_t* h, const char* line) {
     h->lines[h->count++] = dup;
 }
 
-static int term_get_cols(int fd, int* out_cols) {
+static int term_get_size(int fd, int* out_cols, int* out_rows) {
     if (out_cols) *out_cols = 80;
+    if (out_rows) *out_rows = 25;
     yos_winsize_t ws;
-    if (ioctl(fd, YOS_TIOCGWINSZ, &ws) == 0) {
-        if (ws.ws_col > 0) {
-            if (out_cols) *out_cols = (int)ws.ws_col;
-            return 1;
-        }
+    if (ioctl(fd, YOS_TIOCGWINSZ, &ws) != 0) {
+        return 0;
     }
-    return 0;
+    if (ws.ws_col > 0 && out_cols) *out_cols = (int)ws.ws_col;
+    if (ws.ws_row > 0 && out_rows) *out_rows = (int)ws.ws_row;
+    return 1;
 }
 
 static int term_is_ansi(int fd) {
@@ -787,13 +787,16 @@ static int read_byte_timeout(int fd_in, char* out, int timeout_ms) {
     return read_byte_blocking(fd_in, out);
 }
 
-static ush_key_t read_key(int fd_in) {
+static ush_key_t read_key(int fd_in, int timeout_ms) {
     ush_key_t k;
     k.kind = USH_KEY_NONE;
     k.ch = 0;
 
     char c = 0;
-    int r = read_byte_blocking(fd_in, &c);
+    int r = (timeout_ms < 0) ? read_byte_blocking(fd_in, &c) : read_byte_timeout(fd_in, &c, timeout_ms);
+    if (r == 0) {
+        return k;
+    }
     if (r == -2) {
         k.kind = USH_KEY_CTRL_C;
         return k;
@@ -946,7 +949,8 @@ static int read_line_editor(int fd_in, int fd_out, const char* prompt, int promp
 
     const int ansi = term_is_ansi(fd_out);
     int cols = 80;
-    (void)term_get_cols(fd_out, &cols);
+    int rows = 25;
+    (void)term_get_size(fd_out, &cols, &rows);
 
     char* line = 0;
     size_t cap = 0;
@@ -963,16 +967,29 @@ static int read_line_editor(int fd_in, int fd_out, const char* prompt, int promp
     line[0] = '\0';
 
     if (ansi) {
-        (void)term_get_cols(fd_out, &cols);
+        (void)term_get_size(fd_out, &cols, &rows);
         ansi_redraw_line(fd_out, prompt, prompt_len, line, len, cursor, cols, &prev_rows, &prev_cursor_row);
     } else {
         (void)write_all(fd_out, prompt, (uint32_t)prompt_len);
     }
 
     for (;;) {
-        ush_key_t k = read_key(fd_in);
+        ush_key_t k = read_key(fd_in, 100);
         if (k.kind == USH_KEY_ERROR) goto out_err;
-        if (k.kind == USH_KEY_NONE) continue;
+        if (k.kind == USH_KEY_NONE) {
+            if (ansi) {
+                int new_cols = cols;
+                int new_rows = rows;
+                if (term_get_size(fd_out, &new_cols, &new_rows) && (new_cols != cols || new_rows != rows)) {
+                    cols = new_cols;
+                    rows = new_rows;
+                    prev_rows = 1;
+                    prev_cursor_row = 0;
+                    ansi_redraw_line(fd_out, prompt, prompt_len, line, len, cursor, cols, &prev_rows, &prev_cursor_row);
+                }
+            }
+            continue;
+        }
 
         if (k.kind == USH_KEY_CTRL_C) {
             free(hist_saved);
@@ -984,7 +1001,7 @@ static int read_line_editor(int fd_in, int fd_out, const char* prompt, int promp
 
             (void)write_all(fd_out, "\n", 1u);
             if (ansi) {
-                (void)term_get_cols(fd_out, &cols);
+                (void)term_get_size(fd_out, &cols, &rows);
                 prev_rows = 1;
                 prev_cursor_row = 0;
                 ansi_redraw_line(fd_out, prompt, prompt_len, line, len, cursor, cols, &prev_rows, &prev_cursor_row);
@@ -1116,7 +1133,7 @@ static int read_line_editor(int fd_in, int fd_out, const char* prompt, int promp
         }
 
         if (ansi && changed) {
-            (void)term_get_cols(fd_out, &cols);
+            (void)term_get_size(fd_out, &cols, &rows);
             ansi_redraw_line(fd_out, prompt, prompt_len, line, len, cursor, cols, &prev_rows, &prev_cursor_row);
         } else if (!ansi && changed) {
             (void)0;
