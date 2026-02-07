@@ -1,5 +1,6 @@
 #include "flux_internal.h"
 #include "flux_gpu_present.h"
+#include "flux_cursor.h"
 
 enum {
     FLUX_VIRGL_PIPE_TEXTURE_2D = 2u,
@@ -364,6 +365,29 @@ static int flux_gpu_present_virgl_draw_solid_rect_damage_clipped(flux_gpu_presen
     return flux_gpu_present_virgl_copy_solid(p, p->virgl_front_resource_id, x, y, solid_resource_id, w, h);
 }
 
+typedef struct {
+    flux_gpu_present_t* p;
+    uint32_t dmg_x;
+    uint32_t dmg_y;
+    uint32_t dmg_w;
+    uint32_t dmg_h;
+} flux_cursor_draw_ctx_t;
+
+static int flux_cursor_draw_cb(void* ctx, int x, int y, int w, int h, int color_type) {
+    flux_cursor_draw_ctx_t* c = (flux_cursor_draw_ctx_t*)ctx;
+    if (!c || !c->p) return -1;
+
+    uint32_t res_id = 0;
+    if (color_type == 0) res_id = c->p->virgl_solid_black_resource_id;
+    else if (color_type == 1) res_id = c->p->virgl_solid_white_resource_id;
+
+    if (res_id == 0u) return -1;
+
+    return flux_gpu_present_virgl_draw_solid_rect_damage_clipped(c->p,
+                                                                 c->dmg_x, c->dmg_y, c->dmg_w, c->dmg_h,
+                                                                 x, y, (uint32_t)w, (uint32_t)h, res_id);
+}
+
 static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
                                                    uint32_t dmg_x,
                                                    uint32_t dmg_y,
@@ -373,98 +397,14 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
                                                    int32_t cursor_y) {
     if (!p) return -1;
 
-    const uint32_t black = p->virgl_solid_black_resource_id;
-    const uint32_t white = p->virgl_solid_white_resource_id;
-    if (black == 0u || white == 0u) return -1;
+    flux_cursor_draw_ctx_t ctx;
+    ctx.p = p;
+    ctx.dmg_x = dmg_x;
+    ctx.dmg_y = dmg_y;
+    ctx.dmg_w = dmg_w;
+    ctx.dmg_h = dmg_h;
 
-    enum {
-        TIP_H = 13,
-
-        HANDLE_X = 4,
-        HANDLE_Y = 9,
-        HANDLE_W = 4,
-        HANDLE_H = 8,
-
-        HANDLE_INNER_X = HANDLE_X + 1,
-        HANDLE_INNER_Y = HANDLE_Y + 1,
-        HANDLE_INNER_W = HANDLE_W - 2,
-        HANDLE_INNER_H = HANDLE_H - 2,
-    };
-
-    {
-        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
-                                                                            dmg_x,
-                                                                            dmg_y,
-                                                                            dmg_w,
-                                                                            dmg_h,
-                                                                            cursor_x,
-                                                                            cursor_y,
-                                                                            2u,
-                                                                            2u,
-                                                                            black);
-        if (rc != 0) return -1;
-    }
-
-    for (int y = 0; y < TIP_H; y++) {
-        const uint32_t w = (uint32_t)(y + 2);
-        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
-                                                                            dmg_x,
-                                                                            dmg_y,
-                                                                            dmg_w,
-                                                                            dmg_h,
-                                                                            cursor_x,
-                                                                            cursor_y + y,
-                                                                            w,
-                                                                            1u,
-                                                                            black);
-        if (rc != 0) return -1;
-    }
-
-    for (int y = 1; y < TIP_H - 1; y++) {
-        const uint32_t w = (uint32_t)(y);
-        if (w == 0u) continue;
-        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
-                                                                            dmg_x,
-                                                                            dmg_y,
-                                                                            dmg_w,
-                                                                            dmg_h,
-                                                                            cursor_x + 1,
-                                                                            cursor_y + y,
-                                                                            w,
-                                                                            1u,
-                                                                            white);
-        if (rc != 0) return -1;
-    }
-
-    {
-        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
-                                                                            dmg_x,
-                                                                            dmg_y,
-                                                                            dmg_w,
-                                                                            dmg_h,
-                                                                            cursor_x + HANDLE_X,
-                                                                            cursor_y + HANDLE_Y,
-                                                                            (uint32_t)HANDLE_W,
-                                                                            (uint32_t)HANDLE_H,
-                                                                            black);
-        if (rc != 0) return -1;
-    }
-
-    {
-        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
-                                                                            dmg_x,
-                                                                            dmg_y,
-                                                                            dmg_w,
-                                                                            dmg_h,
-                                                                            cursor_x + HANDLE_INNER_X,
-                                                                            cursor_y + HANDLE_INNER_Y,
-                                                                            (uint32_t)HANDLE_INNER_W,
-                                                                            (uint32_t)HANDLE_INNER_H,
-                                                                            white);
-        if (rc != 0) return -1;
-    }
-
-    return 0;
+    return flux_cursor_draw_arrow(&ctx, (int)cursor_x, (int)cursor_y, flux_cursor_draw_cb);
 }
 
 static int flux_gpu_present_virgl_draw_frame_rect_damage_clipped(flux_gpu_present_t* p,

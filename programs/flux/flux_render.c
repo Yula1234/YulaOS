@@ -1,4 +1,5 @@
 #include "flux_internal.h"
+#include "flux_cursor.h"
 
 static inline void put_pixel(uint32_t* fb, int stride, int w, int h, int x, int y, uint32_t color) {
     if ((unsigned)x >= (unsigned)w || (unsigned)y >= (unsigned)h) return;
@@ -92,14 +93,32 @@ static inline void fill_rect_clipped(uint32_t* fb, int stride, int w, int h, int
 #ifndef COMP_CURSOR_SAVE_H
 #define COMP_CURSOR_SAVE_H 17
 #endif
-#ifndef COMP_CURSOR_SAVE_HALF
-#define COMP_CURSOR_SAVE_HALF 8
+#ifndef COMP_CURSOR_HOTSPOT_X
+#define COMP_CURSOR_HOTSPOT_X 0
+#endif
+#ifndef COMP_CURSOR_HOTSPOT_Y
+#define COMP_CURSOR_HOTSPOT_Y 0
 #endif
 
 static uint32_t g_under_cursor_save[COMP_CURSOR_SAVE_W * COMP_CURSOR_SAVE_H];
 static int g_under_cursor_valid = 0;
 static int g_under_cursor_x = 0;
 static int g_under_cursor_y = 0;
+
+typedef struct {
+    uint32_t* fb;
+    int stride;
+    int w;
+    int h;
+    comp_rect_t clip;
+} flux_cursor_draw_fb_ctx_t;
+
+static int flux_cursor_draw_fb_cb(void* raw, int rx, int ry, int rw, int rh, int color_type) {
+    flux_cursor_draw_fb_ctx_t* c = (flux_cursor_draw_fb_ctx_t*)raw;
+    uint32_t color = (color_type == 0) ? 0x000000u : 0xFFFFFFu;
+    fill_rect_clipped(c->fb, c->stride, c->w, c->h, rx, ry, rw, rh, color, c->clip);
+    return 0;
+}
 
 void comp_cursor_reset(void) {
     g_under_cursor_valid = 0;
@@ -108,17 +127,14 @@ void comp_cursor_reset(void) {
 }
 
 void draw_cursor_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, comp_rect_t clip) {
-    const uint32_t c1 = 0xFFFFFF;
-    const uint32_t c2 = 0x000000;
+    flux_cursor_draw_fb_ctx_t ctx;
+    ctx.fb = fb;
+    ctx.stride = stride;
+    ctx.w = w;
+    ctx.h = h;
+    ctx.clip = clip;
 
-    for (int i = -7; i <= 7; i++) {
-        put_pixel_clipped(fb, stride, w, h, x + i, y, c1, clip);
-        put_pixel_clipped(fb, stride, w, h, x, y + i, c1, clip);
-        put_pixel_clipped(fb, stride, w, h, x + i, y + 1, c2, clip);
-        put_pixel_clipped(fb, stride, w, h, x + 1, y + i, c2, clip);
-    }
-
-    fill_rect_clipped(fb, stride, w, h, x - 1, y - 1, 3, 3, 0xFF0000, clip);
+    flux_cursor_draw_arrow(&ctx, x - COMP_CURSOR_HOTSPOT_X, y - COMP_CURSOR_HOTSPOT_Y, flux_cursor_draw_fb_cb);
 }
 
 void comp_cursor_restore(uint32_t* fb, int stride, int w, int h) {
@@ -126,8 +142,8 @@ void comp_cursor_restore(uint32_t* fb, int stride, int w, int h) {
     if (stride <= 0 || w <= 0 || h <= 0) return;
     if (!g_under_cursor_valid) return;
 
-    const int x0 = g_under_cursor_x - COMP_CURSOR_SAVE_HALF;
-    const int y0 = g_under_cursor_y - COMP_CURSOR_SAVE_HALF;
+    const int x0 = g_under_cursor_x - COMP_CURSOR_HOTSPOT_X;
+    const int y0 = g_under_cursor_y - COMP_CURSOR_HOTSPOT_Y;
 
     for (int yy = 0; yy < COMP_CURSOR_SAVE_H; yy++) {
         const int y = y0 + yy;
@@ -148,8 +164,8 @@ void comp_cursor_save_under_draw(uint32_t* fb, int stride, int w, int h, int x, 
     if (!fb) return;
     if (stride <= 0 || w <= 0 || h <= 0) return;
 
-    const int x0 = x - COMP_CURSOR_SAVE_HALF;
-    const int y0 = y - COMP_CURSOR_SAVE_HALF;
+    const int x0 = x - COMP_CURSOR_HOTSPOT_X;
+    const int y0 = y - COMP_CURSOR_HOTSPOT_Y;
 
     for (int yy = 0; yy < COMP_CURSOR_SAVE_H; yy++) {
         const int sy = y0 + yy;

@@ -57,7 +57,8 @@ void draw_text(uint32_t* fb, int stride, int w, int h, int x, int y, const char*
 
 #define COMP_CURSOR_SAVE_W 17
 #define COMP_CURSOR_SAVE_H 17
-#define COMP_CURSOR_SAVE_HALF 8
+#define COMP_CURSOR_HOTSPOT_X 0
+#define COMP_CURSOR_HOTSPOT_Y 0
 
 void draw_frame_rect_clipped(uint32_t* fb, int stride, int w, int h, int x, int y, int rw, int rh, int t, uint32_t color, comp_rect_t clip);
 

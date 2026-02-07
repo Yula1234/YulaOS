@@ -812,8 +812,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
             if (!virgl_mode) {
                 if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
-                    comp_rect_t old_cursor = rect_make((int)prev_draw_mx - COMP_CURSOR_SAVE_HALF,
-                                                       (int)prev_draw_my - COMP_CURSOR_SAVE_HALF,
+                    comp_rect_t old_cursor = rect_make((int)prev_draw_mx - COMP_CURSOR_HOTSPOT_X,
+                                                       (int)prev_draw_my - COMP_CURSOR_HOTSPOT_Y,
                                                        COMP_CURSOR_SAVE_W,
                                                        COMP_CURSOR_SAVE_H);
                     old_cursor = rect_clip_to_screen(old_cursor, w, h);
@@ -822,8 +822,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     }
                 }
 
-                comp_rect_t new_cursor = rect_make((int)ms.x - COMP_CURSOR_SAVE_HALF,
-                                                   (int)ms.y - COMP_CURSOR_SAVE_HALF,
+                comp_rect_t new_cursor = rect_make((int)ms.x - COMP_CURSOR_HOTSPOT_X,
+                                                   (int)ms.y - COMP_CURSOR_HOTSPOT_Y,
                                                    COMP_CURSOR_SAVE_W,
                                                    COMP_CURSOR_SAVE_H);
                 new_cursor = rect_clip_to_screen(new_cursor, w, h);
@@ -832,8 +832,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                 }
             } else {
                 if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
-                    comp_rect_t old_cursor = rect_make((int)prev_draw_mx,
-                                                       (int)prev_draw_my,
+                    comp_rect_t old_cursor = rect_make((int)prev_draw_mx - COMP_CURSOR_HOTSPOT_X,
+                                                       (int)prev_draw_my - COMP_CURSOR_HOTSPOT_Y,
                                                        COMP_CURSOR_SAVE_W,
                                                        COMP_CURSOR_SAVE_H);
                     old_cursor = rect_intersect(old_cursor, rect_make(0, 0, w, h));
@@ -842,7 +842,10 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     }
                 }
 
-                comp_rect_t new_cursor = rect_make((int)ms.x, (int)ms.y, COMP_CURSOR_SAVE_W, COMP_CURSOR_SAVE_H);
+                comp_rect_t new_cursor = rect_make((int)ms.x - COMP_CURSOR_HOTSPOT_X,
+                                                   (int)ms.y - COMP_CURSOR_HOTSPOT_Y,
+                                                   COMP_CURSOR_SAVE_W,
+                                                   COMP_CURSOR_SAVE_H);
                 new_cursor = rect_intersect(new_cursor, rect_make(0, 0, w, h));
                 if (!rect_empty(&new_cursor)) {
                     rects[rect_n++] = fb_rect_from_comp(new_cursor);
@@ -936,8 +939,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                                                       comp_surfaces,
                                                       comp_n,
                                                       preview_ptr,
-                                                      (int32_t)ms.x,
-                                                      (int32_t)ms.y) != 0) {
+                                                      (int32_t)ms.x - COMP_CURSOR_HOTSPOT_X,
+                                                      (int32_t)ms.y - COMP_CURSOR_HOTSPOT_Y) != 0) {
                             comp_cursor_reset();
                             draw_mx = 0x7FFFFFFF;
                             draw_my = 0x7FFFFFFF;
