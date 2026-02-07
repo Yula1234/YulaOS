@@ -198,6 +198,120 @@ static int flux_gpu_present_clip_rect(const flux_gpu_present_t* p,
     return 1;
 }
 
+static uint64_t flux_gpu_present_rect_area(const fb_rect_t* r) {
+    if (!r || r->w <= 0 || r->h <= 0) return 0ull;
+    return (uint64_t)(uint32_t)r->w * (uint64_t)(uint32_t)r->h;
+}
+
+static int flux_gpu_present_rect_touch_or_overlap(const fb_rect_t* a, const fb_rect_t* b) {
+    if (!a || !b) return 0;
+    if (a->w <= 0 || a->h <= 0 || b->w <= 0 || b->h <= 0) return 0;
+
+    const int64_t ax1 = (int64_t)a->x;
+    const int64_t ay1 = (int64_t)a->y;
+    const int64_t ax2 = ax1 + (int64_t)a->w;
+    const int64_t ay2 = ay1 + (int64_t)a->h;
+
+    const int64_t bx1 = (int64_t)b->x;
+    const int64_t by1 = (int64_t)b->y;
+    const int64_t bx2 = bx1 + (int64_t)b->w;
+    const int64_t by2 = by1 + (int64_t)b->h;
+
+    if (ax2 < bx1 - 1) return 0;
+    if (bx2 < ax1 - 1) return 0;
+    if (ay2 < by1 - 1) return 0;
+    if (by2 < ay1 - 1) return 0;
+    return 1;
+}
+
+static fb_rect_t flux_gpu_present_rect_union(const fb_rect_t* a, const fb_rect_t* b) {
+    fb_rect_t r;
+    if (!a || !b) {
+        r.x = 0;
+        r.y = 0;
+        r.w = 0;
+        r.h = 0;
+        return r;
+    }
+    const int32_t ax1 = a->x;
+    const int32_t ay1 = a->y;
+    const int32_t ax2 = a->x + a->w;
+    const int32_t ay2 = a->y + a->h;
+
+    const int32_t bx1 = b->x;
+    const int32_t by1 = b->y;
+    const int32_t bx2 = b->x + b->w;
+    const int32_t by2 = b->y + b->h;
+
+    const int32_t nx1 = (ax1 < bx1) ? ax1 : bx1;
+    const int32_t ny1 = (ay1 < by1) ? ay1 : by1;
+    const int32_t nx2 = (ax2 > bx2) ? ax2 : bx2;
+    const int32_t ny2 = (ay2 > by2) ? ay2 : by2;
+
+    r.x = nx1;
+    r.y = ny1;
+    r.w = nx2 - nx1;
+    r.h = ny2 - ny1;
+    return r;
+}
+
+static int flux_gpu_present_rect_should_merge(const fb_rect_t* a, const fb_rect_t* b) {
+    if (flux_gpu_present_rect_touch_or_overlap(a, b)) return 1;
+    const uint64_t area_a = flux_gpu_present_rect_area(a);
+    const uint64_t area_b = flux_gpu_present_rect_area(b);
+    if (area_a == 0ull || area_b == 0ull) return 0;
+    const fb_rect_t u = flux_gpu_present_rect_union(a, b);
+    const uint64_t area_u = flux_gpu_present_rect_area(&u);
+    return area_u <= (area_a + area_b) * 2ull;
+}
+
+static uint32_t flux_gpu_present_merge_rects(const flux_gpu_present_t* p,
+                                             const fb_rect_t* rects,
+                                             uint32_t rect_count,
+                                             fb_rect_t* out,
+                                             uint32_t out_cap) {
+    if (!p || !rects || !out || out_cap == 0u) return 0u;
+
+    uint32_t out_n = 0u;
+    for (uint32_t ri = 0; ri < rect_count; ri++) {
+        uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
+        if (!flux_gpu_present_clip_rect(p, &rects[ri], &x, &y, &w, &h)) continue;
+
+        fb_rect_t r;
+        r.x = (int32_t)x;
+        r.y = (int32_t)y;
+        r.w = (int32_t)w;
+        r.h = (int32_t)h;
+
+        for (;;) {
+            int merged = 0;
+            for (uint32_t i = 0; i < out_n; i++) {
+                if (!flux_gpu_present_rect_should_merge(&out[i], &r)) continue;
+                r = flux_gpu_present_rect_union(&out[i], &r);
+                out[i] = out[out_n - 1u];
+                out_n--;
+                merged = 1;
+                break;
+            }
+            if (!merged) break;
+        }
+
+        if (out_n < out_cap) {
+            out[out_n++] = r;
+        } else {
+            fb_rect_t u = out[0];
+            for (uint32_t i = 1u; i < out_n; i++) {
+                u = flux_gpu_present_rect_union(&u, &out[i]);
+            }
+            u = flux_gpu_present_rect_union(&u, &r);
+            out[0] = u;
+            out_n = 1u;
+            break;
+        }
+    }
+    return out_n;
+}
+
 static int flux_gpu_present_transfer_and_flush(flux_gpu_present_t* p,
                                               uint32_t x,
                                               uint32_t y,
@@ -484,14 +598,37 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         if (flux_gpu_present_virgl_slots_ensure(p, want) != 0) return -1;
     }
 
+    fb_rect_t local_compose[64];
+    fb_rect_t* compose_rects = 0;
+    fb_rect_t* compose_storage = 0;
+    uint32_t compose_rect_count = 0u;
+    uint32_t compose_rect_cap = 0u;
+    int compose_heap = 0;
+    if (rect_count <= (uint32_t)(sizeof(local_compose) / sizeof(local_compose[0]))) {
+        compose_rects = local_compose;
+        compose_storage = local_compose;
+        compose_rect_cap = (uint32_t)(sizeof(local_compose) / sizeof(local_compose[0]));
+    } else {
+        compose_rects = (fb_rect_t*)malloc((size_t)rect_count * sizeof(*compose_rects));
+        if (!compose_rects) return -1;
+        compose_storage = compose_rects;
+        compose_rect_cap = rect_count;
+        compose_heap = 1;
+    }
+    compose_rect_count = flux_gpu_present_merge_rects(p, rects, rect_count, compose_rects, compose_rect_cap);
+    if (compose_rect_count == 0u) {
+        if (compose_heap) free(compose_rects);
+        return 0;
+    }
+
     uint32_t dmg_union_x = 0u;
     uint32_t dmg_union_y = 0u;
     uint32_t dmg_union_w = 0u;
     uint32_t dmg_union_h = 0u;
     int dmg_union_valid = 0;
-    for (uint32_t ri = 0; ri < rect_count; ri++) {
+    for (uint32_t ri = 0; ri < compose_rect_count; ri++) {
         uint32_t rx = 0u, ry = 0u, rw = 0u, rh = 0u;
-        if (!flux_gpu_present_clip_rect(p, &rects[ri], &rx, &ry, &rw, &rh)) continue;
+        if (!flux_gpu_present_clip_rect(p, &compose_rects[ri], &rx, &ry, &rw, &rh)) continue;
         if (!dmg_union_valid) {
             dmg_union_x = rx;
             dmg_union_y = ry;
@@ -517,12 +654,10 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
     }
 
     fb_rect_t union_rect;
-    const fb_rect_t* compose_rects = rects;
-    uint32_t compose_rect_count = rect_count;
-    if (dmg_union_valid && rect_count > 1u) {
+    if (dmg_union_valid && compose_rect_count > 1u) {
         const uint64_t union_area = (uint64_t)dmg_union_w * (uint64_t)dmg_union_h;
         const uint64_t screen_area = (uint64_t)p->width * (uint64_t)p->height;
-        if (union_area * 3ull >= screen_area) {
+        if (union_area * 5ull >= screen_area) {
             union_rect.x = (int32_t)dmg_union_x;
             union_rect.y = (int32_t)dmg_union_y;
             union_rect.w = (int32_t)dmg_union_w;
@@ -532,7 +667,7 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         }
     }
 
-    flux_gpu_present_cached_surface_t local_cached[128];
+    flux_gpu_present_cached_surface_t local_cached[256];
     flux_gpu_present_cached_surface_t* cached = 0;
     uint32_t cached_cap = 0u;
     int cached_heap = 0;
@@ -660,11 +795,11 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
                 }
 
                 const uint64_t full_area = (uint64_t)cs->width * (uint64_t)cs->height;
-                const int use_full = (valid > 0u && sum_area * 2ull >= full_area) ? 1 : 0;
+                const int use_full = (valid > 0u && sum_area * 3ull >= full_area) ? 1 : 0;
                 int use_merge = 0;
                 if (!use_full && valid > 1u) {
                     const uint64_t bound_area = (uint64_t)(bx2 - bx1) * (uint64_t)(by2 - by1);
-                    if (bound_area <= sum_area * 2ull) {
+                    if (bound_area <= sum_area * 3ull) {
                         use_merge = 1;
                     }
                 }
@@ -782,7 +917,7 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
     {
         static uint32_t gc_tick = 0u;
         gc_tick++;
-        if ((gc_tick & 0x1Fu) == 0u) {
+        if ((gc_tick & 0x3Fu) == 0u) {
             flux_gpu_present_virgl_gc(p, 60u);
         }
     }
@@ -934,6 +1069,7 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
 
 done:
     if (cached_heap) free(cached);
+    if (compose_heap && compose_storage) free(compose_storage);
     return result;
 }
 
