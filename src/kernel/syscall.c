@@ -691,6 +691,8 @@ static void syscall_set_console_color(registers_t* regs, task_t* curr) {
         spinlock_acquire(&term->lock);
         term->curr_fg = fg;
         term->curr_bg = bg;
+        term->def_fg = fg;
+        term->def_bg = bg;
         spinlock_release(&term->lock);
     }
     regs->eax = 0;

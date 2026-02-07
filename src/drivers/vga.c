@@ -56,6 +56,28 @@ int dirty_x1, dirty_y1, dirty_x2, dirty_y2;
 static inline int vga_can_use_avx(void);
 static inline int vga_can_use_avx2(void);
 
+static const uint32_t term_ansi_colors[8] = {
+    0x000000u,
+    0xAA0000u,
+    0x00AA00u,
+    0xAA5500u,
+    0x0000AAu,
+    0xAA00AAu,
+    0x00AAAAu,
+    0xAAAAAAu
+};
+
+static const uint32_t term_ansi_bright_colors[8] = {
+    0x555555u,
+    0xFF5555u,
+    0x55FF55u,
+    0xFFFF55u,
+    0x5555FFu,
+    0xFF55FFu,
+    0x55FFFFu,
+    0xFFFFFFu
+};
+
 void vga_reset_dirty() {
     dirty_x1 = 2000;
     dirty_y1 = 2000;
@@ -266,6 +288,200 @@ static int term_ensure_rows(term_instance_t* term, int rows_needed) {
     return 0;
 }
 
+static inline uint32_t term_effective_fg(const term_instance_t* term) {
+    return (term && term->ansi_inverse) ? term->curr_bg : term->curr_fg;
+}
+
+static inline uint32_t term_effective_bg(const term_instance_t* term) {
+    return (term && term->ansi_inverse) ? term->curr_fg : term->curr_bg;
+}
+
+static void term_ansi_reset(term_instance_t* term) {
+    if (!term) return;
+    term->esc_state = 0;
+    term->csi_in_param = 0;
+    term->csi_param_value = 0;
+    term->csi_param_count = 0;
+}
+
+static void term_csi_push_param(term_instance_t* term) {
+    if (!term) return;
+    if (term->csi_param_count < (int)(sizeof(term->csi_params) / sizeof(term->csi_params[0]))) {
+        int v = term->csi_in_param ? term->csi_param_value : 0;
+        term->csi_params[term->csi_param_count++] = v;
+    }
+    term->csi_param_value = 0;
+    term->csi_in_param = 0;
+}
+
+static inline int term_csi_param(const term_instance_t* term, int idx, int def) {
+    if (!term || idx < 0 || idx >= term->csi_param_count) return def;
+    int v = term->csi_params[idx];
+    return (v == 0) ? def : v;
+}
+
+static void term_set_cursor(term_instance_t* term, int row, int col) {
+    if (!term) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    if (row < 0) row = 0;
+    if (col < 0) col = 0;
+    if (col >= cols) col = cols - 1;
+
+    if (term_ensure_rows(term, row + 1) != 0) return;
+
+    term->row = row;
+    term->col = col;
+
+    if (term->row >= term->history_rows) term->history_rows = term->row + 1;
+    if (term->row > term->max_row) term->max_row = term->row;
+}
+
+static void term_clear_row_range(term_instance_t* term, int row, int x0, int x1) {
+    if (!term) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    if (row < 0) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 > cols) x1 = cols;
+    if (x0 >= x1) return;
+
+    if (term_ensure_rows(term, row + 1) != 0) return;
+
+    size_t base = (size_t)row * (size_t)cols + (size_t)x0;
+    uint32_t fg = term_effective_fg(term);
+    uint32_t bg = term_effective_bg(term);
+    for (int x = x0; x < x1; x++) {
+        term->buffer[base] = ' ';
+        term->fg_colors[base] = fg;
+        term->bg_colors[base] = bg;
+        base++;
+    }
+
+    if (row >= term->history_rows) term->history_rows = row + 1;
+    if (row > term->max_row) term->max_row = row;
+}
+
+static void term_clear_all(term_instance_t* term) {
+    if (!term) return;
+
+    int rows = term->history_rows;
+    if (rows < 1) rows = 1;
+
+    for (int r = 0; r < rows; r++) {
+        term_clear_row_range(term, r, 0, term->cols);
+    }
+
+    term->col = 0;
+    term->row = 0;
+    term->view_row = 0;
+    term->max_row = 0;
+    term->history_rows = 1;
+}
+
+static void term_apply_sgr(term_instance_t* term) {
+    if (!term) return;
+
+    if (term->csi_param_count == 0) {
+        term->curr_fg = term->def_fg;
+        term->curr_bg = term->def_bg;
+        term->ansi_bright = 0;
+        term->ansi_inverse = 0;
+        return;
+    }
+
+    for (int i = 0; i < term->csi_param_count; i++) {
+        int p = term->csi_params[i];
+        if (p == 0) {
+            term->curr_fg = term->def_fg;
+            term->curr_bg = term->def_bg;
+            term->ansi_bright = 0;
+            term->ansi_inverse = 0;
+        } else if (p == 1) {
+            term->ansi_bright = 1;
+        } else if (p == 22) {
+            term->ansi_bright = 0;
+        } else if (p == 7) {
+            term->ansi_inverse = 1;
+        } else if (p == 27) {
+            term->ansi_inverse = 0;
+        } else if (p == 39) {
+            term->curr_fg = term->def_fg;
+        } else if (p == 49) {
+            term->curr_bg = term->def_bg;
+        } else if (p >= 30 && p <= 37) {
+            int idx = p - 30;
+            term->curr_fg = term->ansi_bright ? term_ansi_bright_colors[idx] : term_ansi_colors[idx];
+        } else if (p >= 90 && p <= 97) {
+            int idx = p - 90;
+            term->curr_fg = term_ansi_bright_colors[idx];
+        } else if (p >= 40 && p <= 47) {
+            int idx = p - 40;
+            term->curr_bg = term->ansi_bright ? term_ansi_bright_colors[idx] : term_ansi_colors[idx];
+        } else if (p >= 100 && p <= 107) {
+            int idx = p - 100;
+            term->curr_bg = term_ansi_bright_colors[idx];
+        }
+    }
+}
+
+static void term_handle_csi(term_instance_t* term, char cmd) {
+    if (!term) return;
+
+    if (cmd == 'A') {
+        int n = term_csi_param(term, 0, 1);
+        term_set_cursor(term, term->row - n, term->col);
+    } else if (cmd == 'B') {
+        int n = term_csi_param(term, 0, 1);
+        term_set_cursor(term, term->row + n, term->col);
+    } else if (cmd == 'C') {
+        int n = term_csi_param(term, 0, 1);
+        term_set_cursor(term, term->row, term->col + n);
+    } else if (cmd == 'D') {
+        int n = term_csi_param(term, 0, 1);
+        term_set_cursor(term, term->row, term->col - n);
+    } else if (cmd == 'H' || cmd == 'f') {
+        int r = term_csi_param(term, 0, 1) - 1;
+        int c = term_csi_param(term, 1, 1) - 1;
+        term_set_cursor(term, r, c);
+    } else if (cmd == 'J') {
+        int mode = term->csi_param_count > 0 ? term->csi_params[0] : 0;
+        if (mode == 2) {
+            term_clear_all(term);
+        } else if (mode == 0) {
+            term_clear_row_range(term, term->row, term->col, term->cols);
+            for (int r = term->row + 1; r < term->view_row + term->view_rows; r++) {
+                term_clear_row_range(term, r, 0, term->cols);
+            }
+        } else if (mode == 1) {
+            for (int r = term->view_row; r < term->row; r++) {
+                term_clear_row_range(term, r, 0, term->cols);
+            }
+            term_clear_row_range(term, term->row, 0, term->col + 1);
+        }
+    } else if (cmd == 'K') {
+        int mode = term->csi_param_count > 0 ? term->csi_params[0] : 0;
+        if (mode == 0) {
+            term_clear_row_range(term, term->row, term->col, term->cols);
+        } else if (mode == 1) {
+            term_clear_row_range(term, term->row, 0, term->col + 1);
+        } else if (mode == 2) {
+            term_clear_row_range(term, term->row, 0, term->cols);
+        }
+    } else if (cmd == 'm') {
+        term_apply_sgr(term);
+    } else if (cmd == 's') {
+        term->saved_row = term->row;
+        term->saved_col = term->col;
+    } else if (cmd == 'u') {
+        term_set_cursor(term, term->saved_row, term->saved_col);
+    }
+}
+
 void term_init(term_instance_t* term) {
     if (!term) return;
 
@@ -276,6 +492,8 @@ void term_init(term_instance_t* term) {
 
     if (term->curr_fg == 0) term->curr_fg = COLOR_WHITE;
     if (term->curr_bg == 0) term->curr_bg = COLOR_BLACK;
+    term->def_fg = term->curr_fg;
+    term->def_bg = term->curr_bg;
 
     if (term->cols <= 0) term->cols = TERM_W;
     if (term->view_rows <= 0) term->view_rows = TERM_H;
@@ -290,6 +508,14 @@ void term_init(term_instance_t* term) {
     term->row = 0;
     term->view_row = 0;
     term->max_row = 0;
+    term->saved_col = 0;
+    term->saved_row = 0;
+    term->esc_state = 0;
+    term->csi_in_param = 0;
+    term->csi_param_value = 0;
+    term->csi_param_count = 0;
+    term->ansi_bright = 0;
+    term->ansi_inverse = 0;
 }
 
 void term_destroy(term_instance_t* term) {
@@ -375,14 +601,21 @@ void term_putc(term_instance_t* term, char c) {
         return;
     }
 
+    if (c == '\r') {
+        term->col = 0;
+        return;
+    }
+
     if (c == '\n') {
         if (term_ensure_rows(term, term->row + 1) != 0) return;
 
         int idx = term->row * cols + term->col;
+        uint32_t fg = term_effective_fg(term);
+        uint32_t bg = term_effective_bg(term);
         int remaining = cols - term->col;
         for (int k = 0; k < remaining; k++) {
-            term->bg_colors[idx + k] = term->curr_bg;
-            term->fg_colors[idx + k] = term->curr_fg;
+            term->bg_colors[idx + k] = bg;
+            term->fg_colors[idx + k] = fg;
             term->buffer[idx + k] = ' ';
         }
 
@@ -395,14 +628,14 @@ void term_putc(term_instance_t* term, char c) {
         if (term_ensure_rows(term, term->row + 1) != 0) return;
         int idx = term->row * cols + term->col;
         term->buffer[idx] = ' ';
-        term->fg_colors[idx] = term->curr_fg;
-        term->bg_colors[idx] = term->curr_bg;
+        term->fg_colors[idx] = term_effective_fg(term);
+        term->bg_colors[idx] = term_effective_bg(term);
     } else {
         if (term_ensure_rows(term, term->row + 1) != 0) return;
         int idx = term->row * cols + term->col;
         term->buffer[idx] = c;
-        term->fg_colors[idx] = term->curr_fg;
-        term->bg_colors[idx] = term->curr_bg;
+        term->fg_colors[idx] = term_effective_fg(term);
+        term->bg_colors[idx] = term_effective_bg(term);
         term->col++;
     }
 
@@ -425,77 +658,71 @@ void term_putc(term_instance_t* term, char c) {
 void term_write(term_instance_t* term, const char* buf, uint32_t len) {
     if (!term || !buf || len == 0) return;
 
-    int cols = term->cols;
-    if (cols <= 0) cols = TERM_W;
-
-    int view_rows = term->view_rows;
-    if (view_rows <= 0) view_rows = TERM_H;
-
-    int was_at_bottom = (term->view_row + view_rows) >= term->row;
-
     uint32_t i = 0;
     while (i < len) {
-        char c = buf[i];
+        char c = buf[i++];
 
-        if (c == 0x0C || c == '\n' || c == '\b') {
+        if (term->esc_state == 0) {
+            if ((uint8_t)c == 0x1Bu) {
+                term->esc_state = 1;
+                continue;
+            }
+            if (c == '\r' || c == '\n' || c == '\b' || c == 0x0C) {
+                term_putc(term, c);
+                continue;
+            }
             term_putc(term, c);
-            i++;
             continue;
         }
 
-        if (term_ensure_rows(term, term->row + 1) != 0) return;
-
-        if (term->col >= cols) {
-            term->col = 0;
-            term->row++;
-            term_clear_row(term, term->row);
+        if (term->esc_state == 1) {
+            if (c == '[') {
+                term->esc_state = 2;
+                term->csi_param_count = 0;
+                term->csi_param_value = 0;
+                term->csi_in_param = 0;
+                continue;
+            }
+            if (c == '7') {
+                term->saved_row = term->row;
+                term->saved_col = term->col;
+                term_ansi_reset(term);
+                continue;
+            }
+            if (c == '8') {
+                term_set_cursor(term, term->saved_row, term->saved_col);
+                term_ansi_reset(term);
+                continue;
+            }
+            term_ansi_reset(term);
             continue;
         }
 
-        int remaining = cols - term->col;
-        if (remaining <= 0) continue;
+        if (term->esc_state == 2) {
+            if (c >= '0' && c <= '9') {
+                term->csi_in_param = 1;
+                term->csi_param_value = term->csi_param_value * 10 + (int)(c - '0');
+                if (term->csi_param_value > 9999) term->csi_param_value = 9999;
+                continue;
+            }
+            if (c == ';') {
+                term_csi_push_param(term);
+                continue;
+            }
 
-        uint32_t run = 0;
-        while (i + run < len && run < (uint32_t)remaining) {
-            char cc = buf[i + run];
-            if (cc == 0x0C || cc == '\n' || cc == '\b') break;
-            run++;
+            if (term->csi_in_param || term->csi_param_count > 0) {
+                term_csi_push_param(term);
+            }
+            term_handle_csi(term, c);
+            term_ansi_reset(term);
         }
-
-        if (run == 0) {
-            term_putc(term, c);
-            i++;
-            continue;
-        }
-
-        size_t base = (size_t)term->row * (size_t)cols + (size_t)term->col;
-        memcpy(&term->buffer[base], &buf[i], run);
-        for (uint32_t k = 0; k < run; k++) {
-            term->fg_colors[base + (size_t)k] = term->curr_fg;
-            term->bg_colors[base + (size_t)k] = term->curr_bg;
-        }
-
-        term->col += (int)run;
-        i += run;
-
-        if (term->col >= cols) {
-            term->col = 0;
-            term->row++;
-            term_clear_row(term, term->row);
-        }
-    }
-
-    if (term->row >= term->history_rows) term->history_rows = term->row + 1;
-    if (term->row > term->max_row) term->max_row = term->row;
-
-    if (was_at_bottom) {
-        if (term->row >= view_rows) term->view_row = term->row - view_rows + 1;
-        else term->view_row = 0;
     }
 }
 
 void term_print(term_instance_t* term, const char* s) {
-    while (*s) term_putc(term, *s++);
+    if (!term || !s) return;
+    uint32_t len = (uint32_t)strlen(s);
+    term_write(term, s, len);
 }
 
 void term_reflow(term_instance_t* term, int new_cols) {

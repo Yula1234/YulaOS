@@ -33,6 +33,8 @@ typedef struct {
 
     uint32_t curr_fg;
     uint32_t curr_bg;
+    uint32_t def_fg;
+    uint32_t def_bg;
 
     int cols;
     int view_rows;
@@ -41,6 +43,16 @@ typedef struct {
     int row;
     int view_row;
     int max_row;
+
+    int saved_col;
+    int saved_row;
+    int esc_state;
+    int csi_in_param;
+    int csi_param_value;
+    int csi_param_count;
+    int csi_params[8];
+    int ansi_bright;
+    int ansi_inverse;
 
     spinlock_t lock;
 } term_instance_t;
