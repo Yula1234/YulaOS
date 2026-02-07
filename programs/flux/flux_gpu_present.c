@@ -407,6 +407,30 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
     return flux_cursor_draw_arrow(&ctx, (int)cursor_x, (int)cursor_y, flux_cursor_draw_cb);
 }
 
+static int flux_gpu_present_virgl_rect_intersects_cursor(uint32_t x,
+                                                         uint32_t y,
+                                                         uint32_t w,
+                                                         uint32_t h,
+                                                         int32_t cursor_x,
+                                                         int32_t cursor_y) {
+    if (w == 0u || h == 0u) return 0;
+    if (cursor_x == 0x7FFFFFFF || cursor_y == 0x7FFFFFFF) return 0;
+
+    const int64_t rx1 = (int64_t)x;
+    const int64_t ry1 = (int64_t)y;
+    const int64_t rx2 = rx1 + (int64_t)w;
+    const int64_t ry2 = ry1 + (int64_t)h;
+
+    const int64_t cx1 = (int64_t)cursor_x;
+    const int64_t cy1 = (int64_t)cursor_y;
+    const int64_t cx2 = cx1 + (int64_t)COMP_CURSOR_SAVE_W;
+    const int64_t cy2 = cy1 + (int64_t)COMP_CURSOR_SAVE_H;
+
+    if (cx2 <= rx1 || cx1 >= rx2) return 0;
+    if (cy2 <= ry1 || cy1 >= ry2) return 0;
+    return 1;
+}
+
 static int flux_gpu_present_virgl_draw_frame_rect_damage_clipped(flux_gpu_present_t* p,
                                                                 uint32_t dmg_x,
                                                                 uint32_t dmg_y,
@@ -574,7 +598,13 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         }
     }
 
-    flux_gpu_present_virgl_gc(p, 120u);
+    {
+        static uint32_t gc_tick = 0u;
+        gc_tick++;
+        if ((gc_tick & 0x1Fu) == 0u) {
+            flux_gpu_present_virgl_gc(p, 120u);
+        }
+    }
 
     for (uint32_t ri = 0; ri < rect_count; ri++) {
         uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
@@ -659,7 +689,7 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
             }
         }
 
-        if (cursor_x != 0x7FFFFFFF && cursor_y != 0x7FFFFFFF) {
+        if (flux_gpu_present_virgl_rect_intersects_cursor(x, y, w, h, cursor_x, cursor_y)) {
             if (flux_gpu_present_virgl_draw_cursor_arrow(p, x, y, w, h, cursor_x, cursor_y) != 0) {
                 return -1;
             }
@@ -973,10 +1003,8 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     p->virgl_bg_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_preview_h_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_preview_v_resource_id = flux_gpu_present_choose_resource_id();
-    p->virgl_cursor_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_solid_white_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_solid_black_resource_id = flux_gpu_present_choose_resource_id();
-    p->virgl_solid_red_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_solid_grey_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_solid_blue_resource_id = flux_gpu_present_choose_resource_id();
 
@@ -988,10 +1016,8 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_bg_resource_id, p->width, p->height, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_preview_h_resource_id, p->width, 2u, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_preview_v_resource_id, 2u, p->height, src_bind) != 0) goto fail;
-    if (flux_gpu_present_virgl_create_3d(p, p->virgl_cursor_resource_id, (uint32_t)COMP_CURSOR_SAVE_W, (uint32_t)COMP_CURSOR_SAVE_H, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_white_resource_id, 32u, 32u, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_black_resource_id, 32u, 32u, src_bind) != 0) goto fail;
-    if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_red_resource_id, 32u, 32u, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_grey_resource_id, 32u, 32u, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_blue_resource_id, 32u, 32u, src_bind) != 0) goto fail;
 
@@ -999,10 +1025,8 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_bg_resource_id, p->width, p->height, 0x101010u) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_preview_h_resource_id, p->width, 2u, 0x007ACCu) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_preview_v_resource_id, 2u, p->height, 0x007ACCu) != 0) goto fail;
-    if (flux_gpu_present_virgl_upload_cursor(p, p->virgl_cursor_resource_id) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_white_resource_id, 32u, 32u, 0xFFFFFFu) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_black_resource_id, 32u, 32u, 0x000000u) != 0) goto fail;
-    if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_red_resource_id, 32u, 32u, 0xFF0000u) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_grey_resource_id, 32u, 32u, 0x808080u) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_blue_resource_id, 32u, 32u, 0x007ACCu) != 0) goto fail;
 
