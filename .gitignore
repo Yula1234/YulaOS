@@ -12,6 +12,8 @@
 *.swp
 
 *.txt
+!doc/*.txt
+!doc/syscall.txt
 *.py
 
 bin/

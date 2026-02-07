@@ -1,0 +1,1569 @@
+YulaOS system calls (i386 int 0x80 ABI)
+======================================
+
+1. Overview
+-----------
+
+This document describes the user/kernel system-call ABI of YulaOS.
+It is intended for user space developers.
+
+Unless stated otherwise, system calls are synchronous and execute in the
+context of the calling thread/process.
+
+
+1.1. Invocation ABI
+-------------------
+
+YulaOS uses the classic i386 software interrupt entry:
+
+  int $0x80
+
+Registers on entry:
+
+  eax  system call number
+  ebx  arg1
+  ecx  arg2
+  edx  arg3
+
+Return value:
+
+  eax  system call result
+
+
+1.2. Return values and error handling
+-------------------------------------
+
+YulaOS syscalls typically return:
+
+  - >= 0 on success (often a length, a descriptor, or a PID)
+  - 0 on success for operations without a natural numeric result
+  - -1 on error
+
+Additionally, some blocking operations can return:
+
+  - -2 if the call was interrupted (typically by a signal delivery)
+
+This ABI does not use POSIX errno; callers must interpret negative values
+directly.
+
+
+1.3. User pointers
+------------------
+
+When a syscall takes a user pointer, it must be a valid user-space virtual
+address for the calling process.
+
+Direction:
+
+  - input pointer/buffer: memory must be readable by the caller
+  - output pointer/buffer: memory must be writable by the caller
+
+If a pointer is invalid, the syscall usually fails with -1.
+
+Strings:
+
+  - paths and names are NUL-terminated
+  - extremely long strings can fail (caller should keep names reasonably sized)
+
+
+1.4. File descriptors
+---------------------
+
+File descriptors are small non-negative integers.
+
+Most syscalls that take an fd return -1 when the fd is invalid or the
+operation is not supported for the underlying object.
+
+
+1.5. Time units
+--------------
+
+  sleep():      milliseconds
+  usleep():     microseconds
+  uptime_ms():  milliseconds
+  poll():       timeout_ms is milliseconds
+
+
+2. Data structures
+------------------
+
+This section describes user-visible structures passed to syscalls.
+
+
+2.1. struct user_stat
+---------------------
+
+Used by stat() and fstatat().
+
+  struct user_stat {
+      uint32_t type;   /* 1 = file, 2 = directory */
+      uint32_t size;   /* byte size */
+  } __attribute__((packed));
+
+
+2.2. struct user_fs_info
+------------------------
+
+Used by get_fs_info().
+
+  struct user_fs_info {
+      uint32_t total_blocks;
+      uint32_t free_blocks;
+      uint32_t block_size;
+  } __attribute__((packed));
+
+
+2.3. Framebuffer present structures
+-----------------------------------
+
+Used by fb_present().
+
+  struct fb_rect {
+      int32_t x;
+      int32_t y;
+      int32_t w;
+      int32_t h;
+  } __attribute__((packed));
+
+  struct fb_present_req {
+      const void*             src;
+      uint32_t                src_stride;
+      const struct fb_rect*   rects;
+      uint32_t                rect_count;
+  } __attribute__((packed));
+
+Semantics:
+
+  - src points to a linear pixel buffer in 32bpp format (4 bytes per pixel)
+  - src_stride is bytes per source row
+  - rects points to rect_count rectangles describing what to copy
+
+
+2.4. struct pollfd
+------------------
+
+Used by poll().
+
+  struct pollfd {
+      int32_t fd;
+      int16_t events;
+      int16_t revents;
+  } __attribute__((packed));
+
+Common event bits:
+
+  POLLIN    0x001   data can be read
+  POLLOUT   0x004   data can be written
+  POLLERR   0x008   error condition
+  POLLHUP   0x010   hang up
+  POLLNVAL  0x020   invalid request/descriptor
+
+
+2.5. struct yos_proc_info
+-------------------------
+
+Used by proc_list().
+
+The layout is defined by <yos/proc.h>.
+
+
+3. System call number table
+---------------------------
+
+  0   exit
+  1   print
+  2   getpid
+  3   open
+  4   read
+  5   write
+  6   close
+  7   sleep
+  8   sbrk
+  9   kill
+  10  reserved (invalid)
+  11  usleep
+  12  get_mem_stats
+  13  mkdir
+  14  unlink
+  15  get_time
+  16  reboot
+  17  signal
+  18  sigreturn
+  19  reserved (invalid)
+  20  removed
+  21  removed
+  22  removed
+  23  removed
+  24  reserved (invalid)
+  25  set_clipboard
+  26  get_clipboard
+  27  set_term_mode
+  28  set_console_color
+  29  pipe
+  30  dup2
+  31  mmap
+  32  munmap
+  33  stat
+  34  get_fs_info
+  35  rename
+  36  spawn_process
+  37  waitpid
+  38  getdents
+  39  fstatat
+  40  fb_map
+  41  fb_acquire
+  42  fb_release
+  43  shm_create
+  44  pipe_try_read
+  45  pipe_try_write
+  46  kbd_try_read
+  47  ipc_listen
+  48  ipc_accept
+  49  ipc_connect
+  50  fb_present
+  51  shm_create_named
+  52  shm_open_named
+  53  shm_unlink_named
+  54  futex_wait
+  55  futex_wake
+  56  poll
+  57  ioctl
+  58  chdir
+  59  getcwd
+  60  uptime_ms
+  61  proc_list
+
+
+3.1. Notes on selected interfaces
+---------------------------------
+
+3.1.1. mmap()/munmap() flags
+----------------------------
+
+The only supported mapping kind flags are:
+
+  MAP_SHARED   1
+  MAP_PRIVATE  2
+
+Exactly one of MAP_SHARED or MAP_PRIVATE must be set. Any other flag bits
+cause mmap() to fail.
+
+
+3.1.2. ioctl() request encoding
+-------------------------------
+
+ioctl() request codes use a Linux-like encoding defined in <yos/ioctl.h>.
+
+Bitfields inside req:
+
+  dir   _YOS_IOC_DIR(req)   (2 bits)
+  type  _YOS_IOC_TYPE(req)  (8 bits)
+  nr    _YOS_IOC_NR(req)    (8 bits)
+  size  _YOS_IOC_SIZE(req)  (14 bits)
+
+Direction values:
+
+  _YOS_IOC_NONE   0
+  _YOS_IOC_WRITE  1   user -> kernel
+  _YOS_IOC_READ   2   kernel -> user
+
+Convenience macros:
+
+  _YOS_IO(type, nr)
+  _YOS_IOR(type, nr, data_t)
+  _YOS_IOW(type, nr, data_t)
+  _YOS_IOWR(type, nr, data_t)
+
+Terminal-related requests currently defined:
+
+  YOS_TCGETS
+  YOS_TCSETS
+  YOS_TIOCGWINSZ
+  YOS_TIOCSWINSZ
+  YOS_TIOCGPTN
+
+
+4. System call reference
+------------------------
+
+4.0. exit (syscall 0)
+---------------------
+
+NAME
+  exit - terminate the calling process
+
+SYNOPSIS
+  int exit(int status);
+
+DESCRIPTION
+  Terminates the calling process. The exit status may be observed by the
+  parent using waitpid().
+
+ARGUMENTS
+  status
+    Process exit status.
+
+RETURN VALUE
+  Does not return.
+
+
+4.1. print (syscall 1)
+----------------------
+
+NAME
+  print - write a NUL-terminated string to the process terminal
+
+SYNOPSIS
+  int print(const char* s);
+
+DESCRIPTION
+  Writes the string s to the terminal associated with the calling process.
+
+ARGUMENTS
+  s
+    Pointer to a NUL-terminated string.
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    Invalid pointer or terminal not available.
+
+
+4.2. getpid (syscall 2)
+-----------------------
+
+NAME
+  getpid - get the PID of the calling process
+
+SYNOPSIS
+  int getpid(void);
+
+RETURN VALUE
+  PID of the caller.
+
+
+4.3. open (syscall 3)
+---------------------
+
+NAME
+  open - open a file and obtain a file descriptor
+
+SYNOPSIS
+  int open(const char* path, int flags);
+
+ARGUMENTS
+  path
+    NUL-terminated path.
+
+  flags
+    Open flags (implementation-defined).
+
+RETURN VALUE
+  >= 0 file descriptor on success.
+
+ERRORS
+  -1
+    Invalid path pointer, file not found, invalid flags, or other failure.
+
+
+4.4. read (syscall 4)
+---------------------
+
+NAME
+  read - read bytes from a file descriptor
+
+SYNOPSIS
+  int read(int fd, void* buf, uint32_t size);
+
+ARGUMENTS
+  fd
+    File descriptor.
+
+  buf
+    Output buffer.
+
+  size
+    Maximum number of bytes to read.
+
+RETURN VALUE
+  >= 0 number of bytes read.
+
+ERRORS
+  -1
+    Invalid fd, invalid buf, or read failed.
+
+
+4.5. write (syscall 5)
+----------------------
+
+NAME
+  write - write bytes to a file descriptor
+
+SYNOPSIS
+  int write(int fd, const void* buf, uint32_t size);
+
+RETURN VALUE
+  >= 0 number of bytes written.
+
+ERRORS
+  -1
+    Invalid fd, invalid buf, or write failed.
+
+
+4.6. close (syscall 6)
+----------------------
+
+NAME
+  close - close a file descriptor
+
+SYNOPSIS
+  int close(int fd);
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    Invalid fd or close failed.
+
+
+4.7. sleep (syscall 7)
+----------------------
+
+NAME
+  sleep - sleep for a specified number of milliseconds
+
+SYNOPSIS
+  int sleep(uint32_t ms);
+
+RETURN VALUE
+  0.
+
+
+4.8. sbrk (syscall 8)
+---------------------
+
+NAME
+  sbrk - change data segment size (program break)
+
+SYNOPSIS
+  void* sbrk(int incr);
+
+RETURN VALUE
+  Previous program break on success, (void*)-1 on error.
+
+
+4.9. kill (syscall 9)
+---------------------
+
+NAME
+  kill - terminate a process
+
+SYNOPSIS
+  int kill(uint32_t pid);
+
+DESCRIPTION
+  Requests termination of the process identified by pid.
+
+ARGUMENTS
+  pid
+    Target process ID.
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    No such process, permission denied, or termination failed.
+
+
+
+
+4.10. reserved (syscall 10)
+---------------------------
+
+RETURN VALUE
+  -1.
+
+
+4.11. usleep (syscall 11)
+-------------------------
+
+NAME
+  usleep - sleep for a specified number of microseconds
+
+SYNOPSIS
+  int usleep(uint32_t us);
+
+RETURN VALUE
+  0.
+
+
+4.12. get_mem_stats (syscall 12)
+--------------------------------
+
+NAME
+  get_mem_stats - query coarse system memory statistics
+
+SYNOPSIS
+  int get_mem_stats(uint32_t* used_kb, uint32_t* free_kb);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.13. mkdir (syscall 13)
+------------------------
+
+NAME
+  mkdir - create a directory
+
+SYNOPSIS
+  int mkdir(const char* path);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.14. unlink (syscall 14)
+-------------------------
+
+NAME
+  unlink - remove a name from the filesystem
+
+SYNOPSIS
+  int unlink(const char* path);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.15. get_time (syscall 15)
+---------------------------
+
+NAME
+  get_time - format the current time into a string
+
+SYNOPSIS
+  int get_time(char* buf);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.16. reboot (syscall 16)
+-------------------------
+
+NAME
+  reboot - reboot the system
+
+SYNOPSIS
+  int reboot(void);
+
+RETURN VALUE
+  Does not normally return.
+
+
+4.17. signal (syscall 17)
+-------------------------
+
+NAME
+  signal - install a signal handler
+
+SYNOPSIS
+  int signal(uint32_t signum, void* handler);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.18. sigreturn (syscall 18)
+----------------------------
+
+NAME
+  sigreturn - return from a signal handler
+
+SYNOPSIS
+  int sigreturn(void);
+
+RETURN VALUE
+  Does not return normally.
+
+
+4.19. reserved (syscall 19)
+---------------------------
+
+RETURN VALUE
+  -1.
+
+
+4.20. removed (syscalls 20..23)
+-------------------------------
+
+RETURN VALUE
+  -1.
+
+
+4.24. reserved (syscall 24)
+---------------------------
+
+RETURN VALUE
+  -1.
+
+
+4.25. set_clipboard (syscall 25)
+--------------------------------
+
+NAME
+  set_clipboard - set clipboard contents
+
+SYNOPSIS
+  int set_clipboard(const char* buf, int len);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.26. get_clipboard (syscall 26)
+--------------------------------
+
+NAME
+  get_clipboard - read clipboard contents
+
+SYNOPSIS
+  int get_clipboard(char* buf, int max_len);
+
+
+
+
+4.27. set_term_mode (syscall 27)
+--------------------------------
+
+NAME
+  set_term_mode - set terminal mode for the calling process
+
+SYNOPSIS
+  int set_term_mode(int mode);
+
+RETURN VALUE
+  0.
+
+
+4.28. set_console_color (syscall 28)
+------------------------------------
+
+NAME
+  set_console_color - set terminal colors
+
+SYNOPSIS
+  int set_console_color(uint32_t fg, uint32_t bg);
+
+RETURN VALUE
+  0.
+
+
+4.29. pipe (syscall 29)
+-----------------------
+
+NAME
+  pipe - create a pipe
+
+SYNOPSIS
+  int pipe(int fds[2]);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.30. dup2 (syscall 30)
+-----------------------
+
+NAME
+  dup2 - duplicate a file descriptor
+
+SYNOPSIS
+  int dup2(int oldfd, int newfd);
+
+RETURN VALUE
+  newfd on success, -1 on error.
+
+
+4.31. mmap (syscall 31)
+-----------------------
+
+NAME
+  mmap - create a memory mapping
+
+SYNOPSIS
+  void* mmap(int fd, uint32_t size, int flags);
+
+DESCRIPTION
+  Creates a new mapping in the calling process address space and returns the
+  starting virtual address.
+
+  The mapping address is chosen by the kernel.
+
+  Mappings are always page-based (4 KiB pages). The kernel internally rounds
+  the mapping size up to a page boundary.
+
+ARGUMENTS
+  fd
+    File descriptor providing the backing object.
+
+    Supported objects:
+      - regular files (MAP_PRIVATE only)
+      - shared memory objects created by shm_create*() (MAP_SHARED only)
+
+    Not supported:
+      - pipes
+      - PTYs
+
+  size
+    Requested mapping size in bytes.
+
+    size must be non-zero and must not overflow when aligned to a page.
+
+  flags
+    Mapping kind. Exactly one of:
+      - MAP_PRIVATE
+      - MAP_SHARED
+
+RETURN VALUE
+  On success: returns a non-zero user virtual address.
+
+  On failure: returns 0 (NULL).
+
+ERRORS
+  0 (NULL)
+    Returned for all failures.
+
+NOTES
+  - If fd refers to shared memory, MAP_SHARED is required and size must not
+    exceed the shared memory object size.
+
+  - If fd refers to a regular file, MAP_PRIVATE is required.
+
+  - The mapping region is chosen to avoid overlap with:
+      - existing mmap() regions
+      - the current user stack region
+      - the heap (program break), with a guard gap
+
+EXAMPLES
+  Mapping a shared memory object:
+
+    int fd = shm_create(65536);
+    void* p = mmap(fd, 65536, MAP_SHARED);
+    if (!p) {
+        /* handle error */
+    }
+
+
+4.32. munmap (syscall 32)
+-------------------------
+
+NAME
+  munmap - remove a memory mapping
+
+SYNOPSIS
+  int munmap(void* addr, uint32_t len);
+
+DESCRIPTION
+  Removes mappings covering the address range [addr, addr + len).
+
+  addr must be page-aligned.
+
+  The kernel validates that the entire range is covered by existing mapping
+  areas. Partial holes are not allowed.
+
+  If the range cuts a mapping in the middle, the kernel can split the mapping
+  into two mapping areas and unmap the middle.
+
+ARGUMENTS
+  addr
+    Page-aligned base address returned from mmap().
+
+  len
+    Length in bytes. Must be non-zero. The kernel rounds len up to a multiple
+    of the page size.
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    addr is not aligned, len is 0, overflow, or the specified range is not
+    fully mapped.
+
+
+4.33. stat (syscall 33)
+-----------------------
+
+NAME
+  stat - get file status by path
+
+SYNOPSIS
+  int stat(const char* path, struct user_stat* st);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.34. get_fs_info (syscall 34)
+------------------------------
+
+NAME
+  get_fs_info - query filesystem capacity and usage
+
+SYNOPSIS
+  int get_fs_info(struct user_fs_info* info);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.35. rename (syscall 35)
+-------------------------
+
+NAME
+  rename - rename a filesystem object
+
+SYNOPSIS
+  int rename(const char* oldpath, const char* newpath);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.36. spawn_process (syscall 36)
+--------------------------------
+
+NAME
+  spawn_process - spawn a new process from an ELF executable
+
+SYNOPSIS
+  int spawn_process(const char* path, int argc, char** argv);
+
+DESCRIPTION
+  Loads an ELF executable from path and starts it as a new process.
+
+ARGUMENTS
+  path
+    NUL-terminated path to the ELF executable.
+
+  argc
+    Argument count.
+
+    The kernel enforces:
+      0 <= argc <= 64
+
+  argv
+    Pointer to an array of argc pointers.
+
+    Each argv[i] must point to a readable NUL-terminated string.
+
+RETURN VALUE
+  On success: PID of the new process.
+
+ERRORS
+  -1
+    Invalid pointers, argc out of range, or process creation failed.
+
+
+
+
+4.37. waitpid (syscall 37)
+--------------------------
+
+NAME
+  waitpid - wait for a process to exit
+
+SYNOPSIS
+  int waitpid(uint32_t pid, int* status);
+
+RETURN VALUE
+  pid on success, -1 on error.
+
+
+4.38. getdents (syscall 38)
+---------------------------
+
+NAME
+  getdents - read directory entries
+
+SYNOPSIS
+  int getdents(int fd, void* buf, uint32_t size);
+
+DESCRIPTION
+  Reads directory entries from the directory referenced by fd.
+
+  The buffer is filled with an array of packed records:
+
+    struct yfs_dirent_info {
+        uint32_t inode;
+        uint32_t type;
+        uint32_t size;
+        char     name[60];
+    } __attribute__((packed));
+
+  The format matches yfs_dirent_info_t.
+
+ARGUMENTS
+  fd
+    Directory fd.
+
+  buf
+    Output buffer receiving records.
+
+  size
+    Output buffer size in bytes.
+
+RETURN VALUE
+  >= 0 number of bytes written into buf.
+
+ERRORS
+  -1
+    Invalid fd, fd is not a YulaFS directory, invalid buf, or size == 0.
+
+NOTES
+  The file offset associated with fd is advanced as entries are read, so
+  repeated calls continue where the previous call ended.
+
+
+4.39. fstatat (syscall 39)
+--------------------------
+
+NAME
+  fstatat - get file status relative to a directory fd
+
+SYNOPSIS
+  int fstatat(int dirfd, const char* name, struct user_stat* st);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.40. fb_map (syscall 40)
+-------------------------
+
+NAME
+  fb_map - map framebuffer into the caller address space
+
+SYNOPSIS
+  void* fb_map(void);
+
+DESCRIPTION
+  Maps the current framebuffer into the calling process.
+
+  This call requires that the calling process is the current framebuffer
+  owner (see fb_acquire()/fb_release()).
+
+  The framebuffer is mapped at a fixed user virtual region starting at:
+
+    0xB1000000
+
+  The returned pointer can have an offset from 0xB1000000 due to physical
+  alignment.
+
+RETURN VALUE
+  Non-NULL pointer on success.
+
+ERRORS
+  NULL
+    The caller is not the framebuffer owner, or the framebuffer is not
+    available/initialized.
+
+NOTES
+  fb_release() unmaps any previous fb_map() mapping done by the process.
+
+
+4.41. fb_acquire (syscall 41)
+-----------------------------
+
+NAME
+  fb_acquire - acquire framebuffer ownership
+
+SYNOPSIS
+  int fb_acquire(void);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.42. fb_release (syscall 42)
+-----------------------------
+
+NAME
+  fb_release - release framebuffer ownership
+
+SYNOPSIS
+  int fb_release(void);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.43. shm_create (syscall 43)
+-----------------------------
+
+NAME
+  shm_create - create an unnamed shared memory object
+
+SYNOPSIS
+  int shm_create(uint32_t size);
+
+DESCRIPTION
+  Creates an unnamed shared-memory object and returns an fd.
+
+  The returned fd can be mapped with mmap(fd, ..., MAP_SHARED).
+
+ARGUMENTS
+  size
+    Object size in bytes.
+
+    The kernel enforces:
+      - size != 0
+      - number of pages <= 16384 (i.e. <= 64 MiB)
+
+RETURN VALUE
+  fd >= 0 on success.
+
+ERRORS
+  -1
+    Invalid size or resource exhaustion.
+
+
+
+
+4.44. pipe_try_read (syscall 44)
+--------------------------------
+
+NAME
+  pipe_try_read - non-blocking read from a pipe
+
+SYNOPSIS
+  int pipe_try_read(int fd, void* buf, uint32_t size);
+
+RETURN VALUE
+  > 0 bytes read, 0 if no data, -1 on error.
+
+
+4.45. pipe_try_write (syscall 45)
+---------------------------------
+
+NAME
+  pipe_try_write - non-blocking write to a pipe
+
+SYNOPSIS
+  int pipe_try_write(int fd, const void* buf, uint32_t size);
+
+RETURN VALUE
+  > 0 bytes written, 0 if would block, -1 on error.
+
+
+4.46. kbd_try_read (syscall 46)
+-------------------------------
+
+NAME
+  kbd_try_read - non-blocking keyboard read
+
+SYNOPSIS
+  int kbd_try_read(char* out);
+
+RETURN VALUE
+  1 on success, 0 if no char, -1 on error.
+
+
+4.47. ipc_listen (syscall 47)
+-----------------------------
+
+NAME
+  ipc_listen - create an IPC listening endpoint
+
+SYNOPSIS
+  int ipc_listen(const char* name, int* out_fds);
+
+DESCRIPTION
+  Creates a named IPC listening endpoint.
+
+  The endpoint name is copied into a fixed-size buffer (maximum length is
+  31 characters; the terminating NUL must be present).
+
+  Only one active listener per name is allowed.
+
+ARGUMENTS
+  name
+    NUL-terminated endpoint name (<= 31 bytes).
+
+  out_fds
+    Compatibility argument.
+
+    The kernel accepts NULL. If non-NULL, it must point to a writable buffer
+    of 2 integers.
+
+RETURN VALUE
+  fd >= 0 on success.
+
+ERRORS
+  -1
+    Invalid name, name too long, name already has a listener, or failure.
+
+
+4.48. ipc_accept (syscall 48)
+-----------------------------
+
+NAME
+  ipc_accept - accept a pending IPC connection
+
+SYNOPSIS
+  int ipc_accept(int listen_fd, int out_fds[2]);
+
+DESCRIPTION
+  Accepts one pending IPC connection from the listening endpoint.
+
+  On success, returns two fds in out_fds:
+
+    out_fds[0]  readable end (server reads client->server)
+    out_fds[1]  writable end (server writes server->client)
+
+RETURN VALUE
+  1 on success and out_fds is filled.
+  0 if there is no pending connection.
+
+ERRORS
+  -1
+    Invalid listen_fd, not a listen endpoint, invalid out_fds.
+
+
+
+
+4.49. ipc_connect (syscall 49)
+------------------------------
+
+NAME
+  ipc_connect - connect to a named IPC endpoint
+
+SYNOPSIS
+  int ipc_connect(const char* name, int out_fds[2]);
+
+DESCRIPTION
+  Connects to an IPC listening endpoint identified by name.
+
+  On success, returns two fds in out_fds:
+
+    out_fds[0]  readable end (client reads server->client)
+    out_fds[1]  writable end (client writes client->server)
+
+RETURN VALUE
+  0 on success and out_fds is filled.
+
+ERRORS
+  -1
+    Invalid name, name too long, no listener, invalid out_fds, or failure.
+
+
+4.50. fb_present (syscall 50)
+-----------------------------
+
+NAME
+  fb_present - copy pixels into the framebuffer
+
+SYNOPSIS
+  int fb_present(const struct fb_present_req* req);
+
+DESCRIPTION
+  Presents pixels into the framebuffer by copying rectangles from a source
+  buffer described by req.
+
+  struct fb_present_req {
+      const void*           src;
+      uint32_t              src_stride;
+      const struct fb_rect* rects;
+      uint32_t              rect_count;
+  } __attribute__((packed));
+
+  struct fb_rect {
+      int32_t x;
+      int32_t y;
+      int32_t w;
+      int32_t h;
+  } __attribute__((packed));
+
+  src is treated as a 32bpp pixel buffer (4 bytes per pixel).
+
+  If rect_count is 0, the call succeeds and returns 0.
+
+ARGUMENTS
+  req
+    Pointer to fb_present_req.
+
+    The request object must be readable and mappable.
+
+    req->rect_count has an upper bound:
+      rect_count <= 4096
+
+    req->src_stride must be non-zero and must be at least:
+      (framebuffer_width * 4)
+
+    rect coordinates are clipped to the framebuffer; rectangles with non-
+    positive width/height are ignored.
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    Not framebuffer owner, invalid pointers, invalid stride, or invalid/malformed
+    rectangle array.
+
+NOTES
+  - For performance, keep rect_count reasonably small.
+  - The source buffer must be readable for the whole region described by
+    the rectangles.
+  - The kernel aligns copy regions horizontally to 4-pixel boundaries.
+  - If the source points exactly to the caller's own mapped framebuffer and
+    the stride matches, the kernel may treat the operation as a no-op.
+
+
+4.51. shm_create_named (syscall 51)
+-----------------------------------
+
+NAME
+  shm_create_named - create a named shared memory object
+
+SYNOPSIS
+  int shm_create_named(const char* name, uint32_t size);
+
+DESCRIPTION
+  Creates a named shared-memory object and returns an fd.
+
+  The returned fd can be mapped with mmap(fd, ..., MAP_SHARED).
+
+ARGUMENTS
+  name
+    NUL-terminated object name.
+
+    The name is copied into a fixed-size buffer and must be at most 31 bytes
+    long (excluding the terminating NUL).
+
+  size
+    Object size in bytes.
+
+    The kernel enforces:
+      - size != 0
+      - number of pages <= 16384 (i.e. <= 64 MiB)
+
+RETURN VALUE
+  fd >= 0 on success.
+
+ERRORS
+  -1
+    Invalid name, name too long, invalid size, already exists, or failure.
+
+
+
+
+4.52. shm_open_named (syscall 52)
+---------------------------------
+
+NAME
+  shm_open_named - open an existing named shared memory object
+
+SYNOPSIS
+  int shm_open_named(const char* name);
+
+DESCRIPTION
+  Opens an existing named shared-memory object and returns an fd.
+
+ARGUMENTS
+  name
+    NUL-terminated object name (<= 31 bytes).
+
+RETURN VALUE
+  fd >= 0 on success.
+
+ERRORS
+  -1
+    Invalid name, name too long, not found, or failure.
+
+
+
+
+4.53. shm_unlink_named (syscall 53)
+-----------------------------------
+
+NAME
+  shm_unlink_named - remove a named shared memory object
+
+SYNOPSIS
+  int shm_unlink_named(const char* name);
+
+DESCRIPTION
+  Removes the name of a shared-memory object so it can no longer be opened by
+  shm_open_named(). Existing open fds remain valid.
+
+ARGUMENTS
+  name
+    NUL-terminated object name (<= 31 bytes).
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    Invalid name, name too long, not found, or failure.
+
+
+
+
+4.54. futex_wait (syscall 54)
+-----------------------------
+
+NAME
+  futex_wait - wait on a user-space address
+
+SYNOPSIS
+  int futex_wait(const uint32_t* uaddr, uint32_t expected);
+
+DESCRIPTION
+  Waits on a 32-bit futex word at uaddr.
+
+  If *uaddr != expected, the call returns immediately.
+
+ARGUMENTS
+  uaddr
+    Pointer to a 32-bit word.
+
+  expected
+    Expected value.
+
+RETURN VALUE
+  0 on success.
+
+ERRORS
+  -1
+    Invalid uaddr.
+
+  -2
+    Interrupted.
+
+
+
+
+4.55. futex_wake (syscall 55)
+-----------------------------
+
+NAME
+  futex_wake - wake threads waiting on a user-space address
+
+SYNOPSIS
+  int futex_wake(const uint32_t* uaddr, uint32_t max_wake);
+
+DESCRIPTION
+  Wakes up to max_wake tasks waiting on uaddr.
+
+RETURN VALUE
+  >= 0 number of woken tasks.
+
+ERRORS
+  -1
+    Invalid uaddr.
+
+
+
+
+4.56. poll (syscall 56)
+-----------------------
+
+NAME
+  poll - wait for I/O readiness events
+
+SYNOPSIS
+  int poll(struct pollfd* fds, uint32_t nfds, int timeout_ms);
+
+DESCRIPTION
+  Waits for events on multiple fds.
+
+  The kernel reads fds[].events and writes fds[].revents.
+
+  If nfds == 0, poll() behaves as a sleep primitive:
+    - timeout_ms == 0 returns immediately (0)
+    - timeout_ms > 0 sleeps up to the deadline
+    - timeout_ms < 0 sleeps indefinitely
+
+ARGUMENTS
+  fds
+    Pointer to an array of pollfd records.
+
+  nfds
+    Number of records. The kernel enforces nfds <= 4096.
+
+  timeout_ms
+    Timeout in milliseconds:
+
+      timeout_ms < 0   wait indefinitely
+      timeout_ms = 0   return immediately
+      timeout_ms > 0   wait up to timeout_ms
+
+SUPPORTED READINESS SOURCES:
+  - pipes
+  - PTYs
+  - ipc_listen endpoints (POLLIN indicates pending accepts)
+  - selected device nodes (kbd/mouse) for POLLIN
+
+RETURN VALUE
+  > 0 number of entries with non-zero revents.
+  0 on timeout.
+
+ERRORS
+  -1
+    Invalid fds pointer, overflow in size computation, nfds too large.
+
+  -2
+    Interrupted.
+
+NOTES
+  - If an fd is invalid, POLLNVAL is set in revents for that entry.
+  - If result is negative, the kernel clears all revents to 0.
+  - The kernel ignores unknown event bits in events.
+
+
+
+
+4.57. ioctl (syscall 57)
+------------------------
+
+NAME
+  ioctl - device-specific control operation
+
+SYNOPSIS
+  int ioctl(int fd, uint32_t req, void* arg);
+
+DESCRIPTION
+  Performs a device-specific control operation.
+
+  Request encoding and direction semantics are defined by <yos/ioctl.h>.
+
+  The expected arg pointer type and size depend on req.
+
+ARGUMENTS
+  fd
+    File descriptor.
+
+  req
+    Encoded request code.
+
+  arg
+    Optional pointer to request-specific data.
+
+RETURN VALUE
+  0 on success for most requests.
+  Some requests can return a positive integer (for example, an identifier).
+
+ERRORS
+  -1
+    Invalid fd, unsupported request, or invalid arg.
+
+NOTES
+  - For requests created with _YOS_IOR/_YOS_IOW/_YOS_IOWR the direction bits
+    describe how arg is used:
+
+      _YOS_IOC_READ   kernel writes to *arg
+      _YOS_IOC_WRITE  kernel reads from *arg
+
+    User space must provide a buffer of at least _YOS_IOC_SIZE(req) bytes.
+
+  - YulaOS currently defines terminal-related requests in <yos/ioctl.h>.
+
+  Requests currently defined in <yos/ioctl.h> include terminal controls:
+
+    YOS_TCGETS / YOS_TCSETS
+    YOS_TIOCGWINSZ / YOS_TIOCSWINSZ
+    YOS_TIOCGPTN
+
+
+
+
+4.58. chdir (syscall 58)
+------------------------
+
+NAME
+  chdir - change current working directory
+
+SYNOPSIS
+  int chdir(const char* path);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.59. getcwd (syscall 59)
+-------------------------
+
+NAME
+  getcwd - get current working directory
+
+SYNOPSIS
+  int getcwd(char* buf, uint32_t size);
+
+RETURN VALUE
+  >= 0 length on success, -1 on error.
+
+
+4.60. uptime_ms (syscall 60)
+----------------------------
+
+NAME
+  uptime_ms - get system uptime in milliseconds
+
+SYNOPSIS
+  uint32_t uptime_ms(void);
+
+RETURN VALUE
+  Uptime in milliseconds.
+
+
+4.61. proc_list (syscall 61)
+----------------------------
+
+NAME
+  proc_list - snapshot the process list
+
+SYNOPSIS
+  int proc_list(struct yos_proc_info* buf, uint32_t cap);
+
+DESCRIPTION
+  Writes a snapshot of the current process list into buf.
+
+  The record format is:
+
+    typedef struct {
+        uint32_t pid;
+        uint32_t parent_pid;
+        uint32_t state;
+        uint32_t priority;
+        uint32_t mem_pages;
+        uint32_t term_mode;
+        char name[32];
+    } __attribute__((packed)) yos_proc_info_t;
+
+ARGUMENTS
+  buf
+    Output buffer.
+
+  cap
+    Capacity in number of records.
+
+    The kernel requires:
+      - buf != NULL
+      - cap != 0
+
+RETURN VALUE
+  >= 0 number of records written (<= cap).
+
+ERRORS
+  -1
+    Invalid arguments or buf not writable/present.
+
+
