@@ -96,6 +96,7 @@ static void comp_disconnect_client_with_wm(comp_client_t* clients, int clients_c
                 break;
             }
         }
+
     }
 
     comp_client_disconnect(&clients[dc]);
@@ -120,6 +121,18 @@ static void comp_client_slot_reset(comp_client_t* c) {
         c->surfaces[i].shm_fd = -1;
         for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
             c->surfaces[i].shadow_shm_fd[bi] = -1;
+        }
+    }
+}
+
+static void comp_surface_shadow_free_all(comp_client_t* clients, int clients_cap) {
+    if (!clients || clients_cap <= 0) return;
+    for (int ci = 0; ci < clients_cap; ci++) {
+        comp_client_t* c = &clients[ci];
+        for (int si = 0; si < COMP_MAX_SURFACES; si++) {
+            comp_surface_t* s = &c->surfaces[si];
+            if (!s->in_use) continue;
+            comp_surface_shadow_free(s);
         }
     }
 }
@@ -191,6 +204,74 @@ static int comp_clients_reserve(comp_client_t** clients,
     if (*prev_state) free(*prev_state);
     if (*order) free(*order);
     if (*comp_surfaces) free(*comp_surfaces);
+
+    *clients = new_clients;
+    *clients_cap = new_cap;
+    *prev_state = new_prev;
+    *prev_state_cap_clients = new_cap;
+    *order = new_order;
+    *order_cap = (int)new_order_n;
+    *comp_surfaces = new_comp;
+    *comp_surfaces_cap = (int)new_order_n;
+    return 0;
+}
+
+static int comp_clients_shrink(comp_client_t** clients,
+                               int* clients_cap,
+                               draw_surface_state_t** prev_state,
+                               int* prev_state_cap_clients,
+                               draw_item_t** order,
+                               int* order_cap,
+                               flux_gpu_comp_surface_t** comp_surfaces,
+                               int* comp_surfaces_cap) {
+    if (!clients || !clients_cap || !prev_state || !prev_state_cap_clients || !order || !order_cap || !comp_surfaces || !comp_surfaces_cap) return -1;
+    if (!*clients || *clients_cap <= (int)COMP_CLIENTS_INIT) return 0;
+
+    int max_used = -1;
+    for (int i = 0; i < *clients_cap; i++) {
+        if ((*clients)[i].connected) max_used = i;
+    }
+
+    int new_cap = max_used + 1;
+    if (new_cap < (int)COMP_CLIENTS_INIT) new_cap = (int)COMP_CLIENTS_INIT;
+    if (new_cap >= *clients_cap) return 0;
+
+    for (int i = new_cap; i < *clients_cap; i++) {
+        if ((*clients)[i].connected) return -1;
+    }
+
+    size_t new_clients_bytes = (size_t)new_cap * sizeof(comp_client_t);
+    size_t new_prev_n = (size_t)new_cap * (size_t)COMP_MAX_SURFACES;
+    size_t new_prev_bytes = new_prev_n * sizeof(draw_surface_state_t);
+    size_t new_order_n = (size_t)new_cap * (size_t)COMP_MAX_SURFACES;
+    size_t new_order_bytes = new_order_n * sizeof(draw_item_t);
+    size_t new_comp_bytes = new_order_n * sizeof(flux_gpu_comp_surface_t);
+
+    comp_client_t* new_clients = (comp_client_t*)malloc(new_clients_bytes);
+    draw_surface_state_t* new_prev = (draw_surface_state_t*)malloc(new_prev_bytes);
+    draw_item_t* new_order = (draw_item_t*)malloc(new_order_bytes);
+    flux_gpu_comp_surface_t* new_comp = (flux_gpu_comp_surface_t*)malloc(new_comp_bytes);
+
+    if (!new_clients || !new_prev || !new_order || !new_comp) {
+        if (new_clients) free(new_clients);
+        if (new_prev) free(new_prev);
+        if (new_order) free(new_order);
+        if (new_comp) free(new_comp);
+        return -1;
+    }
+
+    for (int i = 0; i < new_cap; i++) {
+        comp_client_slot_reset(&new_clients[i]);
+    }
+    memcpy(new_clients, *clients, (size_t)new_cap * sizeof(comp_client_t));
+    memcpy(new_prev, *prev_state, new_prev_bytes);
+    memset(new_order, 0, new_order_bytes);
+    memset(new_comp, 0, new_comp_bytes);
+
+    free(*clients);
+    free(*prev_state);
+    free(*order);
+    free(*comp_surfaces);
 
     *clients = new_clients;
     *clients_cap = new_cap;
@@ -372,6 +453,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     int preview_dirty = 0;
 
     int first_frame = 1;
+    int prev_virgl_active = 0;
+    uint32_t shrink_tick = 0u;
 
     while (!g_should_exit) {
         int scene_dirty = 0;
@@ -379,6 +462,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         {
             const uint32_t pm = gpu_present_ok ? flux_gpu_present_mode(&gpu_present) : (uint32_t)FLUX_GPU_PRESENT_MODE_NONE;
             g_virgl_active = (pm == (uint32_t)FLUX_GPU_PRESENT_MODE_VIRGL_COMPOSE) ? 1 : 0;
+        }
+        if (g_virgl_active && !prev_virgl_active) {
+            comp_surface_shadow_free_all(clients, clients_cap);
         }
 
         if (listen_fd < 0) {
@@ -521,6 +607,18 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         if (comp_send_mouse(clients, clients_cap, &input, &ms) < 0) {
             const int dc = input.last_client;
             comp_disconnect_client_with_wm(clients, clients_cap, dc, &wm, &input, &preview, &preview_dirty);
+        }
+
+        shrink_tick++;
+        if ((shrink_tick & 0xFFu) == 0u) {
+            (void)comp_clients_shrink(&clients,
+                                      &clients_cap,
+                                      &prev_state,
+                                      &prev_state_cap_clients,
+                                      &order,
+                                      &order_cap,
+                                      &comp_surfaces,
+                                      &comp_surfaces_cap);
         }
 
         for (;;) {

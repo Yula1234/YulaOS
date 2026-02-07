@@ -125,6 +125,8 @@ typedef struct {
     comp_ipc_rect_t damage_committed[COMP_IPC_DAMAGE_MAX_RECTS];
 } comp_surface_t;
 
+void comp_surface_shadow_free(comp_surface_t* s);
+
 typedef struct {
     int connected;
     int pid;

@@ -1,6 +1,6 @@
 #include "flux_internal.h"
 
-static void comp_surface_shadow_free(comp_surface_t* s) {
+void comp_surface_shadow_free(comp_surface_t* s) {
     if (!s) return;
     for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
         if (s->shadow_pixels[bi] && s->shadow_size_bytes) {
