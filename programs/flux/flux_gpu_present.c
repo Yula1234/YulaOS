@@ -516,6 +516,22 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         }
     }
 
+    fb_rect_t union_rect;
+    const fb_rect_t* compose_rects = rects;
+    uint32_t compose_rect_count = rect_count;
+    if (dmg_union_valid && rect_count > 1u) {
+        const uint64_t union_area = (uint64_t)dmg_union_w * (uint64_t)dmg_union_h;
+        const uint64_t screen_area = (uint64_t)p->width * (uint64_t)p->height;
+        if (union_area * 3ull >= screen_area) {
+            union_rect.x = (int32_t)dmg_union_x;
+            union_rect.y = (int32_t)dmg_union_y;
+            union_rect.w = (int32_t)dmg_union_w;
+            union_rect.h = (int32_t)dmg_union_h;
+            compose_rects = &union_rect;
+            compose_rect_count = 1u;
+        }
+    }
+
     flux_gpu_present_cached_surface_t local_cached[128];
     flux_gpu_present_cached_surface_t* cached = 0;
     uint32_t cached_cap = 0u;
@@ -643,8 +659,10 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
                     valid++;
                 }
 
+                const uint64_t full_area = (uint64_t)cs->width * (uint64_t)cs->height;
+                const int use_full = (valid > 0u && sum_area * 2ull >= full_area) ? 1 : 0;
                 int use_merge = 0;
-                if (valid > 1u) {
+                if (!use_full && valid > 1u) {
                     const uint64_t bound_area = (uint64_t)(bx2 - bx1) * (uint64_t)(by2 - by1);
                     if (bound_area <= sum_area * 2ull) {
                         use_merge = 1;
@@ -653,6 +671,16 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
 
                 if (valid == 0u) {
                     ok = 1;
+                } else if (use_full) {
+                    ok = (flux_gpu_present_virgl_transfer_box(p,
+                                                              slot->resource_id,
+                                                              cs->width,
+                                                              cs->height,
+                                                              cs->stride_bytes,
+                                                              0u,
+                                                              0u,
+                                                              cs->width,
+                                                              cs->height) == 0);
                 } else if (use_merge) {
                     const uint32_t ux = (uint32_t)bx1;
                     const uint32_t uy = (uint32_t)by1;
@@ -759,9 +787,15 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         }
     }
 
-    for (uint32_t ri = 0; ri < rect_count; ri++) {
+    uint32_t present_union_x = 0u;
+    uint32_t present_union_y = 0u;
+    uint32_t present_union_w = 0u;
+    uint32_t present_union_h = 0u;
+    int present_union_valid = 0;
+
+    for (uint32_t ri = 0; ri < compose_rect_count; ri++) {
         uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
-        if (!flux_gpu_present_clip_rect(p, &rects[ri], &x, &y, &w, &h)) continue;
+        if (!flux_gpu_present_clip_rect(p, &compose_rects[ri], &x, &y, &w, &h)) continue;
 
         if (flux_gpu_present_virgl_copy_2d(p,
                                            p->virgl_front_resource_id,
@@ -862,7 +896,37 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
             }
         }
 
-        if (flux_gpu_present_virgl_flush_rect(p, p->virgl_front_resource_id, x, y, w, h) != 0) {
+        if (!present_union_valid) {
+            present_union_x = x;
+            present_union_y = y;
+            present_union_w = w;
+            present_union_h = h;
+            present_union_valid = 1;
+        } else {
+            const uint32_t ux2 = present_union_x + present_union_w;
+            const uint32_t uy2 = present_union_y + present_union_h;
+            const uint32_t rx2 = x + w;
+            const uint32_t ry2 = y + h;
+
+            const uint32_t nx1 = (x < present_union_x) ? x : present_union_x;
+            const uint32_t ny1 = (y < present_union_y) ? y : present_union_y;
+            const uint32_t nx2 = (rx2 > ux2) ? rx2 : ux2;
+            const uint32_t ny2 = (ry2 > uy2) ? ry2 : uy2;
+
+            present_union_x = nx1;
+            present_union_y = ny1;
+            present_union_w = nx2 - nx1;
+            present_union_h = ny2 - ny1;
+        }
+    }
+
+    if (present_union_valid) {
+        if (flux_gpu_present_virgl_flush_rect(p,
+                                              p->virgl_front_resource_id,
+                                              present_union_x,
+                                              present_union_y,
+                                              present_union_w,
+                                              present_union_h) != 0) {
             result = -1;
             goto done;
         }
