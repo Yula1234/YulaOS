@@ -738,7 +738,25 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         for (int ci = 0; ci < clients_cap; ci++) {
             for (int si = 0; si < COMP_MAX_SURFACES; si++) {
                 const int idx = ci * COMP_MAX_SURFACES + si;
-                const comp_surface_t* s = &clients[ci].surfaces[si];
+                comp_surface_t* s = &clients[ci].surfaces[si];
+
+                if (s->resize_pending) {
+                    comp_ipc_input_t in;
+                    memset(&in, 0, sizeof(in));
+                    in.surface_id = s->id;
+                    in.kind = COMP_IPC_INPUT_RESIZE;
+                    in.x = s->resize_w;
+                    in.y = (int32_t)s->resize_h;
+                    in.buttons = 0;
+                    in.keycode = 0;
+                    in.key_state = 0;
+
+                    int sent = comp_client_try_send_input(&clients[ci], &in);
+                    if (sent > 0) {
+                        s->resize_pending = 0;
+                    }
+                }
+
                 const int curr_valid = (clients[ci].connected && s->in_use && s->attached && s->committed && s->pixels && s->w > 0 && s->h > 0 && s->stride > 0);
 
                 draw_surface_state_t cur;

@@ -105,6 +105,10 @@ typedef struct {
     int h;
     int stride;
 
+    int resize_pending;
+    int resize_w;
+    int resize_h;
+
     uint32_t* shadow_pixels[COMP_SURFACE_SHADOW_BUFS];
     int shadow_stride;
     uint32_t shadow_size_bytes;
@@ -236,6 +240,7 @@ void comp_update_focus(comp_client_t* clients, int nclients, comp_input_state_t*
 int comp_send_mouse(comp_client_t* clients, int nclients, comp_input_state_t* st, const mouse_state_t* ms);
 int comp_send_key(comp_client_t* clients, int nclients, comp_input_state_t* st, uint32_t keycode, uint32_t key_state);
 int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential);
+int comp_client_try_send_input(comp_client_t* c, const comp_ipc_input_t* in);
 
 void comp_client_pump(comp_client_t* c,
                        const comp_buffer_t* buf,

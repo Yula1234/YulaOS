@@ -249,29 +249,8 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                     in.kind = COMP_IPC_INPUT_CLOSE;
 
                     int sent = 0;
-                    if (c->input_ring_enabled && c->input_ring && (c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) {
-                        if (comp_client_send_input(c, &in, 1) < 0) {
-                            sent = 0;
-                        } else {
-                            sent = 1;
-                        }
-                    } else {
-                        if (c->connected && c->fd_s2c >= 0) {
-                            comp_ipc_hdr_t hdr;
-                            hdr.magic = COMP_IPC_MAGIC;
-                            hdr.version = (uint16_t)COMP_IPC_VERSION;
-                            hdr.type = (uint16_t)COMP_IPC_MSG_INPUT;
-                            hdr.len = (uint32_t)sizeof(in);
-                            hdr.seq = c->seq_out++;
-
-                            uint8_t frame[sizeof(hdr) + sizeof(in)];
-                            memcpy(frame, &hdr, (uint32_t)sizeof(hdr));
-                            memcpy(frame + sizeof(hdr), &in, (uint32_t)sizeof(in));
-
-                            int wr = pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), 1);
-                            sent = (wr == 1);
-                        }
-                    }
+                    int sr = comp_client_try_send_input(c, &in);
+                    if (sr > 0) sent = 1;
 
                     if (!sent) {
                         (void)syscall(9, pid, 0, 0);
@@ -333,7 +312,14 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                 in.keycode = 0;
                 in.key_state = 0;
 
-                (void)comp_client_send_input(c, &in, 1);
+                s->resize_pending = 1;
+                s->resize_w = (int)cmd.x;
+                s->resize_h = (int)cmd.y;
+
+                int sent = comp_client_try_send_input(c, &in);
+                if (sent > 0) {
+                    s->resize_pending = 0;
+                }
             } else if (cmd.kind == COMP_WM_CMD_PREVIEW_RECT) {
                 if (!preview) continue;
                 if (cmd.x <= 0 || cmd.y <= 0) continue;

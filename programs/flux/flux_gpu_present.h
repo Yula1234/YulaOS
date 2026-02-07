@@ -48,6 +48,7 @@ typedef struct {
     uint32_t* pixels;
 
     uint32_t virgl_front_resource_id;
+    uint32_t virgl_back_resource_id;
     uint32_t virgl_bg_resource_id;
     uint32_t virgl_preview_h_resource_id;
     uint32_t virgl_preview_v_resource_id;

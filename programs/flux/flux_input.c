@@ -1,73 +1,21 @@
 #include "flux_internal.h"
 
-int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential) {
+static int comp_client_send_input_ring(comp_client_t* c, const comp_ipc_input_t* in, int essential, int* out_sent) {
     if (!c || !in) return 0;
-    if (!c->connected || c->fd_s2c < 0) return 0;
+    if (!c->input_ring_enabled || !c->input_ring || !(c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) return 0;
 
-    if (c->input_ring_enabled && c->input_ring && (c->input_ring->flags & COMP_INPUT_RING_FLAG_READY)) {
-        comp_input_ring_t* ring = c->input_ring;
+    if (out_sent) *out_sent = 0;
+    comp_input_ring_t* ring = c->input_ring;
 
-        if (c->input_ring_mouse_pending) {
-            for (;;) {
-                const uint32_t r = ring->r;
-                const uint32_t w = ring->w;
-                const uint32_t used = w - r;
-                if (used >= ring->cap) break;
-
-                const uint32_t wi = w & ring->mask;
-                ring->events[wi] = c->input_ring_mouse_pending_ev;
-                __sync_synchronize();
-                ring->w = w + 1u;
-                __sync_synchronize();
-
-                if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
-                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
-                    futex_wake(&ring->w, 1u);
-                }
-
-                c->input_ring_mouse_pending = 0;
-                break;
-            }
-        }
-
+    if (c->input_ring_mouse_pending) {
         for (;;) {
             const uint32_t r = ring->r;
             const uint32_t w = ring->w;
             const uint32_t used = w - r;
-            if (used >= ring->cap) {
-                if (in->kind == COMP_IPC_INPUT_MOUSE) {
-                    ring->dropped++;
-                    c->input_ring_mouse_pending_ev = *in;
-                    c->input_ring_mouse_pending = 1;
-                    if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
-                        (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
-                        futex_wake(&ring->w, 1u);
-                    }
-                    return 0;
-                }
-
-                if (essential) {
-                    (void)__sync_fetch_and_or(&ring->flags, COMP_INPUT_RING_FLAG_WAIT_W);
-                    __sync_synchronize();
-
-                    const uint32_t r2 = ring->r;
-                    const uint32_t w2 = ring->w;
-                    if ((w2 - r2) < ring->cap) {
-                        (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
-                        continue;
-                    }
-
-                    (void)futex_wait(&ring->r, r);
-                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
-                    continue;
-                }
-
-                ring->dropped++;
-                return 0;
-            }
+            if (used >= ring->cap) break;
 
             const uint32_t wi = w & ring->mask;
-            ring->events[wi] = *in;
+            ring->events[wi] = c->input_ring_mouse_pending_ev;
             __sync_synchronize();
             ring->w = w + 1u;
             __sync_synchronize();
@@ -76,8 +24,70 @@ int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int ess
                 (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
                 futex_wake(&ring->w, 1u);
             }
-            return 0;
+
+            c->input_ring_mouse_pending = 0;
+            break;
         }
+    }
+
+    for (;;) {
+        const uint32_t r = ring->r;
+        const uint32_t w = ring->w;
+        const uint32_t used = w - r;
+        if (used >= ring->cap) {
+            if (in->kind == COMP_IPC_INPUT_MOUSE) {
+                ring->dropped++;
+                c->input_ring_mouse_pending_ev = *in;
+                c->input_ring_mouse_pending = 1;
+                if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
+                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+                    futex_wake(&ring->w, 1u);
+                }
+                return 1;
+            }
+
+            if (essential) {
+                (void)__sync_fetch_and_or(&ring->flags, COMP_INPUT_RING_FLAG_WAIT_W);
+                __sync_synchronize();
+
+                const uint32_t r2 = ring->r;
+                const uint32_t w2 = ring->w;
+                if ((w2 - r2) < ring->cap) {
+                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
+                    continue;
+                }
+
+                (void)futex_wait(&ring->r, r);
+                (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
+                continue;
+            }
+
+            ring->dropped++;
+            return 1;
+        }
+
+        const uint32_t wi = w & ring->mask;
+        ring->events[wi] = *in;
+        __sync_synchronize();
+        ring->w = w + 1u;
+        __sync_synchronize();
+
+        if (ring->flags & COMP_INPUT_RING_FLAG_WAIT_R) {
+            (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
+            futex_wake(&ring->w, 1u);
+        }
+        if (out_sent) *out_sent = 1;
+        return 1;
+    }
+}
+
+static int comp_client_send_input_ex(comp_client_t* c, const comp_ipc_input_t* in, int essential, int* out_sent) {
+    if (out_sent) *out_sent = 0;
+    if (!c || !in) return 0;
+    if (!c->connected || c->fd_s2c < 0) return 0;
+
+    if (comp_client_send_input_ring(c, in, essential, out_sent)) {
+        return 0;
     }
 
     comp_ipc_hdr_t hdr;
@@ -93,7 +103,19 @@ int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int ess
 
     int wr = pipe_try_write_frame(c->fd_s2c, frame, (uint32_t)sizeof(frame), essential);
     if (wr < 0) return -1;
+    if (out_sent) *out_sent = (wr == 1);
     return 0;
+}
+
+int comp_client_send_input(comp_client_t* c, const comp_ipc_input_t* in, int essential) {
+    return comp_client_send_input_ex(c, in, essential, 0);
+}
+
+int comp_client_try_send_input(comp_client_t* c, const comp_ipc_input_t* in) {
+    int sent = 0;
+    int rc = comp_client_send_input_ex(c, in, 0, &sent);
+    if (rc < 0) return -1;
+    return sent ? 1 : 0;
 }
 
 void comp_input_state_init(comp_input_state_t* st) {
