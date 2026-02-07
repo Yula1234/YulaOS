@@ -281,6 +281,28 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                 continue;
             }
 
+            if (cmd.kind == COMP_WM_CMD_FOCUS) {
+                if (cmd.client_id >= (uint32_t)nclients || cmd.surface_id == 0) {
+                    if (input->focus_client != -1 || input->focus_surface_id != 0) {
+                        input->focus_client = -1;
+                        input->focus_surface_id = 0;
+                        if (scene_dirty) *scene_dirty = 1;
+                    }
+                } else {
+                    comp_client_t* c = &clients[(int)cmd.client_id];
+                    if (!c->connected) continue;
+                    comp_surface_t* s = comp_client_surface_get(c, cmd.surface_id, 0);
+                    if (!s || !s->attached || !s->committed) continue;
+
+                    if (input->focus_client != (int)cmd.client_id || input->focus_surface_id != cmd.surface_id) {
+                        input->focus_client = (int)cmd.client_id;
+                        input->focus_surface_id = cmd.surface_id;
+                        if (scene_dirty) *scene_dirty = 1;
+                    }
+                }
+                continue;
+            }
+
             if (cmd.client_id >= (uint32_t)nclients || cmd.surface_id == 0) continue;
 
             comp_client_t* c = &clients[(int)cmd.client_id];
@@ -289,10 +311,7 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
             comp_surface_t* s = comp_client_surface_get(c, cmd.surface_id, 0);
             if (!s || !s->attached || !s->committed) continue;
 
-            if (cmd.kind == COMP_WM_CMD_FOCUS) {
-                input->focus_client = (int)cmd.client_id;
-                input->focus_surface_id = cmd.surface_id;
-            } else if (cmd.kind == COMP_WM_CMD_RAISE) {
+            if (cmd.kind == COMP_WM_CMD_RAISE) {
                 s->z = ++(*z_counter);
                 if (scene_dirty) *scene_dirty = 1;
             } else if (cmd.kind == COMP_WM_CMD_MOVE) {

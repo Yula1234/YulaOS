@@ -152,6 +152,8 @@ static void flux_gpu_present_reset(flux_gpu_present_t* p) {
     p->virgl_solid_white_resource_id = 0u;
     p->virgl_solid_black_resource_id = 0u;
     p->virgl_solid_red_resource_id = 0u;
+    p->virgl_solid_grey_resource_id = 0u;
+    p->virgl_solid_blue_resource_id = 0u;
 
     p->virgl_surfaces = 0;
     p->virgl_surfaces_cap = 0u;
@@ -465,6 +467,28 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
     return 0;
 }
 
+static int flux_gpu_present_virgl_draw_frame_rect_damage_clipped(flux_gpu_present_t* p,
+                                                                uint32_t dmg_x,
+                                                                uint32_t dmg_y,
+                                                                uint32_t dmg_w,
+                                                                uint32_t dmg_h,
+                                                                int32_t rx,
+                                                                int32_t ry,
+                                                                uint32_t rw,
+                                                                uint32_t rh,
+                                                                uint32_t t,
+                                                                uint32_t solid_resource_id) {
+    if (!p) return -1;
+    if (rw <= 0 || rh <= 0 || t == 0) return 0;
+    
+    if (flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p, dmg_x, dmg_y, dmg_w, dmg_h, rx, ry, rw, t, solid_resource_id) != 0) return -1;
+    if (flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p, dmg_x, dmg_y, dmg_w, dmg_h, rx, ry + (int32_t)rh - (int32_t)t, rw, t, solid_resource_id) != 0) return -1;
+    if (flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p, dmg_x, dmg_y, dmg_w, dmg_h, rx, ry, t, rh, solid_resource_id) != 0) return -1;
+    if (flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p, dmg_x, dmg_y, dmg_w, dmg_h, rx + (int32_t)rw - (int32_t)t, ry, t, rh, solid_resource_id) != 0) return -1;
+
+    return 0;
+}
+
 int flux_gpu_present_compose(flux_gpu_present_t* p,
                              const fb_rect_t* rects,
                              uint32_t rect_count,
@@ -648,6 +672,19 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
                                                cw,
                                                ch) != 0) {
                 return -1;
+            }
+
+            uint32_t border_resid = (cs->flags & FLUX_GPU_SURFACE_FLAG_ACTIVE) ? p->virgl_solid_blue_resource_id : p->virgl_solid_grey_resource_id;
+            if (border_resid != 0u) {
+                if (flux_gpu_present_virgl_draw_frame_rect_damage_clipped(p, x, y, w, h,
+                                                                         cs->x - 1,
+                                                                         cs->y - 1,
+                                                                         cs->width + 2u,
+                                                                         cs->height + 2u,
+                                                                         1u,
+                                                                         border_resid) != 0) {
+                    return -1;
+                }
             }
         }
 
@@ -978,6 +1015,8 @@ static void flux_gpu_present_virgl_shutdown_state(flux_gpu_present_t* p) {
     flux_gpu_present_virgl_destroy_resource(p, &p->virgl_solid_white_resource_id);
     flux_gpu_present_virgl_destroy_resource(p, &p->virgl_solid_black_resource_id);
     flux_gpu_present_virgl_destroy_resource(p, &p->virgl_solid_red_resource_id);
+    flux_gpu_present_virgl_destroy_resource(p, &p->virgl_solid_grey_resource_id);
+    flux_gpu_present_virgl_destroy_resource(p, &p->virgl_solid_blue_resource_id);
 }
 
 static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
@@ -998,6 +1037,8 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     p->virgl_solid_white_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_solid_black_resource_id = flux_gpu_present_choose_resource_id();
     p->virgl_solid_red_resource_id = flux_gpu_present_choose_resource_id();
+    p->virgl_solid_grey_resource_id = flux_gpu_present_choose_resource_id();
+    p->virgl_solid_blue_resource_id = flux_gpu_present_choose_resource_id();
 
     const uint32_t front_bind = FLUX_VIRGL_PIPE_BIND_RENDER_TARGET | FLUX_VIRGL_PIPE_BIND_SCANOUT;
     const uint32_t src_bind = FLUX_VIRGL_PIPE_BIND_SAMPLER_VIEW;
@@ -1011,6 +1052,8 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_white_resource_id, 32u, 32u, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_black_resource_id, 32u, 32u, src_bind) != 0) goto fail;
     if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_red_resource_id, 32u, 32u, src_bind) != 0) goto fail;
+    if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_grey_resource_id, 32u, 32u, src_bind) != 0) goto fail;
+    if (flux_gpu_present_virgl_create_3d(p, p->virgl_solid_blue_resource_id, 32u, 32u, src_bind) != 0) goto fail;
 
     stage = "upload";
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_bg_resource_id, p->width, p->height, 0x101010u) != 0) goto fail;
@@ -1020,6 +1063,8 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_white_resource_id, 32u, 32u, 0xFFFFFFu) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_black_resource_id, 32u, 32u, 0x000000u) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_red_resource_id, 32u, 32u, 0xFF0000u) != 0) goto fail;
+    if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_grey_resource_id, 32u, 32u, 0x808080u) != 0) goto fail;
+    if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_blue_resource_id, 32u, 32u, 0x007ACCu) != 0) goto fail;
 
     yos_gpu_set_scanout_t sc;
     memset(&sc, 0, sizeof(sc));

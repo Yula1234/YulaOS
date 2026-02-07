@@ -28,7 +28,10 @@ typedef struct {
 
     uint32_t damage_count;
     const comp_ipc_rect_t* damage;
+    uint32_t flags;
 } flux_gpu_comp_surface_t;
+
+#define FLUX_GPU_SURFACE_FLAG_ACTIVE (1u << 0)
 
 typedef struct {
     int fd;
@@ -52,6 +55,8 @@ typedef struct {
     uint32_t virgl_solid_white_resource_id;
     uint32_t virgl_solid_black_resource_id;
     uint32_t virgl_solid_red_resource_id;
+    uint32_t virgl_solid_grey_resource_id;
+    uint32_t virgl_solid_blue_resource_id;
 
     flux_gpu_present_surface_slot_t* virgl_surfaces;
     uint32_t virgl_surfaces_cap;

@@ -671,8 +671,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
 
                 if (changed) {
                     any_surface_changed = 1;
-                    if (prev->valid) damage_add(&dmg, rect_make(prev->x, prev->y, prev->w, prev->h), w, h);
-                    if (cur.valid) damage_add(&dmg, rect_make(cur.x, cur.y, cur.w, cur.h), w, h);
+                    if (prev->valid) damage_add(&dmg, rect_make(prev->x - 1, prev->y - 1, prev->w + 2, prev->h + 2), w, h);
+                    if (cur.valid) damage_add(&dmg, rect_make(cur.x - 1, cur.y - 1, cur.w + 2, cur.h + 2), w, h);
                 }
 
                 prev_state[idx] = cur;
@@ -757,6 +757,12 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                         }
                         if (!src || src_stride <= 0) continue;
                         blit_surface_clipped(out, stride, w, h, s->x, s->y, src, src_stride, s->w, s->h, clip);
+
+                        uint32_t border_col = 0x808080u;
+                        if (input.focus_client == (int)order[k].ci && input.focus_surface_id == s->id) {
+                            border_col = 0x007ACCu;
+                        }
+                        draw_frame_rect_clipped(out, stride, w, h, s->x - 1, s->y - 1, s->w + 2, s->h + 2, 1, border_col, clip);
                     }
                 }
 
@@ -901,6 +907,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                             cs->shm_fd = shm_fd;
                             cs->commit_gen = s->commit_gen;
 
+                            cs->flags = 0u;
+                            if (input.focus_client == (int)order[i].ci && input.focus_surface_id == s->id) {
+                                cs->flags |= FLUX_GPU_SURFACE_FLAG_ACTIVE;
+                            }
+
                             cs->damage_count = 0u;
                             cs->damage = 0;
                             if (s->damage_committed_gen == s->commit_gen && s->damage_committed_count) {
@@ -957,6 +968,12 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                                 }
                                 if (!src || src_stride <= 0) continue;
                                 blit_surface_clipped(fb, stride, w, h, s->x, s->y, src, src_stride, s->w, s->h, rect_make(0, 0, w, h));
+
+                                uint32_t border_col = 0x808080u;
+                                if (input.focus_client == (int)order[si].ci && input.focus_surface_id == s->id) {
+                                    border_col = 0x007ACCu;
+                                }
+                                draw_frame_rect_clipped(fb, stride, w, h, s->x - 1, s->y - 1, s->w + 2, s->h + 2, 1, border_col, rect_make(0, 0, w, h));
                             }
                             if (!rect_empty(&new_preview_rect)) {
                                 draw_frame_rect_clipped(fb,
