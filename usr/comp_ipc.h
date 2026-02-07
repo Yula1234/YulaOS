@@ -13,11 +13,16 @@ int write(int fd, const void* buf, uint32_t size);
 
 #define COMP_IPC_MAX_PAYLOAD 512u
 
+#define COMP_IPC_DAMAGE_MAX_RECTS 31u
+
+#define COMP_IPC_CAP_DAMAGE 1u
+
 typedef enum {
     COMP_IPC_MSG_HELLO      = 1,
     COMP_IPC_MSG_ATTACH_SHM = 2,
     COMP_IPC_MSG_ATTACH_SHM_NAME = 5,
     COMP_IPC_MSG_COMMIT     = 3,
+    COMP_IPC_MSG_DAMAGE     = 13,
     COMP_IPC_MSG_INPUT      = 4,
     COMP_IPC_MSG_DESTROY_SURFACE = 6,
     COMP_IPC_MSG_ACK        = 7,
@@ -38,7 +43,7 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     uint32_t client_pid;
-    uint32_t reserved;
+    uint32_t caps;
 } comp_ipc_hello_t;
 
 typedef struct __attribute__((packed)) {
@@ -66,6 +71,19 @@ typedef struct __attribute__((packed)) {
     int32_t  y;
     uint32_t flags;
 } comp_ipc_commit_t;
+
+typedef struct __attribute__((packed)) {
+    int32_t x;
+    int32_t y;
+    int32_t w;
+    int32_t h;
+} comp_ipc_rect_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t surface_id;
+    uint32_t rect_count;
+    comp_ipc_rect_t rects[0];
+} comp_ipc_damage_t;
 
 #define COMP_IPC_COMMIT_FLAG_RAISE 1u
 #define COMP_IPC_COMMIT_FLAG_ACK   2u

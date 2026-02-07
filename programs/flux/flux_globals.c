@@ -6,6 +6,8 @@
 volatile int g_should_exit;
 volatile int g_fb_released;
 
+volatile int g_virgl_active;
+
 uint32_t g_commit_gen = 1;
 
 int g_screen_w = 0;

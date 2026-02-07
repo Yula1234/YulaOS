@@ -136,6 +136,15 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     return 1;
                 }
 
+                {
+                    comp_ipc_rect_t r;
+                    r.x = 0;
+                    r.y = 0;
+                    r.w = width;
+                    r.h = height;
+                    (void)comp_send_damage(&conn, 1u, &r, 1u);
+                }
+
                 int init_x = 16 + (pid % 5) * 32;
                 int init_y = 16 + (pid % 7) * 24;
                 if (comp_send_commit(&conn, 1u, init_x, init_y, 0u) != 0) {

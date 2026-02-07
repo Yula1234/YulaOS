@@ -376,6 +376,11 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     while (!g_should_exit) {
         int scene_dirty = 0;
 
+        {
+            const uint32_t pm = gpu_present_ok ? flux_gpu_present_mode(&gpu_present) : (uint32_t)FLUX_GPU_PRESENT_MODE_NONE;
+            g_virgl_active = (pm == (uint32_t)FLUX_GPU_PRESENT_MODE_VIRGL_COMPOSE) ? 1 : 0;
+        }
+
         if (listen_fd < 0) {
             listen_fd = ipc_listen("flux");
             if (listen_fd >= 0) {
@@ -820,23 +825,18 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                     rects[rect_n++] = fb_rect_from_comp(new_cursor);
                 }
             } else {
-                enum {
-                    FLUX_GPU_CURSOR_W = 12,
-                    FLUX_GPU_CURSOR_H = 17,
-                };
-
                 if (prev_draw_mx != 0x7FFFFFFF && prev_draw_my != 0x7FFFFFFF) {
                     comp_rect_t old_cursor = rect_make((int)prev_draw_mx,
                                                        (int)prev_draw_my,
-                                                       FLUX_GPU_CURSOR_W,
-                                                       FLUX_GPU_CURSOR_H);
+                                                       COMP_CURSOR_SAVE_W,
+                                                       COMP_CURSOR_SAVE_H);
                     old_cursor = rect_intersect(old_cursor, rect_make(0, 0, w, h));
                     if (!rect_empty(&old_cursor)) {
                         rects[rect_n++] = fb_rect_from_comp(old_cursor);
                     }
                 }
 
-                comp_rect_t new_cursor = rect_make((int)ms.x, (int)ms.y, FLUX_GPU_CURSOR_W, FLUX_GPU_CURSOR_H);
+                comp_rect_t new_cursor = rect_make((int)ms.x, (int)ms.y, COMP_CURSOR_SAVE_W, COMP_CURSOR_SAVE_H);
                 new_cursor = rect_intersect(new_cursor, rect_make(0, 0, w, h));
                 if (!rect_empty(&new_cursor)) {
                     rects[rect_n++] = fb_rect_from_comp(new_cursor);
@@ -881,26 +881,16 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                             uint32_t shm_size_bytes = 0u;
                             uint32_t stride_bytes = 0u;
 
-                            if (s->shadow_valid && s->shadow_active >= 0 && s->shadow_active < COMP_SURFACE_SHADOW_BUFS) {
-                                const int bi = s->shadow_active;
-                                if (s->shadow_shm_fd[bi] >= 0 && s->shadow_size_bytes != 0u && s->shadow_stride > 0) {
-                                    shm_fd = s->shadow_shm_fd[bi];
-                                    shm_size_bytes = s->shadow_size_bytes;
-                                    stride_bytes = (uint32_t)s->shadow_stride * 4u;
-                                }
-                            }
-
-                            if (shm_fd < 0) {
-                                if (s->owns_buffer && s->shm_fd >= 0 && s->size_bytes != 0u && s->stride > 0) {
-                                    shm_fd = s->shm_fd;
-                                    shm_size_bytes = s->size_bytes;
-                                    stride_bytes = (uint32_t)s->stride * 4u;
-                                }
+                            if (s->owns_buffer && s->shm_fd >= 0 && s->size_bytes != 0u && s->stride > 0) {
+                                shm_fd = s->shm_fd;
+                                shm_size_bytes = s->size_bytes;
+                                stride_bytes = (uint32_t)s->stride * 4u;
                             }
 
                             if (shm_fd < 0 || shm_size_bytes == 0u || stride_bytes == 0u) continue;
 
                             flux_gpu_comp_surface_t* cs = &comp_surfaces[comp_n++];
+                            cs->client_id = (uint32_t)order[i].ci;
                             cs->surface_id = s->id;
                             cs->x = (int32_t)s->x;
                             cs->y = (int32_t)s->y;
@@ -910,6 +900,13 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
                             cs->shm_size_bytes = shm_size_bytes;
                             cs->shm_fd = shm_fd;
                             cs->commit_gen = s->commit_gen;
+
+                            cs->damage_count = 0u;
+                            cs->damage = 0;
+                            if (s->damage_committed_gen == s->commit_gen && s->damage_committed_count) {
+                                cs->damage_count = s->damage_committed_count;
+                                cs->damage = s->damage_committed;
+                            }
                         }
 
                         fb_rect_t preview_fb;

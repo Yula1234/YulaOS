@@ -104,6 +104,9 @@ comp_surface_t* comp_client_surface_get(comp_client_t* c, uint32_t id, int creat
             s->in_use = 1;
             s->id = id;
             s->shm_fd = -1;
+            s->damage_pending_count = 0u;
+            s->damage_committed_count = 0u;
+            s->damage_committed_gen = 0u;
             for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
                 s->shadow_shm_fd[bi] = -1;
             }

@@ -153,8 +153,61 @@ static void wm_on_commit(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event
     if (ev->surface_id == 0) return;
     if (ev->flags & COMP_WM_EVENT_FLAG_BACKGROUND) return;
 
+    const int existed = (wm_find_view_idx(st, ev->client_id, ev->surface_id) >= 0);
     wm_view_t* v = wm_get_or_create_view(st, ev->client_id, ev->surface_id);
     if (!v) return;
+
+    if (!existed) {
+        v->w = ev->sw;
+        v->h = ev->sh;
+        v->x = ev->sx;
+        v->y = ev->sy;
+        v->hidden = 0;
+
+        const int view_idx = (int)(v - st->views);
+        if (!v->floating) {
+            uint32_t ws = v->workspace;
+            if (ws < WM_MAX_WORKSPACES) {
+                if (st->layout_root[ws] < 0) {
+                    int n = wm_layout_alloc_node(st, ws);
+                    if (n >= 0) {
+                        st->layout_nodes[n].is_split = 0;
+                        st->layout_nodes[n].view_idx = view_idx;
+                        st->layout_root[ws] = n;
+                    }
+                } else {
+                    int split_on = -1;
+
+                    if (st->focused_idx >= 0 && st->focused_idx < WM_MAX_VIEWS) {
+                        wm_view_t* fv = &st->views[st->focused_idx];
+                        if (fv->mapped && !fv->ui && !fv->floating && fv->workspace == ws) {
+                            split_on = st->focused_idx;
+                        }
+                    }
+
+                    if (split_on < 0) {
+                        int leaf = wm_layout_find_any_leaf(st, ws);
+                        if (leaf >= 0) split_on = st->layout_nodes[leaf].view_idx;
+                    }
+
+                    if (split_on >= 0 && split_on < WM_MAX_VIEWS && split_on != view_idx) {
+                        wm_layout_insert_split(st, ws, split_on, view_idx);
+                    }
+                }
+            }
+        }
+
+        if (st->master_surface_id[v->workspace] == 0 && !v->floating) {
+            wm_master_set_for_ws(st, v->workspace, v->client_id, v->surface_id);
+        }
+
+        wm_apply_layout(c, st);
+        {
+            int idx = wm_find_view_idx(st, ev->client_id, ev->surface_id);
+            if (idx >= 0) wm_focus_view_idx(c, st, idx);
+        }
+        return;
+    }
 
     if (v->floating) {
         v->w = ev->sw;

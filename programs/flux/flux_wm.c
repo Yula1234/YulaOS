@@ -305,21 +305,6 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
 
                 if (scene_dirty) *scene_dirty = 1;
 
-                {
-                    int32_t nw = cmd.x;
-                    int32_t nh = cmd.y;
-                    int new_w = s->w;
-                    int new_h = s->h;
-
-                    if (nw > 0 && nw < new_w) new_w = (int)nw;
-                    if (nh > 0 && nh < new_h) new_h = (int)nh;
-
-                    if (new_w != s->w || new_h != s->h) {
-                        s->w = new_w;
-                        s->h = new_h;
-                    }
-                }
-
                 comp_ipc_input_t in;
                 in.surface_id = cmd.surface_id;
                 in.kind = COMP_IPC_INPUT_RESIZE;

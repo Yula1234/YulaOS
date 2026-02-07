@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <yula.h>
+#include <comp_ipc.h>
 #include <yos/gpu.h>
 
 typedef struct flux_gpu_present_surface_slot flux_gpu_present_surface_slot_t;
@@ -14,6 +15,7 @@ typedef enum {
 } flux_gpu_present_mode_t;
 
 typedef struct {
+    uint32_t client_id;
     uint32_t surface_id;
     int32_t x;
     int32_t y;
@@ -23,6 +25,9 @@ typedef struct {
     uint32_t shm_size_bytes;
     int shm_fd;
     uint32_t commit_gen;
+
+    uint32_t damage_count;
+    const comp_ipc_rect_t* damage;
 } flux_gpu_comp_surface_t;
 
 typedef struct {

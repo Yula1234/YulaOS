@@ -7,6 +7,8 @@
 extern volatile int g_should_exit;
 extern volatile int g_fb_released;
 
+extern volatile int g_virgl_active;
+
 extern uint32_t g_commit_gen;
 
 extern int g_screen_w;
@@ -113,6 +115,13 @@ typedef struct {
     int shm_fd;
     uint32_t size_bytes;
     char shm_name[32];
+
+    uint32_t damage_pending_count;
+    comp_ipc_rect_t damage_pending[COMP_IPC_DAMAGE_MAX_RECTS];
+
+    uint32_t damage_committed_count;
+    uint32_t damage_committed_gen;
+    comp_ipc_rect_t damage_committed[COMP_IPC_DAMAGE_MAX_RECTS];
 } comp_surface_t;
 
 typedef struct {

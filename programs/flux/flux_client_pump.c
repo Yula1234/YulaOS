@@ -293,6 +293,9 @@ void comp_client_pump(comp_client_t* c,
                 s->h = (int)a.height;
                 s->stride = (int)a.stride;
                 if (s->stride <= 0) s->stride = s->w;
+                s->damage_pending_count = 0u;
+                s->damage_committed_count = 0u;
+                s->damage_committed_gen = 0u;
             }
             comp_send_ack(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, a.surface_id, 0);
         } else if (hdr.type == COMP_IPC_MSG_ATTACH_SHM_NAME && hdr.len == (uint32_t)sizeof(comp_ipc_attach_shm_name_t)) {
@@ -377,7 +380,42 @@ void comp_client_pump(comp_client_t* c,
             s->shm_fd = shm_fd;
             s->size_bytes = a.size_bytes;
             memcpy(s->shm_name, name, sizeof(s->shm_name));
+            s->damage_pending_count = 0u;
+            s->damage_committed_count = 0u;
+            s->damage_committed_gen = 0u;
             comp_send_ack(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, a.surface_id, 0);
+        } else if (hdr.type == COMP_IPC_MSG_DAMAGE) {
+            if (hdr.len < (uint32_t)sizeof(comp_ipc_damage_t)) {
+                comp_send_error(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, (uint16_t)COMP_IPC_ERR_INVALID, 0u, 0u);
+                continue;
+            }
+
+            const comp_ipc_damage_t* d = (const comp_ipc_damage_t*)payload;
+            const uint32_t rc = d->rect_count;
+
+            if (d->surface_id == 0u || rc > COMP_IPC_DAMAGE_MAX_RECTS) {
+                comp_send_error(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, (uint16_t)COMP_IPC_ERR_INVALID, d->surface_id, 0u);
+                continue;
+            }
+
+            const uint32_t want_len = (uint32_t)sizeof(comp_ipc_damage_t) + rc * (uint32_t)sizeof(comp_ipc_rect_t);
+            if (want_len != hdr.len) {
+                comp_send_error(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, (uint16_t)COMP_IPC_ERR_INVALID, d->surface_id, 0u);
+                continue;
+            }
+
+            comp_surface_t* s = comp_client_surface_get(c, d->surface_id, 0);
+            if (!(s && s->attached)) {
+                comp_send_error(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, (uint16_t)COMP_IPC_ERR_NO_SURFACE, d->surface_id, 0u);
+                continue;
+            }
+
+            s->damage_pending_count = rc;
+            if (rc) {
+                memcpy(s->damage_pending, d->rects, rc * (uint32_t)sizeof(comp_ipc_rect_t));
+            }
+
+            comp_send_ack(c->fd_s2c, hdr.seq, (uint16_t)hdr.type, d->surface_id, 0u);
         } else if (hdr.type == COMP_IPC_MSG_COMMIT && hdr.len == (uint32_t)sizeof(comp_ipc_commit_t)) {
             comp_ipc_commit_t cm;
             memcpy(&cm, payload, sizeof(cm));
@@ -391,16 +429,18 @@ void comp_client_pump(comp_client_t* c,
                 const int first_commit = (s->commit_gen == 0);
                 const int was_committed = (s->committed != 0);
 
-                if (comp_surface_shadow_ensure(s) == 0) {
-                    const int next = (s->shadow_active + 1) % COMP_SURFACE_SHADOW_BUFS;
-                    uint32_t* dst = s->shadow_pixels[next];
-                    const uint32_t* src = s->pixels;
-                    const uint32_t n = s->shadow_size_bytes / 4u;
-                    if (dst && src && n) {
-                        if (comp_surface_shadow_snapshot_try(s, dst)) {
-                            __sync_synchronize();
-                            s->shadow_active = next;
-                            s->shadow_valid = 1;
+                if (!g_virgl_active) {
+                    if (comp_surface_shadow_ensure(s) == 0) {
+                        const int next = (s->shadow_active + 1) % COMP_SURFACE_SHADOW_BUFS;
+                        uint32_t* dst = s->shadow_pixels[next];
+                        const uint32_t* src = s->pixels;
+                        const uint32_t n = s->shadow_size_bytes / 4u;
+                        if (dst && src && n) {
+                            if (comp_surface_shadow_snapshot_try(s, dst)) {
+                                __sync_synchronize();
+                                s->shadow_active = next;
+                                s->shadow_valid = 1;
+                            }
                         }
                     }
                 }
@@ -414,6 +454,15 @@ void comp_client_pump(comp_client_t* c,
                 }
                 s->committed = 1;
                 s->commit_gen = g_commit_gen++;
+
+                if (s->damage_pending_count) {
+                    s->damage_committed_count = s->damage_pending_count;
+                    memcpy(s->damage_committed, s->damage_pending, s->damage_pending_count * (uint32_t)sizeof(comp_ipc_rect_t));
+                } else {
+                    s->damage_committed_count = 0u;
+                }
+                s->damage_committed_gen = s->commit_gen;
+                s->damage_pending_count = 0u;
 
                 if (first_commit && input && cm.surface_id != 0x80000001u) {
                     input->focus_client = (int)client_id;
@@ -467,6 +516,9 @@ void comp_client_pump(comp_client_t* c,
             comp_surface_shadow_free(s);
             memset(s, 0, sizeof(*s));
             s->shm_fd = -1;
+            s->damage_pending_count = 0u;
+            s->damage_committed_count = 0u;
+            s->damage_committed_gen = 0u;
             for (int bi = 0; bi < COMP_SURFACE_SHADOW_BUFS; bi++) {
                 s->shadow_shm_fd[bi] = -1;
             }

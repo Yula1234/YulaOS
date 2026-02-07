@@ -431,7 +431,7 @@ static inline int comp_send_hello(comp_conn_t* c) {
 
     comp_ipc_hello_t hello;
     hello.client_pid = (uint32_t)getpid();
-    hello.reserved = 0;
+    hello.caps = COMP_IPC_CAP_DAMAGE;
     return comp_ipc_send(c->fd_c2s_w, (uint16_t)COMP_IPC_MSG_HELLO, c->seq++, &hello, (uint32_t)sizeof(hello));
 }
 
@@ -440,11 +440,31 @@ static inline int comp_send_hello_sync(comp_conn_t* c, uint32_t max_iters, uint1
 
     comp_ipc_hello_t hello;
     hello.client_pid = (uint32_t)getpid();
-    hello.reserved = 0;
+    hello.caps = COMP_IPC_CAP_DAMAGE;
 
     uint32_t seq = c->seq++;
     if (comp_ipc_send(c->fd_c2s_w, (uint16_t)COMP_IPC_MSG_HELLO, seq, &hello, (uint32_t)sizeof(hello)) != 0) return -1;
     return comp_wait_ack_or_error(c, seq, (uint16_t)COMP_IPC_MSG_HELLO, 0u, out_err_code, max_iters);
+}
+
+static inline int comp_send_damage(comp_conn_t* c, uint32_t surface_id, const comp_ipc_rect_t* rects, uint32_t rect_count) {
+    if (!c || !c->connected || c->fd_c2s_w < 0) return -1;
+    if (surface_id == 0u) return -1;
+    if (rect_count > COMP_IPC_DAMAGE_MAX_RECTS) return -1;
+    if (rect_count && !rects) return -1;
+
+    const uint32_t payload_len = (uint32_t)sizeof(comp_ipc_damage_t) + rect_count * (uint32_t)sizeof(comp_ipc_rect_t);
+    if (payload_len > COMP_IPC_MAX_PAYLOAD) return -1;
+
+    uint8_t payload[COMP_IPC_MAX_PAYLOAD];
+    comp_ipc_damage_t* d = (comp_ipc_damage_t*)payload;
+    d->surface_id = surface_id;
+    d->rect_count = rect_count;
+    if (rect_count) {
+        memcpy((void*)d->rects, (const void*)rects, rect_count * (uint32_t)sizeof(comp_ipc_rect_t));
+    }
+
+    return comp_ipc_send(c->fd_c2s_w, (uint16_t)COMP_IPC_MSG_DAMAGE, c->seq++, payload, payload_len);
 }
 
 static inline int comp_send_attach_shm_name(comp_conn_t* c,

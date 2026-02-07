@@ -11,7 +11,7 @@ enum {
 
 struct flux_gpu_present_surface_slot {
     uint32_t state;
-    uint32_t surface_id;
+    uint64_t key;
 
     uint32_t resource_id;
     uint32_t width;
@@ -49,7 +49,7 @@ static int flux_gpu_present_virgl_flush_rect(flux_gpu_present_t* p, uint32_t res
 
 static void flux_gpu_present_virgl_slot_destroy(flux_gpu_present_t* p, flux_gpu_present_surface_slot_t* s);
 static int flux_gpu_present_virgl_slots_ensure(flux_gpu_present_t* p, uint32_t want_cap);
-static flux_gpu_present_surface_slot_t* flux_gpu_present_virgl_slot_get(flux_gpu_present_t* p, uint32_t surface_id);
+static flux_gpu_present_surface_slot_t* flux_gpu_present_virgl_slot_get(flux_gpu_present_t* p, uint64_t key);
 static void flux_gpu_present_virgl_gc(flux_gpu_present_t* p, uint32_t keep_frames);
 
 static uint32_t flux_gpu_present_hash_u32(uint32_t v) {
@@ -59,6 +59,73 @@ static uint32_t flux_gpu_present_hash_u32(uint32_t v) {
     v *= 0x846CA68Bu;
     v ^= v >> 16;
     return v;
+}
+
+static uint64_t flux_gpu_present_hash_u64(uint64_t v) {
+    v ^= v >> 33;
+    v *= 0xff51afd7ed558ccduLL;
+    v ^= v >> 33;
+    v *= 0xc4ceb9fe1a85ec53uLL;
+    v ^= v >> 33;
+    return v;
+}
+
+static uint64_t flux_gpu_present_surface_key(uint32_t client_id, uint32_t surface_id) {
+    return (uint64_t)client_id << 32 | (uint64_t)surface_id;
+}
+
+static int flux_gpu_present_virgl_upload_cursor(flux_gpu_present_t* p, uint32_t resource_id) {
+    if (!p || p->fd < 0 || resource_id == 0u) return -1;
+
+    const uint32_t width = (uint32_t)COMP_CURSOR_SAVE_W;
+    const uint32_t height = (uint32_t)COMP_CURSOR_SAVE_H;
+
+    const uint32_t size_bytes = width * height * 4u;
+    if (size_bytes == 0u) return -1;
+
+    int fd = shm_create(size_bytes);
+    if (fd < 0) return -1;
+
+    uint32_t* px = (uint32_t*)mmap(fd, size_bytes, MAP_SHARED);
+    if (!px) {
+        close(fd);
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < width * height; i++) {
+        px[i] = 0u;
+    }
+
+    for (uint32_t y = 0; y < 12u && y < height; y++) {
+        for (uint32_t x = 0; x <= y && x < width; x++) {
+            px[y * width + x] = 0x000000u;
+        }
+        for (uint32_t x = 1; x < y && x < width; x++) {
+            if (y >= 2u) {
+                px[y * width + x] = 0xFFFFFFu;
+            }
+        }
+    }
+
+    for (uint32_t y = 9u; y < height; y++) {
+        for (uint32_t x = 4u; x < 8u && x < width; x++) {
+            px[y * width + x] = 0x000000u;
+        }
+    }
+    for (uint32_t y = 10u; y + 1u < height; y++) {
+        for (uint32_t x = 5u; x < 7u && x < width; x++) {
+            px[y * width + x] = 0xFFFFFFu;
+        }
+    }
+
+    int ok = 0;
+    if (flux_gpu_present_virgl_attach_shm(p, resource_id, fd, size_bytes) == 0) {
+        ok = (flux_gpu_present_virgl_transfer_box(p, resource_id, width, height, width * 4u, 0u, 0u, width, height) == 0);
+    }
+
+    (void)munmap((void*)px, size_bytes);
+    close(fd);
+    return ok ? 0 : -1;
 }
 
 static void flux_gpu_present_reset(flux_gpu_present_t* p) {
@@ -309,7 +376,7 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
     if (black == 0u || white == 0u) return -1;
 
     enum {
-        TIP_H = 12,
+        TIP_H = 13,
 
         HANDLE_X = 4,
         HANDLE_Y = 9,
@@ -322,8 +389,22 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
         HANDLE_INNER_H = HANDLE_H - 2,
     };
 
+    {
+        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
+                                                                            dmg_x,
+                                                                            dmg_y,
+                                                                            dmg_w,
+                                                                            dmg_h,
+                                                                            cursor_x,
+                                                                            cursor_y,
+                                                                            2u,
+                                                                            2u,
+                                                                            black);
+        if (rc != 0) return -1;
+    }
+
     for (int y = 0; y < TIP_H; y++) {
-        const uint32_t w = (uint32_t)(y + 1);
+        const uint32_t w = (uint32_t)(y + 2);
         const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
                                                                             dmg_x,
                                                                             dmg_y,
@@ -334,6 +415,22 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
                                                                             w,
                                                                             1u,
                                                                             black);
+        if (rc != 0) return -1;
+    }
+
+    for (int y = 1; y < TIP_H - 1; y++) {
+        const uint32_t w = (uint32_t)(y);
+        if (w == 0u) continue;
+        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
+                                                                            dmg_x,
+                                                                            dmg_y,
+                                                                            dmg_w,
+                                                                            dmg_h,
+                                                                            cursor_x + 1,
+                                                                            cursor_y + y,
+                                                                            w,
+                                                                            1u,
+                                                                            white);
         if (rc != 0) return -1;
     }
 
@@ -348,21 +445,6 @@ static int flux_gpu_present_virgl_draw_cursor_arrow(flux_gpu_present_t* p,
                                                                             (uint32_t)HANDLE_W,
                                                                             (uint32_t)HANDLE_H,
                                                                             black);
-        if (rc != 0) return -1;
-    }
-
-    for (int y = 2; y < TIP_H; y++) {
-        const uint32_t w = (uint32_t)(y - 1);
-        const int rc = flux_gpu_present_virgl_draw_solid_rect_damage_clipped(p,
-                                                                            dmg_x,
-                                                                            dmg_y,
-                                                                            dmg_w,
-                                                                            dmg_h,
-                                                                            cursor_x + 1,
-                                                                            cursor_y + y,
-                                                                            w,
-                                                                            1u,
-                                                                            white);
         if (rc != 0) return -1;
     }
 
@@ -411,21 +493,25 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
 
     for (uint32_t i = 0; i < surface_count; i++) {
         const flux_gpu_comp_surface_t* cs = &surfaces[i];
+        if (cs->client_id == 0u) {
+            if (cs->surface_id == 0u) continue;
+        }
         if (cs->surface_id == 0u) continue;
         if (cs->width == 0u || cs->height == 0u) continue;
         if (cs->shm_fd < 0 || cs->shm_size_bytes == 0u) continue;
         if (cs->stride_bytes < cs->width * 4u) continue;
 
-        flux_gpu_present_surface_slot_t* slot = flux_gpu_present_virgl_slot_get(p, cs->surface_id);
+        const uint64_t key = flux_gpu_present_surface_key(cs->client_id, cs->surface_id);
+        flux_gpu_present_surface_slot_t* slot = flux_gpu_present_virgl_slot_get(p, key);
         if (!slot) return -1;
 
-        if (slot->state != 1u || slot->surface_id != cs->surface_id) {
+        if (slot->state != 1u || slot->key != key) {
             if (slot->state == 1u) {
                 flux_gpu_present_virgl_slot_destroy(p, slot);
             }
             memset(slot, 0, sizeof(*slot));
             slot->state = 1u;
-            slot->surface_id = cs->surface_id;
+            slot->key = key;
             slot->resource_id = flux_gpu_present_choose_resource_id();
             slot->shm_fd = -1;
         }
@@ -464,15 +550,59 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         slot->epoch = epoch;
 
         if (slot->commit_gen != cs->commit_gen) {
-            if (flux_gpu_present_virgl_transfer_box(p,
-                                                   slot->resource_id,
-                                                   cs->width,
-                                                   cs->height,
-                                                   cs->stride_bytes,
-                                                   0u,
-                                                   0u,
-                                                   cs->width,
-                                                   cs->height) != 0) {
+            int ok = 1;
+
+            if (cs->damage_count && cs->damage && cs->damage_count <= COMP_IPC_DAMAGE_MAX_RECTS) {
+                for (uint32_t di = 0; di < cs->damage_count; di++) {
+                    const comp_ipc_rect_t r = cs->damage[di];
+                    if (r.w <= 0 || r.h <= 0) continue;
+
+                    int64_t x1 = (int64_t)r.x;
+                    int64_t y1 = (int64_t)r.y;
+                    int64_t x2 = x1 + (int64_t)r.w;
+                    int64_t y2 = y1 + (int64_t)r.h;
+
+                    if (x2 <= 0 || y2 <= 0) continue;
+                    if (x1 >= (int64_t)cs->width || y1 >= (int64_t)cs->height) continue;
+
+                    if (x1 < 0) x1 = 0;
+                    if (y1 < 0) y1 = 0;
+                    if (x2 > (int64_t)cs->width) x2 = (int64_t)cs->width;
+                    if (y2 > (int64_t)cs->height) y2 = (int64_t)cs->height;
+                    if (x2 <= x1 || y2 <= y1) continue;
+
+                    const uint32_t ux = (uint32_t)x1;
+                    const uint32_t uy = (uint32_t)y1;
+                    const uint32_t uw = (uint32_t)(x2 - x1);
+                    const uint32_t uh = (uint32_t)(y2 - y1);
+                    if (uw == 0u || uh == 0u) continue;
+
+                    if (flux_gpu_present_virgl_transfer_box(p,
+                                                           slot->resource_id,
+                                                           cs->width,
+                                                           cs->height,
+                                                           cs->stride_bytes,
+                                                           ux,
+                                                           uy,
+                                                           uw,
+                                                           uh) != 0) {
+                        ok = 0;
+                        break;
+                    }
+                }
+            } else {
+                ok = (flux_gpu_present_virgl_transfer_box(p,
+                                                         slot->resource_id,
+                                                         cs->width,
+                                                         cs->height,
+                                                         cs->stride_bytes,
+                                                         0u,
+                                                         0u,
+                                                         cs->width,
+                                                         cs->height) == 0);
+            }
+
+            if (!ok) {
                 flux_gpu_present_virgl_slot_destroy(p, slot);
                 return -1;
             }
@@ -480,7 +610,7 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         }
     }
 
-    flux_gpu_present_virgl_gc(p, 2u);
+    flux_gpu_present_virgl_gc(p, 120u);
 
     for (uint32_t ri = 0; ri < rect_count; ri++) {
         uint32_t x = 0u, y = 0u, w = 0u, h = 0u;
@@ -501,7 +631,8 @@ int flux_gpu_present_compose(flux_gpu_present_t* p,
         for (uint32_t si = 0; si < surface_count; si++) {
             const flux_gpu_comp_surface_t* cs = &surfaces[si];
             if (cs->surface_id == 0u) continue;
-            flux_gpu_present_surface_slot_t* slot = flux_gpu_present_virgl_slot_get(p, cs->surface_id);
+            const uint64_t key = flux_gpu_present_surface_key(cs->client_id, cs->surface_id);
+            flux_gpu_present_surface_slot_t* slot = flux_gpu_present_virgl_slot_get(p, key);
             if (!slot || slot->state != 1u || slot->resource_id == 0u) continue;
 
             uint32_t dst_x = 0u, dst_y = 0u, src_x = 0u, src_y = 0u, cw = 0u, ch = 0u;
@@ -705,7 +836,7 @@ static void flux_gpu_present_virgl_slot_destroy(flux_gpu_present_t* p, flux_gpu_
     }
 
     s->state = 2u;
-    s->surface_id = 0u;
+    s->key = 0u;
     s->width = 0u;
     s->height = 0u;
     s->stride_bytes = 0u;
@@ -733,7 +864,7 @@ static int flux_gpu_present_virgl_slots_ensure(flux_gpu_present_t* p, uint32_t w
             if (old->state != 1u) continue;
 
             uint32_t mask = cap - 1u;
-            uint32_t pos = flux_gpu_present_hash_u32(old->surface_id) & mask;
+            uint32_t pos = (uint32_t)flux_gpu_present_hash_u64(old->key) & mask;
             for (uint32_t step = 0; step < cap; step++) {
                 flux_gpu_present_surface_slot_t* cur = &slots[pos];
                 if (cur->state == 0u) {
@@ -752,12 +883,12 @@ static int flux_gpu_present_virgl_slots_ensure(flux_gpu_present_t* p, uint32_t w
     return 0;
 }
 
-static flux_gpu_present_surface_slot_t* flux_gpu_present_virgl_slot_get(flux_gpu_present_t* p, uint32_t surface_id) {
-    if (!p || surface_id == 0u) return 0;
+static flux_gpu_present_surface_slot_t* flux_gpu_present_virgl_slot_get(flux_gpu_present_t* p, uint64_t key) {
+    if (!p || key == 0u) return 0;
     if (!p->virgl_surfaces || p->virgl_surfaces_cap == 0u) return 0;
 
     uint32_t mask = p->virgl_surfaces_cap - 1u;
-    uint32_t pos = flux_gpu_present_hash_u32(surface_id) & mask;
+    uint32_t pos = (uint32_t)flux_gpu_present_hash_u64(key) & mask;
     flux_gpu_present_surface_slot_t* tomb = 0;
 
     for (uint32_t step = 0; step < p->virgl_surfaces_cap; step++) {
@@ -765,7 +896,7 @@ static flux_gpu_present_surface_slot_t* flux_gpu_present_virgl_slot_get(flux_gpu
         if (s->state == 0u) {
             return tomb ? tomb : s;
         }
-        if (s->state == 1u && s->surface_id == surface_id) {
+        if (s->state == 1u && s->key == key) {
             return s;
         }
         if (!tomb && s->state == 2u) tomb = s;
@@ -885,7 +1016,7 @@ static int flux_gpu_present_virgl_init_state(flux_gpu_present_t* p) {
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_bg_resource_id, p->width, p->height, 0x101010u) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_preview_h_resource_id, p->width, 2u, 0x007ACCu) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_preview_v_resource_id, 2u, p->height, 0x007ACCu) != 0) goto fail;
-    if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_cursor_resource_id, (uint32_t)COMP_CURSOR_SAVE_W, (uint32_t)COMP_CURSOR_SAVE_H, 0u) != 0) goto fail;
+    if (flux_gpu_present_virgl_upload_cursor(p, p->virgl_cursor_resource_id) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_white_resource_id, 32u, 32u, 0xFFFFFFu) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_black_resource_id, 32u, 32u, 0x000000u) != 0) goto fail;
     if (flux_gpu_present_virgl_fill_and_upload(p, p->virgl_solid_red_resource_id, 32u, 32u, 0xFF0000u) != 0) goto fail;
