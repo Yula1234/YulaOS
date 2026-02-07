@@ -1,0 +1,630 @@
+Flux compositor API (YulaOS)
+============================
+
+1. Scope and audience
+---------------------
+
+This document describes the public API of the Flux compositor as used by
+user-space clients (applications) and by the window manager.
+
+The API is intentionally described at the protocol/ABI level:
+
+  - endpoints (IPC names)
+  - message framing
+  - message types and payload layouts
+  - required call ordering (lifecycle)
+  - shared memory usage
+  - input delivery model
+  - window-manager control channel
+
+It does not describe internal drawing/scene logic.
+
+
+2. High-level architecture
+--------------------------
+
+Flux provides two IPC endpoints:
+
+  - "flux"     : client <-> compositor connection for surfaces and input
+  - "flux_wm"  : window-manager <-> compositor control and event stream
+
+Both connections are created using the YulaOS IPC syscalls:
+
+  - ipc_connect(name, out_fds)
+  - ipc_listen(name)
+  - ipc_accept(listen_fd, out_fds)
+
+Each connection yields a pair of file descriptors (pipes):
+
+  - out_fds[0] readable end
+  - out_fds[1] writable end
+
+Direction conventions:
+
+  - client side after ipc_connect("flux"):
+      fd_s2c_r = out_fds[0]   (read replies/events from compositor)
+      fd_c2s_w = out_fds[1]   (write requests to compositor)
+
+  - compositor side after ipc_accept(listen_fd):
+      fd_c2s = out_fds[0]     (read requests from peer)
+      fd_s2c = out_fds[1]     (write replies/events to peer)
+
+Flux can optionally create a shared-memory input ring for each client.
+When enabled, most input events are delivered via the shared ring instead of
+being streamed as IPC frames.
+
+
+3. Protocol: framing and common header
+--------------------------------------
+
+All Flux compositor protocol messages use the common IPC header defined by
+usr/comp_ipc.h.
+
+3.1. Constants
+
+  COMP_IPC_MAGIC       0x43495043  ("CPIC")
+  COMP_IPC_VERSION     1
+  COMP_IPC_MAX_PAYLOAD 512
+
+3.2. Frame layout
+
+Each frame is:
+
+  struct comp_ipc_hdr {
+      uint32_t magic;    // must be COMP_IPC_MAGIC
+      uint16_t version;  // must be COMP_IPC_VERSION
+      uint16_t type;     // comp_ipc_msg_type_t
+      uint32_t len;      // payload length in bytes (<= COMP_IPC_MAX_PAYLOAD)
+      uint32_t seq;      // request sequence number
+  } __attribute__((packed));
+
+  uint8_t payload[len];
+
+Rules:
+
+  - magic must match, otherwise the receiver resynchronizes by dropping bytes
+    until a valid header is found.
+  - version must match.
+  - len must be <= COMP_IPC_MAX_PAYLOAD.
+  - seq is used to match ACK/ERROR replies to requests.
+
+
+4. Endpoints
+------------
+
+4.1. Client endpoint: "flux"
+
+This endpoint is used by applications that want:
+
+  - create/update/destroy surfaces
+  - receive input events
+
+4.2. Window manager endpoint: "flux_wm"
+
+This endpoint is used by the window manager.
+
+The WM receives:
+
+  - map/unmap notifications
+  - pointer/key notifications (depending on focus/grab policy)
+
+The WM sends:
+
+  - focus/raise/move/close commands
+  - grab control (pointer/keyboard)
+  - preview overlay commands
+  - compositor exit request
+
+
+5. Client API ("flux")
+----------------------
+
+5.1. Connection lifecycle
+
+Recommended lifecycle for a client:
+
+  1) Connect to endpoint:
+
+       comp_conn_t c;
+       comp_conn_reset(&c);
+       comp_connect(&c, "flux");
+
+  2) Send HELLO:
+
+       comp_send_hello(&c);
+
+     The compositor uses HELLO to learn the client PID.
+
+  3) Attach a buffer to a surface (two modes described below).
+
+  4) Commit surface position/state to make it visible.
+
+  5) Process input/events until done.
+
+  6) Destroy surface(s) and disconnect.
+
+
+5.2. Surface model
+
+A client manages up to COMP_MAX_SURFACES surfaces concurrently.
+Surface IDs are 32-bit unsigned integers and must be non-zero.
+
+A surface is considered usable by the compositor for input and drawing only
+after it is:
+
+  - in_use
+  - attached (a buffer is attached)
+  - committed (at least one COMMIT was received)
+
+
+5.3. Message types
+
+Message types (comp_ipc_msg_type_t):
+
+  COMP_IPC_MSG_HELLO                1
+  COMP_IPC_MSG_ATTACH_SHM           2
+  COMP_IPC_MSG_COMMIT               3
+  COMP_IPC_MSG_INPUT                4
+  COMP_IPC_MSG_ATTACH_SHM_NAME      5
+  COMP_IPC_MSG_DESTROY_SURFACE      6
+  COMP_IPC_MSG_ACK                  7
+  COMP_IPC_MSG_ERROR                8
+  COMP_IPC_MSG_WM_EVENT             9   (not used on client endpoint)
+  COMP_IPC_MSG_WM_CMD               10  (not used on client endpoint)
+  COMP_IPC_MSG_INPUT_RING_NAME      11
+  COMP_IPC_MSG_INPUT_RING_ACK       12
+
+Client->compositor requests are typically acknowledged by an ACK or an ERROR.
+
+
+5.4. HELLO (client -> compositor)
+
+TYPE
+  COMP_IPC_MSG_HELLO
+
+PAYLOAD
+  struct comp_ipc_hello {
+      uint32_t client_pid;
+      uint32_t reserved;
+  } __attribute__((packed));
+
+SEMANTICS
+  - Must be sent once per connection.
+  - On success compositor replies with ACK.
+  - After a successful HELLO the compositor may initiate input-ring setup
+    (INPUT_RING_NAME).
+
+
+5.5. INPUT_RING_NAME (compositor -> client)
+
+TYPE
+  COMP_IPC_MSG_INPUT_RING_NAME
+
+PAYLOAD
+  struct comp_ipc_input_ring_name {
+      uint32_t size_bytes;
+      uint32_t cap;
+      uint32_t reserved;
+      char     shm_name[32];
+  } __attribute__((packed));
+
+SEMANTICS
+  - Optional optimization: compositor offers a shared-memory ring for input.
+  - Client should:
+      - shm_open_named(shm_name)
+      - mmap(fd, size_bytes, MAP_SHARED)
+      - validate magic/version of comp_input_ring_t
+  - If accepted, client sends INPUT_RING_ACK.
+
+NOTES
+  - The compositor creates the ring with a name like: "cir_<pid>_<idx>".
+  - The compositor may unlink the SHM name after it receives INPUT_RING_ACK
+    (so only already-open clients keep access).
+
+
+5.6. INPUT_RING_ACK (client -> compositor)
+
+TYPE
+  COMP_IPC_MSG_INPUT_RING_ACK
+
+PAYLOAD
+  none
+
+SEMANTICS
+  - Confirms that the client successfully mapped the input ring.
+  - On success, compositor replies with ACK.
+
+
+5.7. Shared-memory input ring format
+-----------------------------------
+
+The ring buffer is defined by comp_input_ring_t:
+
+  #define COMP_INPUT_RING_MAGIC   0x49525043
+  #define COMP_INPUT_RING_VERSION 1
+  #define COMP_INPUT_RING_CAP     2048
+
+  struct comp_input_ring {
+      uint32_t magic;
+      uint32_t version;
+      uint32_t cap;
+      uint32_t mask;
+      volatile uint32_t r;
+      volatile uint32_t w;
+      volatile uint32_t dropped;
+      volatile uint32_t flags;
+      comp_ipc_input_t events[COMP_INPUT_RING_CAP];
+  };
+
+Flags:
+
+  COMP_INPUT_RING_FLAG_READY   ring initialized and usable
+  COMP_INPUT_RING_FLAG_WAIT_W  compositor is waiting for client to advance r
+  COMP_INPUT_RING_FLAG_WAIT_R  client is waiting for compositor to advance w
+
+Futex usage:
+
+  - Client waits on ring->w when empty.
+  - Compositor may wait on ring->r when full.
+
+Correctness rules:
+
+  - The ring is single-producer (compositor) / single-consumer (client).
+  - Memory barriers are required around reading/writing entries.
+
+Dropped events:
+
+  - If the compositor cannot enqueue, it increments dropped.
+
+
+5.8. ATTACH_SHM_NAME (client -> compositor)
+-------------------------------------------
+
+TYPE
+  COMP_IPC_MSG_ATTACH_SHM_NAME
+
+PAYLOAD
+  struct comp_ipc_attach_shm_name {
+      uint32_t surface_id;
+      uint32_t width;
+      uint32_t height;
+      uint32_t stride;
+      uint32_t format;
+      uint32_t size_bytes;
+      char     shm_name[32];
+  } __attribute__((packed));
+
+SEMANTICS
+  - Attaches a named shared-memory buffer as the backing storage for surface.
+  - The compositor opens the SHM by name and mmaps it MAP_SHARED.
+  - width/height are in pixels.
+  - stride is in pixels (not bytes). If stride==0, compositor may treat it as
+    width.
+  - Pixel format is currently treated as 32bpp XRGB-like (format is reserved
+    for future).
+
+VALIDATION (observed from compositor implementation)
+  - surface_id must be non-zero.
+  - width and height must be non-zero.
+  - stride defaults to width; stride must be >= width.
+  - Minimum size requirement:
+
+      size_bytes >= height * stride * 4
+
+  - Maximum size restriction:
+
+      size_bytes <= 64 MiB
+
+  - shm_name must be non-empty and NUL-terminated within 32 bytes.
+
+REPLIES
+  - ACK on success.
+  - ERROR on failure:
+
+      COMP_IPC_ERR_INVALID
+      COMP_IPC_ERR_SHM_OPEN
+      COMP_IPC_ERR_SHM_MAP
+
+RESOURCE OWNERSHIP
+  - The client owns the SHM object lifetime. Flux may unlink the name for its
+    internal rings, but for client buffers it expects client-managed SHM.
+
+
+5.9. ATTACH_SHM (client -> compositor)
+--------------------------------------
+
+TYPE
+  COMP_IPC_MSG_ATTACH_SHM
+
+PAYLOAD
+  struct comp_ipc_attach_shm {
+      uint32_t surface_id;
+      uint32_t shm_fd;
+      uint32_t width;
+      uint32_t height;
+      uint32_t stride;
+      uint32_t format;
+  } __attribute__((packed));
+
+SEMANTICS
+  - Legacy/optimized path where the client passes an fd.
+
+IMPORTANT
+  In the current Flux compositor code, ATTACH_SHM is accepted only when shm_fd
+  matches an internal buffer fd provided by the compositor code path.
+
+In practice, external clients should use ATTACH_SHM_NAME.
+
+
+5.10. COMMIT (client -> compositor)
+-----------------------------------
+
+TYPE
+  COMP_IPC_MSG_COMMIT
+
+PAYLOAD
+  struct comp_ipc_commit {
+      uint32_t surface_id;
+      int32_t  x;
+      int32_t  y;
+      uint32_t flags;
+  } __attribute__((packed));
+
+Flags:
+
+  COMP_IPC_COMMIT_FLAG_RAISE  request raise (bring to top)
+  COMP_IPC_COMMIT_FLAG_ACK    request an explicit ACK reply
+
+SEMANTICS
+  - Makes the surface visible (first commit maps the surface).
+  - Updates surface position (x,y).
+  - If no window manager is connected, client commits may directly affect z.
+  - With a window manager connected, stacking policy is controlled by WM.
+
+REPLIES
+  - If COMP_IPC_COMMIT_FLAG_ACK is set: compositor replies with ACK or ERROR.
+  - Otherwise ACK may be omitted (implementation choice); clients that need
+    synchronization should use the sync wrappers in usr/comp.h.
+
+
+5.11. DESTROY_SURFACE (client -> compositor)
+--------------------------------------------
+
+TYPE
+  COMP_IPC_MSG_DESTROY_SURFACE
+
+PAYLOAD
+  struct comp_ipc_destroy_surface {
+      uint32_t surface_id;
+      uint32_t flags;
+  } __attribute__((packed));
+
+SEMANTICS
+  - Detaches the buffer, releases resources, and unmaps the surface.
+  - The compositor notifies WM with COMP_WM_EVENT_UNMAP if WM is connected.
+
+REPLIES
+  - ACK on success, ERROR on failure.
+
+
+5.12. INPUT (compositor -> client)
+----------------------------------
+
+TYPE
+  COMP_IPC_MSG_INPUT
+
+PAYLOAD
+  struct comp_ipc_input {
+      uint32_t surface_id;
+      uint32_t kind;
+      int32_t  x;
+      int32_t  y;
+      uint32_t buttons;
+      uint32_t keycode;
+      uint32_t key_state;
+  } __attribute__((packed));
+
+Input kinds:
+
+  COMP_IPC_INPUT_MOUSE   1
+  COMP_IPC_INPUT_KEY     2
+  COMP_IPC_INPUT_RESIZE  3
+  COMP_IPC_INPUT_CLOSE   4
+
+SEMANTICS
+  - Input is normally delivered to the focused surface.
+  - When the shared input ring is active, the compositor prefers ring delivery
+    but may still send essential events as frames.
+
+Coordinates:
+  - For mouse events: x/y are pointer coordinates and/or deltas depending on
+    the current client logic.
+
+Buttons:
+  - buttons is a bitmask. The exact bit meanings are device-dependent.
+
+keycode/key_state:
+  - keycode is a raw keyboard code.
+  - key_state indicates press/release.
+
+
+6. Window manager API ("flux_wm")
+---------------------------------
+
+6.1. Connection lifecycle
+
+The WM connects similarly:
+
+  - connect to "flux_wm" endpoint
+  - read WM_EVENT frames
+  - write WM_CMD frames
+
+Flux can automatically spawn a WM process (currently "axwm") when both
+endpoints are available.
+
+
+6.2. WM_EVENT (compositor -> WM)
+
+TYPE
+  COMP_IPC_MSG_WM_EVENT
+
+PAYLOAD
+  struct comp_ipc_wm_event {
+      uint32_t kind;
+      uint32_t client_id;
+      uint32_t surface_id;
+      int32_t  sx;
+      int32_t  sy;
+      uint32_t sw;
+      uint32_t sh;
+      int32_t  px;
+      int32_t  py;
+      uint32_t buttons;
+      uint32_t keycode;
+      uint32_t key_state;
+      uint32_t flags;
+  } __attribute__((packed));
+
+Kinds:
+
+  COMP_WM_EVENT_MAP      1
+  COMP_WM_EVENT_UNMAP    2
+  COMP_WM_EVENT_CLICK    3
+  COMP_WM_EVENT_COMMIT   4
+  COMP_WM_EVENT_KEY      5
+  COMP_WM_EVENT_POINTER  6
+
+Flags:
+
+  COMP_WM_EVENT_FLAG_REPLAY      state replay event
+  COMP_WM_EVENT_FLAG_BACKGROUND  background surface
+
+SEMANTICS
+  - MAP is emitted on first successful COMMIT for a surface.
+  - UNMAP is emitted on surface destroy or client disconnect.
+  - COMMIT is emitted for subsequent commits.
+  - CLICK/POINTER/KEY carry pointer/key info.
+
+
+6.3. WM_CMD (WM -> compositor)
+
+TYPE
+  COMP_IPC_MSG_WM_CMD
+
+PAYLOAD
+  struct comp_ipc_wm_cmd {
+      uint32_t kind;
+      uint32_t client_id;
+      uint32_t surface_id;
+      int32_t  x;
+      int32_t  y;
+      uint32_t flags;
+  } __attribute__((packed));
+
+Commands:
+
+  COMP_WM_CMD_FOCUS          1
+  COMP_WM_CMD_RAISE          2
+  COMP_WM_CMD_MOVE           3
+  COMP_WM_CMD_CLOSE          4
+  COMP_WM_CMD_POINTER_GRAB   5
+  COMP_WM_CMD_RESIZE         6
+  COMP_WM_CMD_PREVIEW_RECT   7
+  COMP_WM_CMD_PREVIEW_CLEAR  8
+  COMP_WM_CMD_EXIT           9
+  COMP_WM_CMD_KEYBOARD_GRAB  10
+
+SEMANTICS (selected)
+
+  - FOCUS
+      Sets compositor focus to the specified client/surface.
+
+  - RAISE
+      Brings the surface to the top (updates z ordering).
+
+  - MOVE
+      Requests moving a surface to (x,y).
+
+  - CLOSE
+      Requests the compositor to send COMP_IPC_INPUT_CLOSE to the target
+      client/surface.
+
+  - POINTER_GRAB
+      flags & 1 enables grab; disables otherwise.
+
+  - KEYBOARD_GRAB
+      flags & 1 enables keyboard grab; disables otherwise.
+
+  - PREVIEW_RECT / PREVIEW_CLEAR
+      Controls compositor preview overlay.
+
+  - EXIT
+      Requests compositor exit.
+
+
+7. Error reporting and ACKs
+---------------------------
+
+7.1. ACK
+
+TYPE
+  COMP_IPC_MSG_ACK
+
+PAYLOAD
+  struct comp_ipc_ack {
+      uint16_t req_type;
+      uint16_t reserved;
+      uint32_t surface_id;
+      uint32_t flags;
+  } __attribute__((packed));
+
+7.2. ERROR
+
+TYPE
+  COMP_IPC_MSG_ERROR
+
+PAYLOAD
+  struct comp_ipc_error {
+      uint16_t req_type;
+      uint16_t code;
+      uint32_t surface_id;
+      uint32_t detail;
+  } __attribute__((packed));
+
+Codes:
+
+  COMP_IPC_ERR_INVALID       1
+  COMP_IPC_ERR_NO_SURFACE    2
+  COMP_IPC_ERR_SHM_OPEN      3
+  COMP_IPC_ERR_SHM_MAP       4
+
+Error matching:
+
+  - req_type identifies the request that failed.
+  - surface_id matches the relevant surface when applicable.
+
+
+8. Practical examples
+---------------------
+
+8.1. Minimal client (outline)
+
+  - create named SHM buffer (shm_create_named)
+  - connect to "flux" and send HELLO
+  - ATTACH_SHM_NAME(surface_id=1, shm_name, size, w, h, stride=w, format=0)
+  - COMMIT(surface_id=1, x, y, flags=0)
+  - draw into mapped pixels and periodically COMMIT to update state
+  - handle INPUT via comp_try_recv() / input ring
+
+See programs/comp_client.c for a working example.
+
+
+9. Compatibility notes
+----------------------
+
+- Protocol is versioned via COMP_IPC_VERSION.
+
+- Payloads are packed; clients must use the exact layouts.
+
+- Some message types exist for legacy or internal paths (ATTACH_SHM).
+  External clients should prefer ATTACH_SHM_NAME.
