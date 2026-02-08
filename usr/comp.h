@@ -164,6 +164,7 @@ static inline void comp_wait_events(comp_conn_t* c, uint32_t fallback_us) {
             (void)futex_wait(&ring->w, w);
             (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_R);
         }
+        return;
     }
 
     if (fallback_us) usleep(fallback_us);
@@ -645,7 +646,24 @@ static inline int comp_wm_send_cmd(comp_conn_t* c, uint32_t kind, uint32_t clien
     cmd.x = x;
     cmd.y = y;
     cmd.flags = flags;
-    return comp_ipc_send(c->fd_c2s_w, (uint16_t)COMP_IPC_MSG_WM_CMD, c->seq++, &cmd, (uint32_t)sizeof(cmd));
+    struct {
+        comp_ipc_hdr_t h;
+        comp_ipc_wm_cmd_t body;
+    } frame;
+    frame.h.magic = COMP_IPC_MAGIC;
+    frame.h.version = (uint16_t)COMP_IPC_VERSION;
+    frame.h.type = (uint16_t)COMP_IPC_MSG_WM_CMD;
+    frame.h.len = (uint32_t)sizeof(cmd);
+    frame.h.seq = c->seq;
+    frame.body = cmd;
+
+    const uint32_t size = (uint32_t)sizeof(frame);
+    int r = pipe_try_write(c->fd_c2s_w, &frame, size);
+    if (r == (int)size) {
+        c->seq++;
+        return 0;
+    }
+    return -1;
 }
 
 static inline int comp_wm_focus(comp_conn_t* c, uint32_t client_id, uint32_t surface_id) {

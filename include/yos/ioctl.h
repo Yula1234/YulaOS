@@ -55,10 +55,15 @@ typedef struct {
     uint16_t ws_ypixel;
 } yos_winsize_t;
 
+typedef struct {
+    int32_t delta;
+} yos_tty_scroll_t;
+
 #define YOS_TCGETS     _YOS_IOR('T', 0x19, yos_termios_t)
 #define YOS_TCSETS     _YOS_IOW('T', 0x1A, yos_termios_t)
 #define YOS_TIOCGWINSZ _YOS_IOR('T', 0x13, yos_winsize_t)
 #define YOS_TIOCSWINSZ _YOS_IOW('T', 0x14, yos_winsize_t)
 #define YOS_TIOCGPTN   _YOS_IOR('T', 0x15, uint32_t)
+#define YOS_TTY_SCROLL _YOS_IOW('T', 0x16, yos_tty_scroll_t)
 
 #endif
