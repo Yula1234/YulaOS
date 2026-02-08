@@ -25,9 +25,6 @@ static poll_waitq_t mouse_poll_waitq;
 static uint8_t mouse_cycle = 0;
 static uint8_t mouse_byte[3];
 
-extern uint32_t fb_width;
-extern uint32_t fb_height;
-
 static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
     (void)node;
     (void)offset;

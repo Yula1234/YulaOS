@@ -15,6 +15,12 @@ typedef struct {
     uint32_t size_bytes;
 } fb_info_t;
 
+extern uint32_t* fb_ptr;
+extern uint32_t  fb_width;
+extern uint32_t  fb_height;
+extern uint32_t  fb_pitch;
+extern volatile int g_fb_mapped;
+
 void fb_vfs_init(void);
 
 uint32_t fb_get_owner_pid(void);

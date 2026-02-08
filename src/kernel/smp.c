@@ -13,6 +13,7 @@
 #include <arch/i386/idt.h>
 #include <arch/i386/paging.h>
 #include <drivers/vga.h>
+#include <drivers/fbdev.h>
 #include <kernel/sched.h>
 #include "cpu.h"
 
@@ -44,9 +45,6 @@ void smp_ap_main(cpu_t* cpu_arg) {
     paging_switch(kernel_page_directory);
     paging_init_pat();
 
-    extern uint32_t* fb_ptr;
-    extern uint32_t fb_height;
-    extern uint32_t fb_pitch;
     if (fb_ptr && fb_pitch && fb_height) {
         uint32_t fb_base = (uint32_t)fb_ptr;
         uint32_t fb_size = fb_pitch * fb_height;

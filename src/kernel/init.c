@@ -23,16 +23,6 @@
 
 #include "init.h"
 
-extern uint32_t fb_width;
-extern uint32_t fb_height;
-
-static void term_print_locked(term_instance_t* term, const char* text) {
-    if (!term || !text) return;
-    spinlock_acquire(&term->lock);
-    term_print(term, text);
-    spinlock_release(&term->lock);
-}
-
 static void init_task_prepare_dirs(void) {
     if (yulafs_lookup("/bin") == -1) (void)yulafs_mkdir("/bin");
     if (yulafs_lookup("/home") == -1) (void)yulafs_mkdir("/home");
@@ -43,12 +33,7 @@ static term_instance_t* init_task_create_terminal(task_t* self) {
     if (!term) return 0;
     memset(term, 0, sizeof(*term));
 
-    int cols = (int)(fb_width / 8);
-    int view_rows = (int)(fb_height / 16);
-    if (cols < 1) cols = 1;
-    if (view_rows < 1) view_rows = 1;
-    term->cols = cols;
-    term->view_rows = view_rows;
+    tty_term_apply_default_size(term);
     term->curr_fg = 0xD4D4D4;
     term->curr_bg = 0x141414;
     term_init(term);
@@ -77,7 +62,7 @@ static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
         char* argv[] = { "ush", 0 };
         task_t* child = proc_spawn_elf("/bin/ush.exe", 1, argv);
         if (!child) {
-            term_print_locked(term, "init: failed to spawn /bin/ush.exe\n");
+            tty_term_print_locked(term, "init: failed to spawn /bin/ush.exe\n");
             proc_usleep(200000);
             continue;
         }
@@ -86,7 +71,7 @@ static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
         proc_wait(child->pid);
         input_focus_set_pid(self->pid);
 
-        term_print_locked(term, "[ush exited]\n");
+        tty_term_print_locked(term, "[ush exited]\n");
         proc_usleep(200000);
     }
 }

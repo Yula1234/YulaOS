@@ -2,13 +2,9 @@
 // Copyright (C) 2025 Yula1234
 
 #include <arch/i386/idt.h>
+#include <drivers/fbdev.h>
 
 extern const uint8_t font8x16_basic[128][16];
-
-extern uint32_t* fb_ptr;
-extern uint32_t  fb_width;
-extern uint32_t  fb_height;
-extern uint32_t  fb_pitch;
 
 static void panic_putc(int x, int y, char c) {
     if ((uint8_t)c > 127) return;

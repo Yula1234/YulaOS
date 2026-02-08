@@ -507,6 +507,25 @@ task_t* proc_task_at(uint32_t idx) {
     return 0;
 }
 
+static int proc_alloc_kstack(task_t* t) {
+    if (!t) return 0;
+
+    t->kstack_size = KSTACK_SIZE;
+    t->kstack = kmalloc_a(t->kstack_size);
+    if (!t->kstack) return 0;
+
+    memset(t->kstack, 0, t->kstack_size);
+    return 1;
+}
+
+static uint32_t* proc_kstack_top(task_t* t) {
+    if (!t || !t->kstack) return 0;
+
+    uint32_t stack_top = (uint32_t)t->kstack + t->kstack_size;
+    stack_top &= ~0xF;
+    return (uint32_t*)stack_top;
+}
+
 task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(void*), void* arg) {
     task_t* t = alloc_task();
     if (!t) return 0;
@@ -517,20 +536,13 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     t->page_dir = 0;
     t->mem_pages = 0;
     t->priority = prio;
-    
-    t->kstack_size = KSTACK_SIZE;
-    t->kstack = kmalloc_a(t->kstack_size);
-    if (!t->kstack) {
+
+    if (!proc_alloc_kstack(t)) {
         proc_free_resources(t);
         return 0;
     }
-    memset(t->kstack, 0, t->kstack_size);
-    
-    uint32_t stack_top = (uint32_t)t->kstack + t->kstack_size;
-    
-    stack_top &= ~0xF; 
-    
-    uint32_t* sp = (uint32_t*)stack_top;
+
+    uint32_t* sp = proc_kstack_top(t);
     *--sp = 0;
     *--sp = 0;
     *--sp = 0;
@@ -541,7 +553,7 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     *--sp = 0; // ESI                     
     *--sp = 0; // EDI                     
     t->esp = sp;
-    
+
     sched_add(t);
     return t;
 }
@@ -961,11 +973,6 @@ void reaper_task_func(void* arg) {
 task_t* proc_create_idle(int cpu_index) {
     task_t* t = alloc_task();
     if (!t) return 0;
-    
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
-    list_remove(t);
-    pid_hash_remove(t);
-    spinlock_release_safe(&proc_lock, flags);
 
     strlcpy(t->name, "idle", 32);
     t->state = TASK_RUNNING;
@@ -973,16 +980,14 @@ task_t* proc_create_idle(int cpu_index) {
     t->assigned_cpu = cpu_index;
     t->mem_pages = 0;
     t->page_dir = kernel_page_directory;
-
-    t->kstack_size = KSTACK_SIZE;
     t->priority = PRIO_IDLE;
-    
-    t->kstack = kmalloc_a(t->kstack_size);
-    memset(t->kstack, 0, t->kstack_size);
-    
-    uint32_t stack_top = (uint32_t)t->kstack + t->kstack_size;
-    stack_top &= ~0xF;
-    uint32_t* sp = (uint32_t*)stack_top;
+
+    if (!proc_alloc_kstack(t)) {
+        proc_free_resources(t);
+        return 0;
+    }
+
+    uint32_t* sp = proc_kstack_top(t);
     
     extern void idle_task_func(void*);
     
@@ -995,7 +1000,12 @@ task_t* proc_create_idle(int cpu_index) {
     *--sp = 0; // EDI
     
     t->esp = sp;
-    
+
+    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    list_remove(t);
+    pid_hash_remove(t);
+    spinlock_release_safe(&proc_lock, flags);
+
     return t;
 }
 

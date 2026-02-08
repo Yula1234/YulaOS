@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Yula1234
 
 #include <drivers/acpi.h>
+#include <drivers/fbdev.h>
 #include <drivers/virtio_gpu.h>
 
 #include <hal/apic.h>
@@ -16,11 +17,6 @@
 #include <kernel/cpu.h>
 
 #include "boot.h"
-
-extern uint32_t* fb_ptr;
-extern uint32_t  fb_width;
-extern uint32_t  fb_height;
-extern uint32_t  fb_pitch;
 
 static void halt_forever(void) {
     __asm__ volatile("cli");

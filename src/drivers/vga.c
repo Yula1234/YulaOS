@@ -11,11 +11,6 @@
 
 #include "vga.h"
 
-extern uint32_t* fb_ptr;
-extern uint32_t  fb_width;
-extern uint32_t  fb_height;
-extern uint32_t  fb_pitch;
-
 static inline int vga_get_hw_fb(uint32_t** out_ptr, uint32_t* out_pitch, uint32_t* out_w, uint32_t* out_h) {
     if (out_ptr) *out_ptr = 0;
     if (out_pitch) *out_pitch = 0;

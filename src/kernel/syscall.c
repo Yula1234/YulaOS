@@ -35,11 +35,6 @@
 
 extern volatile uint32_t timer_ticks;
 
-extern uint32_t* fb_ptr;
-extern uint32_t  fb_width;
-extern uint32_t  fb_height;
-extern uint32_t  fb_pitch;
-
 extern uint32_t* paging_get_dir(void); 
 
 extern int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h);

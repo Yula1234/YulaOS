@@ -4,9 +4,6 @@
 #include <hal/lock.h>
 #include <drivers/fbdev.h>
 
-extern uint32_t fb_width;
-extern uint32_t fb_height;
-
 static spinlock_t tty_lock;
 static term_instance_t* tty_term;
 
@@ -14,6 +11,27 @@ void tty_set_terminal(term_instance_t* term) {
     uint32_t flags = spinlock_acquire_safe(&tty_lock);
     tty_term = term;
     spinlock_release_safe(&tty_lock, flags);
+}
+
+void tty_term_apply_default_size(term_instance_t* term) {
+    if (!term) return;
+
+    int cols = (int)(fb_width / 8u);
+    int view_rows = (int)(fb_height / 16u);
+
+    if (cols < 1) cols = 1;
+    if (view_rows < 1) view_rows = 1;
+
+    term->cols = cols;
+    term->view_rows = view_rows;
+}
+
+void tty_term_print_locked(term_instance_t* term, const char* text) {
+    if (!term || !text) return;
+
+    spinlock_acquire(&term->lock);
+    term_print(term, text);
+    spinlock_release(&term->lock);
 }
 
 static void tty_render_once(term_instance_t* term) {

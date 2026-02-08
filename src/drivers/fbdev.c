@@ -9,9 +9,11 @@
 
 #include <drivers/virtio_gpu.h>
 
-extern uint32_t fb_width;
-extern uint32_t fb_height;
-extern uint32_t fb_pitch;
+uint32_t* fb_ptr = 0;
+uint32_t  fb_width = 0;
+uint32_t  fb_height = 0;
+uint32_t  fb_pitch = 0;
+volatile int g_fb_mapped = 0;
 
 static spinlock_t fb_owner_lock;
 static uint32_t fb_owner_pid;

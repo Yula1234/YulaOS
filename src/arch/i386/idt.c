@@ -7,6 +7,7 @@
 #include <drivers/vga.h>
 #include <drivers/mouse.h>
 #include <drivers/keyboard.h>
+#include <drivers/fbdev.h>
 
 #include <kernel/syscall.h>
 #include <kernel/sched.h>
@@ -57,8 +58,6 @@ static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
 extern void smp_blit_ipi_handler(void);
-
-extern volatile int g_fb_mapped;
 
 static inline uint32_t get_cr3();
 

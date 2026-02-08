@@ -48,11 +48,6 @@
 volatile uint32_t kernel_simd_caps;
 volatile uint64_t kernel_xsave_mask;
 
-uint32_t* fb_ptr;
-uint32_t  fb_width;
-uint32_t  fb_height;
-uint32_t  fb_pitch;
-
 extern uint32_t kernel_end; 
 
 extern void put_pixel(int x, int y, uint32_t color);
@@ -65,9 +60,7 @@ extern void smp_boot_aps(void);
 
 static int g_enable_uhci = ENABLE_UHCI;
 
-volatile int g_fb_mapped = 0;
-
-__attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
+static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
     validate_multiboot(magic, mb_info);
 
     kernel_enable_sse();
@@ -86,31 +79,38 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     if (g_enable_uhci) {
         uhci_quiesce_early();
     }
+}
 
+static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
     uint32_t memory_end_addr = detect_memory_end(mb_info);
     pic_configure_legacy();
 
     pmm_init(memory_end_addr, (uint32_t)&kernel_end);
-
     paging_init(memory_end_addr);
-
     heap_init();
 
+    return memory_end_addr;
+}
+
+static void kmain_video_init(uint32_t memory_end_addr) {
     virtio_gpu_init();
     fb_select_active();
     map_framebuffer(memory_end_addr);
 
     g_fb_mapped = 1;
+}
 
+static void kmain_platform_init(void) {
     acpi_init();
-
     ensure_bsp_cpu_index_zero();
+}
 
+static void kmain_devices_init(void) {
     vga_init();
     vga_init_graphics();
 
     clipboard_init();
-    
+
     kbd_init();
     mouse_init();
 
@@ -118,38 +118,53 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     ahci_init();
 
-    yulafs_init();
-    yulafs_lookup("/"); 
- 
     kbd_vfs_init();
     console_init();
     mouse_vfs_init();
     fb_vfs_init();
     gpu0_vfs_init();
+}
+
+static void kmain_fs_init(void) {
+    yulafs_init();
+    yulafs_lookup("/");
 
     pty_init();
- 
+}
+
+static void kmain_tasks_init(void) {
     proc_init();
     sched_init();
 
     pc_speaker_init();
-    pc_speaker_beep(); 
+    pc_speaker_beep();
 
     for (int i = 0; i < MAX_CPUS; i++) {
         cpus[i].idle_task = proc_create_idle(i);
     }
-     
+}
+
+static void kmain_handle_kthread_failure(void) {
+    vga_set_target(0, 0, 0);
+    vga_draw_rect(0, 0, (int)fb_width, (int)fb_height, 0x000000);
+    vga_print_at("BOOT ERROR: kthread spawn failed", 16, 16, COLOR_RED);
+    vga_mark_dirty(0, 0, (int)fb_width, (int)fb_height);
+    vga_flip_dirty();
+
+    while (1) {
+        __asm__ volatile("hlt");
+    }
+}
+
+static void kmain_spawn_core_tasks(void) {
     task_t* tty_t = proc_spawn_kthread("tty", PRIO_GUI, tty_task, 0);
     task_t* init_t = proc_spawn_kthread("init", PRIO_USER, init_task, 0);
     if (!tty_t || !init_t) {
-        vga_set_target(0, 0, 0);
-        vga_draw_rect(0, 0, (int)fb_width, (int)fb_height, 0x000000);
-        vga_print_at("BOOT ERROR: kthread spawn failed", 16, 16, COLOR_RED);
-        vga_mark_dirty(0, 0, (int)fb_width, (int)fb_height);
-        vga_flip_dirty();
-        for (;;) __asm__ volatile("hlt");
+        kmain_handle_kthread_failure();
     }
+}
 
+static void kmain_smp_init(void) {
     smp_boot_aps();
  
     if (cpu_count > 1) {
@@ -163,7 +178,9 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
             }
         }
     }
+}
 
+static void kmain_spawn_service_tasks(void) {
     if (g_enable_uhci) {
         proc_spawn_kthread("uhci", PRIO_LOW, uhci_late_init_task, 0);
     }
@@ -172,6 +189,21 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     ahci_set_async_mode(1);
     proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
+}
+
+__attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
+    kmain_cpu_init(magic, mb_info);
+
+    uint32_t memory_end_addr = kmain_memory_init(mb_info);
+
+    kmain_video_init(memory_end_addr);
+    kmain_platform_init();
+    kmain_devices_init();
+    kmain_fs_init();
+    kmain_tasks_init();
+    kmain_spawn_core_tasks();
+    kmain_smp_init();
+    kmain_spawn_service_tasks();
 
     __asm__ volatile("sti");
     sched_yield();
