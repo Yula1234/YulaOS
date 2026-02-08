@@ -66,5 +66,6 @@ void uhci_init(void);
 void uhci_late_init(void);
 void uhci_poll(void);
 int uhci_is_initialized(void);
+void uhci_quiesce_early(void);
 
 #endif

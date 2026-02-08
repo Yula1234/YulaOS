@@ -15,8 +15,8 @@
 #include <hal/lock.h>
 #include <hal/io.h>
 #include <hal/simd.h>
- #include <drivers/fbdev.h>
- #include <kernel/input_focus.h>
+#include <drivers/fbdev.h>
+#include <kernel/input_focus.h>
 
 #include "sched.h"
 #include "proc.h"
@@ -57,6 +57,7 @@ static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
 
 extern void irq_return(void);
+extern volatile uint32_t timer_ticks;
 
 uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
@@ -911,7 +912,7 @@ void proc_wait(uint32_t pid) {
 
 void reaper_task_func(void* arg) {
     (void)arg;
-    while(1) {
+    while (1) {
         uint32_t flags = spinlock_acquire_safe(&proc_lock);
         task_t* curr = tasks_head;
         
@@ -953,7 +954,7 @@ void reaper_task_func(void* arg) {
         
         spinlock_release_safe(&proc_lock, flags);
 
-        __asm__ volatile("int $0x80" : : "a"(7), "b"(50)); // sleep(50ms)
+        proc_usleep(50000);
     }
 }
 
@@ -1027,6 +1028,17 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
     
     spinlock_release_safe(&sleep_lock, flags);
     sched_yield();
+}
+
+void proc_usleep(uint32_t us) {
+    task_t* curr = proc_current();
+    if (!curr) return;
+
+    uint32_t ticks = (us * 15u) / 1000u;
+    if (ticks == 0) ticks = 1;
+
+    uint32_t target = timer_ticks + ticks;
+    proc_sleep_add(curr, target);
 }
 
 void proc_check_sleepers(uint32_t current_tick) {

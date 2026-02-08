@@ -13,6 +13,7 @@
 #include <hal/lock.h>
 
 #include <kernel/cpu.h>
+#include <kernel/proc.h>
 
 #include <mm/heap.h>
 
@@ -196,10 +197,6 @@ typedef struct {
 
 static uhci_hid_dev_t g_hid_devs[2];
 
-static inline void sys_usleep(uint32_t us) {
-    __asm__ volatile("int $0x80" : : "a"(11), "b"(us));
-}
-
 static inline uint8_t pci_read8(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     uint32_t reg = pci_read(bus, slot, func, offset & 0xFCu);
     return (uint8_t)((reg >> ((offset & 3u) * 8u)) & 0xFFu);
@@ -217,6 +214,51 @@ __attribute__((unused)) static inline void pci_write16(uint8_t bus, uint8_t slot
     reg &= ~(0xFFFFu << shift);
     reg |= ((uint32_t)value << shift);
     pci_write(bus, slot, func, aligned, reg);
+}
+
+void uhci_quiesce_early(void) {
+    for (uint16_t bus = 0; bus < 256; bus++) {
+        for (uint8_t slot = 0; slot < 32; slot++) {
+            for (uint8_t func = 0; func < 8; func++) {
+                uint16_t vendor = (uint16_t)(pci_read((uint8_t)bus, slot, func, 0x00u) & 0xFFFFu);
+                if (vendor == 0xFFFFu) continue;
+
+                uint32_t reg = pci_read((uint8_t)bus, slot, func, 0x08u);
+                uint8_t class_code = (uint8_t)((reg >> 24) & 0xFFu);
+                uint8_t subclass = (uint8_t)((reg >> 16) & 0xFFu);
+                uint8_t prog_if = (uint8_t)((reg >> 8) & 0xFFu);
+
+                if (class_code != UHCI_PCI_CLASS_SERIAL_BUS || subclass != UHCI_PCI_SUBCLASS_USB) {
+                    continue;
+                }
+
+                if (prog_if == UHCI_PCI_PROGIF_UHCI) {
+                    uint32_t bar4 = pci_read((uint8_t)bus, slot, func, UHCI_PCI_REG_BAR4);
+                    uint16_t io_base = (uint16_t)(bar4 & 0xFFFCu);
+                    if (io_base) {
+                        uint16_t cmd = pci_read16((uint8_t)bus, slot, func, UHCI_PCI_REG_COMMAND);
+                        if ((cmd & 0x0001u) == 0u) {
+                            pci_write16((uint8_t)bus, slot, func, UHCI_PCI_REG_COMMAND, (uint16_t)(cmd | 0x0001u));
+                        }
+
+                        outw((uint16_t)(io_base + UHCI_REG_USBCMD), 0);
+                        outw((uint16_t)(io_base + UHCI_REG_USBCMD), (uint16_t)(1u << 1));
+                        for (uint32_t i = 0; i < 100000u; i++) {
+                            if ((inw((uint16_t)(io_base + UHCI_REG_USBCMD)) & (1u << 1)) == 0u) break;
+                        }
+                        outw((uint16_t)(io_base + UHCI_REG_USBSTS), 0xFFFFu);
+                    }
+                }
+
+                uint16_t cmd = pci_read16((uint8_t)bus, slot, func, UHCI_PCI_REG_COMMAND);
+                cmd &= (uint16_t)~(0x0001u);
+                cmd &= (uint16_t)~(0x0002u);
+                cmd &= (uint16_t)~(0x0004u);
+                cmd |= (uint16_t)(1u << 10);
+                pci_write16((uint8_t)bus, slot, func, UHCI_PCI_REG_COMMAND, cmd);
+            }
+        }
+    }
 }
 
 static inline uint16_t uhci_readw(uint16_t reg) {
@@ -299,12 +341,12 @@ static int uhci_port_reset_enable(uint8_t port) {
     uhci_port_clear(port, UHCI_PORTSC_RWC);
 
     uhci_port_set(port, UHCI_PORTSC_PR);
-    sys_usleep(50000);
+    proc_usleep(50000);
     uhci_port_clear(port, UHCI_PORTSC_PR);
-    sys_usleep(10000);
+    proc_usleep(10000);
 
     uhci_port_set(port, UHCI_PORTSC_PE);
-    sys_usleep(10000);
+    proc_usleep(10000);
     uhci_port_clear(port, UHCI_PORTSC_RWC);
 
     uint16_t st = uhci_port_read(port);
@@ -383,7 +425,7 @@ static int uhci_wait_qh_done(uhci_qh_t* qh, uint32_t timeout_us) {
         }
 
         if (g_uhci_can_sleep) {
-            sys_usleep(1000);
+            proc_usleep(1000);
             waited += 1000;
         } else {
             uhci_wait_io(1000);
@@ -544,7 +586,7 @@ static int uhci_control_transfer(uint8_t devaddr, uint8_t low_speed, uint16_t ep
     uhci_sched_remove_head_qh(qh);
 
     if (g_uhci_can_sleep) {
-        sys_usleep(2000);
+        proc_usleep(2000);
     } else {
         uhci_wait_io(2000);
     }
@@ -627,7 +669,7 @@ static int uhci_usb_set_address(uint8_t low_speed, uint16_t ep0_mps, uint8_t new
     setup.wLength = 0;
     int r = uhci_control_transfer(0, low_speed, ep0_mps, &setup, 0, 0, 1000000);
     if (r < 0) return 0;
-    sys_usleep(10000);
+    proc_usleep(10000);
     return 1;
 }
 

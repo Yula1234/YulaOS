@@ -606,13 +606,8 @@ static void syscall_kill(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_usleep(registers_t* regs, task_t* curr) {
-    uint32_t us = regs->ebx;
-    uint32_t ticks = (us * 15u) / 1000u;
-    if (ticks == 0) ticks = 1;
-
-    uint32_t target = timer_ticks + ticks;
-    extern void proc_sleep_add(task_t* t, uint32_t tick);
-    proc_sleep_add(curr, target);
+    (void)curr;
+    proc_usleep(regs->ebx);
 }
 
 static void syscall_get_mem_stats(registers_t* regs, task_t* curr) {

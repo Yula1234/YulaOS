@@ -12,7 +12,6 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
-#include <kernel/kdb.h>
 #include <kernel/shm.h>
 
 #include <hal/io.h>

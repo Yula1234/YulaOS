@@ -1,7 +1,8 @@
 #include <kernel/tty.h>
+#include <kernel/proc.h>
 
 #include <hal/lock.h>
- #include <drivers/fbdev.h>
+#include <drivers/fbdev.h>
 
 extern uint32_t fb_width;
 extern uint32_t fb_height;
@@ -60,7 +61,7 @@ void tty_task(void* arg) {
 
     while (1) {
         if (!fb_kernel_can_render()) {
-            __asm__ volatile("int $0x80" : : "a"(11), "b"(10000));
+            proc_usleep(10000);
             continue;
         }
 
@@ -76,6 +77,6 @@ void tty_task(void* arg) {
             tty_render_fallback();
         }
 
-        __asm__ volatile("int $0x80" : : "a"(11), "b"(10000));
+        proc_usleep(10000);
     }
 }

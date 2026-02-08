@@ -172,6 +172,7 @@ task_t* proc_find_by_pid(uint32_t pid);
 void proc_sleep_remove(task_t* t);
 void proc_check_sleepers(uint32_t current_tick);
 void proc_sleep_add(task_t* t, uint32_t wake_tick);
+void proc_usleep(uint32_t us);
 void proc_wake(task_t* t);
 
 #endif
