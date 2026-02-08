@@ -652,6 +652,8 @@ typedef enum {
     USH_KEY_RIGHT,
     USH_KEY_UP,
     USH_KEY_DOWN,
+    USH_KEY_SCROLL_UP,
+    USH_KEY_SCROLL_DOWN,
     USH_KEY_HOME,
     USH_KEY_END,
     USH_KEY_CTRL_C,
@@ -743,6 +745,18 @@ static int term_is_ansi(int fd) {
     return ioctl(fd, YOS_TCGETS, &t) == 0;
 }
 
+static void term_scroll(int fd, int delta) {
+    yos_tty_scroll_t s;
+    s.delta = delta;
+    (void)ioctl(fd, YOS_TTY_SCROLL, &s);
+}
+
+static void term_scroll_reset(int fd) {
+    yos_tty_scroll_t s;
+    s.delta = 0;
+    (void)ioctl(fd, YOS_TTY_SCROLL, &s);
+}
+
 static int ush_make_prompt(char* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
     char cwd[256];
@@ -822,6 +836,8 @@ static ush_key_t read_key(int fd_in, int timeout_ms) {
     if ((uint8_t)c == 0x12u) { k.kind = USH_KEY_RIGHT; return k; }
     if ((uint8_t)c == 0x13u) { k.kind = USH_KEY_UP; return k; }
     if ((uint8_t)c == 0x14u) { k.kind = USH_KEY_DOWN; return k; }
+    if ((uint8_t)c == 0x80u) { k.kind = USH_KEY_SCROLL_UP; return k; }
+    if ((uint8_t)c == 0x81u) { k.kind = USH_KEY_SCROLL_DOWN; return k; }
 
     if ((uint8_t)c == 0x1Bu) {
         char c1 = 0;
@@ -990,6 +1006,18 @@ static int read_line_editor(int fd_in, int fd_out, const char* prompt, int promp
             }
             continue;
         }
+
+        if (k.kind == USH_KEY_SCROLL_UP) {
+            term_scroll(fd_out, 1);
+            continue;
+        }
+
+        if (k.kind == USH_KEY_SCROLL_DOWN) {
+            term_scroll(fd_out, -1);
+            continue;
+        }
+
+        term_scroll_reset(fd_out);
 
         if (k.kind == USH_KEY_CTRL_C) {
             free(hist_saved);

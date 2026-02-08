@@ -62,7 +62,8 @@ int fb_acquire(uint32_t pid) {
     int ok = 0;
     if (fb_owner_pid == 0 || fb_owner_pid == pid) {
         if (fb_owner_pid == 0) {
-            fb_prev_focus_pid = (int)input_focus_exchange_pid(pid);
+            uint32_t prev = input_focus_exchange_pid(pid);
+            fb_prev_focus_pid = (prev == pid) ? 0 : (int)prev;
         } else {
             input_focus_set_pid(pid);
         }

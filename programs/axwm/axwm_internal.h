@@ -109,6 +109,10 @@ typedef struct {
     uint32_t drag_resize_new_h;
     uint32_t drag_preview_last_w;
     uint32_t drag_preview_last_h;
+    int pending_exit;
+    int pending_close;
+    uint32_t pending_close_client_id;
+    uint32_t pending_close_surface_id;
 
     wm_ui_t ui;
 } wm_state_t;
@@ -166,5 +170,8 @@ void wm_move_focused_to_ws(comp_conn_t* c, wm_state_t* st, uint32_t ws);
 void wm_toggle_floating(comp_conn_t* c, wm_state_t* st);
 void wm_move_focused_float(comp_conn_t* c, wm_state_t* st, int32_t dx, int32_t dy);
 void wm_close_focused(comp_conn_t* c, wm_state_t* st);
+void wm_request_close(comp_conn_t* c, wm_state_t* st, uint32_t client_id, uint32_t surface_id);
+void wm_request_exit(comp_conn_t* c, wm_state_t* st);
+void wm_flush_pending_cmds(comp_conn_t* c, wm_state_t* st);
 
 int wm_handle_event(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t* ev);

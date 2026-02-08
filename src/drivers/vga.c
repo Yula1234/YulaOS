@@ -1075,76 +1075,68 @@ void vga_draw_sprite_masked(int x, int y, int w, int h, uint32_t* data, uint32_t
     }
     if (draw_w <= 0) return;
 
-    uint32_t* src_ptr = data + skip_x;
-    uint32_t* dst_ptr = &vga_current_target[y * vga_target_w + x];
+    uint8_t* src_ptr = (uint8_t*)(data + skip_x);
+    uint8_t* dst_ptr = (uint8_t*)&vga_current_target[y * vga_target_w + x];
 
-    int screen_stride = vga_target_w * 4;
+    int screen_stride = (int)vga_target_w * 4;
     int sprite_stride = w * 4;
     int draw_bytes = draw_w * 4;
 
-    __asm__ volatile (
-        "movd      %[trans], %%xmm7 \n\t"
-        "pshufd    $0x00, %%xmm7, %%xmm7 \n\t"
+    for (int row = 0; row < h; row++) {
+        uint8_t* src_row = src_ptr;
+        uint8_t* dst_row = dst_ptr;
+        int bytes = draw_bytes;
 
-        "1: \n\t"
-        "push      %[w_bytes] \n\t"  
-        "push      %[src] \n\t"      
-        "push      %[dst] \n\t"      
+        __asm__ volatile (
+            "movd      %[trans], %%xmm7 \n\t"
+            "pshufd    $0x00, %%xmm7, %%xmm7 \n\t"
 
-        "2: \n\t"
-        "cmp       $16, %[w_bytes] \n\t"
-        "jl        3f \n\t"
+            "1: \n\t"
+            "cmp       $16, %[w_bytes] \n\t"
+            "jl        2f \n\t"
 
-        "movdqu    (%[src]), %%xmm0 \n\t"  
-        "movdqu    (%[dst]), %%xmm1 \n\t"  
-        
-        "movdqa    %%xmm0, %%xmm2 \n\t"
-        "pcmpeqd   %%xmm7, %%xmm2 \n\t"  
-        
-        "pand      %%xmm2, %%xmm1 \n\t"  
-        "pandn     %%xmm0, %%xmm2 \n\t"  
-        "por       %%xmm2, %%xmm1 \n\t"  
-        
-        "movdqu    %%xmm1, (%[dst]) \n\t"
+            "movdqu    (%[src]), %%xmm0 \n\t"
+            "movdqu    (%[dst]), %%xmm1 \n\t"
 
-        "add       $16, %[src] \n\t"
-        "add       $16, %[dst] \n\t"
-        "sub       $16, %[w_bytes] \n\t"
-        "jmp       2b \n\t"
+            "movdqa    %%xmm0, %%xmm2 \n\t"
+            "pcmpeqd   %%xmm7, %%xmm2 \n\t"
 
-        "3: \n\t"
-        "cmp       $0, %[w_bytes] \n\t"
-        "jle       4f \n\t"
-        
-        "mov       (%[src]), %%eax \n\t"
-        "cmp       %[trans], %%eax \n\t"
-        "je        5f \n\t"
-        "mov       %%eax, (%[dst]) \n\t"
-        "5: \n\t"
-        "add       $4, %[src] \n\t"
-        "add       $4, %[dst] \n\t"
-        "sub       $4, %[w_bytes] \n\t"
-        "jmp       3b \n\t"
+            "pand      %%xmm2, %%xmm1 \n\t"
+            "pandn     %%xmm0, %%xmm2 \n\t"
+            "por       %%xmm2, %%xmm1 \n\t"
 
-        "4: \n\t"
-        "pop       %[dst] \n\t"       
-        "pop       %[src] \n\t"       
-        "pop       %[w_bytes] \n\t"
-        
-        "add       %[s_stride], %[src] \n\t" 
-        "add       %[d_stride], %[dst] \n\t" 
-        "dec       %[h] \n\t"
-        "jnz       1b \n\t"
+            "movdqu    %%xmm1, (%[dst]) \n\t"
 
-        : [src]      "+r" (src_ptr),
-          [dst]      "+r" (dst_ptr),
-          [h]        "+r" (h),
-          [w_bytes]  "+r" (draw_bytes)
-        : [trans]    "r"  (trans_color),
-          [s_stride] "m"  (sprite_stride),
-          [d_stride] "m"  (screen_stride)
-        : "memory", "eax", "ecx", "xmm0", "xmm1", "xmm2", "xmm7"
-    );
+            "add       $16, %[src] \n\t"
+            "add       $16, %[dst] \n\t"
+            "sub       $16, %[w_bytes] \n\t"
+            "jmp       1b \n\t"
+
+            "2: \n\t"
+            "cmp       $0, %[w_bytes] \n\t"
+            "jle       3f \n\t"
+
+            "mov       (%[src]), %%eax \n\t"
+            "cmp       %[trans], %%eax \n\t"
+            "je        4f \n\t"
+            "mov       %%eax, (%[dst]) \n\t"
+            "4: \n\t"
+            "add       $4, %[src] \n\t"
+            "add       $4, %[dst] \n\t"
+            "sub       $4, %[w_bytes] \n\t"
+            "jmp       2b \n\t"
+
+            "3: \n\t"
+            : [src] "+r" (src_row),
+              [dst] "+r" (dst_row),
+              [w_bytes] "+r" (bytes)
+            : [trans] "r" (trans_color)
+            : "memory", "eax", "xmm0", "xmm1", "xmm2", "xmm7", "cc"
+        );
+
+        src_ptr += sprite_stride;
+        dst_ptr += screen_stride;
+    }
 }
 
 void vga_print_at(const char* s, int x, int y, uint32_t fg) {

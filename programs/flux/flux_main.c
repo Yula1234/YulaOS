@@ -574,6 +574,9 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
         if (wm.connected) {
             wm_pump(&wm, clients, clients_cap, &input, &z_counter, &preview, &preview_dirty, &scene_dirty);
         }
+        if (g_should_exit) {
+            break;
+        }
 
         mouse_state_t ms;
         int mr = read(fd_mouse, &ms, sizeof(ms));

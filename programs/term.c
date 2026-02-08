@@ -1426,6 +1426,11 @@ static int term_run(void) {
     }
 
 cleanup:
+    if (child_pid > 0) {
+        kill(child_pid);
+        child_pid = -1;
+    }
+
     if (master_fd >= 0) {
         close(master_fd);
         master_fd = -1;

@@ -571,15 +571,38 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
 static void syscall_kill(registers_t* regs, task_t* curr) {
     uint32_t target_pid = regs->ebx;
     task_t* t = proc_find_by_pid(target_pid);
-    if (t) {
-        proc_kill(t);
-        if (target_pid == curr->pid) {
-            sched_yield();
-        }
-        regs->eax = 0;
-    } else {
+    if (!t) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    if (t == curr) {
+        proc_kill(t);
+        sched_yield();
+        regs->eax = 0;
+        return;
+    }
+
+    int is_running = 0;
+    for (int i = 0; i < MAX_CPUS; i++) {
+        if (cpus[i].current_task == t) {
+            is_running = 1;
+            break;
+        }
+    }
+
+    if (is_running) {
+        if (t->page_dir) {
+            __sync_fetch_and_or(&t->pending_signals, 1u << SIGTERM);
+            regs->eax = 0;
+        } else {
+            regs->eax = (uint32_t)-1;
+        }
+        return;
+    }
+
+    proc_kill(t);
+    regs->eax = 0;
 }
 
 static void syscall_usleep(registers_t* regs, task_t* curr) {

@@ -47,19 +47,7 @@ static int comp_client_send_input_ring(comp_client_t* c, const comp_ipc_input_t*
             }
 
             if (essential) {
-                (void)__sync_fetch_and_or(&ring->flags, COMP_INPUT_RING_FLAG_WAIT_W);
-                __sync_synchronize();
-
-                const uint32_t r2 = ring->r;
-                const uint32_t w2 = ring->w;
-                if ((w2 - r2) < ring->cap) {
-                    (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
-                    continue;
-                }
-
-                (void)futex_wait(&ring->r, r);
-                (void)__sync_fetch_and_and(&ring->flags, ~COMP_INPUT_RING_FLAG_WAIT_W);
-                continue;
+                return 0;
             }
 
             ring->dropped++;

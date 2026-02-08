@@ -474,7 +474,7 @@ void proc_kill(task_t* t) {
 
     t->state = TASK_ZOMBIE;
 
-    sem_signal(&t->exit_sem);
+    sem_signal_all(&t->exit_sem);
 }
 
 static void kthread_trampoline(void) {
@@ -927,7 +927,11 @@ void reaper_task_func(void* arg) {
                 
                 int has_waiters = !dlist_empty(&curr->exit_sem.wait_list);
 
-                if (still_running || has_waiters || curr->exit_waiters > 0) {
+                if (has_waiters) {
+                    sem_signal_all(&curr->exit_sem);
+                }
+
+                if (still_running || curr->exit_waiters > 0) {
                     curr = curr->next;
                     continue;
                 }

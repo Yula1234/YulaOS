@@ -45,6 +45,10 @@ void wm_reset_session_state(wm_state_t* st) {
     st->drag_resize_new_h = 0;
     st->drag_preview_last_w = 0;
     st->drag_preview_last_h = 0;
+    st->pending_exit = 0;
+    st->pending_close = 0;
+    st->pending_close_client_id = 0;
+    st->pending_close_surface_id = 0;
     wm_ui_cleanup(&st->ui);
 
     st->ui.client_id = COMP_WM_CLIENT_NONE;

@@ -66,6 +66,8 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             wm_ui_pump(&st.ui);
         }
 
+        wm_flush_pending_cmds(&c, &st);
+
         comp_ipc_hdr_t hdr;
         uint8_t payload[COMP_IPC_MAX_PAYLOAD];
         int r = comp_try_recv(&c, &hdr, payload, (uint32_t)sizeof(payload));
@@ -80,6 +82,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
             if (st.ui.connected) {
                 wm_ui_pump(&st.ui);
             }
+            wm_flush_pending_cmds(&c, &st);
             comp_wait_events(&c, 1000u);
             continue;
         }

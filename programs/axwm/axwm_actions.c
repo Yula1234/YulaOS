@@ -165,8 +165,38 @@ void wm_close_focused(comp_conn_t* c, wm_state_t* st) {
     const uint32_t closing_surface_id = v->surface_id;
     const int next_idx = wm_pick_next_focus_idx(st, idx);
 
-    (void)comp_wm_close(c, closing_client_id, closing_surface_id);
+    wm_request_close(c, st, closing_client_id, closing_surface_id);
     if (next_idx >= 0) {
         wm_focus_view_idx(c, st, next_idx);
+    }
+}
+
+void wm_request_close(comp_conn_t* c, wm_state_t* st, uint32_t client_id, uint32_t surface_id) {
+    if (!st) return;
+    if (!c || comp_wm_close(c, client_id, surface_id) != 0) {
+        st->pending_close = 1;
+        st->pending_close_client_id = client_id;
+        st->pending_close_surface_id = surface_id;
+    }
+}
+
+void wm_request_exit(comp_conn_t* c, wm_state_t* st) {
+    if (!st) return;
+    if (!c || comp_wm_exit(c) != 0) {
+        st->pending_exit = 1;
+    }
+}
+
+void wm_flush_pending_cmds(comp_conn_t* c, wm_state_t* st) {
+    if (!c || !st) return;
+    if (st->pending_exit) {
+        if (comp_wm_exit(c) == 0) {
+            st->pending_exit = 0;
+        }
+    }
+    if (st->pending_close) {
+        if (comp_wm_close(c, st->pending_close_client_id, st->pending_close_surface_id) == 0) {
+            st->pending_close = 0;
+        }
     }
 }

@@ -422,6 +422,29 @@ void sem_signal(semaphore_t* sem) {
     spinlock_release_safe(&sem->lock, flags);
 }
 
+void sem_signal_all(semaphore_t* sem) {
+    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+
+    while (!dlist_empty(&sem->wait_list)) {
+        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+
+        dlist_del(&t->sem_node);
+
+        t->sem_node.next = 0;
+        t->sem_node.prev = 0;
+        t->blocked_on_sem = 0;
+
+        sem->count++;
+
+        if (t->state != TASK_ZOMBIE) {
+            t->state = TASK_RUNNABLE;
+            sched_add(t);
+        }
+    }
+
+    spinlock_release_safe(&sem->lock, flags);
+}
+
 void sem_remove_task(task_t* t) {
     if (!t->blocked_on_sem) return;
     
