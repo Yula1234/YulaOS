@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("edit" "geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
+USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -126,7 +126,6 @@ done
 "$TOOL" "$DISK_IMG" import bin/obj/string.o /bin/string.o > /dev/null
 "$TOOL" "$DISK_IMG" import bin/obj/stdlib.o /bin/stdlib.o > /dev/null
 "$TOOL" "$DISK_IMG" import bin/obj/stdio.o /bin/stdio.o > /dev/null
-"$TOOL" "$DISK_IMG" import programs/loop.asm /home/loop.asm > /dev/null
 
 cp bin/kernel.bin "$ISODIR/boot/kernel.bin"
 
