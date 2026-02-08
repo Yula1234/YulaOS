@@ -134,7 +134,7 @@ void wm_ui_draw_bar(wm_state_t* st) {
         tmp[0] = (char)('1' + (int)i);
         tmp[1] = '\0';
         const uint32_t col = (i == st->active_ws) ? 0xE0E0E0u : 0x808080u;
-        draw_string(ui->pixels, (int)ui->w, (int)ui->h, x, 8, tmp, col);
+        draw_string(ui->pixels, (int)ui->w, (int)ui->h, x, 2, tmp, col);
         x += 12;
     }
 

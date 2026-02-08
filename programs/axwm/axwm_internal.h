@@ -13,7 +13,7 @@
 #define WM_SPLIT_HORIZONTAL 1
 
 #define WM_UI_BAR_SURFACE_ID 0x80000001u
-#define WM_UI_BAR_H 28u
+#define WM_UI_BAR_H 20u
 
 #define WM_RESIZE_EDGE_LEFT   1u
 #define WM_RESIZE_EDGE_RIGHT  2u
