@@ -36,10 +36,10 @@ static int WIN_H = 600;
 #define C_SYN_COMMENT   0x6A9955 // green
 #define C_SYN_REG       0x9CDCFE // light blue
 
-#define LINE_H      18
+#define LINE_H      20
 #define CHAR_W      8
 #define GUTTER_W    48
-#define STATUS_H    24
+#define STATUS_H    28
 #define TAB_H       32
 #define PAD_X       8 
 
@@ -1088,7 +1088,7 @@ void draw_rect(int x, int y, int w, int h, uint32_t color) {
 }
 
 void render_char(int x, int y, char c, uint32_t color) {
-    draw_char(canvas, WIN_W, WIN_H, x, y + 5, c, color);
+    draw_char(canvas, WIN_W, WIN_H, x, y + 2, c, color);
 }
 
 void render_string(int x, int y, const char* s, uint32_t color) {
@@ -1616,11 +1616,11 @@ void render_ui() {
         if (bw < 80) bw = 80;
 
         int text_y = status_text_y;
-        int glyph_top = text_y + 5;
+        int glyph_top = text_y + 2;
         int pad_y = 2;
         int box_shift = 1;
         int by = glyph_top - pad_y + box_shift;
-        int bh = 8 + pad_y * 2;
+        int bh = 16 + pad_y * 2;
         draw_rect(bx, by, bw, bh, C_MINI_BG);
         draw_rect(bx, by, bw, 1, C_MINI_BORDER);
         draw_rect(bx, by + bh - 1, bw, 1, C_MINI_BORDER);
@@ -1632,7 +1632,7 @@ void render_ui() {
         int cx = ix + ed.mini_len * CHAR_W;
         if (cx > bx + bw - 4) cx = bx + bw - 4;
         int cy = glyph_top;
-        int ch = 8;
+        int ch = 16;
         draw_rect(cx, cy, 2, ch, C_CURSOR);
     }
     else if (ed.mode == MODE_GOTO) {
@@ -1644,11 +1644,11 @@ void render_ui() {
         if (bw < 80) bw = 80;
 
         int text_y = status_text_y;
-        int glyph_top = text_y + 5;
+        int glyph_top = text_y + 2;
         int pad_y = 2;
         int box_shift = 1;
         int by = glyph_top - pad_y + box_shift;
-        int bh = 8 + pad_y * 2;
+        int bh = 16 + pad_y * 2;
         draw_rect(bx, by, bw, bh, C_MINI_BG);
         draw_rect(bx, by, bw, 1, C_MINI_BORDER);
         draw_rect(bx, by + bh - 1, bw, 1, C_MINI_BORDER);
@@ -1660,7 +1660,7 @@ void render_ui() {
         int cx = ix + ed.mini_len * CHAR_W;
         if (cx > bx + bw - 4) cx = bx + bw - 4;
         int cy = glyph_top;
-        int ch = 8;
+        int ch = 16;
         draw_rect(cx, cy, 2, ch, C_CURSOR);
     }
     else if (ed.mode == MODE_OPEN) {
@@ -1678,11 +1678,11 @@ void render_ui() {
         fmt_title_ellipsis(ed.mini, disp, (int)sizeof(disp), max_chars);
 
         int text_y = status_text_y;
-        int glyph_top = text_y + 5;
+        int glyph_top = text_y + 2;
         int pad_y = 2;
         int box_shift = 1;
         int by = glyph_top - pad_y + box_shift;
-        int bh = 8 + pad_y * 2;
+        int bh = 16 + pad_y * 2;
         draw_rect(bx, by, bw, bh, C_MINI_BG);
         draw_rect(bx, by, bw, 1, C_MINI_BORDER);
         draw_rect(bx, by + bh - 1, bw, 1, C_MINI_BORDER);
@@ -1695,7 +1695,7 @@ void render_ui() {
         int cx = ix + disp_len * CHAR_W;
         if (cx > bx + bw - 4) cx = bx + bw - 4;
         int cy = glyph_top;
-        int ch = 8;
+        int ch = 16;
         draw_rect(cx, cy, 2, ch, C_CURSOR);
     }
     else if (ed.status_len > 0) {

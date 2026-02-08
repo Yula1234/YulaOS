@@ -18,7 +18,7 @@ static int WIN_H = 260;
 #define C_ACCENT    0x007ACC
 #define C_SELECT_BG 0x094771
 
-#define ROW_H 18
+#define ROW_H 28
 #define PAD_X 12
 #define PAD_Y 12
 
@@ -329,16 +329,16 @@ static void render(void) {
 
     char header[96];
     (void)snprintf(header, sizeof(header), "Run: %s", g_query);
-    draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, panel_y + 14, header, C_TEXT);
+    draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, panel_y + 8, header, C_TEXT);
 
-    draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, panel_y + 34, "Enter=run  Esc=close  Up/Down=select", C_MUTED);
+    draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, panel_y + 30, "Enter=run  Esc=close  Up/Down=select", C_MUTED);
 
-    const int list_y = panel_y + 56;
+    const int list_y = panel_y + 60;
     const int list_h = panel_h - (list_y - panel_y) - PAD_Y;
     const int rows = max_i(1, list_h / ROW_H);
 
     if (g_filtered_count == 0) {
-        draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, list_y + 14, "No matches", C_MUTED);
+        draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, list_y + 6, "No matches", C_MUTED);
         return;
     }
 
@@ -355,7 +355,7 @@ static void render(void) {
         const char* name = g_apps[app_idx].base;
 
         const int row_y = list_y + i * ROW_H;
-        const int text_y = row_y + 4;
+        const int text_y = row_y + 6;
         if (idx == g_selected) {
             fill_rect(panel_x + 2, row_y, panel_w - 4, ROW_H, C_SELECT_BG);
             draw_string(canvas, WIN_W, WIN_H, panel_x + PAD_X, text_y, name, 0xFFFFFF);

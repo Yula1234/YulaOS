@@ -53,9 +53,9 @@ void draw_text(uint32_t* fb, int stride, int w, int h, int x, int y, const char*
     while (*p) {
         unsigned char uc = (unsigned char)*p;
         if (uc >= 128u) uc = (unsigned char)'?';
-        const uint8_t* glyph = font8x8_basic[(int)uc];
+        const uint8_t* glyph = font8x16_basic[(int)uc];
 
-        for (int row = 0; row < 8; row++) {
+        for (int row = 0; row < 16; row++) {
             int py = y + row;
             if (py < 0 || py >= h) continue;
             uint8_t bits = glyph[row];

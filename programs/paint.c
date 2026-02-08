@@ -55,8 +55,8 @@ static void paint_on_signal(int sig) {
 #define C_ACCENT    0x007ACC
 #define C_CANVAS_BG 0xFFFFFF
 
-#define UI_TOP_H    36
-#define UI_STATUS_H 22
+#define UI_TOP_H    44
+#define UI_STATUS_H 28
 #define UI_TOOL_W   96
 
 typedef struct { int x, y, w, h; } rect_t;
@@ -795,7 +795,7 @@ static int tool_name(char* out, int out_cap) {
 static void ui_draw_tool_item(int y, const char* label, int is_active) {
     int x = 8;
     int w = r_toolbar.w - 16;
-    int h = 20;
+    int h = 24;
 
     if (is_active) {
         fill_rect(r_toolbar.x + x, r_toolbar.y + y, w, h, 0x1B1B1C);
@@ -805,7 +805,7 @@ static void ui_draw_tool_item(int y, const char* label, int is_active) {
         draw_frame(r_toolbar.x + x, r_toolbar.y + y, w, h, C_BORDER);
     }
 
-    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + x + 6, r_toolbar.y + y + 6, label, is_active ? C_TEXT : C_TEXT_DIM);
+    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + x + 6, r_toolbar.y + y + 4, label, is_active ? C_TEXT : C_TEXT_DIM);
 }
 
 static rect_t palette_rect(int idx) {
@@ -813,15 +813,15 @@ static rect_t palette_rect(int idx) {
     int sw = 18;
     int gap = 6;
 
-    int color_bar_y = r_toolbar.y + r_toolbar.h - 56;
+    int color_bar_y = r_toolbar.y + r_toolbar.h - 60;
     int rows = (8 + cols - 1) / cols;
     int pal_h = rows * sw + (rows - 1) * gap;
 
-    int label_h = 18;
+    int label_h = 22;
     int pad = 2;
 
     int py = color_bar_y - (pal_h + label_h + pad);
-    int min_py = r_toolbar.y + 220;
+    int min_py = r_toolbar.y + 236;
     int max_py = color_bar_y - pal_h - pad;
 
     if (max_py < min_py) {
@@ -852,25 +852,25 @@ static void render_all() {
 
     fill_rect(r_header.x, r_header.y, r_header.w, r_header.h, C_HEADER_BG);
     draw_frame(r_header.x, r_header.y, r_header.w, r_header.h, 0x000000);
-    draw_string(canvas, WIN_W, WIN_H, 10, 12, "Paint", C_TEXT);
+    draw_string(canvas, WIN_W, WIN_H, 10, 14, "Paint", C_TEXT);
 
     fill_rect(r_toolbar.x, r_toolbar.y, r_toolbar.w, r_toolbar.h, C_PANEL_BG);
     draw_frame(r_toolbar.x, r_toolbar.y, r_toolbar.w, r_toolbar.h, C_BORDER);
 
     ui_draw_tool_item(10, "Brush (B)", tool == TOOL_BRUSH);
-    ui_draw_tool_item(34, "Eraser (E)", tool == TOOL_ERASER);
-    ui_draw_tool_item(58, "Line (L)", tool == TOOL_LINE);
-    ui_draw_tool_item(82, "Rect (R)", tool == TOOL_RECT);
-    ui_draw_tool_item(106, "Circle (C)", tool == TOOL_CIRCLE);
-    ui_draw_tool_item(130, "Fill (F)", tool == TOOL_FILL);
-    ui_draw_tool_item(154, "Pick (P)", tool == TOOL_PICK);
+    ui_draw_tool_item(36, "Eraser (E)", tool == TOOL_ERASER);
+    ui_draw_tool_item(62, "Line (L)", tool == TOOL_LINE);
+    ui_draw_tool_item(88, "Rect (R)", tool == TOOL_RECT);
+    ui_draw_tool_item(114, "Circle (C)", tool == TOOL_CIRCLE);
+    ui_draw_tool_item(140, "Fill (F)", tool == TOOL_FILL);
+    ui_draw_tool_item(166, "Pick (P)", tool == TOOL_PICK);
 
-    int cy = 190;
+    int cy = 200;
     draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, r_toolbar.y + cy, "Size:", C_TEXT_DIM);
     char sbuf[32];
     snprintf(sbuf, sizeof(sbuf), "%d", brush_r);
     draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 54, r_toolbar.y + cy, sbuf, C_TEXT);
-    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, r_toolbar.y + cy + 18, "-/+", C_TEXT_DIM);
+    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, r_toolbar.y + cy + 22, "-/+", C_TEXT_DIM);
 
     fill_rect(r_status.x, r_status.y, r_status.w, r_status.h, C_HEADER_BG);
     draw_frame(r_status.x, r_status.y, r_status.w, r_status.h, 0x000000);
@@ -879,7 +879,7 @@ static void render_all() {
     tool_name(tbuf, sizeof(tbuf));
     char st[96];
     snprintf(st, sizeof(st), "Tool: %s  Undo:%d  Redo:%d", tbuf, undo_count, redo_count);
-    draw_string(canvas, WIN_W, WIN_H, 8, r_status.y + 7, st, C_TEXT_DIM);
+    draw_string(canvas, WIN_W, WIN_H, 8, r_status.y + 6, st, C_TEXT_DIM);
 
     fill_rect(r_canvas.x, r_canvas.y, r_canvas.w, r_canvas.h, C_CANVAS_BG);
     draw_frame(r_canvas.x, r_canvas.y, r_canvas.w, r_canvas.h, C_BORDER);
@@ -907,20 +907,20 @@ static void render_all() {
     }
 
     if (shape_fill) {
-        draw_string(canvas, WIN_W, WIN_H, r_header.w - 90, 12, "FILL", C_ACCENT);
+        draw_string(canvas, WIN_W, WIN_H, r_header.w - 90, 14, "FILL", C_ACCENT);
     }
 
     rect_t p0 = palette_rect(0);
-    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, p0.y - 14, "Colors:", C_TEXT_DIM);
+    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, p0.y - 20, "Colors:", C_TEXT_DIM);
     for (int i = 0; i < 8; i++) {
         rect_t pr = palette_rect(i);
         fill_rect(pr.x, pr.y, pr.w, pr.h, palette[i]);
         draw_frame(pr.x, pr.y, pr.w, pr.h, (palette[i] == cur_color) ? C_ACCENT : 0x000000);
     }
 
-    fill_rect(r_toolbar.x + 10, r_toolbar.y + r_toolbar.h - 56, r_toolbar.w - 20, 18, cur_color);
-    draw_frame(r_toolbar.x + 10, r_toolbar.y + r_toolbar.h - 56, r_toolbar.w - 20, 18, 0x000000);
-    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, r_toolbar.y + r_toolbar.h - 32, "Ctrl+Z/Y", C_TEXT_DIM);
+    fill_rect(r_toolbar.x + 10, r_toolbar.y + r_toolbar.h - 60, r_toolbar.w - 20, 20, cur_color);
+    draw_frame(r_toolbar.x + 10, r_toolbar.y + r_toolbar.h - 60, r_toolbar.w - 20, 20, 0x000000);
+    draw_string(canvas, WIN_W, WIN_H, r_toolbar.x + 10, r_toolbar.y + r_toolbar.h - 40, "Ctrl+Z/Y", C_TEXT_DIM);
 }
 
 static int mouse_to_img(int mx, int my, int* out_x, int* out_y) {
@@ -947,13 +947,13 @@ static void handle_mouse_down(int mx, int my) {
             return;
         }
         int ry = my - r_toolbar.y;
-        if (ry >= 10 && ry < 30) tool = TOOL_BRUSH;
-        else if (ry >= 34 && ry < 54) tool = TOOL_ERASER;
-        else if (ry >= 58 && ry < 78) tool = TOOL_LINE;
-        else if (ry >= 82 && ry < 102) tool = TOOL_RECT;
-        else if (ry >= 106 && ry < 126) tool = TOOL_CIRCLE;
-        else if (ry >= 130 && ry < 150) tool = TOOL_FILL;
-        else if (ry >= 154 && ry < 174) tool = TOOL_PICK;
+        if (ry >= 10 && ry < 34) tool = TOOL_BRUSH;
+        else if (ry >= 36 && ry < 60) tool = TOOL_ERASER;
+        else if (ry >= 62 && ry < 86) tool = TOOL_LINE;
+        else if (ry >= 88 && ry < 112) tool = TOOL_RECT;
+        else if (ry >= 114 && ry < 138) tool = TOOL_CIRCLE;
+        else if (ry >= 140 && ry < 164) tool = TOOL_FILL;
+        else if (ry >= 166 && ry < 190) tool = TOOL_PICK;
 
         mouse_down = 0;
         drag_active = 0;

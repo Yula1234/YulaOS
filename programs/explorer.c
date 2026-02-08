@@ -27,9 +27,9 @@ static int WIN_H = 480;
 #define ICON_W 48
 #define ICON_H 40
 #define GRID_X 20
-#define GRID_Y 60
+#define GRID_Y 72
 #define GAP_X  32 
-#define GAP_Y  30
+#define GAP_Y  36
 
 typedef struct {
     char name[64];
@@ -262,37 +262,37 @@ void nav_up() {
 void render_all() {
     fill_rect(0, 0, WIN_W, WIN_H, C_WIN_BG);
     
-    fill_rect(0, 0, WIN_W, 36, C_HEADER);
-    fill_rect(0, 36, WIN_W, 1, 0x000000);
+    fill_rect(0, 0, WIN_W, 44, C_HEADER);
+    fill_rect(0, 44, WIN_W, 1, 0x000000);
     
-    fill_rect(50, 6, WIN_W - 60, 24, 0x181818);
-    draw_frame(50, 6, WIN_W - 60, 24, C_BORDER);
-    draw_string(canvas, WIN_W, WIN_H, 60, 14, current_path, C_TEXT);
+    fill_rect(50, 8, WIN_W - 60, 28, 0x181818);
+    draw_frame(50, 8, WIN_W - 60, 28, C_BORDER);
+    draw_string(canvas, WIN_W, WIN_H, 60, 12, current_path, C_TEXT);
 
-    int bx = 15, by = 12;
+    int bx = 15, by = 14;
     fill_rect(bx, by + 4, 12, 4, C_TEXT);
     fill_rect(bx, by + 4, 2, 4, C_TEXT);
     fill_rect(bx + 2, by + 2, 2, 8, C_TEXT);
     fill_rect(bx + 4, by, 2, 12, C_TEXT);
 
-    int bar_y = WIN_H - 24;
-    fill_rect(0, bar_y, WIN_W, 24, C_HEADER);
+    int bar_y = WIN_H - 28;
+    fill_rect(0, bar_y, WIN_W, 28, C_HEADER);
     fill_rect(0, bar_y, WIN_W, 1, C_BORDER);
 
     fs_info_t fs;
     if (get_fs_info(&fs) == 0 && fs.total_blocks > 0) {
         uint32_t used = fs.total_blocks - fs.free_blocks;
         uint32_t pct = (used * 100) / fs.total_blocks;
-        int bar_w = 100; int bar_h = 10;
-        int bx = WIN_W - bar_w - 10; int by = WIN_H - 17;
+        int bar_w = 100; int bar_h = 12;
+        int bx = WIN_W - bar_w - 10; int by = bar_y + 8;
         fill_rect(bx, by, bar_w, bar_h, 0x111111);
         uint32_t col = (pct > 80) ? 0xC94E4E : C_ACCENT;
         fill_rect(bx + 1, by + 1, (pct * (bar_w - 2)) / 100, bar_h - 2, col);
         
-        draw_string(canvas, WIN_W, WIN_H, bx - 70, by + 1, "Storage:", C_TEXT_DIM);
+        draw_string(canvas, WIN_W, WIN_H, bx - 70, bar_y + 6, "Storage:", C_TEXT_DIM);
         char buf[32], num[10]; fmt_int(entry_count, num);
         strcpy(buf, "Items: "); strcat(buf, num);
-        draw_string(canvas, WIN_W, WIN_H, 10, by + 1, buf, C_TEXT_DIM);
+        draw_string(canvas, WIN_W, WIN_H, 10, bar_y + 6, buf, C_TEXT_DIM);
     }
 
     int cur_x = GRID_X;
@@ -304,7 +304,7 @@ void render_all() {
         e->y = cur_y;
         
         int hit_w = ICON_W + 20;
-        int hit_h = ICON_H + 30;
+        int hit_h = ICON_H + 36;
         int hit_x = cur_x - 10;
         int hit_y = cur_y - 5;
 
@@ -330,8 +330,8 @@ void render_all() {
         int text_w = strlen(name_short) * 8;
         int text_x = cur_x + (40 - text_w) / 2;
         
-        draw_string(canvas, WIN_W, WIN_H, text_x + 1, cur_y + ICON_H + 6, name_short, 0x000000);
-        draw_string(canvas, WIN_W, WIN_H, text_x, cur_y + ICON_H + 5, name_short, C_TEXT);
+        draw_string(canvas, WIN_W, WIN_H, text_x + 1, cur_y + ICON_H + 11, name_short, 0x000000);
+        draw_string(canvas, WIN_W, WIN_H, text_x, cur_y + ICON_H + 10, name_short, C_TEXT);
 
         cur_x += ICON_W + GAP_X;
         if (cur_x + ICON_W > WIN_W - GRID_X) {

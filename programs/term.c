@@ -13,6 +13,21 @@ static int TERM_SCALE = TERM_SCALE_DEFAULT;
 static const int TERM_PAD_X = 8;
 static const int TERM_PAD_Y = 8;
 
+static int term_scale(void) {
+    int scale = TERM_SCALE;
+    if (scale < TERM_SCALE_MIN) scale = TERM_SCALE_MIN;
+    if (scale > TERM_SCALE_MAX) scale = TERM_SCALE_MAX;
+    return scale;
+}
+
+static int term_cell_w(void) {
+    return 8 * term_scale();
+}
+
+static int term_cell_h(void) {
+    return 16 * term_scale();
+}
+
 static const uint32_t surface_id = 1u;
 
 static comp_conn_t conn;
@@ -99,9 +114,9 @@ static void draw_char_scaled(uint32_t* buf, int w, int h, int x, int y, char c, 
     if (!buf || w <= 0 || h <= 0) return;
     if (scale <= 0) return;
     if (c < 0) c = '?';
-    const uint8_t* glyph = font8x8_basic[(int)c];
+    const uint8_t* glyph = font8x16_basic[(int)c];
 
-    for (int row = 0; row < 8; row++) {
+    for (int row = 0; row < 16; row++) {
         const uint8_t bits = glyph[row];
         for (int col = 0; col < 8; col++) {
             if (((bits >> (7 - col)) & 1u) == 0u) continue;
@@ -180,12 +195,8 @@ static void term_calc_view(int* out_x0, int* out_y0, int* out_w, int* out_h) {
 static void term_calc_grid(int* out_cols, int* out_rows) {
     if (!out_cols || !out_rows) return;
 
-    const int scale = (TERM_SCALE < TERM_SCALE_MIN) ? TERM_SCALE_MIN :
-                      (TERM_SCALE > TERM_SCALE_MAX) ? TERM_SCALE_MAX :
-                      TERM_SCALE;
-
-    const int cell_w = 8 * scale;
-    const int cell_h = 8 * scale;
+    const int cell_w = term_cell_w();
+    const int cell_h = term_cell_h();
 
     int vx = 0, vy = 0, vw = 0, vh = 0;
     term_calc_view(&vx, &vy, &vw, &vh);
@@ -281,11 +292,7 @@ static uint32_t term_collect_damage(const term_t* t, comp_ipc_rect_t* rects, uin
     term_calc_view(&vx, &vy, &vw, &vh);
     if (vw <= 0 || vh <= 0) return 0u;
 
-    const int scale = (TERM_SCALE < TERM_SCALE_MIN) ? TERM_SCALE_MIN :
-                      (TERM_SCALE > TERM_SCALE_MAX) ? TERM_SCALE_MAX :
-                      TERM_SCALE;
-
-    const int cell_h = 8 * scale;
+    const int cell_h = term_cell_h();
     int view_rows = vh / cell_h;
     if (view_rows <= 0) return 0u;
 
@@ -1050,12 +1057,9 @@ static void term_process_buf(term_t* t, const void* buf, uint32_t size) {
 static void term_render(term_t* t) {
     if (!t || !canvas || !t->cells || !t->dirty_rows) return;
 
-    const int scale = (TERM_SCALE < TERM_SCALE_MIN) ? TERM_SCALE_MIN :
-                      (TERM_SCALE > TERM_SCALE_MAX) ? TERM_SCALE_MAX :
-                      TERM_SCALE;
-
-    const int cell_w = 8 * scale;
-    const int cell_h = 8 * scale;
+    const int scale = term_scale();
+    const int cell_w = term_cell_w();
+    const int cell_h = term_cell_h();
 
     int vx = 0, vy = 0, vw = 0, vh = 0;
     term_calc_view(&vx, &vy, &vw, &vh);
