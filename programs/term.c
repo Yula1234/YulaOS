@@ -1299,6 +1299,8 @@ static int term_run(void) {
                         ws.ws_ypixel = 0;
                         (void)ioctl(master_fd, YOS_TIOCSWINSZ, &ws);
                         (void)ioctl(0, YOS_TIOCSWINSZ, &ws);
+                        (void)ioctl(1, YOS_TIOCSWINSZ, &ws);
+                        (void)ioctl(2, YOS_TIOCSWINSZ, &ws);
 
                         need_update = 1;
                     }
@@ -1357,6 +1359,8 @@ static int term_run(void) {
                         ws.ws_ypixel = 0;
                         (void)ioctl(master_fd, YOS_TIOCSWINSZ, &ws);
                         (void)ioctl(0, YOS_TIOCSWINSZ, &ws);
+                        (void)ioctl(1, YOS_TIOCSWINSZ, &ws);
+                        (void)ioctl(2, YOS_TIOCSWINSZ, &ws);
 
                         need_update = 1;
                     }
