@@ -19,6 +19,7 @@
 #include <drivers/vga.h>
 #include <drivers/virtio_gpu.h>
 #include <drivers/gpu0.h>
+#include <drivers/ne2k.h>
 
 #include <kernel/clipboard.h>
 #include <kernel/boot.h>
@@ -117,6 +118,7 @@ static void kmain_devices_init(void) {
     init_ioapic_legacy();
 
     ahci_init();
+    ne2k_init();
 
     kbd_vfs_init();
     console_init();

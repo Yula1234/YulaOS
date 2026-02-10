@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
+USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill" "networkd" "networkctl" "ping")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -72,9 +72,10 @@ $CC $CFLAGS_USER -c usr/lib/malloc.c -o bin/obj/malloc.o &
 $CC $CFLAGS_USER -c usr/lib/stdio.c  -o bin/obj/stdio.o &
 $CC $CFLAGS_USER -c usr/lib/string.c  -o bin/obj/string.o &
 $CC $CFLAGS_USER -c usr/lib/stdlib.c  -o bin/obj/stdlib.o &
+$CC $CFLAGS_USER -c usr/lib/net_ipc.c  -o bin/obj/net_ipc.o &
 
 USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o
-bin/obj/string.o bin/obj/stdlib.o"
+bin/obj/string.o bin/obj/stdlib.o bin/obj/net_ipc.o"
 
 echo "[user] compiling apps..."
 declare -A USER_APP_OBJS
@@ -148,6 +149,7 @@ export __GL_SYNC_TO_VBLANK=0
 QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
 -device ide-hd,drive=disk,bus=ahci.0 -machine pcspk-audiodev=snd0 -m 1G
 -device piix3-usb-uhci,id=uhci -device usb-kbd,bus=uhci.0,port=1
+-netdev user,id=net0 -device ne2k_isa,netdev=net0
 -drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe,aio=io_uring
 -accel kvm -device virtio-vga-gl,xres=1680,yres=1050 -display sdl,gl=on -smp 3 -mem-prealloc
 -cpu host,migratable=no,+invtsc,l3-cache=on -audiodev pa,id=snd0

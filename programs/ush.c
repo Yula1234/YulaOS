@@ -26,6 +26,7 @@ typedef enum {
     USH_TOK_REDIR_IN,
     USH_TOK_REDIR_OUT,
     USH_TOK_REDIR_OUT_APPEND,
+    USH_TOK_BACKGROUND,
 } ush_tok_kind_t;
 
 typedef struct {
@@ -120,6 +121,12 @@ static int ush_tokenize_alloc(const char* s, ush_tok_t** out_toks, int* out_cnt,
                 if (!ush_tok_push(&toks, &cnt, &cap, t)) goto oom;
                 p++;
             }
+            continue;
+        }
+        if (*p == '&') {
+            ush_tok_t t = { .kind = USH_TOK_BACKGROUND, .text = 0 };
+            if (!ush_tok_push(&toks, &cnt, &cap, t)) goto oom;
+            p++;
             continue;
         }
 
@@ -228,6 +235,8 @@ typedef struct {
     char** owned_words;
     int owned_count;
     int owned_cap;
+
+    int background;
 } ush_pipeline_t;
 
 static void ush_cmd_init(ush_cmd_t* c) {
@@ -270,6 +279,8 @@ static void ush_pipeline_init(ush_pipeline_t* p) {
     p->owned_words = 0;
     p->owned_count = 0;
     p->owned_cap = 0;
+
+    p->background = 0;
 }
 
 static void ush_pipeline_destroy(ush_pipeline_t* p) {
@@ -291,6 +302,8 @@ static void ush_pipeline_destroy(ush_pipeline_t* p) {
     p->owned_words = 0;
     p->owned_count = 0;
     p->owned_cap = 0;
+
+    p->background = 0;
 }
 
 static int ush_pipeline_add_owned_word(ush_pipeline_t* p, char* s) {
@@ -376,6 +389,19 @@ static int ush_parse_tokens(const ush_tok_t* toks, int cnt, ush_pipeline_t* out_
                 cur->out_append = (t.kind == USH_TOK_REDIR_OUT_APPEND);
             }
             i++;
+            continue;
+        }
+
+        if (t.kind == USH_TOK_BACKGROUND) {
+            if (i != cnt - 1) {
+                if (out_err) *out_err = ush_strdup_printf("ush: syntax error near '&': %s\n", "");
+                goto fail;
+            }
+            if (cur->argc == 0) {
+                if (out_err) *out_err = ush_strdup_printf("ush: syntax error near '&': %s\n", "");
+                goto fail;
+            }
+            out_pl->background = 1;
             continue;
         }
     }
@@ -593,9 +619,17 @@ static int ush_exec_pipeline(const ush_pipeline_t* pl) {
     (void)close(save1);
     (void)close(save2);
 
-    for (int i = 0; i < spawned; i++) {
-        int st = 0;
-        (void)waitpid(pids[i], &st);
+    if (!pl->background) {
+        for (int i = 0; i < spawned; i++) {
+            int st = 0;
+            (void)waitpid(pids[i], &st);
+        }
+    } else {
+        if (spawned > 0) {
+            char msg[64];
+            int r = snprintf(msg, sizeof(msg), "[%d]\n", pids[spawned - 1]);
+            if (r > 0) (void)write_all(1, msg, (uint32_t)r);
+        }
     }
 
     free(pids);
@@ -640,6 +674,15 @@ static void ush_print_prompt(int fd_out) {
 static int spawn_by_name(const char* name, int argc, char** argv) {
     if (!name || !*name) return -1;
     return spawn_process_resolved(name, argc, argv);
+}
+
+static int is_builtin_cmd(const char* name) {
+    if (!name || !*name) return 0;
+    if (strcmp(name, "exit") == 0) return 1;
+    if (strcmp(name, "cd") == 0) return 1;
+    if (strcmp(name, "pwd") == 0) return 1;
+    if (strcmp(name, "clear") == 0) return 1;
+    return 0;
 }
 
 typedef enum {
@@ -1238,6 +1281,13 @@ int main(int argc, char** argv) {
                         redir_ok = 0;
                     }
                 }
+            }
+
+            if (pl.background && is_builtin_cmd(c->argv[0])) {
+                write_str(1, "ush: built-in cannot run in background\n");
+                ush_pipeline_destroy(&pl);
+                free(line);
+                continue;
             }
 
             if (strcmp(c->argv[0], "exit") == 0) {

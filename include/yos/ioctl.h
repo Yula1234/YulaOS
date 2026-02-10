@@ -66,4 +66,10 @@ typedef struct {
 #define YOS_TIOCGPTN   _YOS_IOR('T', 0x15, uint32_t)
 #define YOS_TTY_SCROLL _YOS_IOW('T', 0x16, yos_tty_scroll_t)
 
+typedef struct {
+    uint8_t mac[6];
+} yos_net_mac_t;
+
+#define YOS_NET_GET_MAC _YOS_IOR('N', 0x01, yos_net_mac_t)
+
 #endif
