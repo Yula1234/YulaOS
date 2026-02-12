@@ -8,6 +8,7 @@
 #include "netd_device.h"
 #include "netd_iface.h"
 #include "netd_ipc.h"
+#include "netd_tcp.h"
 #include "netd_types.h"
 
 static void netd_ctx_init(netd_ctx_t* ctx) {
@@ -17,6 +18,7 @@ static void netd_ctx_init(netd_ctx_t* ctx) {
     ctx->iface.mask = NETD_DEFAULT_MASK;
     ctx->iface.gw = NETD_DEFAULT_GW;
     ctx->dns_server = NETD_DEFAULT_DNS;
+    netd_rand_init(&ctx->rand);
 }
 
 static uint32_t netd_build_poll_fds(int listen_fd, const netd_client_t clients[NETD_MAX_CLIENTS], pollfd_t fds[1 + NETD_MAX_CLIENTS]) {
@@ -44,6 +46,7 @@ static uint32_t netd_build_poll_fds(int listen_fd, const netd_client_t clients[N
 int main(void) {
     netd_ctx_t ctx;
     netd_ctx_init(&ctx);
+    netd_tcp_init(&ctx);
 
     if (netd_iface_ensure_up(&ctx) != 0) {
         printf("networkd: failed to open /dev/ne2k0\n");

@@ -52,6 +52,18 @@ typedef struct __attribute__((packed)) {
 } net_udp_hdr_t;
 
 typedef struct __attribute__((packed)) {
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t data_offset;
+    uint8_t flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urg_ptr;
+} net_tcp_hdr_t;
+
+typedef struct __attribute__((packed)) {
     uint16_t id;
     uint16_t flags;
     uint16_t qdcount;
@@ -61,4 +73,3 @@ typedef struct __attribute__((packed)) {
 } net_dns_hdr_t;
 
 #endif
-

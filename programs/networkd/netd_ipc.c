@@ -5,6 +5,7 @@
 #include <yula.h>
 
 #include "netd_dns.h"
+#include "netd_http.h"
 #include "netd_iface.h"
 #include "netd_ipv4.h"
 
@@ -210,6 +211,14 @@ static void netd_handle_msg(netd_ctx_t* ctx, netd_client_t* c, const net_ipc_hdr
         netd_iface_close(ctx);
         netd_links_init(ctx);
         (void)netd_send_iface_resp(ctx, c->fd_out, NET_IPC_MSG_IFACE_DOWN_RESP, hdr->seq, NET_STATUS_OK);
+        return;
+    }
+
+    if (hdr->type == NET_IPC_MSG_HTTP_GET_REQ && hdr->len == (uint32_t)sizeof(net_http_get_req_t)) {
+        net_http_get_req_t req;
+        memcpy(&req, payload, sizeof(req));
+        req.url[(uint32_t)sizeof(req.url) - 1u] = '\0';
+        (void)netd_http_get(ctx, c->fd_out, hdr->seq, &req);
         return;
     }
 }

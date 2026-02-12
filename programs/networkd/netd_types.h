@@ -8,6 +8,7 @@
 #include <net_ipc.h>
 
 #include "netd_config.h"
+#include "netd_rand.h"
 
 typedef struct {
     int used;
@@ -52,6 +53,35 @@ typedef struct {
     uint32_t addr;
 } netd_dns_wait_t;
 
+#define NETD_TCP_RX_CAP 4096u
+
+typedef struct {
+    int active;
+    uint8_t state;
+    uint8_t pad0[3];
+
+    uint32_t remote_ip;
+    uint16_t remote_port;
+    uint16_t local_port;
+
+    uint32_t iss;
+    uint32_t irs;
+    uint32_t snd_una;
+    uint32_t snd_nxt;
+    uint32_t rcv_nxt;
+
+    int remote_closed;
+    int fin_sent;
+    int fin_acked;
+
+    uint32_t last_activity_ms;
+    uint32_t last_err;
+
+    uint8_t rx_buf[NETD_TCP_RX_CAP];
+    uint32_t rx_r;
+    uint32_t rx_w;
+} netd_tcp_conn_t;
+
 typedef struct {
     netd_state_t state;
     netd_iface_t iface;
@@ -63,6 +93,8 @@ typedef struct {
 
     netd_ping_wait_t ping_wait;
     netd_dns_wait_t dns_wait;
+    netd_tcp_conn_t tcp;
+    netd_rand_t rand;
 
     uint8_t rx_buf[NETD_FRAME_MAX];
     uint8_t tx_buf[NETD_FRAME_MAX];

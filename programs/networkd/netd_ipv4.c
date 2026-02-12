@@ -10,6 +10,7 @@
 #include "netd_dns.h"
 #include "netd_iface.h"
 #include "netd_proto.h"
+#include "netd_tcp.h"
 #include "netd_util.h"
 
 static void netd_send_icmp_reply(netd_ctx_t* ctx, const net_eth_hdr_t* rx_eth, const net_ipv4_hdr_t* rx_ip, const net_icmp_hdr_t* rx_icmp, uint32_t icmp_len) {
@@ -198,6 +199,11 @@ void netd_ipv4_process_frame(netd_ctx_t* ctx, const uint8_t* buf, uint32_t len) 
         netd_dns_process_udp(ctx, ip, payload, payload_len);
         return;
     }
+
+    if (ip->proto == 6) {
+        netd_tcp_process_ipv4(ctx, ip, payload, payload_len);
+        return;
+    }
 }
 
 uint32_t netd_ipv4_send_ping(netd_ctx_t* ctx, uint32_t dst_ip, uint32_t timeout_ms, uint16_t seq, uint32_t* out_rtt) {
@@ -232,4 +238,3 @@ uint32_t netd_ipv4_send_ping(netd_ctx_t* ctx, uint32_t dst_ip, uint32_t timeout_
 
     return NET_STATUS_TIMEOUT;
 }
-
