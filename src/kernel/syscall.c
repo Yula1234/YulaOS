@@ -511,9 +511,9 @@ static void syscall_open(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_read(registers_t* regs, task_t* curr) {
-    if (check_user_buffer(curr, (void*)regs->ecx, (uint32_t)regs->edx)) {
+    if (ensure_user_buffer_writable_mappable(curr, (void*)regs->ecx, (uint32_t)regs->edx)) {
         int res = vfs_read((int)regs->ebx, (void*)regs->ecx, (uint32_t)regs->edx);
-        regs->eax = (res == -2) ? (uint32_t)-1 : (uint32_t)res;
+        regs->eax = (uint32_t)res;
     } else {
         regs->eax = (uint32_t)-1;
     }

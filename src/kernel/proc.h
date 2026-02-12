@@ -123,6 +123,12 @@ typedef struct task {
     registers_t signal_context; 
     int is_running_signal;
 
+    uint32_t last_fault_cr2;
+    uint32_t last_fault_eip;
+    uint32_t last_fault_err;
+    uint8_t last_fault_int;
+    uint8_t last_fault_pad[3];
+
     uint32_t parent_pid;
 
     task_prio_t priority;

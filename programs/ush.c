@@ -4,6 +4,14 @@ static int write_all(int fd, const void* buf, uint32_t size) {
     const uint8_t* p = (const uint8_t*)buf;
     uint32_t done = 0;
     while (done < size) {
+        uintptr_t a = (uintptr_t)(p + done);
+        uintptr_t b = a + (uintptr_t)(size - done);
+        if (b < a) {
+            return -1;
+        }
+        if (a < 0x08000000u || b > 0xC0000000u) {
+            return -1;
+        }
         int r = write(fd, p + done, size - done);
         if (r <= 0) return -1;
         done += (uint32_t)r;
@@ -14,6 +22,35 @@ static int write_all(int fd, const void* buf, uint32_t size) {
 static int write_str(int fd, const char* s) {
     if (!s) return 0;
     return write_all(fd, s, (uint32_t)strlen(s));
+}
+
+static void write_int(int fd, int v) {
+    char buf[16];
+    uint32_t u = (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
+    int pos = 0;
+
+    if (v < 0) {
+        buf[pos++] = '-';
+    }
+
+    char tmp[10];
+    int n = 0;
+    if (u == 0) {
+        tmp[n++] = '0';
+    } else {
+        while (u != 0 && n < (int)sizeof(tmp)) {
+            tmp[n++] = (char)('0' + (u % 10u));
+            u /= 10u;
+        }
+    }
+
+    while (n > 0 && pos < (int)sizeof(buf)) {
+        buf[pos++] = tmp[--n];
+    }
+
+    if (pos > 0) {
+        (void)write_all(fd, buf, (uint32_t)pos);
+    }
 }
 
 static int is_space(char c) {
@@ -859,7 +896,13 @@ static ush_key_t read_key(int fd_in, int timeout_ms) {
         return k;
     }
     if (r != 1) {
-        k.kind = USH_KEY_ERROR;
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            write_str(2, "ush: input read error: ");
+            write_int(2, r);
+            write_str(2, "\n");
+        }
         return k;
     }
 
@@ -1035,6 +1078,15 @@ static int read_line_editor(int fd_in, int fd_out, const char* prompt, int promp
     for (;;) {
         ush_key_t k = read_key(fd_in, 100);
         if (k.kind == USH_KEY_ERROR) goto out_err;
+
+        if (cursor > len) {
+            cursor = len;
+        }
+        if (!line_ensure_cap(&line, &cap, len + 1)) {
+            goto out_err;
+        }
+        line[len] = '\0';
+
         if (k.kind == USH_KEY_NONE) {
             if (ansi) {
                 int new_cols = cols;

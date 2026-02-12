@@ -9,6 +9,8 @@
 #define CHUNK_SIZE      65536   
 
 #define BLOCK_MAGIC     0xDEADBEEF
+#define TAIL_MAGIC      0xC0FFEE01u
+#define TAIL_SIZE       ((size_t)sizeof(uint32_t))
 #define BLOCK_USED      0
 #define BLOCK_FREE      1
 
@@ -29,11 +31,13 @@ typedef struct FreeNode {
 
 #define HEADER_SIZE (ALIGN(sizeof(Block)))
 
-#define MIN_BLOCK_SIZE (HEADER_SIZE + sizeof(FreeNode))
+#define MIN_BLOCK_SIZE (ALIGN(HEADER_SIZE + TAIL_SIZE + sizeof(FreeNode)))
 
 static FreeNode* bins[NUM_BINS];
 static FreeNode* large_bin = NULL;
 static Block* top_chunk = NULL;
+static char* heap_base = NULL;
+static char* heap_end = NULL;
 static pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void malloc_lock_acquire(void) {
@@ -47,8 +51,27 @@ static void malloc_lock_release(void) {
 static void panic(const char* msg, void* ptr) {
     print("\n[MALLOC ERROR] ");
     print(msg);
+    print(" pid=");
+    print_dec(getpid());
     print(" at 0x");
     print_hex((uint32_t)ptr);
+    print("\n");
+    exit(1);
+}
+
+static void panic_block_link(const char* msg, Block* block, const void* user_ptr, const void* link_val) {
+    print("\n[MALLOC ERROR] ");
+    print(msg);
+    print(" pid=");
+    print_dec(getpid());
+    print(" block=0x");
+    print_hex((uint32_t)block);
+    print(" user=0x");
+    print_hex((uint32_t)user_ptr);
+    print(" size=");
+    print_dec((int)(block ? block->size : 0));
+    print(" link=0x");
+    print_hex((uint32_t)link_val);
     print("\n");
     exit(1);
 }
@@ -61,12 +84,65 @@ static Block* get_header(void* ptr) {
     return (Block*)((char*)ptr - HEADER_SIZE);
 }
 
+static int validate_heap_ptr(const void* p);
+
 static int validate_block(Block* block) {
-    return block && block->magic == BLOCK_MAGIC;
+    if (!block) return 0;
+    if (!validate_heap_ptr(block)) return 0;
+    return block->magic == BLOCK_MAGIC;
+}
+
+static int validate_heap_ptr(const void* p) {
+    if (!p) return 0;
+    if (!heap_base || !heap_end) return 0;
+
+    uintptr_t a = (uintptr_t)p;
+    uintptr_t lo = (uintptr_t)heap_base;
+    uintptr_t hi = (uintptr_t)heap_end;
+
+    if (a < lo || a >= hi) return 0;
+    if ((a & (ALIGNMENT - 1u)) != 0u) return 0;
+    return 1;
+}
+
+static void validate_heap_block_or_panic(const char* msg, Block* b) {
+    if (!validate_heap_ptr(b)) {
+        panic(msg, b);
+    }
+}
+
+static uint32_t* block_tail_ptr(Block* b) {
+    if (!b) return 0;
+    if (b->size < HEADER_SIZE + TAIL_SIZE) return 0;
+    return (uint32_t*)((char*)b + b->size - TAIL_SIZE);
+}
+
+static void block_tail_set(Block* b) {
+    uint32_t* t = block_tail_ptr(b);
+    if (t) {
+        *t = TAIL_MAGIC;
+    }
+}
+
+static void panic_block_overflow(const char* msg, Block* block, const void* user_ptr, uint32_t tail_val) {
+    print("\n[MALLOC ERROR] ");
+    print(msg);
+    print(" pid=");
+    print_dec(getpid());
+    print(" block=0x");
+    print_hex((uint32_t)block);
+    print(" user=0x");
+    print_hex((uint32_t)user_ptr);
+    print(" size=");
+    print_dec((int)(block ? block->size : 0));
+    print(" tail=0x");
+    print_hex(tail_val);
+    print("\n");
+    exit(1);
 }
 
 static int get_bin_index(size_t size) {
-    size_t payload_size = size - HEADER_SIZE;
+    size_t payload_size = size - HEADER_SIZE - TAIL_SIZE;
     if (payload_size < BIN_STEP) return 0;
     int idx = (payload_size / BIN_STEP) - 1;
     if (idx >= NUM_BINS) return -1;
@@ -119,19 +195,33 @@ static void extend_heap(size_t min_size) {
     
     if ((int)p == -1) return; // OOM
 
+    if (!heap_base) {
+        heap_base = (char*)p;
+    }
+
+    char* new_end = (char*)p + req_size;
+    if (!heap_end || new_end > heap_end) {
+        heap_end = new_end;
+    }
+
     Block* new_region = (Block*)p;
     new_region->size = req_size;
     new_region->magic = BLOCK_MAGIC;
     new_region->is_free = BLOCK_FREE;
     new_region->next_phys = NULL;
+    block_tail_set(new_region);
     
     if (top_chunk) {
+        validate_heap_block_or_panic("Heap corruption (top_chunk ptr)", top_chunk);
         if (!top_chunk->is_free) panic("Heap corruption (top_chunk used)", top_chunk);
         char* top_end = (char*)top_chunk + top_chunk->size;
         if (top_end == (char*)new_region) {
             top_chunk->size += new_region->size;
+            block_tail_set(top_chunk);
             return; 
         }
+
+        insert_into_bin(top_chunk);
         
         top_chunk->next_phys = new_region;
         new_region->prev_phys = top_chunk;
@@ -160,6 +250,9 @@ static Block* split_chunk(Block* block, size_t size) {
         block->size = size;
         block->next_phys = remainder;
 
+        block_tail_set(block);
+        block_tail_set(remainder);
+
         if (block == top_chunk) {
             top_chunk = remainder;
         } else {
@@ -173,7 +266,7 @@ static void* malloc_impl(size_t size) {
     if (size == 0) return NULL;
 
     size_t aligned_size = ALIGN(size);
-    size_t total_req = aligned_size + HEADER_SIZE;
+    size_t total_req = ALIGN(aligned_size + HEADER_SIZE + TAIL_SIZE);
     
     if (total_req < MIN_BLOCK_SIZE) total_req = MIN_BLOCK_SIZE;
 
@@ -205,6 +298,10 @@ static void* malloc_impl(size_t size) {
         curr = next_node;
     }
 
+    if (top_chunk && !validate_heap_ptr(top_chunk)) {
+        panic("Heap corruption (top_chunk ptr)", top_chunk);
+    }
+
     if (!top_chunk || top_chunk->size < total_req + MIN_BLOCK_SIZE) {
         extend_heap(total_req + MIN_BLOCK_SIZE);
         if (!top_chunk || top_chunk->size < total_req + MIN_BLOCK_SIZE) return NULL;
@@ -213,6 +310,7 @@ static void* malloc_impl(size_t size) {
     Block* block = top_chunk;
     block = split_chunk(block, total_req);
     block->is_free = BLOCK_USED;
+    block_tail_set(block);
     
     return get_data_ptr(block);
 }
@@ -222,13 +320,26 @@ static void free_impl(void* ptr) {
 
     Block* block = get_header(ptr);
     if (!validate_block(block)) panic("Heap corruption", ptr);
+
+    {
+        uint32_t* t = block_tail_ptr(block);
+        if (t && *t != TAIL_MAGIC) {
+            panic_block_overflow("Heap overflow", block, ptr, *t);
+        }
+    }
+
     if (block->is_free) return;
 
     block->is_free = BLOCK_FREE;
 
     // Coalesce Right
-    if (block->next_phys && block->next_phys->is_free) {
+    if (block->next_phys) {
         Block* next = block->next_phys;
+        if (!validate_block(next)) {
+            panic_block_link("Heap corruption (next_phys)", block, ptr, next);
+        }
+
+        if (next->is_free) {
         if (next == top_chunk) {
             top_chunk = block;
         } else {
@@ -238,13 +349,22 @@ static void free_impl(void* ptr) {
         block->size += next->size;
         block->next_phys = next->next_phys;
         if (block->next_phys) block->next_phys->prev_phys = block;
+        block_tail_set(block);
+        }
     }
 
     // Coalesce Left
-    if (block->prev_phys && block->prev_phys->is_free) {
+    if (block->prev_phys) {
         Block* prev = block->prev_phys;
-        
-        remove_from_bin(prev);
+        if (!validate_block(prev)) {
+            panic_block_link("Heap corruption (prev_phys)", block, ptr, prev);
+        }
+
+        if (prev->is_free) {
+
+        if (prev != top_chunk) {
+            remove_from_bin(prev);
+        }
         
         if (block == top_chunk) {
             top_chunk = prev;
@@ -253,8 +373,10 @@ static void free_impl(void* ptr) {
         prev->size += block->size;
         prev->next_phys = block->next_phys;
         if (prev->next_phys) prev->next_phys->prev_phys = prev;
+        block_tail_set(prev);
         
         block = prev;
+        }
     }
 
     if (block != top_chunk) {
@@ -277,7 +399,7 @@ static void* realloc_impl(void* ptr, size_t size) {
     Block* block = get_header(ptr);
     if (!validate_block(block)) panic("Heap corruption (realloc)", ptr);
 
-    size_t new_total = ALIGN(size) + HEADER_SIZE;
+    size_t new_total = ALIGN(ALIGN(size) + HEADER_SIZE + TAIL_SIZE);
     if (new_total < MIN_BLOCK_SIZE) new_total = MIN_BLOCK_SIZE;
 
     if (block->size >= new_total) return ptr;
@@ -325,7 +447,14 @@ static void* realloc_impl(void* ptr, size_t size) {
 slow:
     void* new_ptr = malloc_impl(size);
     if (!new_ptr) return NULL;
-    memcpy(new_ptr, ptr, block->size - HEADER_SIZE);
+    {
+        size_t old_cap = 0;
+        if (block->size > HEADER_SIZE + TAIL_SIZE) {
+            old_cap = block->size - HEADER_SIZE - TAIL_SIZE;
+        }
+        size_t to_copy = (old_cap < size) ? old_cap : size;
+        memcpy(new_ptr, ptr, to_copy);
+    }
     free_impl(ptr);
     return new_ptr;
 }

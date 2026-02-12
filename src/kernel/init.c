@@ -57,6 +57,68 @@ static void init_task_set_cwd(task_t* self) {
     self->cwd_inode = home_inode;
 }
 
+static void init_append_int(char* out, int* io_pos, int cap, int v) {
+    if (!out || !io_pos || cap <= 0) {
+        return;
+    }
+
+    int pos = *io_pos;
+    if (pos < 0 || pos >= cap) {
+        return;
+    }
+
+    uint32_t u = (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
+    if (v < 0) {
+        if (pos + 1 < cap) {
+            out[pos++] = '-';
+        }
+    }
+
+    char tmp[11];
+    int n = 0;
+    if (u == 0) {
+        tmp[n++] = '0';
+    } else {
+        while (u != 0 && n < (int)sizeof(tmp)) {
+            tmp[n++] = (char)('0' + (u % 10u));
+            u /= 10u;
+        }
+    }
+
+    while (n > 0 && pos + 1 < cap) {
+        out[pos++] = tmp[--n];
+    }
+
+    *io_pos = pos;
+}
+
+static void init_append_hex32(char* out, int* io_pos, int cap, uint32_t v) {
+    if (!out || !io_pos || cap <= 0) {
+        return;
+    }
+
+    static const char hex[] = "0123456789ABCDEF";
+
+    int pos = *io_pos;
+    if (pos < 0 || pos >= cap) {
+        return;
+    }
+
+    if (pos + 2 < cap) {
+        out[pos++] = '0';
+        out[pos++] = 'x';
+    }
+
+    for (int i = 7; i >= 0; i--) {
+        if (pos + 1 >= cap) {
+            break;
+        }
+        out[pos++] = hex[(v >> (i * 4)) & 0xFu];
+    }
+
+    *io_pos = pos;
+}
+
 static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
     for (;;) {
         char* argv[] = { "ush", 0 };
@@ -68,10 +130,51 @@ static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
         }
 
         input_focus_set_pid(child->pid);
-        proc_wait(child->pid);
+        int st = 0;
+        (void)proc_waitpid(child->pid, &st);
         input_focus_set_pid(self->pid);
 
-        tty_term_print_locked(term, "[ush exited]\n");
+        if (st != 0) {
+            char msg[48];
+            int pos = 0;
+            const char prefix[] = "[ush exited: ";
+            const char suffix[] = "]\n";
+
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(prefix) - 1u) && pos + 1 < (int)sizeof(msg); i++) {
+                msg[pos++] = prefix[i];
+            }
+            init_append_int(msg, &pos, (int)sizeof(msg), st);
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(suffix) - 1u) && pos + 1 < (int)sizeof(msg); i++) {
+                msg[pos++] = suffix[i];
+            }
+            msg[pos] = '\0';
+
+            tty_term_print_locked(term, msg);
+        }
+
+        if (st == 139 && child) {
+            char pf[128];
+            int p = 0;
+            const char a[] = "PF CR2=";
+            const char b[] = " EIP=";
+            const char c[] = " ERR=";
+            const char e[] = " INT=";
+            const char d[] = "\n";
+
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(a) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = a[i];
+            init_append_hex32(pf, &p, (int)sizeof(pf), child->last_fault_cr2);
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(b) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = b[i];
+            init_append_hex32(pf, &p, (int)sizeof(pf), child->last_fault_eip);
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(c) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = c[i];
+            init_append_hex32(pf, &p, (int)sizeof(pf), child->last_fault_err);
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(e) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = e[i];
+            init_append_hex32(pf, &p, (int)sizeof(pf), (uint32_t)child->last_fault_int);
+            for (uint32_t i = 0; i < (uint32_t)(sizeof(d) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = d[i];
+            pf[p] = '\0';
+
+            tty_term_print_locked(term, pf);
+        }
+
         proc_usleep(200000);
     }
 }

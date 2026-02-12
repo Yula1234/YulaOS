@@ -478,9 +478,9 @@ void isr_handler(registers_t* regs) {
                 uint32_t pd_idx = cr2 >> 22;
                 uint32_t pt_idx = (cr2 >> 12) & 0x3FF;
 
-                if (dir[pd_idx] & 1) { 
+                if (dir[pd_idx] & 1) {
                     uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
-                    if (pt[pt_idx] & 1) { 
+                    if (pt[pt_idx] & 1) {
                         __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
                         return;
                     }
@@ -488,15 +488,20 @@ void isr_handler(registers_t* regs) {
             }
 
             if (!handled) {
-                int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
+                int is_kernel_access_to_user2 = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
-                if (regs->cs != 0x1B && !is_kernel_access_to_user) {
+                if (regs->cs != 0x1B && !is_kernel_access_to_user2) {
                     if (!g_fb_mapped) {
                         early_exception_halt("Kernel Page Fault", regs, cr2);
                     }
                     kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
                 } else {
                     if (curr) {
+                        curr->last_fault_cr2 = cr2;
+                        curr->last_fault_eip = regs->eip;
+                        curr->last_fault_err = regs->err_code;
+                        curr->last_fault_int = (uint8_t)regs->int_no;
+
                         curr->pending_signals |= (1u << SIGSEGV);
                         if (regs->cs == 0x1B) {
                             maybe_deliver_pending_signal(curr, regs);
@@ -512,11 +517,12 @@ void isr_handler(registers_t* regs) {
                     }
                 }
             }
-        } 
-        else {
+        } else {
             const char* msg = "Unknown Exception";
-            if (regs->int_no < 32) msg = exception_messages[regs->int_no];
-            
+            if (regs->int_no < 32) {
+                msg = exception_messages[regs->int_no];
+            }
+
             if (regs->cs == 0x1B && curr) {
                 (void)msg;
                 curr->pending_signals |= (1u << SIGILL);

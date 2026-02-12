@@ -131,13 +131,13 @@ void print(const char* s) {
 
 void print_dec(int n) {
     char buf[32];
-    sprintf(buf, "%d", n);
+    (void)snprintf(buf, sizeof(buf), "%d", n);
     print(buf);
 }
 
 void print_hex(uint32_t n) {
     char buf[32];
-    sprintf(buf, "%x", n);
+    (void)snprintf(buf, sizeof(buf), "%x", n);
     print(buf);
 }
 
@@ -300,13 +300,113 @@ int snprintf(char* str, size_t size, const char* format, ...) {
 int sprintf(char* str, const char* format, ...) {
     va_list args;
     va_start(args, format);
-    int res = vsnprintf(str, 4096, format, args); 
+    int res = vsprintf(str, format, args);
     va_end(args);
     return res;
 }
 
 int vsprintf(char* str, const char* format, va_list ap) {
-    return vsnprintf(str, 4096, format, ap);
+    char* out = str;
+    const char* s;
+
+    if (!out || !format) {
+        return 0;
+    }
+
+    for (const char* fmt = format; *fmt; ++fmt) {
+        if (*fmt != '%') {
+            *out++ = *fmt;
+            continue;
+        }
+
+        int flags = 0;
+        fmt++;
+
+        while (1) {
+            if (*fmt == '-') flags |= 4;
+            else if (*fmt == '+') flags |= 1;
+            else if (*fmt == ' ') flags |= 32;
+            else if (*fmt == '0') flags |= 2;
+            else break;
+            fmt++;
+        }
+
+        int field_width = -1;
+        if (*fmt >= '0' && *fmt <= '9') {
+            field_width = 0;
+            while (*fmt >= '0' && *fmt <= '9') {
+                field_width = field_width * 10 + (*fmt - '0');
+                fmt++;
+            }
+        } else if (*fmt == '*') {
+            fmt++;
+            field_width = va_arg(ap, int);
+            if (field_width < 0) {
+                field_width = -field_width;
+                flags |= 4;
+            }
+        }
+
+        int precision = -1;
+        if (*fmt == '.') {
+            fmt++;
+            precision = 0;
+            if (*fmt >= '0' && *fmt <= '9') {
+                while (*fmt >= '0' && *fmt <= '9') {
+                    precision = precision * 10 + (*fmt - '0');
+                    fmt++;
+                }
+            } else if (*fmt == '*') {
+                fmt++;
+                precision = va_arg(ap, int);
+            }
+        }
+
+        if (*fmt == 'h' || *fmt == 'l' || *fmt == 'L') fmt++;
+
+        if (*fmt == 's') {
+            s = va_arg(ap, char*);
+            if (!s) s = "(null)";
+            int len = strlen(s);
+            if (precision >= 0 && len > precision) len = precision;
+
+            if (!(flags & 4)) {
+                while (len < field_width--) *out++ = ' ';
+            }
+            for (int i = 0; i < len; ++i) *out++ = *s++;
+            while (len < field_width--) *out++ = ' ';
+        }
+        else if (*fmt == 'd' || *fmt == 'i') {
+            out = number(out, (char*)~(uintptr_t)0, va_arg(ap, int), 10, field_width, precision, flags);
+        }
+        else if (*fmt == 'u') {
+            out = number(out, (char*)~(uintptr_t)0, va_arg(ap, unsigned int), 10, field_width, precision, flags);
+        }
+        else if (*fmt == 'x') {
+            out = number(out, (char*)~(uintptr_t)0, va_arg(ap, unsigned int), 16, field_width, precision, flags);
+        }
+        else if (*fmt == 'X') {
+            out = number(out, (char*)~(uintptr_t)0, va_arg(ap, unsigned int), 16, field_width, precision, flags | 16);
+        }
+        else if (*fmt == 'p') {
+            *out++ = '0';
+            *out++ = 'x';
+            out = number(out, (char*)~(uintptr_t)0, (unsigned long)va_arg(ap, void*), 16, field_width, precision, flags);
+        }
+        else if (*fmt == 'c') {
+            *out++ = (unsigned char)va_arg(ap, int);
+        }
+        else if (*fmt == '%') {
+            *out++ = '%';
+        }
+        else {
+            *out++ = '%';
+            if (*fmt) *out++ = *fmt;
+        }
+    }
+
+    *out = '\0';
+    return (int)(out - str);
 }
 
 int vfprintf(FILE* stream, const char* format, va_list ap) {
