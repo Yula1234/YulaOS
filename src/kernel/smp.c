@@ -256,7 +256,7 @@ void smp_blit_ipi_handler(void) {
 }
 
 int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h) {
-    if (!owner || !owner->page_dir) {
+    if (!owner || !owner->mem || !owner->mem->page_dir) {
         vga_present_rect(src, src_stride, x, y, w, h);
         return 0;
     }
@@ -304,7 +304,7 @@ int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int
         return 0;
     }
 
-    blit_job.page_dir = owner->page_dir;
+    blit_job.page_dir = owner->mem->page_dir;
     blit_job.src = src;
     blit_job.src_stride = src_stride;
     blit_job.x = x;

@@ -120,8 +120,8 @@ static inline uint32_t get_cr3() {
 }
 
 static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
-    if (!t) return 0;
-    mmap_area_t* m = t->mmap_list;
+    if (!t || !t->mem) return 0;
+    mmap_area_t* m = t->mem->mmap_list;
     while (m) {
         if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) return m;
         m = m->next;
@@ -130,17 +130,17 @@ static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
 }
 
 static int ensure_user_stack_writable(task_t* curr, uint32_t addr) {
-    if (!curr || !curr->page_dir) return 0;
+    if (!curr || !curr->mem || !curr->mem->page_dir) return 0;
     if (addr < curr->stack_bottom || addr >= curr->stack_top) return 0;
 
     uint32_t vaddr = addr & ~0xFFFu;
-    if (paging_is_user_accessible(curr->page_dir, vaddr)) return 1;
+    if (paging_is_user_accessible(curr->mem->page_dir, vaddr)) return 1;
 
     void* new_page = pmm_alloc_block();
     if (!new_page) return 0;
 
-    paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
-    curr->mem_pages++;
+    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+    curr->mem->mem_pages++;
     __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
     return 1;
 }
@@ -221,7 +221,7 @@ static void maybe_deliver_pending_signal(task_t* curr, registers_t* regs) {
 }
 
 static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
-    if (!curr || !curr->page_dir) return 0;
+    if (!curr || !curr->mem || !curr->mem->page_dir) return 0;
 
     uint32_t vaddr = cr2 & ~0xFFFu;
     mmap_area_t* m = mmap_find_area(curr, vaddr);
@@ -248,7 +248,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 
         if (!phys) return -1;
 
-        paging_map(curr->page_dir, vaddr, phys, 7 | 0x200u);
+        paging_map(curr->mem->page_dir, vaddr, phys, 7 | 0x200u);
         return 1;
     }
 
@@ -275,8 +275,8 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         }
     }
 
-    paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
-    curr->mem_pages++;
+    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+    curr->mem->mem_pages++;
     return 1;
 }
 
@@ -412,14 +412,14 @@ void isr_handler(registers_t* regs) {
             int is_user_access = (regs->cs == 0x1B);
             int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
-            if (!handled && (is_user_access || is_kernel_access_to_user) && !(regs->err_code & 1) && curr) {
+            if (!handled && (is_user_access || is_kernel_access_to_user) && !(regs->err_code & 1) && curr && curr->mem && curr->mem->page_dir) {
                 
                 if (!handled && cr2 >= curr->stack_bottom && cr2 < curr->stack_top) {
                     void* new_page = pmm_alloc_block();
                     if (new_page) {
                         uint32_t vaddr = cr2 & ~0xFFF;
-                        paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
-                        curr->mem_pages++;
+                        paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                        curr->mem->mem_pages++;
                         __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
                         handled = 1;
                     } else {
@@ -435,12 +435,12 @@ void isr_handler(registers_t* regs) {
                 }
 
                 if (!handled) {
-                    if (cr2 >= curr->heap_start && cr2 < curr->prog_break) {
+                    if (cr2 >= curr->mem->heap_start && cr2 < curr->mem->prog_break) {
                         void* new_page = pmm_alloc_block();
                         if (new_page) {
                             uint32_t vaddr = cr2 & ~0xFFF;
-                            paging_map(curr->page_dir, vaddr, (uint32_t)new_page, 7);
-                            curr->mem_pages++;
+                            paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                            curr->mem->mem_pages++;
                             __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
                             handled = 1;
                         } else {

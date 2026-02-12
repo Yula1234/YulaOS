@@ -237,7 +237,7 @@ void sched_set_current(task_t* t) {
     
     tss_set_stack(cpu->index, kstack_top); 
     
-    if (t->page_dir) paging_switch(t->page_dir);
+    if (t->mem && t->mem->page_dir) paging_switch(t->mem->page_dir);
     else paging_switch(kernel_page_directory);
 }
 

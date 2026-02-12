@@ -73,7 +73,7 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
             e->parent_pid = t->parent_pid;
             e->state = (uint32_t)t->state;
             e->priority = (uint32_t)t->priority;
-            e->mem_pages = t->mem_pages;
+            e->mem_pages = (t->mem) ? t->mem->mem_pages : 0;
             e->term_mode = (uint32_t)t->term_mode;
             strlcpy(e->name, t->name, sizeof(e->name));
         }
@@ -233,6 +233,25 @@ int proc_fd_remove(task_t* t, int fd, file_t* out_file) {
     return 0;
 }
 
+static int proc_fd_clone_from(task_t* dst, task_t* src) {
+    if (!dst || !src) return 0;
+
+    proc_fd_entry_t* pe;
+    dlist_for_each_entry(pe, &src->fd_list, list) {
+        file_t* nf = 0;
+        if (proc_fd_add_at(dst, pe->fd, &nf) < 0 || !nf) {
+            return 0;
+        }
+
+        *nf = pe->file;
+        if (nf->node) {
+            vfs_node_retain(nf->node);
+        }
+    }
+
+    return 1;
+}
+
 static void list_append(task_t* t) {
     t->next = 0;
     t->prev = 0;
@@ -278,6 +297,97 @@ task_t* proc_find_by_pid(uint32_t pid) {
     
     spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
     return 0;
+}
+
+static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
+    proc_mem_t* mem = (proc_mem_t*)kmalloc_a(sizeof(proc_mem_t));
+    if (!mem) return 0;
+
+    memset(mem, 0, sizeof(*mem));
+    mem->leader_pid = leader_pid;
+    mem->refcount = 1;
+    mem->mmap_top = 0x80001000u;
+    mem->page_dir = paging_clone_directory();
+    if (!mem->page_dir) {
+        kfree(mem);
+        return 0;
+    }
+
+    return mem;
+}
+
+static void proc_mem_retain(proc_mem_t* mem) {
+    if (!mem) return;
+    __sync_fetch_and_add(&mem->refcount, 1);
+}
+
+static void proc_mem_release(proc_mem_t* mem) {
+    if (!mem) return;
+
+    uint32_t old = __sync_fetch_and_sub(&mem->refcount, 1);
+    if (old == 0) {
+        mem->refcount = 0;
+        return;
+    }
+    if (old > 1) return;
+
+    if (mem->leader_pid) {
+        fb_release_by_pid(mem->leader_pid);
+        if (input_focus_get_pid() == mem->leader_pid) {
+            input_focus_set_pid(0);
+        }
+    }
+
+    mmap_area_t* m = mem->mmap_list;
+    while (m) {
+        mmap_area_t* next = m->next;
+        if (m->file) {
+            vfs_node_release(m->file);
+        }
+        kfree(m);
+        m = next;
+    }
+    mem->mmap_list = 0;
+
+    if (mem->page_dir && mem->page_dir != kernel_page_directory) {
+        for (int i = 0; i < 1024; i++) {
+            uint32_t pde = mem->page_dir[i];
+
+            if (!(pde & 1)) continue;
+
+            if (kernel_page_directory[i] == pde) {
+                continue;
+            }
+
+            if (pde & 4) {
+                uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
+
+                for (int j = 0; j < 1024; j++) {
+                    uint32_t pte = pt[j];
+
+                    if ((pte & 1)) {
+                        if (pte & 0x200) {
+                            pt[j] = 0;
+                        } else if (pte & 4) {
+                            void* physical_page = (void*)(pte & ~0xFFF);
+                            pmm_free_block(physical_page);
+                        }
+                    }
+                }
+                pmm_free_block(pt);
+            }
+        }
+        pmm_free_block(mem->page_dir);
+        mem->page_dir = 0;
+    }
+
+    mem->mem_pages = 0;
+    mem->fbmap_pages = 0;
+    mem->fbmap_user_ptr = 0;
+    mem->fbmap_size_bytes = 0;
+    mem->fbmap_is_virtio = 0;
+
+    kfree(mem);
 }
 
 static task_t* alloc_task(void) {
@@ -349,48 +459,11 @@ void proc_free_resources(task_t* t) {
         }
     }
 
-    mmap_area_t* m = t->mmap_list;
-    while (m) {
-        mmap_area_t* next = m->next;
-        vfs_node_release(m->file);
-        kfree(m);
-        m = next;
-    }
-    t->mmap_list = 0;
-
     proc_sleep_remove(t);
-    
-    if (t->page_dir && t->page_dir != kernel_page_directory) {
-        for (int i = 0; i < 1024; i++) {
-            uint32_t pde = t->page_dir[i];
-            
-            if (!(pde & 1)) continue;
-            
-            if (kernel_page_directory[i] == pde) {
-                continue; 
-            }
-            
-            if (pde & 4) { 
-                uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
-                
-                for (int j = 0; j < 1024; j++) {
-                    uint32_t pte = pt[j];
-                    
-                    if ((pte & 1)) {
-                        if (pte & 0x200) {
-                            pt[j] = 0;
-                        } 
-                        else if (pte & 4) {
-                            void* physical_page = (void*)(pte & ~0xFFF);
-                            pmm_free_block(physical_page);
-                        }
-                    }
-                }
-                pmm_free_block(pt);
-            }
-        }
-        pmm_free_block(t->page_dir);
-        t->page_dir = 0;
+
+    if (t->mem) {
+        proc_mem_release(t->mem);
+        t->mem = 0;
     }
     
     if (t->kstack) { 
@@ -406,7 +479,6 @@ void proc_free_resources(task_t* t) {
     
     pid_hash_remove(t);
 
-    t->mem_pages = 0;
     t->pid = 0;
     memset(t->name, 0, sizeof(t->name));
     
@@ -419,28 +491,6 @@ void proc_free_resources(task_t* t) {
 void proc_kill(task_t* t) {
     if (!t) return;
     
-    uint32_t pid_to_clean = t->pid;
-
-    fb_release_by_pid(pid_to_clean);
-
-    if (input_focus_get_pid() == pid_to_clean) {
-        input_focus_set_pid(0);
-    }
-
-    if (t->fbmap_pages > 0 && t->page_dir) {
-        const uint32_t user_vaddr_start = 0xB1000000u;
-        for (uint32_t i = 0; i < t->fbmap_pages; i++) {
-            uint32_t v = user_vaddr_start + i * 4096u;
-            paging_map(t->page_dir, v, 0, 0);
-        }
-        if (t->mem_pages >= t->fbmap_pages) t->mem_pages -= t->fbmap_pages;
-        else t->mem_pages = 0;
-        t->fbmap_pages = 0;
-        t->fbmap_user_ptr = 0;
-        t->fbmap_size_bytes = 0;
-        t->fbmap_is_virtio = 0;
-    }
-
     uint32_t waited_pid = t->wait_for_pid;
     if (waited_pid) {
         task_t* waited = proc_find_by_pid(waited_pid);
@@ -455,6 +505,7 @@ void proc_kill(task_t* t) {
 
     {
         uint32_t flags = spinlock_acquire_safe(&proc_lock);
+        uint32_t pid_to_clean = (uint32_t)t->pid;
         task_t* child = tasks_head;
         while (child) {
             if (child->parent_pid == pid_to_clean && child->state != TASK_UNUSED) {
@@ -526,6 +577,49 @@ static uint32_t* proc_kstack_top(task_t* t) {
     return (uint32_t*)stack_top;
 }
 
+static void proc_init_user_context(task_t* t, uint32_t user_eip, uint32_t user_esp) {
+    if (!t || !t->kstack) return;
+
+    uint32_t* sp = proc_kstack_top(t);
+    *--sp = 0x23;
+    *--sp = user_esp;
+    *--sp = 0x202;
+    *--sp = 0x1B;
+    *--sp = user_eip;
+
+    *--sp = (uint32_t)irq_return;
+
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+
+    t->esp = sp;
+}
+
+static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32_t stack_top, uint32_t arg, uint32_t* out_user_esp) {
+    if (!t || !t->mem || !t->mem->page_dir || !out_user_esp) return 0;
+
+    uint32_t user_sp = stack_top & ~0xFu;
+    if (user_sp < stack_bottom + 8u) return 0;
+
+    uint32_t* prev_pd = paging_get_dir();
+    __asm__ volatile("cli");
+    paging_switch(t->mem->page_dir);
+
+    uint32_t sp = user_sp;
+    sp -= 4u;
+    *(uint32_t*)sp = arg;
+    sp -= 4u;
+    *(uint32_t*)sp = 0u;
+
+    paging_switch(prev_pd);
+    __asm__ volatile("sti");
+
+    *out_user_esp = sp;
+    return 1;
+}
+
 task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(void*), void* arg) {
     task_t* t = alloc_task();
     if (!t) return 0;
@@ -533,8 +627,7 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     strlcpy(t->name, name ? name : "task", sizeof(t->name));
     t->entry = entry; 
     t->arg = arg;
-    t->page_dir = 0;
-    t->mem_pages = 0;
+    t->mem = 0;
     t->priority = prio;
 
     if (!proc_alloc_kstack(t)) {
@@ -553,6 +646,47 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     *--sp = 0; // ESI                     
     *--sp = 0; // EDI                     
     t->esp = sp;
+
+    sched_add(t);
+    return t;
+}
+
+task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, uint32_t stack_top) {
+    task_t* parent = proc_current();
+    if (!parent || !parent->mem || !parent->mem->page_dir) return 0;
+
+    task_t* t = alloc_task();
+    if (!t) return 0;
+
+    strlcpy(t->name, parent->name, sizeof(t->name));
+    t->parent_pid = parent->pid;
+    t->cwd_inode = parent->cwd_inode;
+    t->terminal = parent->terminal;
+    t->term_mode = parent->term_mode;
+    t->priority = parent->priority;
+    t->stack_bottom = stack_bottom;
+    t->stack_top = stack_top;
+
+    t->mem = parent->mem;
+    proc_mem_retain(t->mem);
+
+    if (!proc_alloc_kstack(t)) {
+        proc_free_resources(t);
+        return 0;
+    }
+
+    if (!proc_fd_clone_from(t, parent)) {
+        proc_free_resources(t);
+        return 0;
+    }
+
+    uint32_t user_esp = 0;
+    if (!proc_setup_thread_user_stack(t, stack_bottom, stack_top, arg, &user_esp)) {
+        proc_free_resources(t);
+        return 0;
+    }
+
+    proc_init_user_context(t, entry, user_esp);
 
     sched_add(t);
     return t;
@@ -583,10 +717,13 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     area->map_flags   = MAP_PRIVATE;
     area->file        = node;
     
-    vfs_node_retain(node);
-
-    area->next = t->mmap_list;
-    t->mmap_list = area;
+    if (t->mem) {
+        vfs_node_retain(node);
+        area->next = t->mem->mmap_list;
+        t->mem->mmap_list = area;
+    } else {
+        kfree(area);
+    }
 }
 
 task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
@@ -709,16 +846,13 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     if (proc_current()) {
         task_t* parent = proc_current();
-        proc_fd_entry_t* pe;
-        dlist_for_each_entry(pe, &parent->fd_list, list) {
-            file_t* nf = 0;
-            if (proc_fd_add_at(t, pe->fd, &nf) < 0) continue;
-            if (nf) {
-                *nf = pe->file;
-                if (nf->node) {
-                    vfs_node_retain(nf->node);
-                }
-            }
+        if (!proc_fd_clone_from(t, parent)) {
+            vfs_node_release(exec_node);
+            for(int i=0; i<argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+            kfree(phdrs);
+            proc_free_resources(t);
+            return 0;
         }
     } else {
         file_t* f0 = 0;
@@ -750,6 +884,16 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     t->priority = PRIO_USER;
     strlcpy(t->name, filename, 32);
 
+    t->mem = proc_mem_create(t->pid);
+    if (!t->mem) {
+        vfs_node_release(exec_node);
+        for(int i=0; i<argc; i++) kfree(k_argv[i]);
+        kfree(k_argv);
+        kfree(phdrs);
+        proc_free_resources(t);
+        return 0;
+    }
+
     t->kstack_size = KSTACK_SIZE;
     t->kstack = kmalloc_a(t->kstack_size);
     if (!t->kstack) {
@@ -762,12 +906,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     }
     memset(t->kstack, 0, t->kstack_size);
 
-    t->page_dir = paging_clone_directory();
-    
     uint32_t* my_pd = paging_get_dir();
-
-    t->mmap_list = 0;
-    t->mmap_top = 0x80001000;
 
     for (int i = 0; i < header.e_phnum; i++) {
         if (phdrs[i].p_type == 1) {
@@ -787,13 +926,13 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     uint32_t end_pde_idx   = (max_vaddr - 1) >> 22;
 
     for (uint32_t i = start_pde_idx; i <= end_pde_idx; i++) {
-        t->page_dir[i] = 0;
+        t->mem->page_dir[i] = 0;
     }
-    
-    t->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
-    t->heap_start = t->prog_break;
-    
-    if (t->mmap_top < t->prog_break) t->mmap_top = t->prog_break + 0x100000;
+
+    t->mem->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
+    t->mem->heap_start = t->mem->prog_break;
+
+    if (t->mem->mmap_top < t->mem->prog_break) t->mem->mmap_top = t->mem->prog_break + 0x100000;
 
     uint32_t stack_size = 4 * 1024 * 1024; 
     uint32_t ustack_top_limit = 0xB0400000;
@@ -806,13 +945,13 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         uint32_t addr = ustack_top_limit - i * 4096;
         void* p = pmm_alloc_block();
         if (p) {
-            paging_map(t->page_dir, addr, (uint32_t)p, 7);
-            t->mem_pages++;
+            paging_map(t->mem->page_dir, addr, (uint32_t)p, 7);
+            t->mem->mem_pages++;
         }
     }
 
     __asm__ volatile("cli");
-    paging_switch(t->page_dir);
+    paging_switch(t->mem->page_dir);
 
     uint32_t ustack_top = ustack_top_limit; 
 
@@ -847,17 +986,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     for(int i=0; i<argc; i++) kfree(k_argv[i]);
     kfree(k_argv);
 
-    uint32_t* ksp = (uint32_t*)((uint32_t)t->kstack + t->kstack_size);
-    *--ksp = 0x23;             // SS (User Data)
-    *--ksp = final_user_esp;   // ESP
-    *--ksp = 0x202;            // EFLAGS (Interrupts enabled)
-    *--ksp = 0x1B;             // CS (User Code)
-    *--ksp = header.e_entry;     // EIP (Entry point)
-    
-    *--ksp = (uint32_t)irq_return; 
-    
-    *--ksp = 0; *--ksp = 0; *--ksp = 0; *--ksp = 0;
-    t->esp = ksp;
+    proc_init_user_context(t, header.e_entry, final_user_esp);
 
     sched_add(t);
     return t;
@@ -978,8 +1107,7 @@ task_t* proc_create_idle(int cpu_index) {
     t->state = TASK_RUNNING;
     t->pid = 0;             
     t->assigned_cpu = cpu_index;
-    t->mem_pages = 0;
-    t->page_dir = kernel_page_directory;
+    t->mem = 0;
     t->priority = PRIO_IDLE;
 
     if (!proc_alloc_kstack(t)) {

@@ -49,7 +49,7 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     if (end < start) return 0; 
     if (start < 0x08000000 || end > 0xC0000000) return 0; 
 
-    if (!task || !task->page_dir) return 0;
+    if (!task || !task->mem || !task->mem->page_dir) return 0;
 
     return 1;
 }
@@ -87,7 +87,7 @@ static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr);
 static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size);
 
 static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
-    if (!t || !t->page_dir) return 0;
+    if (!t || !t->mem || !t->mem->page_dir) return 0;
     if (end_excl <= start) return 0;
 
     if (start < 0x08000000u || end_excl > 0xC0000000u) return 0;
@@ -102,8 +102,8 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
             continue;
         }
 
-        if (t->heap_start < t->prog_break && v >= t->heap_start && v < t->prog_break) {
-            uintptr_t lim = (uintptr_t)t->prog_break;
+        if (t->mem->heap_start < t->mem->prog_break && v >= t->mem->heap_start && v < t->mem->prog_break) {
+            uintptr_t lim = (uintptr_t)t->mem->prog_break;
             cur = (end_excl < lim) ? end_excl : lim;
             continue;
         }
@@ -154,6 +154,8 @@ static int check_user_buffer_present(task_t* task, const void* buf, uint32_t siz
     if (!check_user_buffer(task, buf, size)) return 0;
     if (size == 0) return 1;
 
+    if (!task->mem || !task->mem->page_dir) return 0;
+
     uint32_t start = (uint32_t)buf;
     uint32_t end = start + size;
     if (end < start) return 0;
@@ -162,7 +164,7 @@ static int check_user_buffer_present(task_t* task, const void* buf, uint32_t siz
     uint32_t v_end = (end + 0xFFFu) & ~0xFFFu;
     for (; v < v_end; v += 4096u) {
         uint32_t pte;
-        if (!paging_get_present_pte(task->page_dir, v, &pte)) return 0;
+        if (!paging_get_present_pte(task->mem->page_dir, v, &pte)) return 0;
         if ((pte & 4u) == 0) return 0;
     }
     return 1;
@@ -172,6 +174,8 @@ static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t 
     if (!check_user_buffer(task, buf, size)) return 0;
     if (size == 0) return 1;
 
+    if (!task->mem || !task->mem->page_dir) return 0;
+
     uint32_t start = (uint32_t)buf;
     uint32_t end = start + size;
     if (end < start) return 0;
@@ -180,7 +184,7 @@ static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t 
     uint32_t v_end = (end + 0xFFFu) & ~0xFFFu;
     for (; v < v_end; v += 4096u) {
         uint32_t pte;
-        if (!paging_get_present_pte(task->page_dir, v, &pte)) return 0;
+        if (!paging_get_present_pte(task->mem->page_dir, v, &pte)) return 0;
         if ((pte & 4u) == 0) return 0;
         if ((pte & 2u) == 0) return 0;
     }
@@ -234,8 +238,8 @@ static int yulafs_find_child_name_in_dir(yfs_ino_t dir_ino, yfs_ino_t child_ino,
 }
 
 static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
-    if (!t) return 0;
-    mmap_area_t* m = t->mmap_list;
+    if (!t || !t->mem) return 0;
+    mmap_area_t* m = t->mem->mmap_list;
     while (m) {
         if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) return m;
         m = m->next;
@@ -256,8 +260,8 @@ static inline int ranges_overlap_u32(uint32_t a_start, uint32_t a_end_excl, uint
 }
 
 static mmap_area_t* mmap_find_overlap(task_t* t, uint32_t start, uint32_t end_excl) {
-    if (!t) return 0;
-    mmap_area_t* m = t->mmap_list;
+    if (!t || !t->mem) return 0;
+    mmap_area_t* m = t->mem->mmap_list;
     while (m) {
         if (ranges_overlap_u32(start, end_excl, m->vaddr_start, m->vaddr_end)) return m;
         m = m->next;
@@ -457,6 +461,47 @@ static void syscall_getpid(registers_t* regs, task_t* curr) {
     regs->eax = curr->pid;
 }
 
+static void syscall_clone(registers_t* regs, task_t* curr) {
+    uint32_t entry = regs->ebx;
+    uint32_t arg = regs->ecx;
+    uint32_t stack_top = regs->edx;
+    uint32_t stack_size = regs->esi;
+
+    if (!curr || !curr->mem || !curr->mem->page_dir) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (entry == 0 || stack_top == 0 || stack_size < 16u) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    uint32_t stack_bottom = stack_top - stack_size;
+    if (stack_bottom >= stack_top) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (entry < 0x08000000u || entry >= 0xC0000000u) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (stack_bottom < 0x08000000u || stack_top > 0xC0000000u) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (!ensure_user_buffer_writable_mappable(curr, (void*)stack_bottom, stack_size)) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    task_t* t = proc_clone_thread(entry, arg, stack_bottom, stack_top);
+    regs->eax = t ? t->pid : (uint32_t)-1;
+}
+
 static void syscall_open(registers_t* regs, task_t* curr) {
     if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
         regs->eax = (uint32_t)vfs_open((char*)regs->ebx, (int)regs->ecx);
@@ -496,7 +541,12 @@ static void syscall_sleep(registers_t* regs, task_t* curr) {
 
 static void syscall_sbrk(registers_t* regs, task_t* curr) {
     int incr = (int)regs->ebx;
-    uint32_t old_brk = curr->prog_break;
+    if (!curr->mem || !curr->mem->page_dir) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    uint32_t old_brk = curr->mem->prog_break;
     int64_t new_brk64 = (int64_t)(uint64_t)old_brk + (int64_t)incr;
     if (new_brk64 < 0 || new_brk64 >= 0x80000000ll) {
         regs->eax = (uint32_t)-1;
@@ -504,7 +554,7 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
     }
     uint32_t new_brk = (uint32_t)new_brk64;
 
-    if (new_brk < curr->heap_start) {
+    if (new_brk < curr->mem->heap_start) {
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -536,27 +586,27 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
 
         for (uint32_t v = start_free; v < end_free; v += 4096u) {
             uint32_t pte;
-            if (!paging_get_present_pte(curr->page_dir, v, &pte)) continue;
+            if (!paging_get_present_pte(curr->mem->page_dir, v, &pte)) continue;
             if ((pte & 4u) == 0) continue;
 
-            paging_map(curr->page_dir, v, 0, 0);
+            paging_map(curr->mem->page_dir, v, 0, 0);
 
             uint32_t phys = pte & ~0xFFFu;
-            if (curr->mem_pages > 0) curr->mem_pages--;
+            if (curr->mem->mem_pages > 0) curr->mem->mem_pages--;
             if (phys && (pte & 0x200u) == 0) {
                 pmm_free_block((void*)phys);
             }
         }
     }
 
-    curr->prog_break = new_brk;
+    curr->mem->prog_break = new_brk;
 
     if (incr > 0) {
         uint64_t guard64 = 0x100000ull;
         uint64_t need64 = (uint64_t)new_brk + guard64;
         if (need64 < 0xC0000000ull) {
             uint32_t need = align_up_4k_u32((uint32_t)need64);
-            if (curr->mmap_top < need) curr->mmap_top = need;
+            if (curr->mem->mmap_top < need) curr->mem->mmap_top = need;
         }
     }
 
@@ -587,7 +637,7 @@ static void syscall_kill(registers_t* regs, task_t* curr) {
     }
 
     if (is_running) {
-        if (t->page_dir) {
+        if (t->mem && t->mem->page_dir) {
             __sync_fetch_and_or(&t->pending_signals, 1u << SIGTERM);
             regs->eax = 0;
         } else {
@@ -864,11 +914,16 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
         }
     }
 
-    uint32_t size_aligned = (size + 4095u) & ~4095u;
-    uint32_t vaddr = align_up_4k_u32(curr->mmap_top);
+    if (!curr->mem) {
+        regs->eax = 0;
+        return;
+    }
 
-    if (curr->heap_start < curr->prog_break) {
-        uint64_t need64 = (uint64_t)curr->prog_break + 0x100000ull;
+    uint32_t size_aligned = (size + 4095u) & ~4095u;
+    uint32_t vaddr = align_up_4k_u32(curr->mem->mmap_top);
+
+    if (curr->mem->heap_start < curr->mem->prog_break) {
+        uint64_t need64 = (uint64_t)curr->mem->prog_break + 0x100000ull;
         if (need64 < 0xC0000000ull) {
             uint32_t need = align_up_4k_u32((uint32_t)need64);
             if (vaddr < need) vaddr = need;
@@ -890,9 +945,9 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
             }
         }
 
-        if (curr->heap_start < curr->prog_break) {
-            if (ranges_overlap_u32(vaddr, end_excl, curr->heap_start, curr->prog_break)) {
-                vaddr = align_up_4k_u32(curr->prog_break + 0x100000u);
+        if (curr->mem->heap_start < curr->mem->prog_break) {
+            if (ranges_overlap_u32(vaddr, end_excl, curr->mem->heap_start, curr->mem->prog_break)) {
+                vaddr = align_up_4k_u32(curr->mem->prog_break + 0x100000u);
                 continue;
             }
         }
@@ -908,6 +963,11 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
     }
 
     if (!found) {
+        regs->eax = 0;
+        return;
+    }
+
+    if (!curr->mem) {
         regs->eax = 0;
         return;
     }
@@ -933,9 +993,9 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
     }
 
     vfs_node_retain(area->file);
-    area->next = curr->mmap_list;
-    curr->mmap_list = area;
-    curr->mmap_top = vaddr + size_aligned;
+    area->next = curr->mem->mmap_list;
+    curr->mem->mmap_list = area;
+    curr->mem->mmap_top = vaddr + size_aligned;
 
     regs->eax = vaddr;
 }
@@ -943,6 +1003,11 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
 static void syscall_munmap(registers_t* regs, task_t* curr) {
     uint32_t vaddr = regs->ebx;
     uint32_t len = regs->ecx;
+
+    if (!curr->mem || !curr->mem->page_dir) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
 
     if (vaddr & 0xFFFu) {
         regs->eax = (uint32_t)-1;
@@ -972,7 +1037,7 @@ static void syscall_munmap(registers_t* regs, task_t* curr) {
 
     int result = 0;
     mmap_area_t* prev = 0;
-    mmap_area_t* m = curr->mmap_list;
+    mmap_area_t* m = curr->mem->mmap_list;
 
     while (m) {
         mmap_area_t* next_node = m->next;
@@ -1034,13 +1099,13 @@ static void syscall_munmap(registers_t* regs, task_t* curr) {
 
             for (uint32_t curr_v = o_start; curr_v < o_end; curr_v += 4096u) {
                 uint32_t pte;
-                if (!paging_get_present_pte(curr->page_dir, curr_v, &pte)) continue;
+                if (!paging_get_present_pte(curr->mem->page_dir, curr_v, &pte)) continue;
                 if ((pte & 4u) == 0) continue;
 
-                paging_map(curr->page_dir, curr_v, 0, 0);
+                paging_map(curr->mem->page_dir, curr_v, 0, 0);
 
                 uint32_t phys = pte & ~0xFFFu;
-                if ((pte & 0x200u) == 0 && curr->mem_pages > 0) curr->mem_pages--;
+                if ((pte & 0x200u) == 0 && curr->mem->mem_pages > 0) curr->mem->mem_pages--;
                 if (phys && (pte & 0x200u) == 0) {
                     pmm_free_block((void*)phys);
                 }
@@ -1053,13 +1118,13 @@ static void syscall_munmap(registers_t* regs, task_t* curr) {
 
         for (uint32_t curr_v = o_start; curr_v < o_end; curr_v += 4096u) {
             uint32_t pte;
-            if (!paging_get_present_pte(curr->page_dir, curr_v, &pte)) continue;
+            if (!paging_get_present_pte(curr->mem->page_dir, curr_v, &pte)) continue;
             if ((pte & 4u) == 0) continue;
 
-            paging_map(curr->page_dir, curr_v, 0, 0);
+            paging_map(curr->mem->page_dir, curr_v, 0, 0);
 
             uint32_t phys = pte & ~0xFFFu;
-            if ((pte & 0x200u) == 0 && curr->mem_pages > 0) curr->mem_pages--;
+            if ((pte & 0x200u) == 0 && curr->mem->mem_pages > 0) curr->mem->mem_pages--;
             if (phys && (pte & 0x200u) == 0) {
                 pmm_free_block((void*)phys);
             }
@@ -1067,7 +1132,7 @@ static void syscall_munmap(registers_t* regs, task_t* curr) {
 
         if (o_start == m_start && o_end == m_end) {
             if (prev) prev->next = next_node;
-            else curr->mmap_list = next_node;
+            else curr->mem->mmap_list = next_node;
 
             if (m->file) {
                 vfs_node_release(m->file);
@@ -1244,6 +1309,11 @@ static void syscall_fstatat(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_fb_map(registers_t* regs, task_t* curr) {
+    if (!curr->mem || !curr->mem->page_dir) {
+        regs->eax = 0;
+        return;
+    }
+
     if (fb_get_owner_pid() != curr->pid) {
         regs->eax = 0;
         return;
@@ -1283,19 +1353,19 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
         uint32_t map_size = fb_size + page_off;
         uint32_t pages = (map_size + 0xFFFu) / 4096u;
 
-        if (curr->fbmap_pages > 0) {
-            for (uint32_t i = 0; i < curr->fbmap_pages; i++) {
+        if (curr->mem->fbmap_pages > 0) {
+            for (uint32_t i = 0; i < curr->mem->fbmap_pages; i++) {
                 uint32_t v = user_vaddr_start + i * 4096u;
-                if (paging_is_user_accessible(curr->page_dir, v)) {
-                    paging_map(curr->page_dir, v, 0, 0);
+                if (paging_is_user_accessible(curr->mem->page_dir, v)) {
+                    paging_map(curr->mem->page_dir, v, 0, 0);
                 }
             }
-            if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
-            else curr->mem_pages = 0;
-            curr->fbmap_pages = 0;
-            curr->fbmap_user_ptr = 0;
-            curr->fbmap_size_bytes = 0;
-            curr->fbmap_is_virtio = 0;
+            if (curr->mem->mem_pages >= curr->mem->fbmap_pages) curr->mem->mem_pages -= curr->mem->fbmap_pages;
+            else curr->mem->mem_pages = 0;
+            curr->mem->fbmap_pages = 0;
+            curr->mem->fbmap_user_ptr = 0;
+            curr->mem->fbmap_size_bytes = 0;
+            curr->mem->fbmap_is_virtio = 0;
         }
 
         uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
@@ -1305,14 +1375,14 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
 
         for (uint32_t i = 0; i < pages; i++) {
             uint32_t offset = i * 4096u;
-            paging_map(curr->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
-            curr->mem_pages++;
+            paging_map(curr->mem->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
+            curr->mem->mem_pages++;
         }
 
-        curr->fbmap_pages = pages;
-        curr->fbmap_user_ptr = user_vaddr_start + page_off;
-        curr->fbmap_size_bytes = fb_size;
-        curr->fbmap_is_virtio = 1;
+        curr->mem->fbmap_pages = pages;
+        curr->mem->fbmap_user_ptr = user_vaddr_start + page_off;
+        curr->mem->fbmap_size_bytes = fb_size;
+        curr->mem->fbmap_is_virtio = 1;
 
         __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
         regs->eax = user_vaddr_start + page_off;
@@ -1343,19 +1413,19 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
     uint32_t map_size = fb_size + page_off;
     uint32_t pages = (map_size + 0xFFFu) / 4096u;
 
-    if (curr->fbmap_pages > 0) {
-        for (uint32_t i = 0; i < curr->fbmap_pages; i++) {
+    if (curr->mem->fbmap_pages > 0) {
+        for (uint32_t i = 0; i < curr->mem->fbmap_pages; i++) {
             uint32_t v = user_vaddr_start + i * 4096u;
-            if (paging_is_user_accessible(curr->page_dir, v)) {
-                paging_map(curr->page_dir, v, 0, 0);
+            if (paging_is_user_accessible(curr->mem->page_dir, v)) {
+                paging_map(curr->mem->page_dir, v, 0, 0);
             }
         }
-        if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
-        else curr->mem_pages = 0;
-        curr->fbmap_pages = 0;
-        curr->fbmap_user_ptr = 0;
-        curr->fbmap_size_bytes = 0;
-        curr->fbmap_is_virtio = 0;
+        if (curr->mem->mem_pages >= curr->mem->fbmap_pages) curr->mem->mem_pages -= curr->mem->fbmap_pages;
+        else curr->mem->mem_pages = 0;
+        curr->mem->fbmap_pages = 0;
+        curr->mem->fbmap_user_ptr = 0;
+        curr->mem->fbmap_size_bytes = 0;
+        curr->mem->fbmap_is_virtio = 0;
     }
 
     uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
@@ -1365,14 +1435,14 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
 
     for (uint32_t i = 0; i < pages; i++) {
         uint32_t offset = i * 4096u;
-        paging_map(curr->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
-        curr->mem_pages++;
+        paging_map(curr->mem->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
+        curr->mem->mem_pages++;
     }
 
-    curr->fbmap_pages = pages;
-    curr->fbmap_user_ptr = user_vaddr_start + page_off;
-    curr->fbmap_size_bytes = fb_size;
-    curr->fbmap_is_virtio = 0;
+    curr->mem->fbmap_pages = pages;
+    curr->mem->fbmap_user_ptr = user_vaddr_start + page_off;
+    curr->mem->fbmap_size_bytes = fb_size;
+    curr->mem->fbmap_is_virtio = 0;
 
     __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
     regs->eax = user_vaddr_start + page_off;
@@ -1385,21 +1455,23 @@ static void syscall_fb_acquire(registers_t* regs, task_t* curr) {
 static void syscall_fb_release(registers_t* regs, task_t* curr) {
     const uint32_t user_vaddr_start = 0xB1000000u;
 
-    if (curr->fbmap_pages > 0) {
-        for (uint32_t i = 0; i < curr->fbmap_pages; i++) {
+    if (curr->mem && curr->mem->fbmap_pages > 0) {
+        for (uint32_t i = 0; i < curr->mem->fbmap_pages; i++) {
             uint32_t v = user_vaddr_start + i * 4096u;
-            if (paging_is_user_accessible(curr->page_dir, v)) {
-                paging_map(curr->page_dir, v, 0, 0);
+            if (curr->mem->page_dir && paging_is_user_accessible(curr->mem->page_dir, v)) {
+                paging_map(curr->mem->page_dir, v, 0, 0);
             }
         }
-        if (curr->mem_pages >= curr->fbmap_pages) curr->mem_pages -= curr->fbmap_pages;
-        else curr->mem_pages = 0;
-        curr->fbmap_pages = 0;
+        if (curr->mem->mem_pages >= curr->mem->fbmap_pages) curr->mem->mem_pages -= curr->mem->fbmap_pages;
+        else curr->mem->mem_pages = 0;
+        curr->mem->fbmap_pages = 0;
     }
 
-    curr->fbmap_user_ptr = 0;
-    curr->fbmap_size_bytes = 0;
-    curr->fbmap_is_virtio = 0;
+    if (curr->mem) {
+        curr->mem->fbmap_user_ptr = 0;
+        curr->mem->fbmap_size_bytes = 0;
+        curr->mem->fbmap_is_virtio = 0;
+    }
 
     __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
     regs->eax = (uint32_t)fb_release(curr->pid);
@@ -1769,7 +1841,12 @@ static void syscall_futex_wait(registers_t* regs, task_t* curr) {
         return;
     }
 
-    uint32_t phys = paging_get_phys(curr->page_dir, (uint32_t)uaddr);
+    if (!curr->mem || !curr->mem->page_dir) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    uint32_t phys = paging_get_phys(curr->mem->page_dir, (uint32_t)uaddr);
     if (!phys) {
         regs->eax = (uint32_t)-1;
         return;
@@ -1799,7 +1876,12 @@ static void syscall_futex_wake(registers_t* regs, task_t* curr) {
         return;
     }
 
-    uint32_t phys = paging_get_phys(curr->page_dir, (uint32_t)uaddr);
+    if (!curr->mem || !curr->mem->page_dir) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    uint32_t phys = paging_get_phys(curr->mem->page_dir, (uint32_t)uaddr);
     if (!phys) {
         regs->eax = (uint32_t)-1;
         return;
@@ -2086,8 +2168,8 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
     }
 
     if (!virtio_active) {
-        const int src_is_mapped_fb = !curr->fbmap_is_virtio && curr->fbmap_user_ptr != 0 &&
-                                    (uintptr_t)req.src == (uintptr_t)curr->fbmap_user_ptr &&
+        const int src_is_mapped_fb = curr->mem && !curr->mem->fbmap_is_virtio && curr->mem->fbmap_user_ptr != 0 &&
+                                    (uintptr_t)req.src == (uintptr_t)curr->mem->fbmap_user_ptr &&
                                     req.src_stride == dst_pitch;
         if (src_is_mapped_fb) {
             regs->eax = 0;
@@ -2136,8 +2218,8 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
         const uint8_t* src_base = (const uint8_t*)req.src;
 
         if (virtio_active) {
-            const int flush_only = curr->fbmap_is_virtio && curr->fbmap_user_ptr != 0 &&
-                                    (uintptr_t)req.src == (uintptr_t)curr->fbmap_user_ptr &&
+            const int flush_only = curr->mem && curr->mem->fbmap_is_virtio && curr->mem->fbmap_user_ptr != 0 &&
+                                    (uintptr_t)req.src == (uintptr_t)curr->mem->fbmap_user_ptr &&
                                     req.src_stride == dst_pitch;
 
             if (!flush_only) {
@@ -2447,7 +2529,7 @@ static const syscall_fn_t syscall_table[] = {
     [17] = syscall_signal,
     [18] = syscall_sigreturn,
     [19] = syscall_invalid,
-    [20] = syscall_removed,
+    [20] = syscall_clone,
     [21] = syscall_removed,
     [22] = syscall_removed,
     [23] = syscall_removed,

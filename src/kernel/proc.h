@@ -47,6 +47,24 @@ typedef struct mmap_area {
     struct mmap_area* next;
 } mmap_area_t;
 
+typedef struct proc_mem {
+    uint32_t* page_dir;
+    uint32_t prog_break;
+    uint32_t heap_start;
+    mmap_area_t* mmap_list;
+    uint32_t mmap_top;
+    uint32_t mem_pages;
+
+    uint32_t fbmap_pages;
+    uint32_t fbmap_user_ptr;
+    uint32_t fbmap_size_bytes;
+    uint8_t fbmap_is_virtio;
+    uint8_t fbmap_pad[3];
+
+    uint32_t leader_pid;
+    uint32_t refcount;
+} proc_mem_t;
+
 typedef enum {
     PRIO_IDLE = 0,
     PRIO_LOW  = 5,
@@ -79,17 +97,13 @@ typedef struct task {
     
     int assigned_cpu;
 
-    uint32_t mem_pages;
     uint32_t wait_for_pid;
     uint32_t wake_tick;
     dlist_head_t sleep_node; 
     int is_blocked_on_kbd;
-
-    uint32_t prog_break;
-    uint32_t heap_start;
     
     uint32_t* esp;
-    uint32_t* page_dir;
+    proc_mem_t* mem;
     
     void (*entry)(void*);
     void* arg;
@@ -120,16 +134,6 @@ typedef struct task {
 
     uint8_t term_mode;
 
-    mmap_area_t* mmap_list;
-    uint32_t mmap_top;
-
-    uint32_t fbmap_pages;
-
-    uint32_t fbmap_user_ptr;
-    uint32_t fbmap_size_bytes;
-    uint8_t fbmap_is_virtio;
-    uint8_t fbmap_pad[3];
-
     uint8_t* fpu_state;
     uint32_t fpu_state_size;
 
@@ -157,6 +161,7 @@ task_t* proc_current(void);
 uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap);
 
 task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(void*), void* arg);
+task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, uint32_t stack_top);
 task_t* proc_spawn_elf(const char* filename, int argc, char** argv);
 
 void proc_kill(task_t* t);
