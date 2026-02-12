@@ -12,5 +12,11 @@ void netd_dns_process_udp(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8
 
 int netd_dns_query(netd_ctx_t* ctx, const char* name, uint32_t timeout_ms, uint32_t* out_addr);
 
+int netd_dns_query_start(netd_ctx_t* ctx, const char* name, uint32_t timeout_ms);
+
+int netd_dns_query_poll(netd_ctx_t* ctx, int handle, uint32_t* out_addr, uint32_t* out_status);
+
+void netd_dns_query_cancel(netd_ctx_t* ctx, int handle);
+
 #endif
 

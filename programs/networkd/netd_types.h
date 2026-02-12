@@ -53,6 +53,18 @@ typedef struct {
     uint32_t addr;
 } netd_dns_wait_t;
 
+#define NETD_DNS_MAX_WAITS 16
+
+typedef struct {
+    int active;
+    int received;
+    uint16_t id;
+    uint16_t port;
+    uint32_t addr;
+    uint32_t start_ms;
+    uint32_t timeout_ms;
+} netd_dns_wait_slot_t;
+
 #define NETD_TCP_RX_CAP 4096u
 
 typedef struct {
@@ -63,6 +75,7 @@ typedef struct {
     uint32_t remote_ip;
     uint16_t remote_port;
     uint16_t local_port;
+    uint32_t mgr_index;
 
     uint32_t iss;
     uint32_t irs;
@@ -83,6 +96,14 @@ typedef struct {
 } netd_tcp_conn_t;
 
 typedef struct {
+    netd_tcp_conn_t** conns;
+    uint32_t count;
+    uint32_t cap;
+    uint32_t* map;
+    uint32_t map_cap;
+} netd_tcp_mgr_t;
+
+typedef struct {
     netd_state_t state;
     netd_iface_t iface;
     uint32_t iface_last_try_ms;
@@ -93,7 +114,8 @@ typedef struct {
 
     netd_ping_wait_t ping_wait;
     netd_dns_wait_t dns_wait;
-    netd_tcp_conn_t tcp;
+    netd_dns_wait_slot_t dns_waits[NETD_DNS_MAX_WAITS];
+    netd_tcp_mgr_t tcp;
     netd_rand_t rand;
 
     uint8_t rx_buf[NETD_FRAME_MAX];
@@ -101,4 +123,3 @@ typedef struct {
 } netd_ctx_t;
 
 #endif
-

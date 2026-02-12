@@ -7,6 +7,7 @@
 #include "netd_arp.h"
 #include "netd_device.h"
 #include "netd_iface.h"
+#include "netd_http.h"
 #include "netd_ipc.h"
 #include "netd_tcp.h"
 #include "netd_types.h"
@@ -77,6 +78,10 @@ int main(void) {
 
         netd_device_process(&ctx);
         netd_ipc_process_clients(&ctx, clients);
+        netd_http_tick(&ctx);
         netd_iface_periodic(&ctx);
     }
+
+    netd_tcp_shutdown(&ctx);
+    return 0;
 }

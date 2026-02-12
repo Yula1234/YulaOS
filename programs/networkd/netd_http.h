@@ -11,4 +11,8 @@
 
 int netd_http_get(netd_ctx_t* ctx, int fd_out, uint32_t seq, const net_http_get_req_t* req);
 
+int netd_http_get_start(netd_ctx_t* ctx, int fd_out, uint32_t seq, const net_http_get_req_t* req);
+
+void netd_http_tick(netd_ctx_t* ctx);
+
 #endif

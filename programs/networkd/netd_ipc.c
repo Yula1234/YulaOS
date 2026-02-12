@@ -9,6 +9,13 @@
 #include "netd_iface.h"
 #include "netd_ipv4.h"
 
+static int netd_ipc_is_https_url(const char* url) {
+    if (!url) {
+        return 0;
+    }
+    return strncmp(url, "https://", 8u) == 0;
+}
+
 static void netd_close_client(netd_client_t* c) {
     if (!c || !c->used) {
         return;
@@ -218,7 +225,11 @@ static void netd_handle_msg(netd_ctx_t* ctx, netd_client_t* c, const net_ipc_hdr
         net_http_get_req_t req;
         memcpy(&req, payload, sizeof(req));
         req.url[(uint32_t)sizeof(req.url) - 1u] = '\0';
-        (void)netd_http_get(ctx, c->fd_out, hdr->seq, &req);
+        if (netd_ipc_is_https_url(req.url)) {
+            (void)netd_http_get(ctx, c->fd_out, hdr->seq, &req);
+        } else {
+            (void)netd_http_get_start(ctx, c->fd_out, hdr->seq, &req);
+        }
         return;
     }
 }

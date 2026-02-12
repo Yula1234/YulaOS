@@ -7,8 +7,52 @@
 #include "netd_config.h"
 #include "netd_device.h"
 #include "netd_proto.h"
+#include "netd_rand.h"
 #include "netd_udp.h"
 #include "netd_util.h"
+
+static uint16_t netd_dns_gen_id(netd_ctx_t* ctx) {
+    if (!ctx) {
+        return (uint16_t)(uptime_ms() & 0xFFFFu);
+    }
+
+    uint16_t r = 0;
+    netd_rand_bytes(&ctx->rand, &r, (uint32_t)sizeof(r));
+    if (r == 0) {
+        r = (uint16_t)(uptime_ms() & 0xFFFFu);
+    }
+    return r;
+}
+
+static uint16_t netd_dns_port_from_id(uint16_t id) {
+    return (uint16_t)(49152u + (uint16_t)(id & 0x03FFu));
+}
+
+static netd_dns_wait_slot_t* netd_dns_slot_by_handle(netd_ctx_t* ctx, int handle) {
+    if (!ctx || handle < 0 || handle >= NETD_DNS_MAX_WAITS) {
+        return 0;
+    }
+    return &ctx->dns_waits[handle];
+}
+
+static int netd_dns_alloc_slot(netd_ctx_t* ctx) {
+    if (!ctx) {
+        return -1;
+    }
+    for (int i = 0; i < NETD_DNS_MAX_WAITS; i++) {
+        if (!ctx->dns_waits[i].active) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void netd_dns_slot_reset(netd_dns_wait_slot_t* s) {
+    if (!s) {
+        return;
+    }
+    memset(s, 0, sizeof(*s));
+}
 
 static uint32_t netd_dns_encode_qname(const char* name, uint8_t* out, uint32_t cap) {
     if (!name || !*name || !out || cap == 0) {
@@ -253,16 +297,8 @@ void netd_dns_process_udp(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8
         return;
     }
 
-    if (!ctx->dns_wait.active || ctx->dns_wait.received) {
-        return;
-    }
-
     uint16_t src_port = netd_ntohs(udp->src_port);
     uint16_t dst_port = netd_ntohs(udp->dst_port);
-
-    if (dst_port != ctx->dns_wait.port) {
-        return;
-    }
 
     if (src_port != 53u) {
         return;
@@ -276,11 +312,126 @@ void netd_dns_process_udp(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8
     const uint8_t* dns = payload + sizeof(net_udp_hdr_t);
     uint32_t dns_len = (uint32_t)udp_len - (uint32_t)sizeof(net_udp_hdr_t);
 
-    uint32_t addr = 0;
-    if (netd_dns_parse_response(dns, dns_len, ctx->dns_wait.id, &addr)) {
-        ctx->dns_wait.addr = addr;
-        ctx->dns_wait.received = 1;
+
+    if (ctx->dns_wait.active && !ctx->dns_wait.received && dst_port == ctx->dns_wait.port) {
+        uint32_t addr = 0;
+        if (netd_dns_parse_response(dns, dns_len, ctx->dns_wait.id, &addr)) {
+            ctx->dns_wait.addr = addr;
+            ctx->dns_wait.received = 1;
+        }
     }
+
+    for (int i = 0; i < NETD_DNS_MAX_WAITS; i++) {
+        netd_dns_wait_slot_t* s = &ctx->dns_waits[i];
+        if (!s->active || s->received) {
+            continue;
+        }
+        if (dst_port != s->port) {
+            continue;
+        }
+        uint32_t addr = 0;
+        if (netd_dns_parse_response(dns, dns_len, s->id, &addr)) {
+            s->addr = addr;
+            s->received = 1;
+        }
+    }
+}
+
+int netd_dns_query_start(netd_ctx_t* ctx, const char* name, uint32_t timeout_ms) {
+    if (!ctx || !ctx->iface.up || !name || !*name) {
+        return -1;
+    }
+
+    if (ctx->dns_server == 0) {
+        return -1;
+    }
+
+    if (timeout_ms == 0) {
+        timeout_ms = 1000u;
+    }
+
+    int h = netd_dns_alloc_slot(ctx);
+    if (h < 0) {
+        return -1;
+    }
+
+    netd_dns_wait_slot_t* s = &ctx->dns_waits[h];
+    netd_dns_slot_reset(s);
+
+    uint16_t id = netd_dns_gen_id(ctx);
+    uint16_t src_port = netd_dns_port_from_id(id);
+
+    uint8_t query[300];
+    uint32_t qlen = netd_dns_build_query(id, name, query, (uint32_t)sizeof(query));
+    if (qlen == 0) {
+        netd_dns_slot_reset(s);
+        return -1;
+    }
+
+    s->active = 1;
+    s->received = 0;
+    s->id = id;
+    s->port = src_port;
+    s->addr = 0;
+    s->start_ms = uptime_ms();
+    s->timeout_ms = timeout_ms;
+
+    if (!netd_udp_send(ctx, ctx->dns_server, 53u, src_port, query, qlen)) {
+        netd_dns_slot_reset(s);
+        return -1;
+    }
+
+    return h;
+}
+
+int netd_dns_query_poll(netd_ctx_t* ctx, int handle, uint32_t* out_addr, uint32_t* out_status) {
+    if (out_status) {
+        *out_status = NET_STATUS_ERROR;
+    }
+    if (out_addr) {
+        *out_addr = 0;
+    }
+    if (!ctx) {
+        return 0;
+    }
+
+    netd_dns_wait_slot_t* s = netd_dns_slot_by_handle(ctx, handle);
+    if (!s || !s->active) {
+        return 0;
+    }
+
+    if (s->received) {
+        if (out_addr) {
+            *out_addr = s->addr;
+        }
+        if (out_status) {
+            *out_status = NET_STATUS_OK;
+        }
+        netd_dns_slot_reset(s);
+        return 1;
+    }
+
+    uint32_t now_ms = uptime_ms();
+    if ((now_ms - s->start_ms) >= s->timeout_ms) {
+        if (out_status) {
+            *out_status = NET_STATUS_TIMEOUT;
+        }
+        netd_dns_slot_reset(s);
+        return 1;
+    }
+
+    if (out_status) {
+        *out_status = NET_STATUS_OK;
+    }
+    return 0;
+}
+
+void netd_dns_query_cancel(netd_ctx_t* ctx, int handle) {
+    netd_dns_wait_slot_t* s = netd_dns_slot_by_handle(ctx, handle);
+    if (!s) {
+        return;
+    }
+    netd_dns_slot_reset(s);
 }
 
 int netd_dns_query(netd_ctx_t* ctx, const char* name, uint32_t timeout_ms, uint32_t* out_addr) {
