@@ -5,6 +5,7 @@
 #include "stdlib.h"
 #include "string.h"
 #include "syscall.h"
+#include "pthread.h"
 
 static unsigned char _stdout_wbuf[BUFSIZ];
 
@@ -16,17 +17,36 @@ FILE* stdin  = &_stdin;
 FILE* stdout = &_stdout;
 FILE* stderr = &_stderr;
 
+static pthread_mutex_t stdio_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void stdio_lock_acquire(void) {
+    pthread_mutex_lock(&stdio_lock);
+}
+
+static void stdio_lock_release(void) {
+    pthread_mutex_unlock(&stdio_lock);
+}
+
 static int stdio_flush_wbuf(FILE* stream);
+static int fflush_unlocked(FILE* stream);
 
 int open(const char* path, int flags) {
     return syscall(3, (int)path, flags, 0);
 }
 
-int read(int fd, void* buf, uint32_t size) {
+static int read_unlocked(int fd, void* buf, uint32_t size) {
     if (fd == 0 && stdout && stdout->wbuf_mode == _IOLBF && stdout->wbuf_len) {
         (void)stdio_flush_wbuf(stdout);
     }
     return syscall(4, fd, (int)buf, size);
+}
+
+int read(int fd, void* buf, uint32_t size) {
+    int res;
+    stdio_lock_acquire();
+    res = read_unlocked(fd, buf, size);
+    stdio_lock_release();
+    return res;
 }
 
 int write(int fd, const void* buf, uint32_t size) {
@@ -345,7 +365,8 @@ FILE* fopen(const char* filename, const char* mode) {
 int fclose(FILE* stream) {
     if (!stream) return -1;
 
-    fflush(stream);
+    stdio_lock_acquire();
+    (void)fflush_unlocked(stream);
 
     int res = close(stream->fd);
     if (stream != stdin && stream != stdout && stream != stderr) {
@@ -355,22 +376,38 @@ int fclose(FILE* stream) {
         }
         free(stream);
     }
+    stdio_lock_release();
     return res;
 }
 
 size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream) {
     if (!stream) return 0;
+    stdio_lock_acquire();
     size_t bytes_req = size * nmemb;
-    int res = read(stream->fd, ptr, bytes_req);
-    if (res < 0) { stream->error = 1; return 0; }
-    if (res == 0) { stream->eof = 1; return 0; }
-    return res / size;
+    int res = read_unlocked(stream->fd, ptr, bytes_req);
+    if (res < 0) {
+        stream->error = 1;
+        stdio_lock_release();
+        return 0;
+    }
+    if (res == 0) {
+        stream->eof = 1;
+        stdio_lock_release();
+        return 0;
+    }
+    size_t out = res / size;
+    stdio_lock_release();
+    return out;
 }
 
 size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
     if (!stream) return 0;
+    stdio_lock_acquire();
     size_t bytes_req = size * nmemb;
-    if (bytes_req == 0) return 0;
+    if (bytes_req == 0) {
+        stdio_lock_release();
+        return 0;
+    }
 
     const unsigned char* p = (const unsigned char*)ptr;
     size_t bytes_done = 0;
@@ -382,7 +419,9 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
         } else {
             bytes_done = bytes_req;
         }
-        return size ? (bytes_done / size) : 0;
+        size_t out = size ? (bytes_done / size) : 0;
+        stdio_lock_release();
+        return out;
     }
 
     if (stdio_ensure_wbuf(stream) != 0) {
@@ -392,7 +431,9 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
         } else {
             bytes_done = bytes_req;
         }
-        return size ? (bytes_done / size) : 0;
+        size_t out = size ? (bytes_done / size) : 0;
+        stdio_lock_release();
+        return out;
     }
 
     while (bytes_done < bytes_req) {
@@ -413,7 +454,9 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
             size_t written = 0;
             if (stdio_write_loop(stream, p + bytes_done, chunk, &written) != 0) {
                 bytes_done += written;
-                return size ? (bytes_done / size) : 0;
+                size_t out = size ? (bytes_done / size) : 0;
+                stdio_lock_release();
+                return out;
             }
             bytes_done += chunk;
             continue;
@@ -422,7 +465,11 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
         size_t cpos = 0;
         while (cpos < chunk) {
             if (stream->wbuf_len == stream->wbuf_size) {
-                if (stdio_flush_wbuf(stream) != 0) return size ? (bytes_done / size) : 0;
+                if (stdio_flush_wbuf(stream) != 0) {
+                    size_t out = size ? (bytes_done / size) : 0;
+                    stdio_lock_release();
+                    return out;
+                }
             }
 
             size_t space = stream->wbuf_size - stream->wbuf_len;
@@ -436,11 +483,17 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
         bytes_done += chunk;
 
         if (need_flush_after) {
-            if (stdio_flush_wbuf(stream) != 0) return size ? (bytes_done / size) : 0;
+            if (stdio_flush_wbuf(stream) != 0) {
+                size_t out = size ? (bytes_done / size) : 0;
+                stdio_lock_release();
+                return out;
+            }
         }
     }
 
-    return size ? (bytes_done / size) : 0;
+    size_t out = size ? (bytes_done / size) : 0;
+    stdio_lock_release();
+    return out;
 }
 
 int fputc(int c, FILE* stream) {
@@ -483,9 +536,17 @@ int rename(const char* oldname, const char* newname) {
 }
 
 int fflush(FILE* stream) {
+    int res;
+    stdio_lock_acquire();
+    res = fflush_unlocked(stream);
+    stdio_lock_release();
+    return res;
+}
+
+static int fflush_unlocked(FILE* stream) {
     if (!stream) {
-        int a = fflush(stdout);
-        int b = fflush(stderr);
+        int a = fflush_unlocked(stdout);
+        int b = fflush_unlocked(stderr);
         return (a == 0 && b == 0) ? 0 : EOF;
     }
     return (stdio_flush_wbuf(stream) == 0) ? 0 : EOF;
@@ -495,7 +556,8 @@ int setvbuf(FILE* stream, char* buf, int mode, size_t size) {
     if (!stream) return -1;
     if (mode != _IONBF && mode != _IOLBF && mode != _IOFBF) return -1;
 
-    fflush(stream);
+    stdio_lock_acquire();
+    (void)fflush_unlocked(stream);
 
     if (stream->wbuf_owned && stream->wbuf) {
         free(stream->wbuf);
@@ -507,7 +569,10 @@ int setvbuf(FILE* stream, char* buf, int mode, size_t size) {
     stream->wbuf_owned = 0;
     stream->wbuf_mode = mode;
 
-    if (mode == _IONBF) return 0;
+    if (mode == _IONBF) {
+        stdio_lock_release();
+        return 0;
+    }
 
     if (size == 0) size = BUFSIZ;
     if (size == 0) size = 1;
@@ -516,17 +581,20 @@ int setvbuf(FILE* stream, char* buf, int mode, size_t size) {
         stream->wbuf = (unsigned char*)buf;
         stream->wbuf_size = size;
         stream->wbuf_owned = 0;
+        stdio_lock_release();
         return 0;
     }
 
     unsigned char* nb = (unsigned char*)malloc(size);
     if (!nb) {
         stream->wbuf_mode = _IONBF;
+        stdio_lock_release();
         return -1;
     }
     stream->wbuf = nb;
     stream->wbuf_size = size;
     stream->wbuf_owned = 1;
+    stdio_lock_release();
     return 0;
 }
 

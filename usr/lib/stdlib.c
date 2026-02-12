@@ -4,6 +4,7 @@
 #include "stdlib.h"
 #include "stdio.h"
 #include "syscall.h"
+#include "pthread.h"
 
 void exit(int status) {
     fflush(NULL);
@@ -20,14 +21,20 @@ int abs(int j) {
 }
 
 static unsigned int next_rand = 1;
+static pthread_mutex_t rand_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int rand(void) {
+    pthread_mutex_lock(&rand_lock);
     next_rand = next_rand * 1103515245 + 12345;
-    return (unsigned int)(next_rand / 65536) % 32768;
+    int res = (unsigned int)(next_rand / 65536) % 32768;
+    pthread_mutex_unlock(&rand_lock);
+    return res;
 }
 
 void srand(unsigned int seed) {
+    pthread_mutex_lock(&rand_lock);
     next_rand = seed;
+    pthread_mutex_unlock(&rand_lock);
 }
 
 int atoi(const char* str) {

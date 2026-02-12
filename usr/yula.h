@@ -12,6 +12,7 @@
 #include <lib/string.h>
 #include <lib/stdlib.h>
 #include <lib/stdio.h>
+#include <lib/pthread.h>
 #include <yos/ioctl.h>
 #include <yos/proc.h>
 

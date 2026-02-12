@@ -34,6 +34,15 @@ typedef struct FreeNode {
 static FreeNode* bins[NUM_BINS];
 static FreeNode* large_bin = NULL;
 static Block* top_chunk = NULL;
+static pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void malloc_lock_acquire(void) {
+    pthread_mutex_lock(&malloc_lock);
+}
+
+static void malloc_lock_release(void) {
+    pthread_mutex_unlock(&malloc_lock);
+}
 
 static void panic(const char* msg, void* ptr) {
     print("\n[MALLOC ERROR] ");
@@ -160,7 +169,7 @@ static Block* split_chunk(Block* block, size_t size) {
     return block;
 }
 
-void* malloc(size_t size) {
+static void* malloc_impl(size_t size) {
     if (size == 0) return NULL;
 
     size_t aligned_size = ALIGN(size);
@@ -208,7 +217,7 @@ void* malloc(size_t size) {
     return get_data_ptr(block);
 }
 
-void free(void* ptr) {
+static void free_impl(void* ptr) {
     if (!ptr) return;
 
     Block* block = get_header(ptr);
@@ -253,17 +262,17 @@ void free(void* ptr) {
     }
 }
 
-void* calloc(size_t nelem, size_t elsize) {
+static void* calloc_impl(size_t nelem, size_t elsize) {
     size_t size = nelem * elsize;
     if (nelem != 0 && size / nelem != elsize) return NULL;
-    void* ptr = malloc(size);
+    void* ptr = malloc_impl(size);
     if (ptr) memset(ptr, 0, size);
     return ptr;
 }
 
-void* realloc(void* ptr, size_t size) {
-    if (!ptr) return malloc(size);
-    if (size == 0) { free(ptr); return NULL; }
+static void* realloc_impl(void* ptr, size_t size) {
+    if (!ptr) return malloc_impl(size);
+    if (size == 0) { free_impl(ptr); return NULL; }
 
     Block* block = get_header(ptr);
     if (!validate_block(block)) panic("Heap corruption (realloc)", ptr);
@@ -314,9 +323,40 @@ void* realloc(void* ptr, size_t size) {
     }
 
 slow:
-    void* new_ptr = malloc(size);
+    void* new_ptr = malloc_impl(size);
     if (!new_ptr) return NULL;
     memcpy(new_ptr, ptr, block->size - HEADER_SIZE);
-    free(ptr);
+    free_impl(ptr);
     return new_ptr;
+}
+
+void* malloc(size_t size) {
+    void* res;
+    malloc_lock_acquire();
+    res = malloc_impl(size);
+    malloc_lock_release();
+    return res;
+}
+
+void free(void* ptr) {
+    if (!ptr) return;
+    malloc_lock_acquire();
+    free_impl(ptr);
+    malloc_lock_release();
+}
+
+void* calloc(size_t nelem, size_t elsize) {
+    void* res;
+    malloc_lock_acquire();
+    res = calloc_impl(nelem, elsize);
+    malloc_lock_release();
+    return res;
+}
+
+void* realloc(void* ptr, size_t size) {
+    void* res;
+    malloc_lock_acquire();
+    res = realloc_impl(ptr, size);
+    malloc_lock_release();
+    return res;
 }

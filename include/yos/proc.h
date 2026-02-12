@@ -18,4 +18,19 @@ typedef struct {
     char name[YOS_PROC_NAME_MAX];
 } __attribute__((packed)) yos_proc_info_t;
 
+#define YOS_SYS_CLONE 20
+
+typedef void (*yos_thread_fn_t)(void*);
+
+static inline int yos_clone(yos_thread_fn_t entry, void* arg, void* stack_top, uint32_t stack_size) {
+    int res = -1;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(res)
+        : "a"(YOS_SYS_CLONE), "b"(entry), "c"(arg), "d"(stack_top), "S"(stack_size)
+        : "memory"
+    );
+    return res;
+}
+
 #endif
