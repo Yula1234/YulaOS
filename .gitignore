@@ -18,3 +18,5 @@
 *.py
 
 bin/
+
+packages/tools/spin-build

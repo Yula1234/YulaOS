@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill" "networkd" "networkctl" "ping" "wget")
+USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill" "networkd" "networkctl" "ping" "wget" "spin")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -30,7 +30,7 @@ CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O2 -Wall -Wextra -I src -mno-mmx -mno-sse 
 -fno-strict-aliasing -fno-delete-null-pointer-checks -fno-strict-overflow -fwrapv -fno-common -Wstack-usage=16384 -mno-avx"
 # -fanalyzer
 
-CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O3 -fomit-frame-pointer" 
+CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O3 -fomit-frame-pointer"
 
 LDFLAGS_USER="--no-warn-rwx-segments -T usr/linker.ld"
 
@@ -46,22 +46,22 @@ echo "[kernel] compiling asm..."
 KERNEL_OBJ_FILES=""
 for FILE in $(find src -name "*.asm"); do
     if [[ "$FILE" == src/usr* || "$FILE" == src/boot/smp_trampoline.asm ]]; then continue; fi
-    
-    REL="${FILE#src/}"     
-    FLAT="${REL//\//_}"  
+
+    REL="${FILE#src/}"
+    FLAT="${REL//\//_}"
     OBJ="bin/obj/${FLAT%.*}.o"
-    
+
     $ASM "$FILE" "$OBJ" > /dev/null &
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
 done
 
 echo "[kernel] compiling C..."
 for FILE in $(find src -name "*.c"); do
-    
+
     REL="${FILE#src/}"
     FLAT="${REL//\//_}"
     OBJ="bin/obj/${FLAT%.*}.o"
-    
+
     $CC $CFLAGS_KERN -c "$FILE" -o "$OBJ" &
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
 done
@@ -145,7 +145,7 @@ grub-mkrescue -o bin/yulaos.iso "$ISODIR" 2> /dev/null
 
 echo "[run] qemu..."
 
-export vblank_mode=0 
+export vblank_mode=0
 export __GL_SYNC_TO_VBLANK=0
 
 QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard

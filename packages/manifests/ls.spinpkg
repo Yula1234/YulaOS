@@ -1,0 +1,4 @@
+name ls
+version 1.0
+description Directory listing
+file bin/usr/ls.exe /bin/ls.exe 755
