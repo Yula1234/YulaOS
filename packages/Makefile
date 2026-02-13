@@ -6,11 +6,10 @@ CFLAGS = -O2 -Wall -Wextra
 
 TOOL = tools/spin-build
 MANIFESTS = $(wildcard manifests/*.spinpkg)
-PACKAGES = $(patsubst manifests/%.spinpkg,build/%.spk,$(MANIFESTS))
 
-.PHONY: all clean index tool help
+.PHONY: all clean index tool help packages
 
-all: tool $(PACKAGES) index
+all: tool packages index
 
 tool: $(TOOL)
 
@@ -18,12 +17,17 @@ $(TOOL): tools/spin-build.c
 	@echo "[CC] spin-build"
 	@$(CC) $(CFLAGS) $< -o $@
 
-build/%.spk: manifests/%.spinpkg $(TOOL)
-	@echo "[BUILD] $*"
+packages: $(TOOL) $(MANIFESTS)
 	@mkdir -p build
-	@cd .. && ./packages/$(TOOL) packages/$< packages/$@
+	@for manifest in $(MANIFESTS); do \
+		name=$$(grep "^name " $$manifest | cut -d' ' -f2); \
+		version=$$(grep "^version " $$manifest | cut -d' ' -f2); \
+		output="build/$$name-$$version.spk"; \
+		echo "[BUILD] $$name-$$version"; \
+		cd .. && ./packages/$(TOOL) packages/$$manifest packages/$$output || exit 1; \
+	done
 
-index: $(PACKAGES)
+index:
 	@echo "[INDEX] repo.idx"
 	@cd .. && bash packages/tools/update-index.sh
 

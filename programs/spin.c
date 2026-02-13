@@ -10,7 +10,7 @@
 #define MAX_DESC 128
 #define MAX_PATH 200
 
-#define DEFAULT_REPO "https://raw.githubusercontent.com/YulaOS/yulaos/main/packages/"
+#define DEFAULT_REPO "https://raw.githubusercontent.com/Yula1234/YulaOS/refs/heads/main/packages/"
 #define CONF_PATH "/etc/spin.conf"
 #define DB_PATH "/var/spin/db.txt"
 #define CACHE_DIR "/var/spin/cache"
@@ -114,7 +114,7 @@ static int load_config(void) {
 static int download_file(const char* url, const char* out_path) {
     int fds[2];
     if (ipc_connect("networkd", fds) != 0) {
-        printf("error: cannot connect to networkd\n");
+        printf("error: cannot connect to networkd (is it running?)\n");
         return -1;
     }
 
@@ -125,6 +125,8 @@ static int download_file(const char* url, const char* out_path) {
     net_ipc_rx_reset(&rx);
 
     net_ipc_hdr_t hdr;
+    hdr.magic = NET_IPC_MAGIC;
+    hdr.version = NET_IPC_VERSION;
     hdr.type = NET_IPC_MSG_HELLO;
     hdr.seq = 1;
     hdr.len = 0;
@@ -132,10 +134,29 @@ static int download_file(const char* url, const char* out_path) {
     if (write(fd_w, &hdr, sizeof(hdr)) != sizeof(hdr)) {
         close(fd_r);
         close(fd_w);
+        printf("error: failed to send hello\n");
         return -1;
     }
 
-    sleep(100);
+    uint32_t hello_start = uptime_ms();
+    int hello_received = 0;
+    uint8_t payload[4096];
+
+    while (!hello_received && (uptime_ms() - hello_start) < 2000) {
+        int pr = net_ipc_try_recv(&rx, fd_r, &hdr, payload, sizeof(payload));
+        if (pr > 0 && hdr.type == NET_IPC_MSG_STATUS_RESP && hdr.seq == 1) {
+            hello_received = 1;
+            break;
+        }
+        sleep(10);
+    }
+
+    if (!hello_received) {
+        close(fd_r);
+        close(fd_w);
+        printf("error: networkd not responding\n");
+        return -1;
+    }
 
     net_http_get_req_t req;
     memset(&req, 0, sizeof(req));
@@ -143,6 +164,8 @@ static int download_file(const char* url, const char* out_path) {
     req.flags = 0;
     strncpy(req.url, url, sizeof(req.url) - 1);
 
+    hdr.magic = NET_IPC_MAGIC;
+    hdr.version = NET_IPC_VERSION;
     hdr.type = NET_IPC_MSG_HTTP_GET_REQ;
     hdr.seq = 2;
     hdr.len = sizeof(req);
@@ -162,14 +185,63 @@ static int download_file(const char* url, const char* out_path) {
     if (out_fd < 0) {
         close(fd_r);
         close(fd_w);
+        printf("error: cannot create output file\n");
         return -1;
     }
 
-    uint8_t payload[4096];
-    int done = 0;
-    int success = 0;
+    uint32_t start_time = uptime_ms();
+    uint32_t timeout = 60000;
+    int got_begin = 0;
+    uint32_t http_status = 0;
 
+    while (!got_begin) {
+        if ((uptime_ms() - start_time) > timeout) {
+            close(out_fd);
+            close(fd_r);
+            close(fd_w);
+            printf("error: timeout waiting for response\n");
+            return -1;
+        }
+
+        int pr = net_ipc_try_recv(&rx, fd_r, &hdr, payload, sizeof(payload));
+        if (pr < 0) {
+            close(out_fd);
+            close(fd_r);
+            close(fd_w);
+            printf("error: network read failed\n");
+            return -1;
+        }
+        if (pr == 0) {
+            sleep(50);
+            continue;
+        }
+
+        if (hdr.type == NET_IPC_MSG_HTTP_GET_BEGIN) {
+            if (hdr.len >= sizeof(net_http_get_begin_t)) {
+                net_http_get_begin_t* begin = (net_http_get_begin_t*)payload;
+                http_status = begin->http_status;
+                if (begin->status != 0 || http_status != 200) {
+                    close(out_fd);
+                    close(fd_r);
+                    close(fd_w);
+                    printf("error: http status %u\n", http_status);
+                    return -1;
+                }
+                got_begin = 1;
+                break;
+            }
+        } else if (hdr.type == NET_IPC_MSG_HTTP_GET_STAGE) {
+            continue;
+        }
+    }
+
+    int done = 0;
     while (!done) {
+        if ((uptime_ms() - start_time) > timeout) {
+            printf("error: download timeout\n");
+            break;
+        }
+
         int pr = net_ipc_try_recv(&rx, fd_r, &hdr, payload, sizeof(payload));
         if (pr < 0) {
             break;
@@ -185,10 +257,12 @@ static int download_file(const char* url, const char* out_path) {
             }
         } else if (hdr.type == NET_IPC_MSG_HTTP_GET_END) {
             net_http_get_end_t* end = (net_http_get_end_t*)payload;
-            if (end->status == 200) {
-                success = 1;
+            if (end->status == 0) {
+                done = 1;
+            } else {
+                printf("error: download failed with status %u\n", end->status);
+                done = 1;
             }
-            done = 1;
         }
     }
 
@@ -196,7 +270,7 @@ static int download_file(const char* url, const char* out_path) {
     close(fd_r);
     close(fd_w);
 
-    return success ? 0 : -1;
+    return done ? 0 : -1;
 }
 
 static int cmd_update(void) {
@@ -324,12 +398,12 @@ static int find_package_info(const char* name, char* out_ver, char* out_deps, ch
         }
 
         if (strncmp(line, name, name_len) == 0 && line[name_len] == '|') {
-            char* parts[5];
+            char* parts[6];
             int part_idx = 0;
             parts[part_idx++] = line;
 
             char* p = line;
-            while (*p && *p != '\n' && part_idx < 5) {
+            while (*p && *p != '\n' && part_idx < 6) {
                 if (*p == '|') {
                     *p = '\0';
                     parts[part_idx++] = p + 1;
@@ -338,7 +412,7 @@ static int find_package_info(const char* name, char* out_ver, char* out_deps, ch
             }
             if (*p == '\n') *p = '\0';
 
-            if (part_idx >= 5) {
+            if (part_idx >= 6) {
                 if (out_ver) strcpy(out_ver, parts[1]);
                 if (out_deps) strcpy(out_deps, parts[4]);
                 if (out_desc) strcpy(out_desc, parts[5]);
@@ -382,7 +456,8 @@ static int cmd_install(const char* name) {
     char url[512];
     snprintf(url, sizeof(url), "%sbuild/%s", repo_url, pkg_name);
 
-    printf("downloading...\n");
+    printf("downloading from: %s\n", url);
+    printf("saving to: %s\n", cache_path);
     if (download_file(url, cache_path) != 0) {
         printf("error: download failed\n");
         return 1;
