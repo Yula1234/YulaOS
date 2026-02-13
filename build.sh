@@ -73,9 +73,10 @@ $CC $CFLAGS_USER -c usr/lib/stdio.c  -o bin/obj/stdio.o &
 $CC $CFLAGS_USER -c usr/lib/string.c  -o bin/obj/string.o &
 $CC $CFLAGS_USER -c usr/lib/stdlib.c  -o bin/obj/stdlib.o &
 $CC $CFLAGS_USER -c usr/lib/net_ipc.c  -o bin/obj/net_ipc.o &
+$CC $CFLAGS_USER -c usr/lib/pthread.c  -o bin/obj/pthread.o &
 
 USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o
-bin/obj/string.o bin/obj/stdlib.o bin/obj/net_ipc.o"
+bin/obj/string.o bin/obj/stdlib.o bin/obj/net_ipc.o bin/obj/pthread.o"
 
 echo "[user] compiling apps..."
 declare -A USER_APP_OBJS
@@ -127,6 +128,7 @@ done
 "$TOOL" "$DISK_IMG" import bin/obj/string.o /bin/string.o > /dev/null
 "$TOOL" "$DISK_IMG" import bin/obj/stdlib.o /bin/stdlib.o > /dev/null
 "$TOOL" "$DISK_IMG" import bin/obj/stdio.o /bin/stdio.o > /dev/null
+"$TOOL" "$DISK_IMG" import bin/obj/pthread.o /bin/pthread.o > /dev/null
 
 cp bin/kernel.bin "$ISODIR/boot/kernel.bin"
 
