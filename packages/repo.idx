@@ -1,4 +1,0 @@
-# SPIN Package Index v1
-# Format: name|version|size|sha256|deps|description
-grep|1.0|32532|1a92ecfa9493b83baf7f63c8b73225d5223a0ff659c0590d9a5e1e18a143fbce||Text search utility
-ls|1.0|31148|d103383030ecb31d54db0dd8355d9375d3772a3125b1829511adbf29f7b00b07||Directory listing

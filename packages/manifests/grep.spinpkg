@@ -1,4 +1,0 @@
-name grep
-version 1.0
-description Text search utility
-file bin/usr/grep.exe /bin/grep.exe 755
