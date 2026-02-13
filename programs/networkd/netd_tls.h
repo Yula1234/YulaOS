@@ -10,7 +10,6 @@
 #define NETD_TLS_RX_CAP 8192u
 
 typedef struct {
-    netd_tcp_conn_t* tcp;
     int active;
     int ready;
     int closed;
@@ -48,7 +47,7 @@ typedef struct {
     uint32_t rx_w;
 } netd_tls_client_t;
 
-int netd_tls_handshake(netd_ctx_t* ctx, netd_tls_client_t* t, netd_tcp_conn_t* tcp, const char* host, uint32_t timeout_ms);
+int netd_tls_handshake(netd_ctx_t* ctx, netd_tls_client_t* t, const char* host, uint32_t timeout_ms);
 
 int netd_tls_connect(netd_ctx_t* ctx, netd_tls_client_t* t, const char* host, uint32_t ip, uint16_t port, uint32_t timeout_ms);
 

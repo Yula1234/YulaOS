@@ -133,8 +133,8 @@ static void netd_tls_wipe(void* p, uint32_t n) {
     }
 }
 
-static int netd_tls_tcp_read_exact_deadline(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t* out, uint32_t n, const netd_tls_deadline_t* deadline) {
-    if (!ctx || !t || !t->tcp || (!out && n != 0)) {
+static int netd_tls_tcp_read_exact_deadline(netd_ctx_t* ctx, uint8_t* out, uint32_t n, const netd_tls_deadline_t* deadline) {
+    if (!ctx || (!out && n != 0)) {
         return 0;
     }
 
@@ -142,7 +142,7 @@ static int netd_tls_tcp_read_exact_deadline(netd_ctx_t* ctx, netd_tls_client_t* 
     while (off < n) {
         uint32_t remaining_ms = netd_tls_deadline_remaining(deadline);
         if (remaining_ms == 0) {
-            t->tcp->last_err = NET_STATUS_TIMEOUT;
+            ctx->tcp.last_err = NET_STATUS_TIMEOUT;
             return 0;
         }
 
@@ -152,7 +152,7 @@ static int netd_tls_tcp_read_exact_deadline(netd_ctx_t* ctx, netd_tls_client_t* 
             cap = 512u;
         }
 
-        if (!netd_tcp_recv(ctx, t->tcp, out + off, cap, remaining_ms, &got)) {
+        if (!netd_tcp_recv(ctx, out + off, cap, remaining_ms, &got)) {
             return 0;
         }
         if (got == 0) {
@@ -164,35 +164,35 @@ static int netd_tls_tcp_read_exact_deadline(netd_ctx_t* ctx, netd_tls_client_t* 
     return 1;
 }
 
-static int netd_tls_tcp_read_exact(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t* out, uint32_t n, uint32_t timeout_ms) {
-    if (!ctx || !t || !t->tcp || (!out && n != 0)) {
+static int netd_tls_tcp_read_exact(netd_ctx_t* ctx, uint8_t* out, uint32_t n, uint32_t timeout_ms) {
+    if (!ctx || (!out && n != 0)) {
         return 0;
     }
 
     netd_tls_deadline_t deadline;
     netd_tls_deadline_init(&deadline, timeout_ms);
-    return netd_tls_tcp_read_exact_deadline(ctx, t, out, n, &deadline);
+    return netd_tls_tcp_read_exact_deadline(ctx, out, n, &deadline);
 }
 
-static int netd_tls_tcp_write_all_deadline(netd_ctx_t* ctx, netd_tls_client_t* t, const uint8_t* data, uint32_t len, const netd_tls_deadline_t* deadline) {
-    if (!ctx || !t || !t->tcp || (!data && len != 0)) {
+static int netd_tls_tcp_write_all_deadline(netd_ctx_t* ctx, const uint8_t* data, uint32_t len, const netd_tls_deadline_t* deadline) {
+    if (!ctx || (!data && len != 0)) {
         return 0;
     }
 
     uint32_t remaining_ms = netd_tls_deadline_remaining(deadline);
     if (remaining_ms == 0) {
-        t->tcp->last_err = NET_STATUS_TIMEOUT;
+        ctx->tcp.last_err = NET_STATUS_TIMEOUT;
         return 0;
     }
 
-    return netd_tcp_send(ctx, t->tcp, data, len, remaining_ms);
+    return netd_tcp_send(ctx, data, len, remaining_ms);
 }
 
-static int netd_tls_tcp_write_all(netd_ctx_t* ctx, netd_tls_client_t* t, const uint8_t* data, uint32_t len, uint32_t timeout_ms) {
-    if (!ctx || !t || !t->tcp || (!data && len != 0)) {
+static int netd_tls_tcp_write_all(netd_ctx_t* ctx, const uint8_t* data, uint32_t len, uint32_t timeout_ms) {
+    if (!ctx || (!data && len != 0)) {
         return 0;
     }
-    return netd_tcp_send(ctx, t->tcp, data, len, timeout_ms);
+    return netd_tcp_send(ctx, data, len, timeout_ms);
 }
 
 typedef struct {
@@ -303,8 +303,8 @@ static void netd_tls_sha256_empty(uint8_t out[32]) {
     netd_sha256_hash(0, 0, out);
 }
 
-static int netd_tls_write_record_plain(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t ct, const uint8_t* data, uint32_t len, uint32_t timeout_ms) {
-    if (!ctx || !t || !t->tcp || (!data && len != 0)) {
+static int netd_tls_write_record_plain(netd_ctx_t* ctx, uint8_t ct, const uint8_t* data, uint32_t len, uint32_t timeout_ms) {
+    if (!ctx || (!data && len != 0)) {
         return 0;
     }
 
@@ -314,26 +314,27 @@ static int netd_tls_write_record_plain(netd_ctx_t* ctx, netd_tls_client_t* t, ui
     hdr[2] = 0x03;
     netd_tls_store_be16(hdr + 3, (uint16_t)len);
 
-    if (!netd_tls_tcp_write_all(ctx, t, hdr, (uint32_t)sizeof(hdr), timeout_ms)) {
+    if (!netd_tls_tcp_write_all(ctx, hdr, (uint32_t)sizeof(hdr), timeout_ms)) {
         return 0;
     }
     if (len > 0) {
-        if (!netd_tls_tcp_write_all(ctx, t, data, len, timeout_ms)) {
+        if (!netd_tls_tcp_write_all(ctx, data, len, timeout_ms)) {
             return 0;
         }
     }
     return 1;
 }
 
-static int netd_tls_read_record_header(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t hdr[5], uint32_t timeout_ms) {
-    return netd_tls_tcp_read_exact(ctx, t, hdr, 5u, timeout_ms);
-}
-static int netd_tls_read_record_body(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t* out, uint32_t len, uint32_t timeout_ms) {
-    return netd_tls_tcp_read_exact(ctx, t, out, len, timeout_ms);
+static int netd_tls_read_record_header(netd_ctx_t* ctx, uint8_t hdr[5], uint32_t timeout_ms) {
+    return netd_tls_tcp_read_exact(ctx, hdr, 5u, timeout_ms);
 }
 
-static int netd_tls_write_record_plain_deadline(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t ct, const uint8_t* data, uint32_t len, const netd_tls_deadline_t* deadline) {
-    if (!ctx || !t || !t->tcp || (!data && len != 0)) {
+static int netd_tls_read_record_body(netd_ctx_t* ctx, uint8_t* out, uint32_t len, uint32_t timeout_ms) {
+    return netd_tls_tcp_read_exact(ctx, out, len, timeout_ms);
+}
+
+static int netd_tls_write_record_plain_deadline(netd_ctx_t* ctx, uint8_t ct, const uint8_t* data, uint32_t len, const netd_tls_deadline_t* deadline) {
+    if (!ctx || (!data && len != 0)) {
         return 0;
     }
 
@@ -343,23 +344,23 @@ static int netd_tls_write_record_plain_deadline(netd_ctx_t* ctx, netd_tls_client
     hdr[2] = 0x03;
     netd_tls_store_be16(hdr + 3, (uint16_t)len);
 
-    if (!netd_tls_tcp_write_all_deadline(ctx, t, hdr, (uint32_t)sizeof(hdr), deadline)) {
+    if (!netd_tls_tcp_write_all_deadline(ctx, hdr, (uint32_t)sizeof(hdr), deadline)) {
         return 0;
     }
     if (len > 0) {
-        if (!netd_tls_tcp_write_all_deadline(ctx, t, data, len, deadline)) {
+        if (!netd_tls_tcp_write_all_deadline(ctx, data, len, deadline)) {
             return 0;
         }
     }
     return 1;
 }
 
-static int netd_tls_read_record_header_deadline(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t hdr[5], const netd_tls_deadline_t* deadline) {
-    return netd_tls_tcp_read_exact_deadline(ctx, t, hdr, 5u, deadline);
+static int netd_tls_read_record_header_deadline(netd_ctx_t* ctx, uint8_t hdr[5], const netd_tls_deadline_t* deadline) {
+    return netd_tls_tcp_read_exact_deadline(ctx, hdr, 5u, deadline);
 }
 
-static int netd_tls_read_record_body_deadline(netd_ctx_t* ctx, netd_tls_client_t* t, uint8_t* out, uint32_t len, const netd_tls_deadline_t* deadline) {
-    return netd_tls_tcp_read_exact_deadline(ctx, t, out, len, deadline);
+static int netd_tls_read_record_body_deadline(netd_ctx_t* ctx, uint8_t* out, uint32_t len, const netd_tls_deadline_t* deadline) {
+    return netd_tls_tcp_read_exact_deadline(ctx, out, len, deadline);
 }
 
 static void netd_tls_set_internal_alert(netd_tls_client_t* t, uint16_t code) {
@@ -375,7 +376,7 @@ static void netd_tls_mark_io_failure(netd_ctx_t* ctx, netd_tls_client_t* t) {
         return;
     }
 
-    if (t->tcp && t->tcp->remote_closed) {
+    if (ctx->tcp.remote_closed) {
         netd_tls_set_internal_alert(t, NET_HTTP_TLS_INTERNAL_EOF);
         return;
     }
@@ -1498,10 +1499,10 @@ static int netd_tls_send_finished(
         return 0;
     }
 
-    if (!netd_tls_tcp_write_all_deadline(ctx, t, rec_hdr, 5u, deadline)) {
+    if (!netd_tls_tcp_write_all_deadline(ctx, rec_hdr, 5u, deadline)) {
         return 0;
     }
-    if (!netd_tls_tcp_write_all_deadline(ctx, t, rec_body, rec_body_len, deadline)) {
+    if (!netd_tls_tcp_write_all_deadline(ctx, rec_body, rec_body_len, deadline)) {
         return 0;
     }
 
@@ -1534,7 +1535,7 @@ static int netd_tls_recv_handshake_message(
     uint32_t avail = netd_tls_hs_rx_avail(hs_rx);
     while (avail < 4u) {
         uint8_t rec_hdr[5];
-        if (!netd_tls_read_record_header_deadline(ctx, t, rec_hdr, deadline)) {
+        if (!netd_tls_read_record_header_deadline(ctx, rec_hdr, deadline)) {
             netd_tls_mark_io_failure(ctx, t);
             return 0;
         }
@@ -1546,7 +1547,7 @@ static int netd_tls_recv_handshake_message(
         }
 
         uint8_t rec_body[16384u + 256u];
-        if (!netd_tls_read_record_body_deadline(ctx, t, rec_body, rec_len, deadline)) {
+        if (!netd_tls_read_record_body_deadline(ctx, rec_body, rec_len, deadline)) {
             netd_tls_mark_io_failure(ctx, t);
             return 0;
         }
@@ -1609,7 +1610,7 @@ static int netd_tls_recv_handshake_message(
 
     while (netd_tls_hs_rx_avail(hs_rx) < total_len) {
         uint8_t rec_hdr[5];
-        if (!netd_tls_read_record_header_deadline(ctx, t, rec_hdr, deadline)) {
+        if (!netd_tls_read_record_header_deadline(ctx, rec_hdr, deadline)) {
             netd_tls_mark_io_failure(ctx, t);
             return 0;
         }
@@ -1621,7 +1622,7 @@ static int netd_tls_recv_handshake_message(
         }
 
         uint8_t rec_body[16384u + 256u];
-        if (!netd_tls_read_record_body_deadline(ctx, t, rec_body, rec_len, deadline)) {
+        if (!netd_tls_read_record_body_deadline(ctx, rec_body, rec_len, deadline)) {
             netd_tls_mark_io_failure(ctx, t);
             return 0;
         }
@@ -1697,7 +1698,7 @@ static int netd_tls_ingest_handshake_bytes(
     }
 
     uint8_t rec_hdr[5];
-    if (!netd_tls_read_record_header_deadline(ctx, t, rec_hdr, deadline)) {
+    if (!netd_tls_read_record_header_deadline(ctx, rec_hdr, deadline)) {
         netd_tls_mark_io_failure(ctx, t);
         return 0;
     }
@@ -1709,7 +1710,7 @@ static int netd_tls_ingest_handshake_bytes(
     }
 
     uint8_t rec_body[16384u + 256u];
-    if (!netd_tls_read_record_body_deadline(ctx, t, rec_body, rec_len, deadline)) {
+    if (!netd_tls_read_record_body_deadline(ctx, rec_body, rec_len, deadline)) {
         netd_tls_mark_io_failure(ctx, t);
         return 0;
     }
@@ -1876,14 +1877,8 @@ static void netd_tls_client_reset(netd_tls_client_t* t) {
     t->hs_alert = hs_alert;
 }
 
-int netd_tls_handshake(
-    netd_ctx_t* ctx,
-    netd_tls_client_t* t,
-    netd_tcp_conn_t* tcp,
-    const char* host,
-    uint32_t timeout_ms
-) {
-    if (!ctx || !t || !tcp || !host) {
+int netd_tls_handshake(netd_ctx_t* ctx, netd_tls_client_t* t, const char* host, uint32_t timeout_ms) {
+    if (!ctx || !t || !host) {
         return 0;
     }
 
@@ -1891,7 +1886,6 @@ int netd_tls_handshake(
     netd_tls_deadline_init(&deadline, timeout_ms);
 
     netd_tls_client_init(t);
-    t->tcp = tcp;
     t->hs_status = NET_STATUS_ERROR;
 
     t->hs_step = NET_HTTP_TLS_STEP_BUILD_CLIENT_HELLO;
@@ -1921,8 +1915,8 @@ int netd_tls_handshake(
     netd_tls_transcript_update(&transcript, client_hello, client_hello_len);
 
     t->hs_step = NET_HTTP_TLS_STEP_SEND_CLIENT_HELLO;
-    if (!netd_tls_write_record_plain_deadline(ctx, t, NETD_TLS_CT_HANDSHAKE, client_hello, client_hello_len, &deadline)) {
-        t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+    if (!netd_tls_write_record_plain_deadline(ctx, NETD_TLS_CT_HANDSHAKE, client_hello, client_hello_len, &deadline)) {
+        t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
         netd_tls_client_reset(t);
         netd_tls_wipe(client_priv, (uint32_t)sizeof(client_priv));
         netd_tls_wipe(client_hello, (uint32_t)sizeof(client_hello));
@@ -1931,8 +1925,8 @@ int netd_tls_handshake(
 
     {
         uint8_t ccs = 1u;
-        if (!netd_tls_write_record_plain_deadline(ctx, t, NETD_TLS_CT_CHANGE_CIPHER_SPEC, &ccs, 1u, &deadline)) {
-            t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+        if (!netd_tls_write_record_plain_deadline(ctx, NETD_TLS_CT_CHANGE_CIPHER_SPEC, &ccs, 1u, &deadline)) {
+            t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
             netd_tls_client_reset(t);
             netd_tls_wipe(client_priv, (uint32_t)sizeof(client_priv));
             netd_tls_wipe(client_hello, (uint32_t)sizeof(client_hello));
@@ -1949,7 +1943,7 @@ int netd_tls_handshake(
 
     t->hs_step = NET_HTTP_TLS_STEP_RECV_SERVER_HELLO;
     if (!netd_tls_recv_handshake_message(ctx, t, &hs_rx, server_hello, (uint32_t)sizeof(server_hello), &server_hello_len, &deadline)) {
-        t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+        t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
         netd_tls_client_reset(t);
         goto cleanup;
     }
@@ -1997,16 +1991,16 @@ int netd_tls_handshake(
         }
 
         t->hs_step = NET_HTTP_TLS_STEP_SEND_CLIENT_HELLO;
-        if (!netd_tls_write_record_plain_deadline(ctx, t, NETD_TLS_CT_HANDSHAKE, client_hello, client_hello_len, &deadline)) {
-            t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+        if (!netd_tls_write_record_plain_deadline(ctx, NETD_TLS_CT_HANDSHAKE, client_hello, client_hello_len, &deadline)) {
+            t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
             netd_tls_client_reset(t);
             goto cleanup;
         }
 
         {
             uint8_t ccs = 1u;
-            if (!netd_tls_write_record_plain_deadline(ctx, t, NETD_TLS_CT_CHANGE_CIPHER_SPEC, &ccs, 1u, &deadline)) {
-                t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+            if (!netd_tls_write_record_plain_deadline(ctx, NETD_TLS_CT_CHANGE_CIPHER_SPEC, &ccs, 1u, &deadline)) {
+                t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
                 netd_tls_client_reset(t);
                 goto cleanup;
             }
@@ -2019,7 +2013,7 @@ int netd_tls_handshake(
 
         t->hs_step = NET_HTTP_TLS_STEP_RECV_SERVER_HELLO;
         if (!netd_tls_recv_handshake_message(ctx, t, &hs_rx, server_hello, (uint32_t)sizeof(server_hello), &server_hello_len, &deadline)) {
-            t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+            t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
             netd_tls_client_reset(t);
             goto cleanup;
         }
@@ -2131,7 +2125,7 @@ int netd_tls_handshake(
         t->hs_step = NET_HTTP_TLS_STEP_RECV_SERVER_FINISHED;
         uint8_t hh[4];
         if (!netd_tls_peek_handshake_header(ctx, t, &hs_rx, hh, &deadline)) {
-            t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+            t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
             netd_tls_client_reset(t);
             goto cleanup;
         }
@@ -2142,7 +2136,7 @@ int netd_tls_handshake(
 
         if (ht == NETD_TLS_HS_ENCRYPTED_EXTENSIONS || ht == NETD_TLS_HS_CERTIFICATE || ht == NETD_TLS_HS_CERTIFICATE_VERIFY) {
             if (!netd_tls_discard_handshake_message(ctx, t, &hs_rx, &transcript, &deadline)) {
-                t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+                t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
                 netd_tls_client_reset(t);
                 goto cleanup;
             }
@@ -2156,7 +2150,7 @@ int netd_tls_handshake(
         }
 
         if (!netd_tls_recv_handshake_message(ctx, t, &hs_rx, hs_msg, (uint32_t)sizeof(hs_msg), &hs_msg_len, &deadline)) {
-            t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+            t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
             netd_tls_client_reset(t);
             goto cleanup;
         }
@@ -2230,7 +2224,7 @@ int netd_tls_handshake(
 
     t->hs_step = NET_HTTP_TLS_STEP_SEND_CLIENT_FINISHED;
     if (!netd_tls_send_finished(ctx, t, &transcript, c_finished_key, &deadline)) {
-        t->hs_status = (t->tcp->last_err != 0) ? t->tcp->last_err : NET_STATUS_ERROR;
+        t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
         netd_tls_client_reset(t);
         goto cleanup;
     }
@@ -2277,17 +2271,15 @@ int netd_tls_connect(netd_ctx_t* ctx, netd_tls_client_t* t, const char* host, ui
         return 0;
     }
 
-    uint32_t st = NET_STATUS_ERROR;
-    netd_tcp_conn_t* tcp = netd_tcp_open(ctx, ip, port, timeout_ms, &st);
-    if (!tcp) {
+    if (!netd_tcp_connect(ctx, ip, port, timeout_ms)) {
         t->hs_step = 0;
-        t->hs_status = (st != 0) ? st : NET_STATUS_ERROR;
+        t->hs_status = (ctx->tcp.last_err != 0) ? ctx->tcp.last_err : NET_STATUS_ERROR;
         netd_tls_client_reset(t);
         return 0;
     }
 
-    if (!netd_tls_handshake(ctx, t, tcp, host, timeout_ms)) {
-        (void)netd_tcp_close(ctx, tcp, timeout_ms);
+    if (!netd_tls_handshake(ctx, t, host, timeout_ms)) {
+        (void)netd_tcp_close(ctx, timeout_ms);
         netd_tls_client_reset(t);
         return 0;
     }
@@ -2359,7 +2351,7 @@ static uint32_t netd_tls_ring_pop(netd_tls_client_t* t, uint8_t* out, uint32_t c
 
 static int netd_tls_read_app_record_into_buffer(netd_ctx_t* ctx, netd_tls_client_t* t, uint32_t timeout_ms) {
     uint8_t rec_hdr[5];
-    if (!netd_tls_read_record_header(ctx, t, rec_hdr, timeout_ms)) {
+    if (!netd_tls_read_record_header(ctx, rec_hdr, timeout_ms)) {
         return 0;
     }
 
@@ -2369,7 +2361,7 @@ static int netd_tls_read_app_record_into_buffer(netd_ctx_t* ctx, netd_tls_client
     }
 
     uint8_t rec_body[16384u + 256u];
-    if (!netd_tls_read_record_body(ctx, t, rec_body, rec_len, timeout_ms)) {
+    if (!netd_tls_read_record_body(ctx, rec_body, rec_len, timeout_ms)) {
         return 0;
     }
 
@@ -2437,10 +2429,10 @@ int netd_tls_send(netd_ctx_t* ctx, netd_tls_client_t* t, const void* data, uint3
             return 0;
         }
 
-        if (!netd_tls_tcp_write_all(ctx, t, rec_hdr, 5u, timeout_ms)) {
+        if (!netd_tls_tcp_write_all(ctx, rec_hdr, 5u, timeout_ms)) {
             return 0;
         }
-        if (!netd_tls_tcp_write_all(ctx, t, rec_body, rec_body_len, timeout_ms)) {
+        if (!netd_tls_tcp_write_all(ctx, rec_body, rec_body_len, timeout_ms)) {
             return 0;
         }
 
@@ -2479,13 +2471,11 @@ int netd_tls_close(netd_ctx_t* ctx, netd_tls_client_t* t, uint32_t timeout_ms) {
         return 0;
     }
 
-    netd_tcp_conn_t* tcp = t->tcp;
-
     t->closed = 1;
     t->ready = 0;
     t->active = 0;
 
     netd_tls_wipe(t, (uint32_t)sizeof(*t));
-    return tcp ? netd_tcp_close(ctx, tcp, timeout_ms) : 0;
+    return netd_tcp_close(ctx, timeout_ms);
 }
 
