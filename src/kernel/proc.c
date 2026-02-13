@@ -152,58 +152,191 @@ task_t* proc_current() {
 
 void proc_fd_table_init(task_t* t) {
     if (!t) return;
-    dlist_init(&t->fd_list);
-    t->fd_next = 0;
+
+    fd_table_t* ft = (fd_table_t*)kmalloc(sizeof(*ft));
+    if (!ft) {
+        t->fd_table = 0;
+        return;
+    }
+
+    memset(ft, 0, sizeof(*ft));
+    ft->refs = 1;
+    spinlock_init(&ft->lock);
+    dlist_init(&ft->entries);
+    ft->fd_next = 0;
+
+    t->fd_table = ft;
 }
 
-static proc_fd_entry_t* proc_fd_find_entry(task_t* t, int fd) {
-    if (!t || fd < 0) return 0;
+void proc_fd_table_retain(fd_table_t* ft) {
+    if (!ft) return;
+    __sync_fetch_and_add(&ft->refs, 1);
+}
+
+void file_desc_retain(file_desc_t* d) {
+    if (!d) return;
+    __sync_fetch_and_add(&d->refs, 1);
+}
+
+void file_desc_release(file_desc_t* d) {
+    if (!d) return;
+    if (__sync_sub_and_fetch(&d->refs, 1) != 0) return;
+
+    if (d->node) {
+        vfs_node_release(d->node);
+        d->node = 0;
+    }
+
+    kfree(d);
+}
+
+void proc_fd_table_release(fd_table_t* ft) {
+    if (!ft) return;
+
+    uint32_t old = __sync_fetch_and_sub(&ft->refs, 1);
+    if (old == 0) {
+        ft->refs = 0;
+        return;
+    }
+    if (old > 1) return;
+
     proc_fd_entry_t* e;
-    dlist_for_each_entry(e, &t->fd_list, list) {
+    proc_fd_entry_t* n;
+    dlist_for_each_entry_safe(e, n, &ft->entries, list) {
+        file_desc_t* d = e->desc;
+        dlist_del(&e->list);
+        kfree(e);
+        file_desc_release(d);
+    }
+
+    kfree(ft);
+}
+
+static proc_fd_entry_t* proc_fd_find_entry_locked(fd_table_t* ft, int fd) {
+    if (!ft || fd < 0) return 0;
+
+    proc_fd_entry_t* e;
+    dlist_for_each_entry(e, &ft->entries, list) {
         if (e->fd == fd) return e;
     }
     return 0;
 }
 
-file_t* proc_fd_get(task_t* t, int fd) {
-    proc_fd_entry_t* e = proc_fd_find_entry(t, fd);
-    return e ? &e->file : 0;
+file_desc_t* proc_fd_get(task_t* t, int fd) {
+    if (!t || fd < 0) return 0;
+    fd_table_t* ft = t->fd_table;
+    if (!ft) return 0;
+
+    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    proc_fd_entry_t* e = proc_fd_find_entry_locked(ft, fd);
+    file_desc_t* out = e ? e->desc : 0;
+    if (out) file_desc_retain(out);
+    spinlock_release_safe(&ft->lock, flags);
+    return out;
 }
 
-int proc_fd_add_at(task_t* t, int fd, file_t** out_file) {
+int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
+    if (out_desc) *out_desc = 0;
     if (!t || fd < 0) return -1;
-    if (proc_fd_find_entry(t, fd)) return -1;
+    fd_table_t* ft = t->fd_table;
+    if (!ft) return -1;
+
+    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    if (proc_fd_find_entry_locked(ft, fd)) {
+        spinlock_release_safe(&ft->lock, flags);
+        return -1;
+    }
+
+    file_desc_t* d = (file_desc_t*)kmalloc(sizeof(*d));
+    if (!d) {
+        spinlock_release_safe(&ft->lock, flags);
+        return -1;
+    }
+
+    memset(d, 0, sizeof(*d));
+    d->refs = 1;
+    spinlock_init(&d->lock);
 
     proc_fd_entry_t* e = (proc_fd_entry_t*)kmalloc(sizeof(proc_fd_entry_t));
-    if (!e) return -1;
+    if (!e) {
+        spinlock_release_safe(&ft->lock, flags);
+        kfree(d);
+        return -1;
+    }
     memset(e, 0, sizeof(*e));
     e->fd = fd;
+    e->desc = d;
 
     proc_fd_entry_t* pos;
-    dlist_for_each_entry(pos, &t->fd_list, list) {
+    dlist_for_each_entry(pos, &ft->entries, list) {
         if (pos->fd > fd) {
             dlist_add_tail(&e->list, &pos->list);
-            if (fd == t->fd_next) t->fd_next = fd + 1;
-            if (out_file) *out_file = &e->file;
+            if (fd == ft->fd_next) ft->fd_next = fd + 1;
+            spinlock_release_safe(&ft->lock, flags);
+            if (out_desc) *out_desc = d;
             return fd;
         }
     }
 
-    dlist_add_tail(&e->list, &t->fd_list);
+    dlist_add_tail(&e->list, &ft->entries);
 
-    if (fd == t->fd_next) t->fd_next = fd + 1;
-    if (out_file) *out_file = &e->file;
+    if (fd == ft->fd_next) ft->fd_next = fd + 1;
+    spinlock_release_safe(&ft->lock, flags);
+    if (out_desc) *out_desc = d;
     return fd;
 }
 
-int proc_fd_alloc(task_t* t, file_t** out_file) {
-    if (!t) return -1;
+int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
+    if (!t || fd < 0 || !desc) return -1;
+    fd_table_t* ft = t->fd_table;
+    if (!ft) return -1;
 
-    int expected = t->fd_next;
+    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    if (proc_fd_find_entry_locked(ft, fd)) {
+        spinlock_release_safe(&ft->lock, flags);
+        return -1;
+    }
+
+    proc_fd_entry_t* e = (proc_fd_entry_t*)kmalloc(sizeof(*e));
+    if (!e) {
+        spinlock_release_safe(&ft->lock, flags);
+        return -1;
+    }
+
+    memset(e, 0, sizeof(*e));
+    e->fd = fd;
+    e->desc = desc;
+    file_desc_retain(desc);
+
+    proc_fd_entry_t* pos;
+    dlist_for_each_entry(pos, &ft->entries, list) {
+        if (pos->fd > fd) {
+            dlist_add_tail(&e->list, &pos->list);
+            if (fd == ft->fd_next) ft->fd_next = fd + 1;
+            spinlock_release_safe(&ft->lock, flags);
+            return fd;
+        }
+    }
+
+    dlist_add_tail(&e->list, &ft->entries);
+    if (fd == ft->fd_next) ft->fd_next = fd + 1;
+    spinlock_release_safe(&ft->lock, flags);
+    return fd;
+}
+
+int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
+    if (out_desc) *out_desc = 0;
+    if (!t) return -1;
+    fd_table_t* ft = t->fd_table;
+    if (!ft) return -1;
+
+    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+
+    int expected = ft->fd_next;
     if (expected < 0) expected = 0;
 
     proc_fd_entry_t* e;
-    dlist_for_each_entry(e, &t->fd_list, list) {
+    dlist_for_each_entry(e, &ft->entries, list) {
         if (e->fd < expected) continue;
         if (e->fd == expected) {
             expected++;
@@ -214,42 +347,66 @@ int proc_fd_alloc(task_t* t, file_t** out_file) {
         }
     }
 
-    int fd = proc_fd_add_at(t, expected, out_file);
-    if (fd >= 0 && fd == t->fd_next) t->fd_next = fd + 1;
-    return fd;
+    spinlock_release_safe(&ft->lock, flags);
+    return proc_fd_add_at(t, expected, out_desc);
 }
 
-int proc_fd_remove(task_t* t, int fd, file_t* out_file) {
+int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
+    if (out_desc) *out_desc = 0;
     if (!t || fd < 0) return -1;
+    fd_table_t* ft = t->fd_table;
+    if (!ft) return -1;
 
-    proc_fd_entry_t* e = proc_fd_find_entry(t, fd);
-    if (!e) return -1;
+    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    proc_fd_entry_t* e = proc_fd_find_entry_locked(ft, fd);
+    if (!e) {
+        spinlock_release_safe(&ft->lock, flags);
+        return -1;
+    }
 
-    if (out_file) *out_file = e->file;
+    file_desc_t* d = e->desc;
     dlist_del(&e->list);
     kfree(e);
 
-    if (fd < t->fd_next) t->fd_next = fd;
+    if (fd < ft->fd_next) ft->fd_next = fd;
+    spinlock_release_safe(&ft->lock, flags);
+
+    if (out_desc) *out_desc = d;
     return 0;
 }
 
-static int proc_fd_clone_from(task_t* dst, task_t* src) {
-    if (!dst || !src) return 0;
+static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
+    if (!src) return 0;
 
-    proc_fd_entry_t* pe;
-    dlist_for_each_entry(pe, &src->fd_list, list) {
-        file_t* nf = 0;
-        if (proc_fd_add_at(dst, pe->fd, &nf) < 0 || !nf) {
+    fd_table_t* ft = (fd_table_t*)kmalloc(sizeof(*ft));
+    if (!ft) return 0;
+
+    memset(ft, 0, sizeof(*ft));
+    ft->refs = 1;
+    spinlock_init(&ft->lock);
+    dlist_init(&ft->entries);
+
+    uint32_t flags = spinlock_acquire_safe(&src->lock);
+    ft->fd_next = src->fd_next;
+
+    proc_fd_entry_t* se;
+    dlist_for_each_entry(se, &src->entries, list) {
+        proc_fd_entry_t* e = (proc_fd_entry_t*)kmalloc(sizeof(*e));
+        if (!e) {
+            spinlock_release_safe(&src->lock, flags);
+            proc_fd_table_release(ft);
             return 0;
         }
 
-        *nf = pe->file;
-        if (nf->node) {
-            vfs_node_retain(nf->node);
-        }
+        memset(e, 0, sizeof(*e));
+        e->fd = se->fd;
+        e->desc = se->desc;
+        file_desc_retain(e->desc);
+        dlist_add_tail(&e->list, &ft->entries);
     }
 
-    return 1;
+    spinlock_release_safe(&src->lock, flags);
+    return ft;
 }
 
 static void list_append(task_t* t) {
@@ -446,17 +603,9 @@ void proc_free_resources(task_t* t) {
 
     poll_task_cleanup(t);
 
-    proc_fd_entry_t* e;
-    proc_fd_entry_t* n;
-    dlist_for_each_entry_safe(e, n, &t->fd_list, list) {
-        file_t f = e->file;
-        dlist_del(&e->list);
-        kfree(e);
-
-        if (f.used) {
-            vfs_node_t* node = f.node;
-            vfs_node_release(node);
-        }
+    if (t->fd_table) {
+        proc_fd_table_release(t->fd_table);
+        t->fd_table = 0;
     }
 
     proc_sleep_remove(t);
@@ -670,12 +819,13 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     t->mem = parent->mem;
     proc_mem_retain(t->mem);
 
-    if (!proc_alloc_kstack(t)) {
-        proc_free_resources(t);
-        return 0;
+    if (parent->fd_table) {
+        proc_fd_table_release(t->fd_table);
+        t->fd_table = parent->fd_table;
+        proc_fd_table_retain(t->fd_table);
     }
 
-    if (!proc_fd_clone_from(t, parent)) {
+    if (!proc_alloc_kstack(t)) {
         proc_free_resources(t);
         return 0;
     }
@@ -846,7 +996,8 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     if (proc_current()) {
         task_t* parent = proc_current();
-        if (!proc_fd_clone_from(t, parent)) {
+        fd_table_t* cloned = proc_fd_table_clone(parent->fd_table);
+        if (!cloned) {
             vfs_node_release(exec_node);
             for(int i=0; i<argc; i++) kfree(k_argv[i]);
             kfree(k_argv);
@@ -854,30 +1005,29 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
             proc_free_resources(t);
             return 0;
         }
+
+        proc_fd_table_release(t->fd_table);
+        t->fd_table = cloned;
     } else {
-        file_t* f0 = 0;
-        file_t* f1 = 0;
-        file_t* f2 = 0;
+        file_desc_t* f0 = 0;
+        file_desc_t* f1 = 0;
+        file_desc_t* f2 = 0;
         if (proc_fd_add_at(t, 0, &f0) >= 0 && f0) {
             f0->node = devfs_clone("kbd");
             f0->offset = 0;
             f0->flags = 0;
-            f0->used = (f0->node != 0);
         }
         if (proc_fd_add_at(t, 1, &f1) >= 0 && f1) {
             f1->node = devfs_clone("console");
             f1->offset = 0;
             f1->flags = 0;
-            f1->used = (f1->node != 0);
         }
-        if (proc_fd_add_at(t, 2, &f2) >= 0 && f2 && f1 && f1->used) {
-            *f2 = *f1;
-            if (f2->node) {
-                vfs_node_retain(f2->node);
-            }
-        } else if (f2) {
-            f2->used = 0;
-            f2->node = 0;
+        if (proc_fd_add_at(t, 2, &f2) >= 0 && f2 && f1 && f1->node) {
+            vfs_node_t* node = f1->node;
+            vfs_node_retain(node);
+            f2->node = node;
+            f2->offset = f1->offset;
+            f2->flags = f1->flags;
         }
     }
     

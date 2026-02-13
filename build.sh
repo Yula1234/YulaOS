@@ -13,12 +13,14 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
+USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill" "networkd" "ping")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
+    CXX="ccache g++ -m32"
 else
     CC="gcc -m32"
+    CXX="g++ -m32"
 fi
 
 LD="ld -m elf_i386 --gc-sections"
@@ -30,7 +32,9 @@ CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O2 -Wall -Wextra -I src -mno-mmx -mno-sse 
 -fno-strict-aliasing -fno-delete-null-pointer-checks -fno-strict-overflow -fwrapv -fno-common -Wstack-usage=16384 -mno-avx"
 # -fanalyzer
 
-CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O3 -fomit-frame-pointer"
+CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O2 -fomit-frame-pointer"
+
+CXXFLAGS_USER="$CFLAGS_USER -std=c++23 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit"
 
 LDFLAGS_USER="--no-warn-rwx-segments -T usr/linker.ld"
 
@@ -80,19 +84,27 @@ bin/obj/string.o bin/obj/stdlib.o bin/obj/pthread.o"
 echo "[user] compiling apps..."
 declare -A USER_APP_OBJS
 for APP in "${USER_APPS[@]}"; do
-    if [ -d "programs/$APP" ] && [ -n "$(find "programs/$APP" -name "*.c" -print -quit)" ]; then
+    if [ -d "programs/$APP" ] && [ -n "$(find "programs/$APP" \( -name "*.c" -o -name "*.cpp" \) -print -quit)" ]; then
         OBJS=""
-        for FILE in $(find "programs/$APP" -name "*.c" | sort); do
+        for FILE in $(find "programs/$APP" \( -name "*.c" -o -name "*.cpp" \) | sort); do
             REL="${FILE#programs/$APP/}"
             FLAT="${REL//\//_}"
             OBJ="bin/usr/${APP}_${FLAT%.*}.o"
-            $CC $CFLAGS_USER -c "$FILE" -o "$OBJ" &
+            if [[ "$FILE" == *.cpp ]]; then
+                $CXX $CXXFLAGS_USER -c "$FILE" -o "$OBJ" &
+            else
+                $CC $CFLAGS_USER -c "$FILE" -o "$OBJ" &
+            fi
             OBJS="$OBJS $OBJ"
         done
         USER_APP_OBJS["$APP"]="$OBJS"
     else
         OBJ="bin/usr/$APP.o"
-        $CC $CFLAGS_USER -c "programs/$APP.c" -o "$OBJ" &
+        if [ -f "programs/$APP.c" ]; then
+            $CC $CFLAGS_USER -c "programs/$APP.c" -o "$OBJ" &
+        else
+            $CXX $CXXFLAGS_USER -c "programs/$APP.cpp" -o "$OBJ" &
+        fi
         USER_APP_OBJS["$APP"]="$OBJ"
     fi
 done

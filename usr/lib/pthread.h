@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define PTHREAD_CREATE_JOINABLE 0
 #define PTHREAD_CREATE_DETACHED 1
 
@@ -97,5 +101,9 @@ int pthread_spin_unlock(pthread_spinlock_t* lock);
 int pthread_barrier_init(pthread_barrier_t* barrier, uint32_t count);
 int pthread_barrier_destroy(pthread_barrier_t* barrier);
 int pthread_barrier_wait(pthread_barrier_t* barrier);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

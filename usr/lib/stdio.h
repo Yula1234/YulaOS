@@ -8,6 +8,10 @@
 #include <stdarg.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define EOF (-1)
 
 #ifndef NULL
@@ -87,5 +91,9 @@ int vprintf(const char* format, va_list ap);
 
 int remove(const char* filename);
 int rename(const char* oldname, const char* newname);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

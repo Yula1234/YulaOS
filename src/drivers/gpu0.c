@@ -65,10 +65,12 @@ static vfs_node_t* gpu0_fd_to_node(int32_t fd) {
     task_t* curr = proc_current();
     if (!curr) return 0;
 
-    file_t* f = proc_fd_get(curr, (int)fd);
-    if (!f || !f->used) return 0;
-    if (!f->node) return 0;
-    return f->node;
+    file_desc_t* d = proc_fd_get(curr, (int)fd);
+    if (!d || !d->node) return 0;
+
+    vfs_node_t* node = d->node;
+    file_desc_release(d);
+    return node;
 }
 
 void gpu0_vfs_init(void) {

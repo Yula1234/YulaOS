@@ -209,15 +209,20 @@ void vfs_node_release(vfs_node_t* node) {
 
 int vfs_getdents(int fd, void* buf, uint32_t size) {
     task_t* curr = proc_current();
-    file_t* f = proc_fd_get(curr, fd);
-    if (!f || !f->used) return -1;
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (!d || !d->node) return -1;
     if (!buf || size == 0) return -1;
 
-    vfs_node_t* node = f->node;
+    vfs_node_t* node = d->node;
     if (!node) return -1;
     if ((node->flags & VFS_FLAG_YULAFS) == 0) return -1;
 
-    return yulafs_getdents(node->inode_idx, &f->offset, (yfs_dirent_info_t*)buf, size);
+    uint32_t flags = spinlock_acquire_safe(&d->lock);
+    int res = yulafs_getdents(node->inode_idx, &d->offset, (yfs_dirent_info_t*)buf, size);
+    spinlock_release_safe(&d->lock, flags);
+
+    file_desc_release(d);
+    return res;
 }
 
 typedef struct {
@@ -227,11 +232,11 @@ typedef struct {
 
 int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
     task_t* curr = proc_current();
-    file_t* f = proc_fd_get(curr, dirfd);
-    if (!f || !f->used) return -1;
+    file_desc_t* d = proc_fd_get(curr, dirfd);
+    if (!d || !d->node) return -1;
     if (!name || !*name || !stat_buf) return -1;
 
-    vfs_node_t* node = f->node;
+    vfs_node_t* node = d->node;
     if (!node) return -1;
     if ((node->flags & VFS_FLAG_YULAFS) == 0) return -1;
 
@@ -244,6 +249,8 @@ int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
     vfs_stat_t* st = (vfs_stat_t*)stat_buf;
     st->type = info.type;
     st->size = info.size;
+
+    file_desc_release(d);
     return 0;
 }
 
@@ -326,68 +333,93 @@ int vfs_open(const char* path, int flags) {
         }
     }
 
-    file_t* f = 0;
-    int fd = proc_fd_alloc(curr, &f);
-    if (fd < 0 || !f) {
+    file_desc_t* d = 0;
+    int fd = proc_fd_alloc(curr, &d);
+    if (fd < 0 || !d) {
         vfs_node_release(node);
         return -1;
     }
 
-    f->node = node;
-    f->offset = 0;
-    f->flags = open_append ? FILE_FLAG_APPEND : 0u;
-    f->used = 1;
+    d->node = node;
+    d->offset = 0;
+    d->flags = open_append ? FILE_FLAG_APPEND : 0u;
 
     return fd;
 }
 
 int vfs_read(int fd, void* buf, uint32_t size) {
     task_t* curr = proc_current();
-    file_t* f = proc_fd_get(curr, fd);
-    if (!f || !f->used) return -1;
-    if (!f->node->ops->read) return -1;
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (!d || !d->node) return -1;
+    if (!d->node->ops->read) return -1;
 
-    int res = f->node->ops->read(f->node, f->offset, size, buf);
-    if (res > 0) f->offset += res;
+    uint32_t flags = spinlock_acquire_safe(&d->lock);
+    uint32_t off = d->offset;
+    spinlock_release_safe(&d->lock, flags);
+
+    int res = d->node->ops->read(d->node, off, size, buf);
+    if (res > 0) {
+        flags = spinlock_acquire_safe(&d->lock);
+        d->offset = off + (uint32_t)res;
+        spinlock_release_safe(&d->lock, flags);
+    }
+
+    file_desc_release(d);
     return res;
 }
 
 int vfs_write(int fd, const void* buf, uint32_t size) {
     task_t* curr = proc_current();
-    file_t* f = proc_fd_get(curr, fd);
-    if (!f || !f->used) return -1;
-    if (!f->node->ops->write) return -1;
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (!d || !d->node) return -1;
+    if (!d->node->ops->write) return -1;
 
-    if ((f->flags & FILE_FLAG_APPEND) != 0 && (f->node->flags & VFS_FLAG_YULAFS) != 0) {
+    uint32_t flags = spinlock_acquire_safe(&d->lock);
+    const uint32_t fflags = d->flags;
+    const uint32_t off = d->offset;
+    spinlock_release_safe(&d->lock, flags);
+
+    if ((fflags & FILE_FLAG_APPEND) != 0 && (d->node->flags & VFS_FLAG_YULAFS) != 0) {
         yfs_off_t start = 0;
-        int res = yulafs_append(f->node->inode_idx, buf, size, &start);
-        if (res > 0) f->offset = (uint32_t)start + (uint32_t)res;
+        int res = yulafs_append(d->node->inode_idx, buf, size, &start);
+        if (res > 0) {
+            flags = spinlock_acquire_safe(&d->lock);
+            d->offset = (uint32_t)start + (uint32_t)res;
+            spinlock_release_safe(&d->lock, flags);
+        }
+        file_desc_release(d);
         return res;
     }
 
-    int res = f->node->ops->write(f->node, f->offset, size, buf);
-    if (res > 0) f->offset += res;
+    int res = d->node->ops->write(d->node, off, size, buf);
+    if (res > 0) {
+        flags = spinlock_acquire_safe(&d->lock);
+        d->offset = off + (uint32_t)res;
+        spinlock_release_safe(&d->lock, flags);
+    }
+
+    file_desc_release(d);
     return res;
 }
 
 int vfs_ioctl(int fd, uint32_t req, void* arg) {
     task_t* curr = proc_current();
-    file_t* f = proc_fd_get(curr, fd);
-    if (!f || !f->used || !f->node || !f->node->ops) return -1;
-    if (!f->node->ops->ioctl) return -1;
-    return f->node->ops->ioctl(f->node, req, arg);
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (!d || !d->node || !d->node->ops) return -1;
+    if (!d->node->ops->ioctl) return -1;
+
+    int res = d->node->ops->ioctl(d->node, req, arg);
+    file_desc_release(d);
+    return res;
 }
 
 int vfs_close(int fd) {
     task_t* curr = proc_current();
 
-    file_t f;
-    memset(&f, 0, sizeof(f));
-    if (proc_fd_remove(curr, fd, &f) < 0) return -1;
+    file_desc_t* d = 0;
+    if (proc_fd_remove(curr, fd, &d) < 0 || !d) return -1;
 
-    vfs_node_t* node = f.node;
-
-    vfs_node_release(node);
+    file_desc_release(d);
     return 0;
 }
 

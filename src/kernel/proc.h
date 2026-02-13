@@ -76,9 +76,24 @@ typedef enum {
 
 typedef struct proc_fd_entry {
     int fd;
-    file_t file;
+    struct file_desc* desc;
     dlist_head_t list;
 } proc_fd_entry_t;
+
+typedef struct file_desc {
+    vfs_node_t* node;
+    uint32_t offset;
+    uint32_t flags;
+    uint32_t refs;
+    spinlock_t lock;
+} file_desc_t;
+
+typedef struct fd_table {
+    uint32_t refs;
+    spinlock_t lock;
+    dlist_head_t entries;
+    int fd_next;
+} fd_table_t;
 
 typedef struct task {
     uint32_t pid;
@@ -112,8 +127,7 @@ typedef struct task {
     uint32_t kstack_size;
     uint32_t stack_bottom;
     uint32_t stack_top;
-    dlist_head_t fd_list;
-    int fd_next;
+    fd_table_t* fd_table;
     uint32_t cwd_inode;
 
     void* terminal;
@@ -156,10 +170,15 @@ typedef struct task {
 } task_t;
 
 void proc_fd_table_init(task_t* t);
-file_t* proc_fd_get(task_t* t, int fd);
-int proc_fd_alloc(task_t* t, file_t** out_file);
-int proc_fd_add_at(task_t* t, int fd, file_t** out_file);
-int proc_fd_remove(task_t* t, int fd, file_t* out_file);
+file_desc_t* proc_fd_get(task_t* t, int fd);
+int proc_fd_alloc(task_t* t, file_desc_t** out_desc);
+int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc);
+int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc);
+int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc);
+void proc_fd_table_retain(fd_table_t* ft);
+void proc_fd_table_release(fd_table_t* ft);
+void file_desc_retain(file_desc_t* d);
+void file_desc_release(file_desc_t* d);
 
 void proc_init(void);
 task_t* proc_current(void);

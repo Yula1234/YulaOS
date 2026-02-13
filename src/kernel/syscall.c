@@ -768,8 +768,8 @@ static void syscall_pipe(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* fr = 0;
-    file_t* fw = 0;
+    file_desc_t* fr = 0;
+    file_desc_t* fw = 0;
 
     int fd_r = proc_fd_alloc(curr, &fr);
     if (fd_r < 0 || !fr) {
@@ -779,9 +779,9 @@ static void syscall_pipe(registers_t* regs, task_t* curr) {
 
     int fd_w = proc_fd_alloc(curr, &fw);
     if (fd_w < 0 || !fw) {
-        file_t tmp;
-        memset(&tmp, 0, sizeof(tmp));
-        proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_t* tmp = 0;
+        (void)proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_release(tmp);
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -789,10 +789,12 @@ static void syscall_pipe(registers_t* regs, task_t* curr) {
     vfs_node_t* r_node = 0;
     vfs_node_t* w_node = 0;
     if (vfs_create_pipe(&r_node, &w_node) != 0) {
-        file_t tmp;
-        memset(&tmp, 0, sizeof(tmp));
-        proc_fd_remove(curr, fd_r, &tmp);
-        proc_fd_remove(curr, fd_w, &tmp);
+        file_desc_t* tmp = 0;
+        (void)proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_release(tmp);
+        tmp = 0;
+        (void)proc_fd_remove(curr, fd_w, &tmp);
+        file_desc_release(tmp);
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -800,12 +802,10 @@ static void syscall_pipe(registers_t* regs, task_t* curr) {
     fr->node = r_node;
     fr->offset = 0;
     fr->flags = 0;
-    fr->used = 1;
 
     fw->node = w_node;
     fw->offset = 0;
     fw->flags = 0;
-    fw->used = 1;
 
     user_fds[0] = fd_r;
     user_fds[1] = fd_w;
@@ -821,13 +821,14 @@ static void syscall_dup2(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* of = proc_fd_get(curr, oldfd);
-    if (!of || !of->used) {
+    file_desc_t* of = proc_fd_get(curr, oldfd);
+    if (!of || !of->node) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
     if (oldfd == newfd) {
+        file_desc_release(of);
         regs->eax = (uint32_t)newfd;
         return;
     }
@@ -836,15 +837,13 @@ static void syscall_dup2(registers_t* regs, task_t* curr) {
         (void)vfs_close(newfd);
     }
 
-    file_t* nf = 0;
-    if (proc_fd_add_at(curr, newfd, &nf) < 0 || !nf) {
+    if (proc_fd_install_at(curr, newfd, of) < 0) {
+        file_desc_release(of);
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    *nf = *of;
-    if (nf->node) vfs_node_retain(nf->node);
-
+    file_desc_release(of);
     regs->eax = (uint32_t)newfd;
 }
 
@@ -874,47 +873,55 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = proc_fd_get(curr, fd);
-    if (fd < 0 || !f || !f->used || !f->node) {
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (fd < 0 || !d || !d->node) {
         regs->eax = 0;
         return;
     }
 
-    if (f->node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+    if (d->node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+        file_desc_release(d);
         regs->eax = 0;
         return;
     }
 
-    if (f->node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
+    if (d->node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
+        file_desc_release(d);
         regs->eax = 0;
         return;
     }
 
-    if (f->node->flags & VFS_FLAG_SHM) {
+    if (d->node->flags & VFS_FLAG_SHM) {
         if (map_kind != MAP_SHARED) {
+            file_desc_release(d);
             regs->eax = 0;
             return;
         }
-        if (!f->node->private_data) {
+        if (!d->node->private_data) {
+            file_desc_release(d);
             regs->eax = 0;
             return;
         }
-        if (size > f->node->size) {
+        if (size > d->node->size) {
+            file_desc_release(d);
             regs->eax = 0;
             return;
         }
     } else {
         if (map_kind == MAP_SHARED) {
+            file_desc_release(d);
             regs->eax = 0;
             return;
         }
-        if (!f->node->ops || !f->node->ops->read) {
+        if (!d->node->ops || !d->node->ops->read) {
+            file_desc_release(d);
             regs->eax = 0;
             return;
         }
     }
 
     if (!curr->mem) {
+        file_desc_release(d);
         regs->eax = 0;
         return;
     }
@@ -963,6 +970,7 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
     }
 
     if (!found) {
+        file_desc_release(d);
         regs->eax = 0;
         return;
     }
@@ -974,6 +982,7 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
 
     mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
     if (!area) {
+        file_desc_release(d);
         regs->eax = 0;
         return;
     }
@@ -982,17 +991,18 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
     area->vaddr_end = vaddr + size_aligned;
     area->file_offset = 0;
     area->length = size;
-    area->file = f->node;
-    area->file_size = (f->node->size < size) ? f->node->size : size;
+    area->file = d->node;
+    vfs_node_retain(area->file);
+    area->file_size = (d->node->size < size) ? d->node->size : size;
     area->map_flags = map_kind;
 
+    file_desc_release(d);
+
     if (vaddr + size_aligned < vaddr || vaddr + size_aligned > 0xC0000000u) {
-        kfree(area);
         regs->eax = 0;
         return;
     }
 
-    vfs_node_retain(area->file);
     area->next = curr->mem->mmap_list;
     curr->mem->mmap_list = area;
     curr->mem->mmap_top = vaddr + size_aligned;
@@ -1496,18 +1506,17 @@ static void syscall_shm_create(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = 0;
-    int fd = proc_fd_alloc(curr, &f);
-    if (fd < 0 || !f) {
+    file_desc_t* d = 0;
+    int fd = proc_fd_alloc(curr, &d);
+    if (fd < 0 || !d) {
         vfs_node_release(node);
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    f->node = node;
-    f->offset = 0;
-    f->flags = 0;
-    f->used = 1;
+    d->node = node;
+    d->offset = 0;
+    d->flags = 0;
     regs->eax = (uint32_t)fd;
 }
 
@@ -1521,13 +1530,14 @@ static void syscall_pipe_try_read(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = proc_fd_get(curr, fd);
-    if (!f || !f->used || !f->node) {
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (!d || !d->node) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    regs->eax = (uint32_t)pipe_read_nonblock(f->node, size, buf);
+    regs->eax = (uint32_t)pipe_read_nonblock(d->node, size, buf);
+    file_desc_release(d);
 }
 
 static void syscall_pipe_try_write(registers_t* regs, task_t* curr) {
@@ -1540,13 +1550,14 @@ static void syscall_pipe_try_write(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = proc_fd_get(curr, fd);
-    if (!f || !f->used || !f->node) {
+    file_desc_t* d = proc_fd_get(curr, fd);
+    if (!d || !d->node) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    regs->eax = (uint32_t)pipe_write_nonblock(f->node, size, buf);
+    regs->eax = (uint32_t)pipe_write_nonblock(d->node, size, buf);
+    file_desc_release(d);
 }
 
 static void syscall_kbd_try_read(registers_t* regs, task_t* curr) {
@@ -1601,18 +1612,17 @@ static void syscall_ipc_listen(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = 0;
-    int fd = proc_fd_alloc(curr, &f);
-    if (fd < 0 || !f) {
+    file_desc_t* d = 0;
+    int fd = proc_fd_alloc(curr, &d);
+    if (fd < 0 || !d) {
         vfs_node_release(node);
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    f->node = node;
-    f->offset = 0;
-    f->flags = 0;
-    f->used = 1;
+    d->node = node;
+    d->offset = 0;
+    d->flags = 0;
     regs->eax = (uint32_t)fd;
 }
 
@@ -1625,12 +1635,13 @@ static void syscall_ipc_accept(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* lf = proc_fd_get(curr, listen_fd);
-    if (!lf || !lf->used || !lf->node) {
+    file_desc_t* lf = proc_fd_get(curr, listen_fd);
+    if (!lf || !lf->node) {
         regs->eax = (uint32_t)-1;
         return;
     }
     if ((lf->node->flags & VFS_FLAG_IPC_LISTEN) == 0) {
+        file_desc_release(lf);
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -1638,13 +1649,14 @@ static void syscall_ipc_accept(registers_t* regs, task_t* curr) {
     vfs_node_t* in_r = 0;
     vfs_node_t* out_w = 0;
     int ar = ipc_accept(lf->node, &in_r, &out_w);
+    file_desc_release(lf);
     if (ar <= 0) {
         regs->eax = (uint32_t)ar;
         return;
     }
 
-    file_t* fr = 0;
-    file_t* fw = 0;
+    file_desc_t* fr = 0;
+    file_desc_t* fw = 0;
 
     int fd_r = proc_fd_alloc(curr, &fr);
     if (fd_r < 0 || !fr) {
@@ -1656,9 +1668,9 @@ static void syscall_ipc_accept(registers_t* regs, task_t* curr) {
 
     int fd_w = proc_fd_alloc(curr, &fw);
     if (fd_w < 0 || !fw) {
-        file_t tmp;
-        memset(&tmp, 0, sizeof(tmp));
-        proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_t* tmp = 0;
+        (void)proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_release(tmp);
 
         vfs_node_release(in_r);
         vfs_node_release(out_w);
@@ -1669,12 +1681,10 @@ static void syscall_ipc_accept(registers_t* regs, task_t* curr) {
     fr->node = in_r;
     fr->offset = 0;
     fr->flags = 0;
-    fr->used = 1;
 
     fw->node = out_w;
     fw->offset = 0;
     fw->flags = 0;
-    fw->used = 1;
 
     out_fds[0] = fd_r;
     out_fds[1] = fd_w;
@@ -1704,8 +1714,8 @@ static void syscall_ipc_connect(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* fr = 0;
-    file_t* fw = 0;
+    file_desc_t* fr = 0;
+    file_desc_t* fw = 0;
 
     int fd_r = proc_fd_alloc(curr, &fr);
     if (fd_r < 0 || !fr) {
@@ -1718,9 +1728,9 @@ static void syscall_ipc_connect(registers_t* regs, task_t* curr) {
 
     int fd_w = proc_fd_alloc(curr, &fw);
     if (fd_w < 0 || !fw) {
-        file_t tmp;
-        memset(&tmp, 0, sizeof(tmp));
-        proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_t* tmp = 0;
+        (void)proc_fd_remove(curr, fd_r, &tmp);
+        file_desc_release(tmp);
 
         ipc_connect_cancel(pending);
         vfs_node_release(in_w);
@@ -1732,12 +1742,10 @@ static void syscall_ipc_connect(registers_t* regs, task_t* curr) {
     fr->node = out_r;
     fr->offset = 0;
     fr->flags = 0;
-    fr->used = 1;
 
     fw->node = in_w;
     fw->offset = 0;
     fw->flags = 0;
-    fw->used = 1;
 
     out_fds[0] = fd_r;
     out_fds[1] = fd_w;
@@ -1770,18 +1778,17 @@ static void syscall_shm_create_named(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = 0;
-    int fd = proc_fd_alloc(curr, &f);
-    if (fd < 0 || !f) {
+    file_desc_t* d = 0;
+    int fd = proc_fd_alloc(curr, &d);
+    if (fd < 0 || !d) {
         vfs_node_release(node);
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    f->node = node;
-    f->offset = 0;
-    f->flags = 0;
-    f->used = 1;
+    d->node = node;
+    d->offset = 0;
+    d->flags = 0;
     regs->eax = (uint32_t)fd;
 }
 
@@ -1800,18 +1807,17 @@ static void syscall_shm_open_named(registers_t* regs, task_t* curr) {
         return;
     }
 
-    file_t* f = 0;
-    int fd = proc_fd_alloc(curr, &f);
-    if (fd < 0 || !f) {
+    file_desc_t* d = 0;
+    int fd = proc_fd_alloc(curr, &d);
+    if (fd < 0 || !d) {
         vfs_node_release(node);
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    f->node = node;
-    f->offset = 0;
-    f->flags = 0;
-    f->used = 1;
+    d->node = node;
+    d->offset = 0;
+    d->flags = 0;
     regs->eax = (uint32_t)fd;
 }
 
@@ -2379,11 +2385,11 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             if (fd < 0) {
                 rev = POLLNVAL;
             } else {
-                file_t* f = proc_fd_get(curr, fd);
-                if (!f || !f->used || !f->node) {
+                file_desc_t* d = proc_fd_get(curr, fd);
+                if (!d || !d->node) {
                     rev = POLLNVAL;
                 } else {
-                    vfs_node_t* node = f->node;
+                    vfs_node_t* node = d->node;
                     if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
                         uint32_t avail = 0;
                         uint32_t space = 0;
@@ -2420,6 +2426,8 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                         }
                     }
                 }
+
+                file_desc_release(d);
             }
 
             p->revents = rev;
@@ -2452,10 +2460,13 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             if (fd < 0) continue;
             if ((ev & (POLLIN | POLLOUT)) == 0) continue;
 
-            file_t* f = proc_fd_get(curr, fd);
-            if (!f || !f->used || !f->node) continue;
+            file_desc_t* d = proc_fd_get(curr, fd);
+            if (!d || !d->node) {
+                file_desc_release(d);
+                continue;
+            }
 
-            vfs_node_t* node = f->node;
+            vfs_node_t* node = d->node;
             if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
                 (void)pipe_poll_waitq_register(node, &waiters[i], curr);
             } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
@@ -2471,6 +2482,8 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                     (void)mouse_poll_waitq_register(&waiters[i], curr);
                 }
             }
+
+            file_desc_release(d);
         }
 
         if (have_deadline) {

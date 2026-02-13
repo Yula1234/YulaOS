@@ -6,6 +6,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void* malloc(size_t size);
 void  free(void* ptr);
 void* calloc(size_t nelem, size_t elsize);
@@ -27,5 +31,9 @@ void srand(unsigned int seed);
 
 typedef int (*cmp_func_t)(const void*, const void*);
 void qsort(void* base, size_t nmemb, size_t size, cmp_func_t compar);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
