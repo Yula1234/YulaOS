@@ -13,7 +13,7 @@ DISK_IMG="disk.img"
 
 TOOL="bin/tools/yulafs_tool"
 
-USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill" "networkd" "networkctl" "ping" "wget" "spin")
+USER_APPS=("geditor" "asmc" "dasm" "grep" "cat" "uld" "scc" "explorer" "cp" "mv" "touch" "tree" "ld" "paint" "flux" "axwm" "launcher" "ush" "term" "ps" "time" "neofetch" "ls" "rm" "mkdir" "kill")
 
 if command -v ccache &> /dev/null; then
     CC="ccache gcc -m32"
@@ -72,11 +72,10 @@ $CC $CFLAGS_USER -c usr/lib/malloc.c -o bin/obj/malloc.o &
 $CC $CFLAGS_USER -c usr/lib/stdio.c  -o bin/obj/stdio.o &
 $CC $CFLAGS_USER -c usr/lib/string.c  -o bin/obj/string.o &
 $CC $CFLAGS_USER -c usr/lib/stdlib.c  -o bin/obj/stdlib.o &
-$CC $CFLAGS_USER -c usr/lib/net_ipc.c  -o bin/obj/net_ipc.o &
 $CC $CFLAGS_USER -c usr/lib/pthread.c  -o bin/obj/pthread.o &
 
 USER_LIBS="bin/obj/malloc.o bin/obj/stdio.o bin/usr/start.o
-bin/obj/string.o bin/obj/stdlib.o bin/obj/net_ipc.o bin/obj/pthread.o"
+bin/obj/string.o bin/obj/stdlib.o bin/obj/pthread.o"
 
 echo "[user] compiling apps..."
 declare -A USER_APP_OBJS
