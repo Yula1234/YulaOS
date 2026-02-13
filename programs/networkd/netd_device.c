@@ -37,7 +37,7 @@ void netd_device_process(netd_ctx_t* ctx) {
     }
 
     for (;;) {
-        int r = netd_iface_read_frame(ctx, ctx->rx_buf, (uint32_t)sizeof(ctx->rx_buf));
+        int r = netd_iface_read_frame(ctx, ctx->rx_buf, ctx->rx_buf_size);
         if (r <= 0) {
             break;
         }

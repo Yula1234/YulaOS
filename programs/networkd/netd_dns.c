@@ -29,19 +29,19 @@ static uint16_t netd_dns_port_from_id(uint16_t id) {
 }
 
 static netd_dns_wait_slot_t* netd_dns_slot_by_handle(netd_ctx_t* ctx, int handle) {
-    if (!ctx || handle < 0 || handle >= NETD_DNS_MAX_WAITS) {
+    if (!ctx || handle < 0 || (uint32_t)handle >= ctx->dns_waits.capacity) {
         return 0;
     }
-    return &ctx->dns_waits[handle];
+    return &ctx->dns_waits.slots[handle];
 }
 
 static int netd_dns_alloc_slot(netd_ctx_t* ctx) {
-    if (!ctx) {
+    if (!ctx || !ctx->dns_waits.slots) {
         return -1;
     }
-    for (int i = 0; i < NETD_DNS_MAX_WAITS; i++) {
-        if (!ctx->dns_waits[i].active) {
-            return i;
+    for (uint32_t i = 0; i < ctx->dns_waits.capacity; i++) {
+        if (!ctx->dns_waits.slots[i].active) {
+            return (int)i;
         }
     }
     return -1;
@@ -312,7 +312,6 @@ void netd_dns_process_udp(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8
     const uint8_t* dns = payload + sizeof(net_udp_hdr_t);
     uint32_t dns_len = (uint32_t)udp_len - (uint32_t)sizeof(net_udp_hdr_t);
 
-
     if (ctx->dns_wait.active && !ctx->dns_wait.received && dst_port == ctx->dns_wait.port) {
         uint32_t addr = 0;
         if (netd_dns_parse_response(dns, dns_len, ctx->dns_wait.id, &addr)) {
@@ -321,8 +320,8 @@ void netd_dns_process_udp(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8
         }
     }
 
-    for (int i = 0; i < NETD_DNS_MAX_WAITS; i++) {
-        netd_dns_wait_slot_t* s = &ctx->dns_waits[i];
+    for (uint32_t i = 0; i < ctx->dns_waits.capacity; i++) {
+        netd_dns_wait_slot_t* s = &ctx->dns_waits.slots[i];
         if (!s->active || s->received) {
             continue;
         }
@@ -355,7 +354,7 @@ int netd_dns_query_start(netd_ctx_t* ctx, const char* name, uint32_t timeout_ms)
         return -1;
     }
 
-    netd_dns_wait_slot_t* s = &ctx->dns_waits[h];
+    netd_dns_wait_slot_t* s = &ctx->dns_waits.slots[h];
     netd_dns_slot_reset(s);
 
     uint16_t id = netd_dns_gen_id(ctx);

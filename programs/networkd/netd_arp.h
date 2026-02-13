@@ -13,5 +13,13 @@ void netd_arp_process_frame(netd_ctx_t* ctx, const uint8_t* buf, uint32_t len);
 
 int netd_arp_resolve_mac(netd_ctx_t* ctx, uint32_t target_ip, uint8_t out_mac[6], uint32_t timeout_ms);
 
+void netd_arp_cleanup(netd_ctx_t* ctx);
+
+void netd_arp_cache_clear(netd_ctx_t* ctx);
+
+uint32_t netd_arp_cache_size(const netd_ctx_t* ctx);
+
+void netd_arp_cache_print(const netd_ctx_t* ctx);
+
 #endif
 

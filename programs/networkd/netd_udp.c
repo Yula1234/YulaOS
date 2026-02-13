@@ -19,7 +19,7 @@ int netd_udp_send(netd_ctx_t* ctx, uint32_t dst_ip, uint16_t dst_port, uint16_t 
     uint32_t ip_total_len = (uint32_t)sizeof(net_ipv4_hdr_t) + ip_payload_len;
     uint32_t frame_len = (uint32_t)sizeof(net_eth_hdr_t) + ip_total_len;
 
-    if (frame_len > (uint32_t)sizeof(ctx->tx_buf)) {
+    if (frame_len > ctx->tx_buf_size) {
         return 0;
     }
 

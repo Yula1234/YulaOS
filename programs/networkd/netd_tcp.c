@@ -288,15 +288,15 @@ static uint32_t netd_tcp_rx_count(const netd_tcp_conn_t* c) {
         return c->rx_w - c->rx_r;
     }
 
-    return (uint32_t)NETD_TCP_RX_CAP - (c->rx_r - c->rx_w);
+    return c->rx_cap - (c->rx_r - c->rx_w);
 }
 
 static uint32_t netd_tcp_rx_space(const netd_tcp_conn_t* c) {
     uint32_t used = netd_tcp_rx_count(c);
-    if (used >= (uint32_t)NETD_TCP_RX_CAP - 1u) {
+    if (used >= c->rx_cap - 1u) {
         return 0;
     }
-    return ((uint32_t)NETD_TCP_RX_CAP - 1u) - used;
+    return c->rx_cap - 1u - used;
 }
 
 static uint16_t netd_tcp_window(const netd_tcp_conn_t* c) {
@@ -322,7 +322,7 @@ static uint32_t netd_tcp_rx_write(netd_tcp_conn_t* c, const uint8_t* data, uint3
     }
 
     uint32_t wi = c->rx_w;
-    uint32_t first = (uint32_t)NETD_TCP_RX_CAP - wi;
+    uint32_t first = c->rx_cap - wi;
     if (first > len) {
         first = len;
     }
@@ -334,8 +334,8 @@ static uint32_t netd_tcp_rx_write(netd_tcp_conn_t* c, const uint8_t* data, uint3
     }
 
     wi += len;
-    if (wi >= (uint32_t)NETD_TCP_RX_CAP) {
-        wi -= (uint32_t)NETD_TCP_RX_CAP;
+    if (wi >= c->rx_cap) {
+        wi -= c->rx_cap;
     }
     c->rx_w = wi;
 
@@ -357,7 +357,7 @@ static uint32_t netd_tcp_rx_read(netd_tcp_conn_t* c, uint8_t* out, uint32_t cap)
     }
 
     uint32_t ri = c->rx_r;
-    uint32_t first = (uint32_t)NETD_TCP_RX_CAP - ri;
+    uint32_t first = c->rx_cap - ri;
     if (first > cap) {
         first = cap;
     }
@@ -369,8 +369,8 @@ static uint32_t netd_tcp_rx_read(netd_tcp_conn_t* c, uint8_t* out, uint32_t cap)
     }
 
     ri += cap;
-    if (ri >= (uint32_t)NETD_TCP_RX_CAP) {
-        ri -= (uint32_t)NETD_TCP_RX_CAP;
+    if (ri >= c->rx_cap) {
+        ri -= c->rx_cap;
     }
     c->rx_r = ri;
 
@@ -468,7 +468,7 @@ static int netd_tcp_send_segment(netd_ctx_t* ctx, netd_tcp_conn_t* c, uint8_t fl
     uint32_t ip_total_len = (uint32_t)sizeof(net_ipv4_hdr_t) + ip_payload_len;
     uint32_t frame_len = (uint32_t)sizeof(net_eth_hdr_t) + ip_total_len;
 
-    if (frame_len > (uint32_t)sizeof(ctx->tx_buf)) {
+    if (frame_len > ctx->tx_buf_size) {
         return 0;
     }
 
@@ -544,6 +544,14 @@ static void netd_tcp_conn_destroy(netd_ctx_t* ctx, netd_tcp_conn_t* c) {
         ctx->tcp.conns[idx] = 0;
     }
 
+    if (c->rx_buf) {
+        free(c->rx_buf);
+    }
+
+    if (c->tx_buf) {
+        free(c->tx_buf);
+    }
+
     free(c);
 }
 
@@ -565,6 +573,27 @@ static netd_tcp_conn_t* netd_tcp_open_create_and_send_syn(netd_ctx_t* ctx, uint3
 
     netd_tcp_conn_t* c = (netd_tcp_conn_t*)calloc(1, sizeof(*c));
     if (!c) {
+        if (out_status) {
+            *out_status = NET_STATUS_ERROR;
+        }
+        return 0;
+    }
+
+    c->rx_cap = NETD_TCP_RX_BUF_DEFAULT;
+    c->rx_buf = (uint8_t*)malloc(c->rx_cap);
+    if (!c->rx_buf) {
+        free(c);
+        if (out_status) {
+            *out_status = NET_STATUS_ERROR;
+        }
+        return 0;
+    }
+
+    c->tx_cap = NETD_TCP_TX_BUF_DEFAULT;
+    c->tx_buf = (uint8_t*)malloc(c->tx_cap);
+    if (!c->tx_buf) {
+        free(c->rx_buf);
+        free(c);
         if (out_status) {
             *out_status = NET_STATUS_ERROR;
         }
@@ -900,6 +929,42 @@ void netd_tcp_shutdown(netd_ctx_t* ctx) {
         return;
     }
     netd_tcp_mgr_free(&ctx->tcp);
+}
+
+void netd_tcp_cleanup_idle(netd_ctx_t* ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    netd_tcp_mgr_t* mgr = &ctx->tcp;
+    if (!mgr->conns) {
+        return;
+    }
+
+    uint32_t now = uptime_ms();
+    uint32_t idle_timeout = NETD_TCP_IDLE_TIMEOUT_MS;
+    uint32_t conn_timeout = NETD_TCP_CONN_TIMEOUT_MS;
+
+    for (uint32_t i = 0; i < mgr->count; i++) {
+        netd_tcp_conn_t* c = mgr->conns[i];
+        if (!c || !c->active) {
+            continue;
+        }
+
+        uint32_t idle_time = now - c->last_activity_ms;
+        
+        if (c->state == NETD_TCP_STATE_ESTABLISHED) {
+            if (idle_time > idle_timeout) {
+                netd_tcp_conn_destroy(ctx, c);
+                continue;
+            }
+        } else {
+            if (idle_time > conn_timeout) {
+                netd_tcp_conn_destroy(ctx, c);
+                continue;
+            }
+        }
+    }
 }
 
 void netd_tcp_process_ipv4(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8_t* payload, uint32_t payload_len) {

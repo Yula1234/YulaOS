@@ -8,9 +8,7 @@
 #include "netd_tcp.h"
 #include "netd_tls.h"
 
-#define NETD_HTTP_MAX_REDIRECTS 4u
 
-#define NETD_HTTP_MAX_JOBS 8
 
 static int netd_http_parse_url(
     const char* url,

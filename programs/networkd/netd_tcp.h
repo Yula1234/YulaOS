@@ -10,6 +10,7 @@
 
 void netd_tcp_init(netd_ctx_t* ctx);
 void netd_tcp_shutdown(netd_ctx_t* ctx);
+void netd_tcp_cleanup_idle(netd_ctx_t* ctx);
 
 void netd_tcp_process_ipv4(netd_ctx_t* ctx, const net_ipv4_hdr_t* ip, const uint8_t* payload, uint32_t payload_len);
 
