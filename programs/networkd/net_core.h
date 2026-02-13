@@ -100,6 +100,29 @@ struct UniqueFd {
     void reset(int v = -1);
 };
 
+class PipePair {
+public:
+    PipePair();
+
+    PipePair(const PipePair&) = delete;
+    PipePair& operator=(const PipePair&) = delete;
+
+    PipePair(PipePair&&) = default;
+    PipePair& operator=(PipePair&&) = default;
+
+    bool create();
+
+    int read_fd() const { return m_r.get(); }
+    int write_fd() const { return m_w.get(); }
+
+    void signal() const;
+    void drain() const;
+
+private:
+    UniqueFd m_r;
+    UniqueFd m_w;
+};
+
 }
 
 #endif

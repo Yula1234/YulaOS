@@ -6,6 +6,7 @@
 #include "arp.h"
 #include "net_vec.h"
 #include "net_u32_map.h"
+#include "net_dispatch.h"
 
 #include <stdint.h>
 
@@ -31,12 +32,12 @@ public:
         uint16_t seq_be;
         uint32_t timeout_ms;
         uint32_t tag;
-        uint32_t client_fd_w;
+        uint32_t client_token;
     };
 
     struct PingResult {
         uint32_t tag;
-        uint32_t client_fd_w;
+        uint32_t client_token;
         uint32_t dst_ip_be;
         uint16_t ident_be;
         uint16_t seq_be;
@@ -52,12 +53,15 @@ private:
     bool send_ipv4(const Mac& dst_mac, uint32_t dst_ip_be, uint8_t proto, const uint8_t* payload, uint32_t payload_len);
     bool handle_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* payload, uint32_t payload_len);
 
+    bool handle_proto_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* payload, uint32_t payload_len, uint32_t now_ms);
+    static bool proto_icmp_handler(void* ctx, const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* payload, uint32_t payload_len, uint32_t now_ms);
+
     uint32_t next_hop_ip(uint32_t dst_ip_be) const;
 
     struct PingOp {
         uint32_t key;
         uint32_t tag;
-        uint32_t client_fd_w;
+        uint32_t client_token;
         uint32_t dst_ip_be;
         uint32_t next_hop_ip_be;
 
@@ -80,6 +84,8 @@ private:
     NetDev& m_dev;
     Arp& m_arp;
     IpConfig m_cfg;
+
+    IpProtoDispatch m_proto_dispatch;
 
     Vector<PingOp> m_ops;
     U32Map m_key_to_index;

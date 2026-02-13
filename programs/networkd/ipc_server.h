@@ -4,8 +4,9 @@
 #include "net_core.h"
 #include "net_vec.h"
 #include "net_u32_map.h"
-#include "net_spsc.h"
+#include "net_channel.h"
 #include "netd_msgs.h"
+#include "net_dispatch.h"
 
 #include <yos/netd_ipc.h>
 
@@ -17,21 +18,24 @@ class IpcServer {
 public:
     IpcServer(
         Arena& arena,
-        SpscQueue<PingSubmitMsg, 256>& to_core,
+        SpscChannel<PingSubmitMsg, 256>& to_core,
         SpscQueue<PingResultMsg, 256>& from_core
     );
 
     bool listen();
     void step(uint32_t now_ms);
 
-    int wait(int notify_fd, int timeout_ms);
+    int wait(const PipePair& notify, int timeout_ms);
 
     int listen_fd() const { return m_listen_fd; }
 
 private:
+    static bool handle_ping_req(void* handler_ctx, void* call_ctx, uint16_t type, uint32_t seq, const uint8_t* payload, uint32_t len, uint32_t now_ms);
+
     struct Client {
-        int fd_r;
-        int fd_w;
+        UniqueFd fd_r;
+        UniqueFd fd_w;
+        uint32_t token;
         uint32_t seq_out;
         uint8_t rx_buf[512];
         uint32_t rx_len;
@@ -44,7 +48,7 @@ private:
     bool try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload);
     bool send_msg(Client& c, uint16_t type, uint32_t seq, const void* payload, uint32_t len);
 
-    SpscQueue<PingSubmitMsg, 256>& m_to_core;
+    SpscChannel<PingSubmitMsg, 256>& m_to_core;
     SpscQueue<PingResultMsg, 256>& m_from_core;
 
     int m_listen_fd;
@@ -52,7 +56,10 @@ private:
 
     Vector<pollfd_t> m_pollfds;
 
-    U32Map m_fdw_to_index;
+    IpcMsgDispatch m_dispatch;
+
+    U32Map m_token_to_index;
+    uint32_t m_next_token;
 };
 
 }

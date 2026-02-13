@@ -12,7 +12,7 @@ struct PingSubmitMsg {
     uint32_t timeout_ms;
 
     uint32_t tag;
-    uint32_t client_fd_w;
+    uint32_t client_token;
 };
 
 struct PingResultMsg {
@@ -23,7 +23,7 @@ struct PingResultMsg {
     uint8_t ok;
 
     uint32_t tag;
-    uint32_t client_fd_w;
+    uint32_t client_token;
 };
 
 }

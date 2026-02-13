@@ -73,12 +73,31 @@ Ipv4Icmp::Ipv4Icmp(Arena& arena, NetDev& dev, Arp& arp)
     : m_dev(dev),
       m_arp(arp),
       m_cfg{},
+      m_proto_dispatch(arena),
       m_ops(arena),
       m_key_to_index(arena),
       m_results(arena) {
+    (void)m_proto_dispatch.reserve(4u);
+    (void)m_proto_dispatch.add(IP_PROTO_ICMP, this, &Ipv4Icmp::proto_icmp_handler);
     (void)m_ops.reserve(32u);
     (void)m_results.reserve(32u);
     (void)m_key_to_index.reserve(64u);
+}
+
+bool Ipv4Icmp::proto_icmp_handler(
+    void* ctx,
+    const EthHdr* eth,
+    const Ipv4Hdr* ip,
+    const uint8_t* payload,
+    uint32_t payload_len,
+    uint32_t now_ms
+) {
+    Ipv4Icmp* self = (Ipv4Icmp*)ctx;
+    if (!self) {
+        return false;
+    }
+
+    return self->handle_proto_icmp(eth, ip, payload, payload_len, now_ms);
 }
 
 void Ipv4Icmp::set_config(const IpConfig& cfg) {
@@ -178,8 +197,6 @@ bool Ipv4Icmp::handle_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* 
 }
 
 bool Ipv4Icmp::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms) {
-    (void)now_ms;
-
     ParsedIpv4 p{};
     if (!parse_ipv4_frame(frame, len, p)) {
         return false;
@@ -189,27 +206,37 @@ bool Ipv4Icmp::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms)
         return true;
     }
 
-    if (p.ip->proto == IP_PROTO_ICMP) {
-        if (p.payload && p.payload_len >= (uint32_t)sizeof(IcmpHdr)) {
-            const IcmpHdr* icmp = (const IcmpHdr*)p.payload;
-            if (icmp->type == ICMP_ECHO_REPLY) {
-                const uint32_t key = make_key(icmp->ident, icmp->seq);
-
-                uint32_t idx = 0;
-                if (m_key_to_index.get(key, idx)) {
-                    if (idx < m_ops.size()) {
-                        complete_op(idx, now_ms, 1u);
-                    }
-                }
-
-                return true;
-            }
-        }
-
-        return handle_icmp(p.eth, p.ip, p.payload, p.payload_len);
+    if (m_proto_dispatch.dispatch(p.ip->proto, p.eth, p.ip, p.payload, p.payload_len, now_ms)) {
+        return true;
     }
 
     return true;
+}
+
+bool Ipv4Icmp::handle_proto_icmp(
+    const EthHdr* eth,
+    const Ipv4Hdr* ip,
+    const uint8_t* payload,
+    uint32_t payload_len,
+    uint32_t now_ms
+) {
+    if (payload && payload_len >= (uint32_t)sizeof(IcmpHdr)) {
+        const IcmpHdr* icmp = (const IcmpHdr*)payload;
+        if (icmp->type == ICMP_ECHO_REPLY) {
+            const uint32_t key = make_key(icmp->ident, icmp->seq);
+
+            uint32_t idx = 0;
+            if (m_key_to_index.get(key, idx)) {
+                if (idx < m_ops.size()) {
+                    complete_op(idx, now_ms, 1u);
+                }
+            }
+
+            return true;
+        }
+    }
+
+    return handle_icmp(eth, ip, payload, payload_len);
 }
 
 uint32_t Ipv4Icmp::make_key(uint16_t ident_be, uint16_t seq_be) {
@@ -220,7 +247,7 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
     PingOp op{};
     op.key = make_key(req.ident_be, req.seq_be);
     op.tag = req.tag;
-    op.client_fd_w = req.client_fd_w;
+    op.client_token = req.client_token;
     op.dst_ip_be = req.dst_ip_be;
     op.next_hop_ip_be = next_hop_ip(req.dst_ip_be);
     op.ident_be = req.ident_be;
@@ -253,7 +280,7 @@ void Ipv4Icmp::complete_op(uint32_t op_index, uint32_t now_ms, uint8_t ok) {
 
     PingResult r{};
     r.tag = op.tag;
-    r.client_fd_w = op.client_fd_w;
+    r.client_token = op.client_token;
     r.dst_ip_be = op.dst_ip_be;
     r.ident_be = op.ident_be;
     r.seq_be = op.seq_be;

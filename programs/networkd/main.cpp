@@ -4,7 +4,9 @@
 #include "ipc_server.h"
 #include "arena.h"
 #include "net_spsc.h"
+#include "net_channel.h"
 #include "netd_msgs.h"
+#include "net_dispatch.h"
 
 #include <yula.h>
 
@@ -19,25 +21,6 @@ static uint32_t ip_be(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     return netd::htonl(ip);
 }
 
-struct IpcThreadCtx {
-    netd::IpcServer* ipc;
-    int notify_fd_r;
-};
-
-static void* ipc_thread_main(void* arg) {
-    IpcThreadCtx* ctx = (IpcThreadCtx*)arg;
-    if (!ctx || !ctx->ipc) {
-        return nullptr;
-    }
-
-    for (;;) {
-        (void)ctx->ipc->wait(ctx->notify_fd_r, 1000);
-
-        const uint32_t now = uptime_ms();
-        ctx->ipc->step(now);
-    }
-}
-
 static void print_mac(const netd::Mac& mac) {
     printf(
         "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -50,65 +33,190 @@ static void print_mac(const netd::Mac& mac) {
     );
 }
 
+static void handle_arp(void* ctx, const uint8_t* frame, uint32_t len, uint32_t now_ms) {
+    netd::Arp* arp = (netd::Arp*)ctx;
+    if (!arp) {
+        return;
+    }
+
+    (void)arp->handle_frame(frame, len, now_ms);
 }
 
-extern "C" int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+static void handle_ipv4(void* ctx, const uint8_t* frame, uint32_t len, uint32_t now_ms) {
+    netd::Ipv4Icmp* ip = (netd::Ipv4Icmp*)ctx;
+    if (!ip) {
+        return;
+    }
 
-    netd::Arena arena;
-    if (!arena.init(128u * 1024u)) {
+    (void)ip->handle_frame(frame, len, now_ms);
+}
+
+class NetdApp {
+public:
+    NetdApp();
+
+    NetdApp(const NetdApp&) = delete;
+    NetdApp& operator=(const NetdApp&) = delete;
+
+    bool init();
+    int run();
+
+private:
+    struct IpcThreadCtx {
+        netd::IpcServer* ipc;
+        const netd::PipePair* notify;
+    };
+
+    static void* ipc_thread_main(void* arg);
+
+    static uint32_t default_ip_be();
+    static uint32_t default_mask_be();
+    static uint32_t default_gw_be();
+
+    netd::Arena m_core_arena;
+    netd::Arena m_ipc_arena;
+
+    netd::NetDev m_dev;
+
+    netd::SpscQueue<netd::PingSubmitMsg, 256> m_ipc_to_core_q;
+    netd::SpscQueue<netd::PingResultMsg, 256> m_core_to_ipc_q;
+
+    netd::PipePair m_core_to_ipc_notify;
+    netd::PipePair m_ipc_to_core_notify;
+
+    netd::SpscChannel<netd::PingSubmitMsg, 256> m_ipc_to_core_chan;
+    netd::SpscChannel<netd::PingResultMsg, 256> m_core_to_ipc_chan;
+
+    alignas(netd::Arp) uint8_t m_arp_storage[sizeof(netd::Arp)];
+    netd::Arp* m_arp;
+
+    alignas(netd::Ipv4Icmp) uint8_t m_ip_storage[sizeof(netd::Ipv4Icmp)];
+    netd::Ipv4Icmp* m_ip;
+
+    alignas(netd::EthertypeDispatch) uint8_t m_eth_storage[sizeof(netd::EthertypeDispatch)];
+    netd::EthertypeDispatch* m_eth_dispatch;
+
+    alignas(netd::IpcServer) uint8_t m_ipc_storage[sizeof(netd::IpcServer)];
+    netd::IpcServer* m_ipc;
+
+    pthread_t m_ipc_thread;
+    IpcThreadCtx m_ipc_ctx;
+};
+
+NetdApp::NetdApp()
+    : m_core_arena(),
+      m_ipc_arena(),
+      m_dev(),
+      m_ipc_to_core_q(),
+      m_core_to_ipc_q(),
+      m_core_to_ipc_notify(),
+      m_ipc_to_core_notify(),
+      m_ipc_to_core_chan(m_ipc_to_core_q, m_ipc_to_core_notify),
+      m_core_to_ipc_chan(m_core_to_ipc_q, m_core_to_ipc_notify),
+      m_arp_storage{},
+      m_arp(nullptr),
+      m_ip_storage{},
+      m_ip(nullptr),
+      m_eth_storage{},
+      m_eth_dispatch(nullptr),
+      m_ipc_storage{},
+      m_ipc(nullptr),
+      m_ipc_thread{},
+      m_ipc_ctx{} {
+}
+
+uint32_t NetdApp::default_ip_be() {
+    return ip_be(10, 0, 2, 15);
+}
+
+uint32_t NetdApp::default_mask_be() {
+    return ip_be(255, 255, 255, 0);
+}
+
+uint32_t NetdApp::default_gw_be() {
+    return ip_be(10, 0, 2, 2);
+}
+
+void* NetdApp::ipc_thread_main(void* arg) {
+    IpcThreadCtx* ctx = (IpcThreadCtx*)arg;
+    if (!ctx || !ctx->ipc || !ctx->notify) {
+        return nullptr;
+    }
+
+    for (;;) {
+        (void)ctx->ipc->wait(*ctx->notify, -1);
+
+        const uint32_t now = uptime_ms();
+        ctx->ipc->step(now);
+    }
+}
+
+bool NetdApp::init() {
+    if (!m_core_arena.init(256u * 1024u)) {
         printf("networkd: arena init failed\n");
-        return 1;
+        return false;
     }
 
-    netd::NetDev dev;
-    if (!dev.open_default()) {
+    if (!m_ipc_arena.init(128u * 1024u)) {
+        printf("networkd: arena init failed\n");
+        return false;
+    }
+
+    if (!m_dev.open_default()) {
         printf("networkd: failed to open /dev/ne2k0\n");
-        return 1;
+        return false;
     }
 
-    const netd::Mac mac = dev.mac();
+    m_arp = new (m_arp_storage) netd::Arp(m_core_arena, m_dev);
+    m_ip = new (m_ip_storage) netd::Ipv4Icmp(m_core_arena, m_dev, *m_arp);
+    m_eth_dispatch = new (m_eth_storage) netd::EthertypeDispatch(m_core_arena);
 
-    netd::Arp arp(arena, dev);
+    if (!m_core_to_ipc_notify.create()) {
+        printf("networkd: pipe failed\n");
+        return false;
+    }
+
+    if (!m_ipc_to_core_notify.create()) {
+        printf("networkd: pipe failed\n");
+        return false;
+    }
+
+    const netd::Mac mac = m_dev.mac();
 
     netd::ArpConfig arp_cfg{};
-    arp_cfg.ip_be = ip_be(10, 0, 2, 15);
+    arp_cfg.ip_be = default_ip_be();
     arp_cfg.mac = mac;
-    arp.set_config(arp_cfg);
-
-    netd::Ipv4Icmp ip(arena, dev, arp);
+    m_arp->set_config(arp_cfg);
 
     netd::IpConfig ip_cfg{};
     ip_cfg.ip_be = arp_cfg.ip_be;
-    ip_cfg.mask_be = ip_be(255, 255, 255, 0);
-    ip_cfg.gw_be = ip_be(10, 0, 2, 2);
-    ip.set_config(ip_cfg);
+    ip_cfg.mask_be = default_mask_be();
+    ip_cfg.gw_be = default_gw_be();
+    m_ip->set_config(ip_cfg);
 
-    netd::SpscQueue<netd::PingSubmitMsg, 256> ipc_to_core;
-    netd::SpscQueue<netd::PingResultMsg, 256> core_to_ipc;
+    (void)m_eth_dispatch->reserve(8u);
+    (void)m_eth_dispatch->add(netd::ETHERTYPE_ARP, m_arp, &handle_arp);
+    (void)m_eth_dispatch->add(netd::ETHERTYPE_IPV4, m_ip, &handle_ipv4);
 
-    int notify_fds[2] = { -1, -1 };
-    if (pipe(notify_fds) != 0) {
-        printf("networkd: pipe failed\n");
-        return 1;
-    }
-
-    netd::IpcServer ipc(arena, ipc_to_core, core_to_ipc);
-    if (!ipc.listen()) {
+    m_ipc = new (m_ipc_storage) netd::IpcServer(m_ipc_arena, m_ipc_to_core_chan, m_core_to_ipc_q);
+    if (!m_ipc->listen()) {
         printf("networkd: ipc_listen failed\n");
-        return 1;
+        return false;
     }
 
-    pthread_t ipc_thread{};
-    IpcThreadCtx ipc_ctx{};
-    ipc_ctx.ipc = &ipc;
-    ipc_ctx.notify_fd_r = notify_fds[0];
+    m_ipc_ctx.ipc = m_ipc;
+    m_ipc_ctx.notify = &m_core_to_ipc_notify;
 
-    if (pthread_create(&ipc_thread, nullptr, ipc_thread_main, &ipc_ctx) != 0) {
+    if (pthread_create(&m_ipc_thread, nullptr, &NetdApp::ipc_thread_main, &m_ipc_ctx) != 0) {
         printf("networkd: pthread_create failed\n");
-        return 1;
+        return false;
     }
+
+    return true;
+}
+
+int NetdApp::run() {
+    const netd::Mac mac = m_dev.mac();
 
     printf("networkd: iface ne2k0 up\n");
     printf("networkd: mac ");
@@ -119,7 +227,7 @@ extern "C" int main(int argc, char** argv) {
 
     {
         netd::Mac gw_mac{};
-        (void)arp.resolve(ip_cfg.gw_be, gw_mac, 2000u);
+        (void)m_arp->resolve(default_gw_be(), gw_mac, 2000u);
     }
 
     uint8_t frame[1600];
@@ -127,15 +235,24 @@ extern "C" int main(int argc, char** argv) {
     for (;;) {
         const uint32_t now = uptime_ms();
 
-        pollfd_t fds[1];
-        fds[0].fd = dev.fd();
+        pollfd_t fds[2];
+
+        fds[0].fd = m_dev.fd();
         fds[0].events = POLLIN;
         fds[0].revents = 0;
 
-        (void)poll(fds, 1, 10);
+        fds[1].fd = m_ipc_to_core_chan.notify_fd();
+        fds[1].events = POLLIN;
+        fds[1].revents = 0;
+
+        (void)poll(fds, 2, 10);
+
+        if ((fds[1].revents & POLLIN) != 0) {
+            m_ipc_to_core_chan.drain_notify();
+        }
 
         for (;;) {
-            const int r = dev.read_frame(frame, (uint32_t)sizeof(frame));
+            const int r = m_dev.read_frame(frame, (uint32_t)sizeof(frame));
             if (r <= 0) {
                 break;
             }
@@ -144,20 +261,12 @@ extern "C" int main(int argc, char** argv) {
             const netd::EthHdr* eth = (const netd::EthHdr*)frame;
             const uint16_t et = netd::ntohs(eth->ethertype);
 
-            if (et == netd::ETHERTYPE_ARP) {
-                (void)arp.handle_frame(frame, flen, now);
-                continue;
-            }
-
-            if (et == netd::ETHERTYPE_IPV4) {
-                (void)ip.handle_frame(frame, flen, now);
-                continue;
-            }
+            (void)m_eth_dispatch->dispatch(et, frame, flen, now);
         }
 
         for (;;) {
             netd::PingSubmitMsg msg{};
-            if (!ipc_to_core.pop(msg)) {
+            if (!m_ipc_to_core_q.pop(msg)) {
                 break;
             }
 
@@ -167,16 +276,16 @@ extern "C" int main(int argc, char** argv) {
             pr.seq_be = msg.seq_be;
             pr.timeout_ms = msg.timeout_ms;
             pr.tag = msg.tag;
-            pr.client_fd_w = msg.client_fd_w;
+            pr.client_token = msg.client_token;
 
-            (void)ip.submit_ping(pr, now);
+            (void)m_ip->submit_ping(pr, now);
         }
 
-        ip.step(now);
+        m_ip->step(now);
 
         for (;;) {
             netd::Ipv4Icmp::PingResult r{};
-            if (!ip.poll_result(r)) {
+            if (!m_ip->poll_result(r)) {
                 break;
             }
 
@@ -187,14 +296,25 @@ extern "C" int main(int argc, char** argv) {
             msg.rtt_ms = r.rtt_ms;
             msg.ok = r.ok;
             msg.tag = r.tag;
-            msg.client_fd_w = r.client_fd_w;
+            msg.client_token = r.client_token;
 
-            if (core_to_ipc.push(msg)) {
-                uint8_t b = 1u;
-                (void)pipe_try_write(notify_fds[1], &b, 1u);
-            }
+            (void)m_core_to_ipc_chan.push_and_wake(msg);
         }
     }
 
     return 0;
+}
+
+}
+
+extern "C" int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+
+    NetdApp app;
+    if (!app.init()) {
+        return 1;
+    }
+
+    return app.run();
 }

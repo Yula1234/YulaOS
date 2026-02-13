@@ -44,7 +44,7 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
 
 IpcServer::IpcServer(
     Arena& arena,
-    SpscQueue<PingSubmitMsg, 256>& to_core,
+    SpscChannel<PingSubmitMsg, 256>& to_core,
     SpscQueue<PingResultMsg, 256>& from_core
 )
     : m_to_core(to_core),
@@ -52,8 +52,55 @@ IpcServer::IpcServer(
       m_listen_fd(-1),
       m_clients(arena),
       m_pollfds(arena),
-      m_fdw_to_index(arena) {
-    (void)m_fdw_to_index.reserve(32u);
+      m_dispatch(arena),
+      m_token_to_index(arena),
+      m_next_token(1u) {
+    (void)m_dispatch.reserve(8u);
+    (void)m_dispatch.add(NETD_IPC_MSG_PING_REQ, this, &IpcServer::handle_ping_req);
+    (void)m_token_to_index.reserve(32u);
+}
+
+bool IpcServer::handle_ping_req(
+    void* handler_ctx,
+    void* call_ctx,
+    uint16_t type,
+    uint32_t seq,
+    const uint8_t* payload,
+    uint32_t len,
+    uint32_t now_ms
+) {
+    (void)type;
+    (void)now_ms;
+
+    IpcServer* self = (IpcServer*)handler_ctx;
+    Client* c = (Client*)call_ctx;
+    if (!self || !c || !payload) {
+        return false;
+    }
+
+    if (len != sizeof(netd_ipc_ping_req_t)) {
+        return false;
+    }
+
+    netd_ipc_ping_req_t req{};
+    memcpy(&req, payload, sizeof(req));
+
+    PingSubmitMsg msg{};
+    msg.dst_ip_be = req.dst_ip_be;
+    msg.ident_be = req.ident_be;
+    msg.seq_be = req.seq_be;
+    msg.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
+    msg.tag = seq;
+    msg.client_token = c->token;
+
+    if (self->m_to_core.push_and_wake(msg)) {
+        return true;
+    }
+
+    netd_ipc_error_t err{};
+    err.code = -12;
+    (void)self->send_msg(*c, NETD_IPC_MSG_ERROR, seq, &err, (uint32_t)sizeof(err));
+    return true;
 }
 
 bool IpcServer::listen() {
@@ -61,10 +108,12 @@ bool IpcServer::listen() {
     return m_listen_fd >= 0;
 }
 
-int IpcServer::wait(int notify_fd, int timeout_ms) {
+int IpcServer::wait(const PipePair& notify, int timeout_ms) {
     if (m_listen_fd < 0) {
         return -1;
     }
+
+    const int notify_fd = notify.read_fd();
 
     const uint32_t need = m_clients.size() + 2u;
 
@@ -90,7 +139,7 @@ int IpcServer::wait(int notify_fd, int timeout_ms) {
     for (uint32_t i = 0; i < m_clients.size(); i++) {
         const Client& c = m_clients[i];
 
-        pfd.fd = c.fd_r;
+        pfd.fd = c.fd_r.get();
         pfd.events = POLLIN;
         pfd.revents = 0;
         (void)m_pollfds.push_back(pfd);
@@ -112,8 +161,7 @@ int IpcServer::wait(int notify_fd, int timeout_ms) {
                 break;
             }
 
-            uint8_t buf[64];
-            (void)pipe_try_read(notify_fd, buf, (uint32_t)sizeof(buf));
+            notify.drain();
             break;
         }
     }
@@ -133,19 +181,23 @@ bool IpcServer::accept_one() {
     }
 
     Client c{};
-    c.fd_r = fds[0];
-    c.fd_w = fds[1];
+    c.fd_r.reset(fds[0]);
+    c.fd_w.reset(fds[1]);
+    c.token = m_next_token;
     c.seq_out = 1;
     c.rx_len = 0;
 
-    if (!m_clients.push_back(c)) {
-        close(c.fd_r);
-        close(c.fd_w);
+    m_next_token++;
+    if (m_next_token == 0u) {
+        m_next_token = 1u;
+    }
+
+    if (!m_clients.push_back(netd::move(c))) {
         return false;
     }
 
     const uint32_t idx = m_clients.size() - 1u;
-    (void)m_fdw_to_index.put((uint32_t)c.fd_w, idx);
+    (void)m_token_to_index.put(m_clients[idx].token, idx);
 
     return true;
 }
@@ -162,12 +214,12 @@ bool IpcServer::send_msg(Client& c, uint16_t type, uint32_t seq, const void* pay
     hdr.len = len;
     hdr.seq = seq;
 
-    if (write(c.fd_w, &hdr, (uint32_t)sizeof(hdr)) != (int)sizeof(hdr)) {
+    if (write(c.fd_w.get(), &hdr, (uint32_t)sizeof(hdr)) != (int)sizeof(hdr)) {
         return false;
     }
 
     if (len > 0) {
-        if (write(c.fd_w, payload, len) != (int)len) {
+        if (write(c.fd_w.get(), payload, len) != (int)len) {
             return false;
         }
     }
@@ -215,26 +267,22 @@ void IpcServer::drop_client(uint32_t idx) {
 
     Client& c = m_clients[idx];
 
-    (void)m_fdw_to_index.erase((uint32_t)c.fd_w);
-
-    close(c.fd_r);
-    close(c.fd_w);
+    (void)m_token_to_index.erase(c.token);
 
     const uint32_t last = m_clients.size() - 1u;
     if (idx != last) {
-        const Client moved = m_clients[last];
-        m_clients[idx] = moved;
+        m_clients[idx] = netd::move(m_clients[last]);
 
-        (void)m_fdw_to_index.put((uint32_t)moved.fd_w, idx);
+        (void)m_token_to_index.put(m_clients[idx].token, idx);
     }
 
-    m_clients.erase_unordered(idx);
+    m_clients.erase_unordered(last);
 }
 
 void IpcServer::client_step(Client& c, uint32_t now_ms) {
     (void)now_ms;
 
-    const int got = read_into_buffer(c.fd_r, c.rx_buf, (uint32_t)sizeof(c.rx_buf), c.rx_len);
+    const int got = read_into_buffer(c.fd_r.get(), c.rx_buf, (uint32_t)sizeof(c.rx_buf), c.rx_len);
     if (got < 0) {
         c.rx_len = (uint32_t)sizeof(c.rx_buf);
         return;
@@ -248,24 +296,7 @@ void IpcServer::client_step(Client& c, uint32_t now_ms) {
             break;
         }
 
-        if (hdr.type == NETD_IPC_MSG_PING_REQ && hdr.len == sizeof(netd_ipc_ping_req_t)) {
-            netd_ipc_ping_req_t req{};
-            memcpy(&req, payload, sizeof(req));
-
-            PingSubmitMsg msg{};
-            msg.dst_ip_be = req.dst_ip_be;
-            msg.ident_be = req.ident_be;
-            msg.seq_be = req.seq_be;
-            msg.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
-            msg.tag = hdr.seq;
-            msg.client_fd_w = (uint32_t)c.fd_w;
-
-            if (!m_to_core.push(msg)) {
-                netd_ipc_error_t err{};
-                err.code = -12;
-                (void)send_msg(c, NETD_IPC_MSG_ERROR, hdr.seq, &err, (uint32_t)sizeof(err));
-            }
-
+        if (m_dispatch.dispatch(hdr.type, &c, hdr.seq, payload, hdr.len, now_ms)) {
             continue;
         }
 
@@ -311,7 +342,7 @@ void IpcServer::step(uint32_t now_ms) {
         rsp.ok = res.ok ? 1u : 0u;
 
         uint32_t idx = 0;
-        if (!m_fdw_to_index.get(res.client_fd_w, idx)) {
+        if (!m_token_to_index.get(res.client_token, idx)) {
             continue;
         }
 
