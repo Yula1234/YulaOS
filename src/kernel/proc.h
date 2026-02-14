@@ -32,6 +32,8 @@ typedef enum {
 #define MAP_SHARED  1
 #define MAP_PRIVATE 2
 
+#define MAP_STACK   4
+
 typedef void (*sig_handler_t)(int);
 
 typedef struct mmap_area {

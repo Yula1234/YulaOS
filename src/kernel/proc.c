@@ -688,6 +688,40 @@ static void kthread_trampoline(void) {
     for (;;) cpu_hlt();   
 }
 
+static int proc_alloc_kstack(task_t* t);
+static uint32_t* proc_kstack_top(task_t* t);
+
+task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(void*), void* arg) {
+    task_t* t = alloc_task();
+    if (!t) return 0;
+
+    strlcpy(t->name, name ? name : "task", sizeof(t->name));
+    t->entry = entry;
+    t->arg = arg;
+    t->mem = 0;
+    t->priority = prio;
+
+    if (!proc_alloc_kstack(t)) {
+        proc_free_resources(t);
+        return 0;
+    }
+
+    uint32_t* sp = proc_kstack_top(t);
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+
+    *--sp = (uint32_t)kthread_trampoline;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    t->esp = sp;
+
+    sched_add(t);
+    return t;
+}
+
 task_t* proc_get_list_head() { return tasks_head; }
 uint32_t proc_task_count(void) { return total_tasks; }
 
@@ -769,36 +803,8 @@ static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32
     return 1;
 }
 
-task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(void*), void* arg) {
-    task_t* t = alloc_task();
-    if (!t) return 0;
-    
-    strlcpy(t->name, name ? name : "task", sizeof(t->name));
-    t->entry = entry; 
-    t->arg = arg;
-    t->mem = 0;
-    t->priority = prio;
-
-    if (!proc_alloc_kstack(t)) {
-        proc_free_resources(t);
-        return 0;
-    }
-
-    uint32_t* sp = proc_kstack_top(t);
-    *--sp = 0;
-    *--sp = 0;
-    *--sp = 0;
-    
-    *--sp = (uint32_t)kthread_trampoline; 
-    *--sp = 0; // EBP                     
-    *--sp = 0; // EBX                     
-    *--sp = 0; // ESI                     
-    *--sp = 0; // EDI                     
-    t->esp = sp;
-
-    sched_add(t);
-    return t;
-}
+static int proc_mem_has_mmap_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl);
+static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom, uint32_t stack_top);
 
 task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, uint32_t stack_top) {
     task_t* parent = proc_current();
@@ -834,6 +840,17 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     if (!proc_setup_thread_user_stack(t, stack_bottom, stack_top, arg, &user_esp)) {
         proc_free_resources(t);
         return 0;
+    }
+
+    if (t->mem && t->mem->heap_start < t->mem->prog_break) {
+        uint32_t hs = t->mem->heap_start;
+        uint32_t hb = t->mem->prog_break;
+
+        if (stack_top <= hs || stack_bottom >= hb) {
+            (void)proc_mem_register_stack_region(t->mem, stack_bottom, stack_top);
+        }
+    } else {
+        (void)proc_mem_register_stack_region(t->mem, stack_bottom, stack_top);
     }
 
     proc_init_user_context(t, entry, user_esp);
@@ -874,6 +891,56 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     } else {
         kfree(area);
     }
+}
+
+static int proc_mem_has_mmap_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl) {
+    if (!mem || end_excl <= start) return 0;
+
+    mmap_area_t* m = mem->mmap_list;
+    while (m) {
+        uint32_t a_start = m->vaddr_start;
+        uint32_t a_end_excl = m->vaddr_end;
+
+        if (a_start < end_excl && start < a_end_excl) {
+            return 1;
+        }
+
+        m = m->next;
+    }
+
+    return 0;
+}
+
+static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom, uint32_t stack_top) {
+    if (!mem || !mem->page_dir) return 0;
+    if (stack_top <= stack_bottom) return 0;
+
+    uint32_t start = stack_bottom & ~0xFFFu;
+    uint32_t end_excl = (stack_top + 0xFFFu) & ~0xFFFu;
+
+    if (end_excl <= start) return 0;
+    if (start < 0x08000000u || end_excl > 0xC0000000u) return 0;
+
+    if (proc_mem_has_mmap_overlap(mem, start, end_excl)) {
+        return 1;
+    }
+
+    mmap_area_t* area = kmalloc(sizeof(*area));
+    if (!area) return 0;
+
+    memset(area, 0, sizeof(*area));
+    area->vaddr_start = start;
+    area->vaddr_end = end_excl;
+    area->file_offset = 0;
+    area->length = stack_top - stack_bottom;
+    area->file_size = 0;
+    area->map_flags = MAP_PRIVATE | MAP_STACK;
+    area->file = 0;
+
+    area->next = mem->mmap_list;
+    mem->mmap_list = area;
+
+    return 1;
 }
 
 task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
@@ -1090,6 +1157,8 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     t->stack_bottom = ustack_bottom;
     t->stack_top = ustack_top_limit;
+
+    (void)proc_mem_register_stack_region(t->mem, t->stack_bottom, t->stack_top);
 
     for (int i = 1; i <= 4; i++) {
         uint32_t addr = ustack_top_limit - i * 4096;

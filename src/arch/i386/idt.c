@@ -258,7 +258,13 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     memset(new_page, 0, 4096);
 
     uint32_t rel = vaddr - m->vaddr_start;
-    if (m->file && m->file->ops && m->file->ops->read && rel < m->file_size) {
+
+    if ((m->map_flags & MAP_STACK) == 0 &&
+        m->file &&
+        m->file->ops &&
+        m->file->ops->read &&
+        rel < m->file_size) {
+
         uint32_t bytes = m->file_size - rel;
         if (bytes > 4096) bytes = 4096;
 
