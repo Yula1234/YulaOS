@@ -1,5 +1,10 @@
 #include "ipv4_icmp.h"
 
+#include "arena.h"
+#include "netdev.h"
+#include "arp.h"
+#include "net_mac.h"
+
 #include <yula.h>
 
 namespace netd {
@@ -50,23 +55,6 @@ static bool parse_ipv4_frame(const uint8_t* frame, uint32_t len, ParsedIpv4& out
     return true;
 }
 
-static bool match_icmp_echo_reply(const ParsedIpv4& p, uint16_t ident_be, uint16_t seq_be) {
-    if (!p.ip || p.ip->proto != netd::IP_PROTO_ICMP) {
-        return false;
-    }
-
-    if (!p.payload || p.payload_len < (uint32_t)sizeof(netd::IcmpHdr)) {
-        return false;
-    }
-
-    const netd::IcmpHdr* icmp = (const netd::IcmpHdr*)p.payload;
-    if (icmp->type != netd::ICMP_ECHO_REPLY) {
-        return false;
-    }
-
-    return icmp->ident == ident_be && icmp->seq == seq_be;
-}
-
 }
 
 Ipv4Icmp::Ipv4Icmp(Arena& arena, NetDev& dev, Arp& arp)
@@ -81,7 +69,6 @@ Ipv4Icmp::Ipv4Icmp(Arena& arena, NetDev& dev, Arp& arp)
     (void)m_proto_dispatch.add(IP_PROTO_ICMP, this, &Ipv4Icmp::proto_icmp_handler);
     (void)m_ops.reserve(32u);
     (void)m_results.reserve(32u);
-    (void)m_key_to_index.reserve(64u);
 }
 
 bool Ipv4Icmp::proto_icmp_handler(
@@ -104,20 +91,8 @@ void Ipv4Icmp::set_config(const IpConfig& cfg) {
     m_cfg = cfg;
 }
 
-static Mac mac_from_bytes(const uint8_t b[6]) {
-    Mac m{};
-
-    for (int i = 0; i < 6; i++) {
-        m.b[i] = b[i];
-    }
-
-    return m;
-}
-
-static void mac_to_bytes(const Mac& m, uint8_t out[6]) {
-    for (int i = 0; i < 6; i++) {
-        out[i] = m.b[i];
-    }
+bool Ipv4Icmp::add_proto_handler(uint8_t proto, void* ctx, IpProtoDispatch::HandlerFn fn) {
+    return m_proto_dispatch.add(proto, ctx, fn);
 }
 
 uint32_t Ipv4Icmp::next_hop_ip(uint32_t dst_ip_be) const {
@@ -206,10 +181,7 @@ bool Ipv4Icmp::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms)
         return true;
     }
 
-    if (m_proto_dispatch.dispatch(p.ip->proto, p.eth, p.ip, p.payload, p.payload_len, now_ms)) {
-        return true;
-    }
-
+    (void)m_proto_dispatch.dispatch(p.ip->proto, p.eth, p.ip, p.payload, p.payload_len, now_ms);
     return true;
 }
 
@@ -220,23 +192,34 @@ bool Ipv4Icmp::handle_proto_icmp(
     uint32_t payload_len,
     uint32_t now_ms
 ) {
-    if (payload && payload_len >= (uint32_t)sizeof(IcmpHdr)) {
-        const IcmpHdr* icmp = (const IcmpHdr*)payload;
-        if (icmp->type == ICMP_ECHO_REPLY) {
-            const uint32_t key = make_key(icmp->ident, icmp->seq);
-
-            uint32_t idx = 0;
-            if (m_key_to_index.get(key, idx)) {
-                if (idx < m_ops.size()) {
-                    complete_op(idx, now_ms, 1u);
-                }
-            }
-
-            return true;
-        }
+    if (!payload || payload_len < (uint32_t)sizeof(IcmpHdr)) {
+        return false;
     }
 
-    return handle_icmp(eth, ip, payload, payload_len);
+    const IcmpHdr* icmp = (const IcmpHdr*)payload;
+    if (icmp->type != ICMP_ECHO_REPLY) {
+        return handle_icmp(eth, ip, payload, payload_len);
+    }
+
+    const uint32_t key = make_key(icmp->ident, icmp->seq);
+
+    uint32_t idx = 0;
+    if (!m_key_to_index.get(key, idx)) {
+        return true;
+    }
+
+    if (idx >= m_ops.size()) {
+        return true;
+    }
+
+    const PingOp& op = m_ops[idx];
+    if (op.key != key || op.dst_ip_be != ip->src) {
+        return true;
+    }
+
+    complete_op(idx, now_ms, 1u);
+
+    return true;
 }
 
 uint32_t Ipv4Icmp::make_key(uint16_t ident_be, uint16_t seq_be) {
@@ -258,15 +241,18 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
     op.dst_mac = Mac{};
     op.state = 0u;
 
+    {
+        uint32_t existing = 0;
+        if (m_key_to_index.get(op.key, existing)) {
+            return false;
+        }
+    }
+
     if (!m_ops.push_back(op)) {
         return false;
     }
 
-    const uint32_t idx = m_ops.size() - 1u;
-    if (!m_key_to_index.put(op.key, idx)) {
-        m_ops.erase_unordered(idx);
-        return false;
-    }
+    (void)m_key_to_index.put(op.key, m_ops.size() - 1u);
 
     return true;
 }
@@ -275,6 +261,10 @@ void Ipv4Icmp::complete_op(uint32_t op_index, uint32_t now_ms, uint8_t ok) {
     if (op_index >= m_ops.size()) {
         return;
     }
+
+    const uint32_t last = m_ops.size() - 1u;
+    const uint32_t removed_key = m_ops[op_index].key;
+    const uint32_t moved_key = (op_index != last) ? m_ops[last].key : 0u;
 
     PingOp& op = m_ops[op_index];
 
@@ -294,16 +284,13 @@ void Ipv4Icmp::complete_op(uint32_t op_index, uint32_t now_ms, uint8_t ok) {
 
     (void)m_results.push_back(r);
 
-    (void)m_key_to_index.erase(op.key);
+    (void)m_key_to_index.erase(removed_key);
 
-    const uint32_t last = m_ops.size() - 1u;
-    if (op_index != last) {
-        const PingOp moved = m_ops[last];
-        m_ops[op_index] = moved;
-        (void)m_key_to_index.put(moved.key, op_index);
+    m_ops.erase_unordered(op_index);
+
+    if (moved_key != 0u) {
+        (void)m_key_to_index.put(moved_key, op_index);
     }
-
-    m_ops.erase_unordered(last);
 }
 
 void Ipv4Icmp::step(uint32_t now_ms) {

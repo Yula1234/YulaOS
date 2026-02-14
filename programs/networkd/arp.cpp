@@ -1,5 +1,9 @@
 #include "arp.h"
 
+#include "arena.h"
+#include "netdev.h"
+#include "net_mac.h"
+
 #include <yula.h>
 
 namespace netd {
@@ -8,7 +12,11 @@ namespace {
 
 static uint32_t find_oldest_index(const Vector<ArpEntry>& entries) {
     uint32_t oldest_i = 0;
-    uint32_t oldest_t = entries.size() ? entries[0].last_seen_ms : 0u;
+    uint32_t oldest_t = 0u;
+
+    if (entries.size() != 0u) {
+        oldest_t = entries[0].last_seen_ms;
+    }
 
     for (uint32_t i = 1; i < entries.size(); i++) {
         const uint32_t t = entries[i].last_seen_ms;
@@ -63,14 +71,18 @@ void ArpCache::upsert(uint32_t ip_be, const Mac& mac, uint32_t now_ms) {
         return;
     }
 
-    if (!m_entries.push_back(ArpEntry{ ip_be, mac, now_ms })) {
-        if (m_entries.size() == 0) {
-            return;
-        }
+    const ArpEntry to_add{ ip_be, mac, now_ms };
 
-        const uint32_t oldest_i = find_oldest_index(m_entries);
-        m_entries[oldest_i] = ArpEntry{ ip_be, mac, now_ms };
+    if (m_entries.push_back(to_add)) {
+        return;
     }
+
+    if (m_entries.size() == 0u) {
+        return;
+    }
+
+    const uint32_t oldest_i = find_oldest_index(m_entries);
+    m_entries[oldest_i] = to_add;
 }
 
 void ArpCache::prune(uint32_t now_ms) {
@@ -91,22 +103,6 @@ Arp::Arp(Arena& arena, NetDev& dev) : m_dev(dev), m_cfg{}, m_cache(arena) {
 
 void Arp::set_config(const ArpConfig& cfg) {
     m_cfg = cfg;
-}
-
-static Mac mac_from_bytes(const uint8_t b[6]) {
-    Mac m{};
-
-    for (int i = 0; i < 6; i++) {
-        m.b[i] = b[i];
-    }
-
-    return m;
-}
-
-static void mac_to_bytes(const Mac& m, uint8_t out[6]) {
-    for (int i = 0; i < 6; i++) {
-        out[i] = m.b[i];
-    }
 }
 
 bool Arp::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms) {
@@ -234,7 +230,9 @@ bool Arp::resolve(uint32_t ip_be, Mac& out_mac, uint32_t timeout_ms) {
         fds[0].events = POLLIN;
         fds[0].revents = 0;
 
-        uint32_t remain = timeout_ms - (now - start);
+        const uint32_t elapsed = now - start;
+        const uint32_t remain = timeout_ms - elapsed;
+
         int wait_ms = 50;
         if (remain < (uint32_t)wait_ms) {
             wait_ms = (int)remain;

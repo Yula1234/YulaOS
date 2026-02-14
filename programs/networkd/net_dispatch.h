@@ -41,11 +41,10 @@ public:
     }
 
     bool put(K key, const EntryT& e) {
-        for (uint32_t i = 0; i < m_small.size(); i++) {
-            if (m_small[i].key == key) {
-                m_small[i].entry = e;
-                return true;
-            }
+        Slot* existing = find_small(key);
+        if (existing) {
+            existing->entry = e;
+            return true;
         }
 
         if (m_map.capacity() != 0) {
@@ -69,17 +68,13 @@ public:
 
     bool get(K key, EntryT& out) const {
         if (m_map.capacity() == 0) {
-            for (uint32_t i = 0; i < m_small.size(); i++) {
-                const Slot& s = m_small[i];
-                if (s.key != key) {
-                    continue;
-                }
-
-                out = s.entry;
-                return true;
+            const Slot* s = find_small_const(key);
+            if (!s) {
+                return false;
             }
 
-            return false;
+            out = s->entry;
+            return true;
         }
 
         return m_map.get((uint32_t)key, out);
@@ -90,6 +85,27 @@ private:
         K key;
         EntryT entry;
     };
+
+    Slot* find_small(K key) {
+        for (uint32_t i = 0; i < m_small.size(); i++) {
+            if (m_small[i].key == key) {
+                return &m_small[i];
+            }
+        }
+
+        return nullptr;
+    }
+
+    const Slot* find_small_const(K key) const {
+        for (uint32_t i = 0; i < m_small.size(); i++) {
+            const Slot& s = m_small[i];
+            if (s.key == key) {
+                return &s;
+            }
+        }
+
+        return nullptr;
+    }
 
     void promote_to_map() {
         if (m_map.capacity() == 0) {

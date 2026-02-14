@@ -5,8 +5,8 @@
 #include "netdev.h"
 #include "arp.h"
 #include "net_vec.h"
-#include "net_u32_map.h"
 #include "net_dispatch.h"
+#include "net_u32_map.h"
 
 #include <stdint.h>
 
@@ -48,6 +48,8 @@ public:
     bool submit_ping(const PingRequest& req, uint32_t now_ms);
     void step(uint32_t now_ms);
     bool poll_result(PingResult& out);
+
+    bool add_proto_handler(uint8_t proto, void* ctx, IpProtoDispatch::HandlerFn fn);
 
 private:
     bool send_ipv4(const Mac& dst_mac, uint32_t dst_ip_be, uint8_t proto, const uint8_t* payload, uint32_t payload_len);

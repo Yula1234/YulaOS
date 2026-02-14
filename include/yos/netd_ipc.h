@@ -16,6 +16,9 @@ typedef enum {
     NETD_IPC_MSG_PING_REQ = 1,
     NETD_IPC_MSG_PING_RSP = 2,
     NETD_IPC_MSG_ERROR    = 3,
+
+    NETD_IPC_MSG_RESOLVE_REQ = 4,
+    NETD_IPC_MSG_RESOLVE_RSP = 5,
 } netd_ipc_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -44,6 +47,17 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     int32_t code;
 } netd_ipc_error_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t name_len;
+    char name[127];
+    uint32_t timeout_ms;
+} netd_ipc_resolve_req_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t ip_be;
+    uint32_t ok;
+} netd_ipc_resolve_rsp_t;
 
 #ifdef __cplusplus
 }

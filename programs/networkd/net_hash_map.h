@@ -13,7 +13,12 @@ struct DefaultHashTraits;
 template <typename K, typename V, typename Traits = DefaultHashTraits<K>>
 class HashMap {
 public:
-    HashMap() : m_arena(nullptr), m_keys(nullptr), m_vals(nullptr), m_capacity(0), m_size(0) {
+    HashMap()
+        : m_arena(nullptr),
+          m_keys(nullptr),
+          m_vals(nullptr),
+          m_capacity(0),
+          m_size(0) {
     }
 
     explicit HashMap(Arena& arena)
@@ -53,8 +58,11 @@ public:
             return false;
         }
 
-        K* new_keys = (K*)m_arena->alloc((uint32_t)(need * sizeof(K)), (uint32_t)alignof(K));
-        V* new_vals = (V*)m_arena->alloc((uint32_t)(need * sizeof(V)), (uint32_t)alignof(V));
+        const uint32_t keys_bytes = (uint32_t)(need * sizeof(K));
+        const uint32_t vals_bytes = (uint32_t)(need * sizeof(V));
+
+        K* new_keys = (K*)m_arena->alloc(keys_bytes, (uint32_t)alignof(K));
+        V* new_vals = (V*)m_arena->alloc(vals_bytes, (uint32_t)alignof(V));
         if (!new_keys || !new_vals) {
             return false;
         }
@@ -234,13 +242,13 @@ private:
         uint32_t i = (empty_idx + 1u) & mask;
 
         while (!Traits::is_empty(m_keys[i])) {
-            const K k = m_keys[i];
-            const V v = m_vals[i];
+            const K key_to_relocate = m_keys[i];
+            const V val_to_relocate = m_vals[i];
 
             m_keys[i] = Traits::empty_key();
             m_vals[i] = V{};
 
-            (void)relocate_no_size(k, v);
+            (void)relocate_no_size(key_to_relocate, val_to_relocate);
 
             i = (i + 1u) & mask;
         }
@@ -273,6 +281,33 @@ struct DefaultHashTraits<uint32_t> {
     }
 
     static constexpr bool eq(uint32_t a, uint32_t b) {
+        return a == b;
+    }
+};
+
+template <>
+struct DefaultHashTraits<uint64_t> {
+    static constexpr uint64_t empty_key() {
+        return 0ull;
+    }
+
+    static constexpr bool is_empty(uint64_t k) {
+        return k == 0ull;
+    }
+
+    static uint32_t hash(uint64_t x) {
+        x ^= x >> 33;
+        x *= 0xff51afd7ed558ccdu;
+        x ^= x >> 33;
+        x *= 0xc4ceb9fe1a85ec53u;
+        x ^= x >> 33;
+
+        const uint32_t lo = (uint32_t)x;
+        const uint32_t hi = (uint32_t)(x >> 32);
+        return lo ^ hi;
+    }
+
+    static constexpr bool eq(uint64_t a, uint64_t b) {
         return a == b;
     }
 };

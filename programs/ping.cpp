@@ -35,7 +35,7 @@ static constexpr uint32_t kPayloadBytes = 56u;
 static constexpr uint32_t kReplyLineBytes = 64u;
 static constexpr uint32_t kDefaultTimeoutMs = 2000u;
 static constexpr uint32_t kDefaultCount = 4u;
-static constexpr uint32_t kDefaultIntervalMs = 1000u;
+static constexpr uint32_t kDefaultIntervalMs = 100u;
 static constexpr uint32_t kTtl = 64u;
 
 static uint16_t bswap16(uint16_t v) {
@@ -169,10 +169,13 @@ struct Options {
     uint32_t count;
     uint32_t timeout_ms;
     uint32_t interval_ms;
+
+    uint8_t name_len;
+    char name[127];
 };
 
 static void print_usage() {
-    printf("usage: ping <ip> [-c count] [-W timeout_ms]\n");
+    printf("usage: ping <ip|name> [-c count] [-W timeout_ms]\n");
 }
 
 static bool parse_options(int argc, char** argv, Options& out) {
@@ -180,8 +183,9 @@ static bool parse_options(int argc, char** argv, Options& out) {
     out.count = kDefaultCount;
     out.timeout_ms = kDefaultTimeoutMs;
     out.interval_ms = kDefaultIntervalMs;
+    out.name_len = 0;
 
-    const char* ip_str = 0;
+    const char* target_str = 0;
 
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
@@ -217,19 +221,37 @@ static bool parse_options(int argc, char** argv, Options& out) {
             continue;
         }
 
-        if (!ip_str) {
-            ip_str = a;
+        if (!target_str) {
+            target_str = a;
             continue;
         }
 
         return false;
     }
 
-    if (!ip_str) {
+    if (!target_str) {
         return false;
     }
 
-    return parse_ipv4(ip_str, out.dst_ip_be);
+    if (parse_ipv4(target_str, out.dst_ip_be)) {
+        return true;
+    }
+
+    uint32_t n = 0;
+    for (const char* p = target_str; *p; p++) {
+        n++;
+        if (n > sizeof(out.name)) {
+            return false;
+        }
+    }
+
+    if (n == 0u) {
+        return false;
+    }
+
+    out.name_len = (uint8_t)n;
+    memcpy(out.name, target_str, n);
+    return true;
 }
 
 static uint64_t isqrt_u64(uint64_t x) {
@@ -333,6 +355,88 @@ static int connect_networkd(int& out_r, int& out_w) {
     return 0;
 }
 
+static void close_fds(int& fd_r, int& fd_w) {
+    if (fd_r >= 0) {
+        close(fd_r);
+        fd_r = -1;
+    }
+
+    if (fd_w >= 0) {
+        close(fd_w);
+        fd_w = -1;
+    }
+}
+
+static int recv_ipc_reply_hdr(int fd_r, uint32_t rx_timeout_ms, netd_ipc_hdr_t& out_hdr) {
+    const int hr = read_all_timeout(fd_r, &out_hdr, (uint32_t)sizeof(out_hdr), rx_timeout_ms);
+    if (hr <= 0) {
+        return hr;
+    }
+
+    if (out_hdr.magic != NETD_IPC_MAGIC || out_hdr.version != NETD_IPC_VERSION) {
+        return -1;
+    }
+
+    return 1;
+}
+
+static int drain_unknown_payload(int fd_r, uint32_t rx_timeout_ms, uint32_t len) {
+    if (len == 0u) {
+        return 0;
+    }
+
+    uint8_t trash[NETD_IPC_MAX_PAYLOAD];
+
+    const uint32_t to_read = (len <= sizeof(trash)) ? len : (uint32_t)sizeof(trash);
+    (void)read_all_timeout(fd_r, trash, to_read, rx_timeout_ms);
+    return 0;
+}
+
+static int send_resolve_req(int fd_w, const Options& opt, uint32_t seq) {
+    if (opt.name_len == 0u) {
+        return -1;
+    }
+
+    netd_ipc_hdr_t hdr{};
+
+    hdr.magic = NETD_IPC_MAGIC;
+    hdr.version = NETD_IPC_VERSION;
+    hdr.type = NETD_IPC_MSG_RESOLVE_REQ;
+    hdr.len = (uint32_t)sizeof(netd_ipc_resolve_req_t);
+    hdr.seq = seq;
+
+    netd_ipc_resolve_req_t req{};
+    req.name_len = opt.name_len;
+    memcpy(req.name, opt.name, opt.name_len);
+    req.timeout_ms = opt.timeout_ms;
+
+    if (write_all(fd_w, &hdr, (uint32_t)sizeof(hdr)) != 0) {
+        return -1;
+    }
+
+    if (write_all(fd_w, &req, (uint32_t)sizeof(req)) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int recv_resolve_rsp(int fd_r, uint32_t rx_timeout_ms, netd_ipc_resolve_rsp_t& out) {
+    netd_ipc_hdr_t hdr{};
+
+    const int hr = recv_ipc_reply_hdr(fd_r, rx_timeout_ms, hdr);
+    if (hr <= 0) {
+        return hr;
+    }
+
+    if (hdr.type != NETD_IPC_MSG_RESOLVE_RSP || hdr.len != sizeof(netd_ipc_resolve_rsp_t)) {
+        (void)drain_unknown_payload(fd_r, rx_timeout_ms, hdr.len);
+        return -1;
+    }
+
+    return read_all_timeout(fd_r, &out, (uint32_t)sizeof(out), rx_timeout_ms);
+}
+
 static int send_ping_req(int fd_w, uint32_t dst_ip_be, uint16_t ident_host, uint16_t seq_host, uint32_t timeout_ms) {
     netd_ipc_hdr_t hdr{};
 
@@ -363,29 +467,17 @@ static int send_ping_req(int fd_w, uint32_t dst_ip_be, uint16_t ident_host, uint
 static int recv_ping_rsp(int fd_r, uint32_t rx_timeout_ms, netd_ipc_ping_rsp_t& out) {
     netd_ipc_hdr_t hdr{};
 
-    const int hr = read_all_timeout(fd_r, &hdr, (uint32_t)sizeof(hdr), rx_timeout_ms);
-
+    const int hr = recv_ipc_reply_hdr(fd_r, rx_timeout_ms, hdr);
     if (hr <= 0) {
         return hr;
     }
 
-    if (hdr.magic != NETD_IPC_MAGIC || hdr.version != NETD_IPC_VERSION) {
-        return -1;
-    }
-
     if (hdr.type != NETD_IPC_MSG_PING_RSP || hdr.len != sizeof(netd_ipc_ping_rsp_t)) {
-        if (hdr.len > 0) {
-            uint8_t trash[NETD_IPC_MAX_PAYLOAD];
-
-            const uint32_t to_read = (hdr.len <= sizeof(trash)) ? hdr.len : (uint32_t)sizeof(trash);
-            
-            (void)read_all_timeout(fd_r, trash, to_read, rx_timeout_ms);
-        }
+        (void)drain_unknown_payload(fd_r, rx_timeout_ms, hdr.len);
         return -1;
     }
 
-    const int pr = read_all_timeout(fd_r, &out, (uint32_t)sizeof(out), rx_timeout_ms);
-    return pr;
+    return read_all_timeout(fd_r, &out, (uint32_t)sizeof(out), rx_timeout_ms);
 }
 
 static void print_header(const Options& opt) {
@@ -393,7 +485,8 @@ static void print_header(const Options& opt) {
 
     ip_to_string(opt.dst_ip_be, ip);
 
-    printf("PING %s (%s) %u(%u) bytes of data.\n", ip, ip, kPayloadBytes, kPayloadBytes + 28u);
+    const uint32_t total = kPayloadBytes + 28u;
+    printf("PING %s (%s) %u(%u) bytes of data.\n", ip, ip, kPayloadBytes, total);
 }
 
 static void print_reply_line(uint32_t seq, uint32_t rtt_ms, const Options& opt) {
@@ -421,7 +514,12 @@ static void print_summary(const Options& opt, uint32_t transmitted, uint32_t rec
     printf("\n");
     printf("--- %s ping statistics ---\n", ip);
 
-    const uint32_t loss = transmitted == 0 ? 0u : (uint32_t)(((uint64_t)(transmitted - received) * 100ull) / (uint64_t)transmitted);
+    uint32_t loss = 0u;
+    if (transmitted != 0u) {
+        const uint64_t lost = (uint64_t)(transmitted - received);
+        loss = (uint32_t)((lost * 100ull) / (uint64_t)transmitted);
+    }
+
     printf(
         "%u packets transmitted, %u received, %u%% packet loss, time %ums\n",
         transmitted,
@@ -469,6 +567,25 @@ extern "C" int main(int argc, char** argv) {
         return 1;
     }
 
+    if (opt.dst_ip_be == 0u) {
+        if (ping::send_resolve_req(fd_w, opt, 1u) != 0) {
+            printf("ping: resolve send failed\n");
+            ping::close_fds(fd_r, fd_w);
+            return 1;
+        }
+
+        netd_ipc_resolve_rsp_t rsp{};
+        const uint32_t rx_timeout_ms = opt.timeout_ms + 1500u;
+        const int rr = ping::recv_resolve_rsp(fd_r, rx_timeout_ms, rsp);
+        if (rr <= 0 || rsp.ok == 0u || rsp.ip_be == 0u) {
+            printf("ping: resolve failed\n");
+            ping::close_fds(fd_r, fd_w);
+            return 1;
+        }
+
+        opt.dst_ip_be = rsp.ip_be;
+    }
+
     ping::print_header(opt);
 
     const uint16_t ident = (uint16_t)(getpid() & 0xFFFF);
@@ -485,8 +602,7 @@ extern "C" int main(int argc, char** argv) {
 
         if (ping::send_ping_req(fd_w, opt.dst_ip_be, ident, (uint16_t)seq, opt.timeout_ms) != 0) {
             printf("ping: send failed\n");
-            close(fd_r);
-            close(fd_w);
+            ping::close_fds(fd_r, fd_w);
             return 1;
         }
 
@@ -494,9 +610,7 @@ extern "C" int main(int argc, char** argv) {
         const uint32_t rx_timeout_ms = opt.timeout_ms + 1500u;
         const int rr = ping::recv_ping_rsp(fd_r, rx_timeout_ms, rsp);
 
-        if (rr == 0) {
-            ping::print_timeout_line();
-        } else if (rr < 0 || rsp.ok == 0u) {
+        if (rr <= 0 || rsp.ok == 0u) {
             ping::print_timeout_line();
         } else {
             received++;
@@ -512,8 +626,6 @@ extern "C" int main(int argc, char** argv) {
     const uint32_t total_ms = uptime_ms() - start_ms;
     ping::print_summary(opt, transmitted, received, total_ms, stats);
 
-    close(fd_r);
-    close(fd_w);
-    
+    ping::close_fds(fd_r, fd_w);
     return 0;
 }

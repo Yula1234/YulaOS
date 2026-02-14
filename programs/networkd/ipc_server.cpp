@@ -10,7 +10,6 @@ static int read_into_buffer(int fd, uint8_t* buf, uint32_t cap, uint32_t& inout_
     if (!buf || cap == 0) {
         return -1;
     }
-
     if (inout_len >= cap) {
         return -1;
     }
@@ -42,22 +41,67 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
     return v;
 }
 
+void IpcServer::send_queue_full_error(IpcServer& self, Client& c, uint32_t seq) {
+    netd_ipc_error_t err{};
+    err.code = -12;
+    (void)self.send_msg(c, NETD_IPC_MSG_ERROR, seq, &err, (uint32_t)sizeof(err));
+}
+
 IpcServer::IpcServer(
     Arena& arena,
-    SpscChannel<PingSubmitMsg, 256>& to_core,
-    SpscQueue<PingResultMsg, 256>& from_core
+    SpscChannel<CoreReqMsg, 256>& to_core,
+    SpscQueue<CoreEvtMsg, 256>& from_core
 )
     : m_to_core(to_core),
       m_from_core(from_core),
       m_listen_fd(-1),
       m_clients(arena),
+      m_token_to_index(arena),
       m_pollfds(arena),
       m_dispatch(arena),
-      m_token_to_index(arena),
       m_next_token(1u) {
     (void)m_dispatch.reserve(8u);
     (void)m_dispatch.add(NETD_IPC_MSG_PING_REQ, this, &IpcServer::handle_ping_req);
-    (void)m_token_to_index.reserve(32u);
+    (void)m_dispatch.add(NETD_IPC_MSG_RESOLVE_REQ, this, &IpcServer::handle_resolve_req);
+}
+
+IpcServer::Client* IpcServer::try_get_client_by_token(uint32_t token) {
+    uint32_t idx = 0;
+    if (!m_token_to_index.get(token, idx)) {
+        return nullptr;
+    }
+
+    if (idx >= m_clients.size()) {
+        return nullptr;
+    }
+
+    Client& c = m_clients[idx];
+    if (c.token != token) {
+        return nullptr;
+    }
+
+    return &c;
+}
+
+void IpcServer::on_client_added(uint32_t client_index) {
+    if (client_index >= m_clients.size()) {
+        return;
+    }
+
+    const uint32_t token = m_clients[client_index].token;
+    (void)m_token_to_index.put(token, client_index);
+}
+
+void IpcServer::on_client_removed(uint32_t client_index, uint32_t removed_token, uint32_t moved_token) {
+    if (removed_token != 0u) {
+        (void)m_token_to_index.erase(removed_token);
+    }
+
+    if (moved_token == 0u) {
+        return;
+    }
+
+    (void)m_token_to_index.put(moved_token, client_index);
 }
 
 bool IpcServer::handle_ping_req(
@@ -85,21 +129,65 @@ bool IpcServer::handle_ping_req(
     netd_ipc_ping_req_t req{};
     memcpy(&req, payload, sizeof(req));
 
-    PingSubmitMsg msg{};
-    msg.dst_ip_be = req.dst_ip_be;
-    msg.ident_be = req.ident_be;
-    msg.seq_be = req.seq_be;
-    msg.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
-    msg.tag = seq;
-    msg.client_token = c->token;
+    CoreReqMsg msg{};
+    msg.type = CoreReqType::PingSubmit;
+    msg.ping.dst_ip_be = req.dst_ip_be;
+    msg.ping.ident_be = req.ident_be;
+    msg.ping.seq_be = req.seq_be;
+    msg.ping.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
+    msg.ping.tag = seq;
+    msg.ping.client_token = c->token;
 
     if (self->m_to_core.push_and_wake(msg)) {
         return true;
     }
 
-    netd_ipc_error_t err{};
-    err.code = -12;
-    (void)self->send_msg(*c, NETD_IPC_MSG_ERROR, seq, &err, (uint32_t)sizeof(err));
+    send_queue_full_error(*self, *c, seq);
+    return true;
+}
+
+bool IpcServer::handle_resolve_req(
+    void* handler_ctx,
+    void* call_ctx,
+    uint16_t type,
+    uint32_t seq,
+    const uint8_t* payload,
+    uint32_t len,
+    uint32_t now_ms
+) {
+    (void)type;
+    (void)now_ms;
+
+    IpcServer* self = (IpcServer*)handler_ctx;
+    Client* c = (Client*)call_ctx;
+    if (!self || !c || !payload) {
+        return false;
+    }
+
+    if (len != sizeof(netd_ipc_resolve_req_t)) {
+        return false;
+    }
+
+    netd_ipc_resolve_req_t req{};
+    memcpy(&req, payload, sizeof(req));
+
+    if (req.name_len == 0u || req.name_len > sizeof(req.name)) {
+        return false;
+    }
+
+    CoreReqMsg msg{};
+    msg.type = CoreReqType::DnsResolveSubmit;
+    msg.dns.name_len = req.name_len;
+    memcpy(msg.dns.name, req.name, req.name_len);
+    msg.dns.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
+    msg.dns.tag = seq;
+    msg.dns.client_token = c->token;
+
+    if (self->m_to_core.push_and_wake(msg)) {
+        return true;
+    }
+
+    send_queue_full_error(*self, *c, seq);
     return true;
 }
 
@@ -196,8 +284,7 @@ bool IpcServer::accept_one() {
         return false;
     }
 
-    const uint32_t idx = m_clients.size() - 1u;
-    (void)m_token_to_index.put(m_clients[idx].token, idx);
+    on_client_added(m_clients.size() - 1u);
 
     return true;
 }
@@ -265,18 +352,12 @@ void IpcServer::drop_client(uint32_t idx) {
         return;
     }
 
-    Client& c = m_clients[idx];
-
-    (void)m_token_to_index.erase(c.token);
-
     const uint32_t last = m_clients.size() - 1u;
-    if (idx != last) {
-        m_clients[idx] = netd::move(m_clients[last]);
+    const uint32_t removed_token = m_clients[idx].token;
+    const uint32_t moved_token = (idx != last) ? m_clients[last].token : 0u;
 
-        (void)m_token_to_index.put(m_clients[idx].token, idx);
-    }
-
-    m_clients.erase_unordered(last);
+    on_client_removed(idx, removed_token, moved_token);
+    m_clients.erase_unordered(idx);
 }
 
 void IpcServer::client_step(Client& c, uint32_t now_ms) {
@@ -329,29 +410,45 @@ void IpcServer::step(uint32_t now_ms) {
     }
 
     for (;;) {
-        PingResultMsg res{};
-        if (!m_from_core.pop(res)) {
+        CoreEvtMsg evt{};
+        if (!m_from_core.pop(evt)) {
             break;
         }
 
-        netd_ipc_ping_rsp_t rsp{};
-        rsp.dst_ip_be = res.dst_ip_be;
-        rsp.ident_be = res.ident_be;
-        rsp.seq_be = res.seq_be;
-        rsp.rtt_ms = res.rtt_ms;
-        rsp.ok = res.ok ? 1u : 0u;
+        if (evt.type == CoreEvtType::PingResult) {
+            const PingResultMsg& res = evt.ping;
 
-        uint32_t idx = 0;
-        if (!m_token_to_index.get(res.client_token, idx)) {
+            netd_ipc_ping_rsp_t rsp{};
+            rsp.dst_ip_be = res.dst_ip_be;
+            rsp.ident_be = res.ident_be;
+            rsp.seq_be = res.seq_be;
+            rsp.rtt_ms = res.rtt_ms;
+            rsp.ok = res.ok ? 1u : 0u;
+
+            Client* c = try_get_client_by_token(res.client_token);
+            if (!c) {
+                continue;
+            }
+
+            (void)send_msg(*c, NETD_IPC_MSG_PING_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
             continue;
         }
 
-        if (idx >= m_clients.size()) {
+        if (evt.type == CoreEvtType::DnsResolveResult) {
+            const DnsResolveResultMsg& res = evt.dns;
+
+            netd_ipc_resolve_rsp_t rsp{};
+            rsp.ip_be = res.ip_be;
+            rsp.ok = res.ok ? 1u : 0u;
+
+            Client* c = try_get_client_by_token(res.client_token);
+            if (!c) {
+                continue;
+            }
+
+            (void)send_msg(*c, NETD_IPC_MSG_RESOLVE_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
             continue;
         }
-
-        Client& c = m_clients[idx];
-        (void)send_msg(c, NETD_IPC_MSG_PING_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
     }
 }
 

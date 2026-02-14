@@ -103,6 +103,14 @@ struct __attribute__((packed)) Ipv4Hdr {
 };
 
 static constexpr uint8_t IP_PROTO_ICMP = 1u;
+static constexpr uint8_t IP_PROTO_UDP = 17u;
+
+struct __attribute__((packed)) UdpHdr {
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint16_t len;
+    uint16_t checksum;
+};
 
 struct __attribute__((packed)) IcmpHdr {
     uint8_t type;
