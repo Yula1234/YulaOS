@@ -5,18 +5,20 @@
 #include "net_vec.h"
 #include "net_hash_map.h"
 #include "dns_types.h"
+#include "udp.h"
 
 #include <stdint.h>
 
 namespace netd {
 
 class Arena;
-class NetDev;
+class Ipv4;
+class Udp;
 class Arp;
 
 class DnsClient {
 public:
-    DnsClient(Arena& arena, NetDev& dev, Arp& arp);
+    DnsClient(Arena& arena, Ipv4& ipv4, Udp& udp, Arp& arp);
 
     void set_config(const DnsConfig& cfg);
 
@@ -24,19 +26,11 @@ public:
 
     void step(uint32_t now_ms);
 
-    bool handle_udp_frame(
-        const EthHdr* eth,
-        const Ipv4Hdr* ip,
-        const UdpHdr* udp,
-        const uint8_t* payload,
-        uint32_t payload_len,
-        uint32_t now_ms
-    );
-
-    static bool udp_proto_handler(
+    static bool udp_port_handler(
         void* ctx,
-        const EthHdr* eth,
         const Ipv4Hdr* ip,
+        uint16_t src_port,
+        uint16_t dst_port,
         const uint8_t* payload,
         uint32_t payload_len,
         uint32_t now_ms
@@ -80,7 +74,10 @@ private:
 
     static uint64_t make_key(uint32_t client_token, uint32_t tag);
 
-    NetDev& m_dev;
+    static uint16_t alloc_src_port(uint32_t now_ms);
+
+    Ipv4& m_ipv4;
+    Udp& m_udp;
     Arp& m_arp;
 
     DnsConfig m_cfg;

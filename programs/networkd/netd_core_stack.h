@@ -5,6 +5,7 @@
 #include "netdev.h"
 #include "arp.h"
 #include "ipv4.h"
+#include "udp.h"
 #include "ipv4_icmp.h"
 #include "dns_client.h"
 #include "netd_config.h"
@@ -47,6 +48,7 @@ private:
 
     Inplace<Arp> m_arp;
     Inplace<Ipv4> m_ipv4;
+    Inplace<Udp> m_udp;
     Inplace<Ipv4Icmp> m_icmp;
     Inplace<DnsClient> m_dns;
     Inplace<EthertypeDispatch> m_eth_dispatch;

@@ -7,6 +7,7 @@ NetdCoreStack::NetdCoreStack(Arena& arena, NetDev& dev)
       m_dev(dev),
       m_arp(),
       m_ipv4(),
+      m_udp(),
       m_icmp(),
       m_dns(),
       m_eth_dispatch() {
@@ -15,8 +16,9 @@ NetdCoreStack::NetdCoreStack(Arena& arena, NetDev& dev)
 bool NetdCoreStack::init(const NetdConfig& cfg) {
     Arp* arp = m_arp.construct(m_arena, m_dev);
     Ipv4* ipv4 = m_ipv4.construct(m_arena, m_dev);
+    Udp* udp = m_udp.construct(m_arena, *ipv4);
     Ipv4Icmp* icmp = m_icmp.construct(m_arena, *ipv4, *arp);
-    DnsClient* dns = m_dns.construct(m_arena, m_dev, *arp);
+    DnsClient* dns = m_dns.construct(m_arena, *ipv4, *udp, *arp);
     EthertypeDispatch* eth = m_eth_dispatch.construct(m_arena);
 
     const Mac mac = m_dev.mac();
@@ -39,7 +41,9 @@ bool NetdCoreStack::init(const NetdConfig& cfg) {
     dns->set_config(dns_cfg);
 
     (void)ipv4->add_proto_handler(IP_PROTO_ICMP, icmp, &Ipv4Icmp::proto_icmp_handler);
-    (void)ipv4->add_proto_handler(IP_PROTO_UDP, dns, &DnsClient::udp_proto_handler);
+    (void)ipv4->add_proto_handler(IP_PROTO_UDP, udp, &Udp::ip_proto_udp_handler);
+
+    udp->set_default_handler(dns, &DnsClient::udp_port_handler);
 
     (void)eth->reserve(8u);
     (void)eth->add(ETHERTYPE_ARP, arp, &NetdCoreStack::handle_arp);

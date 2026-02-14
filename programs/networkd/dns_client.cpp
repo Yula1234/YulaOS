@@ -1,9 +1,9 @@
 #include "dns_client.h"
 
 #include "arena.h"
-#include "netdev.h"
+#include "ipv4.h"
+#include "udp.h"
 #include "arp.h"
-#include "dns_transport.h"
 #include "dns_wire.h"
 
 #include <yula.h>
@@ -15,10 +15,16 @@ namespace {
 static constexpr uint16_t kDnsPort = 53u;
 static constexpr uint32_t kMaxOps = 64u;
 
+static uint16_t rand16(uint32_t now_ms) {
+    const uint32_t t = now_ms;
+    return (uint16_t)((t & 0xFFFFu) ^ (t >> 16));
 }
 
-DnsClient::DnsClient(Arena& arena, NetDev& dev, Arp& arp)
-    : m_dev(dev),
+}
+
+DnsClient::DnsClient(Arena& arena, Ipv4& ipv4, Udp& udp, Arp& arp)
+    : m_ipv4(ipv4),
+      m_udp(udp),
       m_arp(arp),
       m_cfg{},
       m_ops(arena),
@@ -87,6 +93,10 @@ void DnsClient::set_config(const DnsConfig& cfg) {
     m_cfg = cfg;
 }
 
+uint16_t DnsClient::alloc_src_port(uint32_t now_ms) {
+    return (uint16_t)(40000u + (rand16(now_ms) % 20000u));
+}
+
 uint64_t DnsClient::make_key(uint32_t client_token, uint32_t tag) {
     const uint64_t k = ((uint64_t)client_token << 32) | (uint64_t)tag;
     if (k == 0ull) {
@@ -134,7 +144,7 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
         m_next_txid = 1u;
     }
 
-    op.src_port = dns_transport::alloc_src_port(now_ms);
+    op.src_port = alloc_src_port(now_ms);
 
     op.dst_mac = Mac{};
 
@@ -189,17 +199,15 @@ void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint3
 }
 
 bool DnsClient::try_send_query(Op& op, uint32_t now_ms) {
-    return dns_transport::send_a_query(
-        m_dev,
-        m_cfg,
-        op.dst_mac,
-        op.dst_ip_be,
-        op.src_port,
-        op.txid,
-        op.name,
-        op.name_len,
-        now_ms
-    );
+    uint8_t dns[256];
+    uint32_t dns_len = 0;
+
+    if (!dns_wire::build_dns_a_query(op.txid, op.name, op.name_len, dns, (uint32_t)sizeof(dns), dns_len)) {
+        return false;
+    }
+
+    (void)now_ms;
+    return m_udp.send_to(op.dst_mac, op.dst_ip_be, op.src_port, kDnsPort, dns, dns_len, now_ms);
 }
 
 void DnsClient::step(uint32_t now_ms) {
@@ -280,21 +288,25 @@ void DnsClient::step(uint32_t now_ms) {
     }
 }
 
-bool DnsClient::handle_udp_frame(
-    const EthHdr* eth,
+bool DnsClient::udp_port_handler(
+    void* ctx,
     const Ipv4Hdr* ip,
-    const UdpHdr* udp,
+    uint16_t src_port,
+    uint16_t dst_port,
     const uint8_t* payload,
     uint32_t payload_len,
     uint32_t now_ms
 ) {
-    (void)eth;
-
-    if (!ip || !udp || !payload) {
+    DnsClient* self = (DnsClient*)ctx;
+    if (!self || !ip || !payload) {
         return false;
     }
 
-    if (ntohs(udp->src_port) != kDnsPort) {
+    if (src_port != kDnsPort) {
+        return false;
+    }
+
+    if (dst_port == 0u) {
         return false;
     }
 
@@ -304,8 +316,8 @@ bool DnsClient::handle_udp_frame(
 
     const uint16_t txid = (uint16_t)payload[0] << 8 | (uint16_t)payload[1];
 
-    for (uint32_t i = 0; i < m_ops.size(); i++) {
-        Op& op = m_ops[i];
+    for (uint32_t i = 0; i < self->m_ops.size(); i++) {
+        Op& op = self->m_ops[i];
 
         if (op.dst_ip_be != ip->src) {
             continue;
@@ -315,55 +327,21 @@ bool DnsClient::handle_udp_frame(
             continue;
         }
 
-        if (htons(op.src_port) != udp->dst_port) {
+        if (op.src_port != dst_port) {
             continue;
         }
 
         uint32_t ip_be = 0;
         if (dns_wire::parse_dns_a_response(txid, payload, payload_len, ip_be)) {
-            complete_op(i, ip_be, 1u, now_ms);
+            self->complete_op(i, ip_be, 1u, now_ms);
             return true;
         }
 
-        complete_op(i, 0u, 0u, now_ms);
+        self->complete_op(i, 0u, 0u, now_ms);
         return true;
     }
 
     return false;
-}
-
-bool DnsClient::udp_proto_handler(
-    void* ctx,
-    const EthHdr* eth,
-    const Ipv4Hdr* ip,
-    const uint8_t* payload,
-    uint32_t payload_len,
-    uint32_t now_ms
-) {
-    DnsClient* self = (DnsClient*)ctx;
-    if (!self || !eth || !ip || !payload) {
-        return false;
-    }
-
-    if (payload_len < (uint32_t)sizeof(UdpHdr)) {
-        return false;
-    }
-
-    const UdpHdr* udp = (const UdpHdr*)payload;
-
-    const uint32_t udp_len = (uint32_t)ntohs(udp->len);
-    if (udp_len < sizeof(UdpHdr)) {
-        return false;
-    }
-
-    if (udp_len > payload_len) {
-        return false;
-    }
-
-    const uint8_t* udp_payload = payload + sizeof(UdpHdr);
-    const uint32_t udp_payload_len = udp_len - (uint32_t)sizeof(UdpHdr);
-
-    return self->handle_udp_frame(eth, ip, udp, udp_payload, udp_payload_len, now_ms);
 }
 
 bool DnsClient::poll_result(ResolveResult& out) {
