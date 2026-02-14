@@ -44,6 +44,8 @@ public:
 
     bool poll_result(ResolveResult& out);
 
+    bool try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const;
+
 private:
     struct Op {
         uint64_t key;
@@ -70,8 +72,11 @@ private:
         uint8_t state;
     };
 
+    static uint32_t op_next_wakeup_ms(const Op& op);
+    static uint32_t recompute_next_wakeup_ms(const Vector<Op>& ops, uint32_t now_ms);
+
     bool try_send_query(Op& op, uint32_t now_ms);
-    void complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok);
+    void complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint32_t now_ms);
 
     static uint64_t make_key(uint32_t client_token, uint32_t tag);
 
@@ -85,6 +90,8 @@ private:
     Vector<ResolveResult> m_results;
 
     uint16_t m_next_txid;
+
+    uint32_t m_next_wakeup_ms;
 };
 
 }

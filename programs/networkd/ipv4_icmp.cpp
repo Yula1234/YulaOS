@@ -64,11 +64,61 @@ Ipv4Icmp::Ipv4Icmp(Arena& arena, NetDev& dev, Arp& arp)
       m_proto_dispatch(arena),
       m_ops(arena),
       m_key_to_index(arena),
-      m_results(arena) {
+      m_results(arena),
+      m_next_wakeup_ms(0u) {
     (void)m_proto_dispatch.reserve(4u);
     (void)m_proto_dispatch.add(IP_PROTO_ICMP, this, &Ipv4Icmp::proto_icmp_handler);
     (void)m_ops.reserve(32u);
     (void)m_results.reserve(32u);
+}
+
+uint32_t Ipv4Icmp::op_next_wakeup_ms(const PingOp& op) {
+    uint32_t t = op.deadline_ms;
+
+    if (op.state == 0u) {
+        if (op.next_arp_tx_ms < t) {
+            t = op.next_arp_tx_ms;
+        }
+    }
+
+    return t;
+}
+
+uint32_t Ipv4Icmp::recompute_next_wakeup_ms(const Vector<PingOp>& ops, uint32_t now_ms) {
+    uint32_t best = 0u;
+
+    for (uint32_t i = 0; i < ops.size(); i++) {
+        const uint32_t t = op_next_wakeup_ms(ops[i]);
+
+        if (t <= now_ms) {
+            continue;
+        }
+
+        if (best == 0u || t < best) {
+            best = t;
+        }
+    }
+
+    return best;
+}
+
+bool Ipv4Icmp::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const {
+    if (m_ops.size() == 0) {
+        return false;
+    }
+
+    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms > now_ms) {
+        out_ms = m_next_wakeup_ms;
+        return true;
+    }
+
+    const uint32_t best = recompute_next_wakeup_ms(m_ops, now_ms);
+    if (best == 0u) {
+        return false;
+    }
+
+    out_ms = best;
+    return true;
 }
 
 bool Ipv4Icmp::proto_icmp_handler(
@@ -254,6 +304,11 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
 
     (void)m_key_to_index.put(op.key, m_ops.size() - 1u);
 
+    const uint32_t wake = op_next_wakeup_ms(op);
+    if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+        m_next_wakeup_ms = wake;
+    }
+
     return true;
 }
 
@@ -290,6 +345,10 @@ void Ipv4Icmp::complete_op(uint32_t op_index, uint32_t now_ms, uint8_t ok) {
 
     if (moved_key != 0u) {
         (void)m_key_to_index.put(moved_key, op_index);
+    }
+
+    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
+        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
     }
 }
 
@@ -329,6 +388,11 @@ void Ipv4Icmp::step(uint32_t now_ms) {
                 op.sent_time_ms = now_ms;
                 op.state = 1u;
 
+                const uint32_t wake = op_next_wakeup_ms(op);
+                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                    m_next_wakeup_ms = wake;
+                }
+
                 i++;
                 continue;
             }
@@ -336,6 +400,11 @@ void Ipv4Icmp::step(uint32_t now_ms) {
             if (now_ms >= op.next_arp_tx_ms) {
                 (void)m_arp.request(op.next_hop_ip_be);
                 op.next_arp_tx_ms = now_ms + 200u;
+
+                const uint32_t wake = op_next_wakeup_ms(op);
+                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                    m_next_wakeup_ms = wake;
+                }
             }
 
             i++;
@@ -343,6 +412,10 @@ void Ipv4Icmp::step(uint32_t now_ms) {
         }
 
         i++;
+    }
+
+    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
+        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
     }
 }
 

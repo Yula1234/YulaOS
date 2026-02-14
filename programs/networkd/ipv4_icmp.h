@@ -49,6 +49,8 @@ public:
     void step(uint32_t now_ms);
     bool poll_result(PingResult& out);
 
+    bool try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const;
+
     bool add_proto_handler(uint8_t proto, void* ctx, IpProtoDispatch::HandlerFn fn);
 
 private:
@@ -80,6 +82,9 @@ private:
         uint8_t state;
     };
 
+    static uint32_t op_next_wakeup_ms(const PingOp& op);
+    static uint32_t recompute_next_wakeup_ms(const Vector<PingOp>& ops, uint32_t now_ms);
+
     void complete_op(uint32_t op_index, uint32_t now_ms, uint8_t ok);
     static uint32_t make_key(uint16_t ident_be, uint16_t seq_be);
 
@@ -92,6 +97,8 @@ private:
     Vector<PingOp> m_ops;
     U32Map m_key_to_index;
     Vector<PingResult> m_results;
+
+    uint32_t m_next_wakeup_ms;
 };
 
 }

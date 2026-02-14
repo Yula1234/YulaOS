@@ -24,9 +24,63 @@ DnsClient::DnsClient(Arena& arena, NetDev& dev, Arp& arp)
       m_ops(arena),
       m_key_to_index(arena),
       m_results(arena),
-      m_next_txid(1u) {
+      m_next_txid(1u),
+      m_next_wakeup_ms(0u) {
     (void)m_ops.reserve(16u);
     (void)m_results.reserve(16u);
+}
+
+uint32_t DnsClient::op_next_wakeup_ms(const Op& op) {
+    uint32_t t = op.deadline_ms;
+
+    if (op.state == 0u) {
+        if (op.next_arp_tx_ms < t) {
+            t = op.next_arp_tx_ms;
+        }
+    } else if (op.state == 1u) {
+        if (op.next_tx_ms < t) {
+            t = op.next_tx_ms;
+        }
+    }
+
+    return t;
+}
+
+uint32_t DnsClient::recompute_next_wakeup_ms(const Vector<Op>& ops, uint32_t now_ms) {
+    uint32_t best = 0u;
+
+    for (uint32_t i = 0; i < ops.size(); i++) {
+        const uint32_t t = op_next_wakeup_ms(ops[i]);
+
+        if (t <= now_ms) {
+            continue;
+        }
+
+        if (best == 0u || t < best) {
+            best = t;
+        }
+    }
+
+    return best;
+}
+
+bool DnsClient::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const {
+    if (m_ops.size() == 0) {
+        return false;
+    }
+
+    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms > now_ms) {
+        out_ms = m_next_wakeup_ms;
+        return true;
+    }
+
+    const uint32_t best = recompute_next_wakeup_ms(m_ops, now_ms);
+    if (best == 0u) {
+        return false;
+    }
+
+    out_ms = best;
+    return true;
 }
 
 void DnsClient::set_config(const DnsConfig& cfg) {
@@ -95,10 +149,15 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
 
     (void)m_key_to_index.put(op.key, m_ops.size() - 1u);
 
+    const uint32_t wake = op_next_wakeup_ms(op);
+    if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+        m_next_wakeup_ms = wake;
+    }
+
     return true;
 }
 
-void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok) {
+void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint32_t now_ms) {
     if (op_index >= m_ops.size()) {
         return;
     }
@@ -123,6 +182,10 @@ void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok) {
     if (moved_key != 0ull) {
         (void)m_key_to_index.put(moved_key, op_index);
     }
+
+    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
+        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
+    }
 }
 
 bool DnsClient::try_send_query(Op& op, uint32_t now_ms) {
@@ -144,7 +207,7 @@ void DnsClient::step(uint32_t now_ms) {
         Op& op = m_ops[i];
 
         if (now_ms >= op.deadline_ms) {
-            complete_op(i, 0u, 0u);
+            complete_op(i, 0u, 0u, now_ms);
             continue;
         }
 
@@ -154,6 +217,12 @@ void DnsClient::step(uint32_t now_ms) {
                 op.dst_mac = mac;
                 op.state = 1u;
                 op.next_tx_ms = now_ms;
+
+                const uint32_t wake = op_next_wakeup_ms(op);
+                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                    m_next_wakeup_ms = wake;
+                }
+
                 i++;
                 continue;
             }
@@ -161,6 +230,11 @@ void DnsClient::step(uint32_t now_ms) {
             if (now_ms >= op.next_arp_tx_ms) {
                 (void)m_arp.request(op.next_hop_ip_be);
                 op.next_arp_tx_ms = now_ms + 200u;
+
+                const uint32_t wake = op_next_wakeup_ms(op);
+                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                    m_next_wakeup_ms = wake;
+                }
             }
 
             i++;
@@ -187,11 +261,22 @@ void DnsClient::step(uint32_t now_ms) {
             op.tries++;
             op.next_tx_ms = now_ms + 800u;
 
+            {
+                const uint32_t wake = op_next_wakeup_ms(op);
+                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                    m_next_wakeup_ms = wake;
+                }
+            }
+
             i++;
             continue;
         }
 
         i++;
+    }
+
+    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
+        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
     }
 }
 
@@ -236,11 +321,11 @@ bool DnsClient::handle_udp_frame(
 
         uint32_t ip_be = 0;
         if (dns_wire::parse_dns_a_response(txid, payload, payload_len, ip_be)) {
-            complete_op(i, ip_be, 1u);
+            complete_op(i, ip_be, 1u, now_ms);
             return true;
         }
 
-        complete_op(i, 0u, 0u);
+        complete_op(i, 0u, 0u, now_ms);
         return true;
     }
 
