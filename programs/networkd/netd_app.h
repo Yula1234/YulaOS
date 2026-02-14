@@ -4,7 +4,9 @@
 #include "arena.h"
 #include "ipc_server.h"
 #include "net_channel.h"
+#include "netd_core_ipc_bridge.h"
 #include "netd_core_stack.h"
+#include "netd_ipc_runtime.h"
 #include "net_spsc.h"
 #include "netdev.h"
 #include "netd_msgs.h"
@@ -25,16 +27,10 @@ public:
     int run();
 
 private:
-    struct IpcThreadCtx {
-        IpcServer* ipc;
-        const PipePair* notify;
-    };
-
-    static void* ipc_thread_main(void* arg);
-
     bool init_arenas();
     bool init_device();
     bool init_stack();
+    bool init_bridge();
     bool init_ipc();
 
     void poll_once(uint32_t now_ms);
@@ -56,10 +52,10 @@ private:
     SpscChannel<CoreEvtMsg, 256> m_core_to_ipc_chan;
 
     Inplace<NetdCoreStack> m_stack;
+    Inplace<NetdCoreIpcBridge> m_bridge;
     Inplace<IpcServer> m_ipc;
 
-    pthread_t m_ipc_thread;
-    IpcThreadCtx m_ipc_ctx;
+    NetdIpcRuntime m_ipc_rt;
 };
 
 }

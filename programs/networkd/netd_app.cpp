@@ -46,90 +46,23 @@ void NetdApp::poll_once(uint32_t now_ms) {
     fds[0].events = POLLIN;
     fds[0].revents = 0;
 
-    fds[1].fd = m_ipc_to_core_chan.notify_fd();
+    fds[1].fd = m_bridge->req_notify_fd();
     fds[1].events = POLLIN;
     fds[1].revents = 0;
 
     (void)poll(fds, 2, timeout_ms);
 
     if ((fds[1].revents & POLLIN) != 0) {
-        m_ipc_to_core_chan.drain_notify();
+        m_bridge->drain_req_notify();
     }
 }
 
 void NetdApp::drain_core_requests(uint32_t now_ms) {
-    for (;;) {
-        CoreReqMsg req{};
-        if (!m_ipc_to_core_q.pop(req)) {
-            break;
-        }
-
-        if (req.type == CoreReqType::PingSubmit) {
-            const PingSubmitMsg& msg = req.ping;
-
-            Ipv4Icmp::PingRequest pr{};
-            pr.dst_ip_be = msg.dst_ip_be;
-            pr.ident_be = msg.ident_be;
-            pr.seq_be = msg.seq_be;
-            pr.timeout_ms = msg.timeout_ms;
-            pr.tag = msg.tag;
-            pr.client_token = msg.client_token;
-
-            (void)m_stack->submit_ping(pr, now_ms);
-            continue;
-        }
-
-        if (req.type == CoreReqType::DnsResolveSubmit) {
-            const DnsResolveSubmitMsg& msg = req.dns;
-
-            ResolveRequest dr{};
-            dr.name_len = msg.name_len;
-            memcpy(dr.name, msg.name, msg.name_len);
-            dr.tag = msg.tag;
-            dr.client_token = msg.client_token;
-            dr.timeout_ms = msg.timeout_ms;
-
-            (void)m_stack->submit_resolve(dr, now_ms);
-            continue;
-        }
-    }
+    m_bridge->drain_requests(now_ms);
 }
 
 void NetdApp::publish_events(uint32_t now_ms) {
-    for (;;) {
-        Ipv4Icmp::PingResult r{};
-        if (!m_stack->poll_ping_result(r)) {
-            break;
-        }
-
-        CoreEvtMsg evt{};
-        evt.type = CoreEvtType::PingResult;
-        evt.ping.dst_ip_be = r.dst_ip_be;
-        evt.ping.ident_be = r.ident_be;
-        evt.ping.seq_be = r.seq_be;
-        evt.ping.rtt_ms = r.rtt_ms;
-        evt.ping.ok = r.ok;
-        evt.ping.tag = r.tag;
-        evt.ping.client_token = r.client_token;
-
-        (void)m_core_to_ipc_chan.push_and_wake(evt);
-    }
-
-    for (;;) {
-        ResolveResult r{};
-        if (!m_stack->poll_resolve_result(r)) {
-            break;
-        }
-
-        CoreEvtMsg evt{};
-        evt.type = CoreEvtType::DnsResolveResult;
-        evt.dns.ip_be = r.ip_be;
-        evt.dns.ok = r.ok;
-        evt.dns.tag = r.tag;
-        evt.dns.client_token = r.client_token;
-
-        (void)m_core_to_ipc_chan.push_and_wake(evt);
-    }
+    m_bridge->publish_events(now_ms);
 }
 
 NetdApp::NetdApp()
@@ -143,23 +76,9 @@ NetdApp::NetdApp()
       m_ipc_to_core_chan(m_ipc_to_core_q, m_ipc_to_core_notify),
       m_core_to_ipc_chan(m_core_to_ipc_q, m_core_to_ipc_notify),
       m_stack(),
+      m_bridge(),
       m_ipc(),
-      m_ipc_thread{},
-      m_ipc_ctx{} {
-}
-
-void* NetdApp::ipc_thread_main(void* arg) {
-    IpcThreadCtx* ctx = (IpcThreadCtx*)arg;
-    if (!ctx || !ctx->ipc || !ctx->notify) {
-        return nullptr;
-    }
-
-    for (;;) {
-        (void)ctx->ipc->wait(*ctx->notify, -1);
-
-        const uint32_t now = uptime_ms();
-        ctx->ipc->step(now);
-    }
+      m_ipc_rt() {
 }
 
 bool NetdApp::init() {
@@ -172,6 +91,10 @@ bool NetdApp::init() {
     }
 
     if (!init_stack()) {
+        return false;
+    }
+
+    if (!init_bridge()) {
         return false;
     }
 
@@ -215,6 +138,11 @@ bool NetdApp::init_stack() {
     return true;
 }
 
+bool NetdApp::init_bridge() {
+    (void)m_bridge.construct(*m_stack.get(), m_ipc_to_core_q, m_ipc_to_core_chan, m_core_to_ipc_chan);
+    return true;
+}
+
 bool NetdApp::init_ipc() {
     if (!m_core_to_ipc_notify.create()) {
         printf("networkd: pipe failed\n");
@@ -232,10 +160,7 @@ bool NetdApp::init_ipc() {
         return false;
     }
 
-    m_ipc_ctx.ipc = ipc;
-    m_ipc_ctx.notify = &m_core_to_ipc_notify;
-
-    if (pthread_create(&m_ipc_thread, nullptr, &NetdApp::ipc_thread_main, &m_ipc_ctx) != 0) {
+    if (!m_ipc_rt.start(*ipc, m_core_to_ipc_notify)) {
         printf("networkd: pthread_create failed\n");
         return false;
     }

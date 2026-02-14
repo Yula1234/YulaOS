@@ -1,7 +1,8 @@
 #include "netd_app.h"
 
 extern "C" int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
 
     netd::NetdApp app;
     if (!app.init()) {
