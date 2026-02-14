@@ -6,14 +6,16 @@ NetdCoreStack::NetdCoreStack(Arena& arena, NetDev& dev)
     : m_arena(arena),
       m_dev(dev),
       m_arp(),
-      m_ip(),
+      m_ipv4(),
+      m_icmp(),
       m_dns(),
       m_eth_dispatch() {
 }
 
 bool NetdCoreStack::init(const NetdConfig& cfg) {
     Arp* arp = m_arp.construct(m_arena, m_dev);
-    Ipv4Icmp* ip = m_ip.construct(m_arena, m_dev, *arp);
+    Ipv4* ipv4 = m_ipv4.construct(m_arena, m_dev);
+    Ipv4Icmp* icmp = m_icmp.construct(m_arena, *ipv4, *arp);
     DnsClient* dns = m_dns.construct(m_arena, m_dev, *arp);
     EthertypeDispatch* eth = m_eth_dispatch.construct(m_arena);
 
@@ -28,7 +30,7 @@ bool NetdCoreStack::init(const NetdConfig& cfg) {
     ip_cfg.ip_be = arp_cfg.ip_be;
     ip_cfg.mask_be = cfg.mask_be;
     ip_cfg.gw_be = cfg.gw_be;
-    ip->set_config(ip_cfg);
+    ipv4->set_config(ip_cfg);
 
     DnsConfig dns_cfg{};
     dns_cfg.ip_be = ip_cfg.ip_be;
@@ -36,11 +38,12 @@ bool NetdCoreStack::init(const NetdConfig& cfg) {
     dns_cfg.dns_ip_be = cfg.dns_ip_be;
     dns->set_config(dns_cfg);
 
-    (void)ip->add_proto_handler(IP_PROTO_UDP, dns, &DnsClient::udp_proto_handler);
+    (void)ipv4->add_proto_handler(IP_PROTO_ICMP, icmp, &Ipv4Icmp::proto_icmp_handler);
+    (void)ipv4->add_proto_handler(IP_PROTO_UDP, dns, &DnsClient::udp_proto_handler);
 
     (void)eth->reserve(8u);
     (void)eth->add(ETHERTYPE_ARP, arp, &NetdCoreStack::handle_arp);
-    (void)eth->add(ETHERTYPE_IPV4, ip, &NetdCoreStack::handle_ipv4);
+    (void)eth->add(ETHERTYPE_IPV4, ipv4, &NetdCoreStack::handle_ipv4);
 
     return true;
 }
@@ -55,16 +58,16 @@ void NetdCoreStack::handle_arp(void* ctx, const uint8_t* frame, uint32_t len, ui
 }
 
 void NetdCoreStack::handle_ipv4(void* ctx, const uint8_t* frame, uint32_t len, uint32_t now_ms) {
-    Ipv4Icmp* ip = (Ipv4Icmp*)ctx;
-    if (!ip) {
+    Ipv4* ipv4 = (Ipv4*)ctx;
+    if (!ipv4) {
         return;
     }
 
-    (void)ip->handle_frame(frame, len, now_ms);
+    (void)ipv4->handle_frame(frame, len, now_ms);
 }
 
 void NetdCoreStack::step(uint32_t now_ms) {
-    m_ip->step(now_ms);
+    m_icmp->step(now_ms);
     m_dns->step(now_ms);
 }
 
@@ -80,11 +83,11 @@ bool NetdCoreStack::handle_frame(const uint8_t* frame, uint32_t len, uint32_t no
 }
 
 bool NetdCoreStack::submit_ping(const Ipv4Icmp::PingRequest& req, uint32_t now_ms) {
-    return m_ip->submit_ping(req, now_ms);
+    return m_icmp->submit_ping(req, now_ms);
 }
 
 bool NetdCoreStack::poll_ping_result(Ipv4Icmp::PingResult& out) {
-    return m_ip->poll_result(out);
+    return m_icmp->poll_result(out);
 }
 
 bool NetdCoreStack::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
@@ -99,7 +102,7 @@ bool NetdCoreStack::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) co
     uint32_t best = 0u;
 
     uint32_t t = 0u;
-    if (m_ip->try_get_next_wakeup_ms(now_ms, t)) {
+    if (m_icmp->try_get_next_wakeup_ms(now_ms, t)) {
         best = t;
     }
 

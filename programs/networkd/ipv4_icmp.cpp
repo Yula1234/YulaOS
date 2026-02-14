@@ -1,7 +1,6 @@
 #include "ipv4_icmp.h"
 
 #include "arena.h"
-#include "netdev.h"
 #include "arp.h"
 #include "net_mac.h"
 
@@ -9,65 +8,13 @@
 
 namespace netd {
 
-namespace {
-
-struct ParsedIpv4 {
-    const netd::EthHdr* eth;
-    const netd::Ipv4Hdr* ip;
-    const uint8_t* payload;
-    uint32_t payload_len;
-};
-
-static bool parse_ipv4_frame(const uint8_t* frame, uint32_t len, ParsedIpv4& out) {
-    if (!frame || len < (uint32_t)(sizeof(netd::EthHdr) + sizeof(netd::Ipv4Hdr))) {
-        return false;
-    }
-
-    const netd::EthHdr* eth = (const netd::EthHdr*)frame;
-    if (netd::ntohs(eth->ethertype) != netd::ETHERTYPE_IPV4) {
-        return false;
-    }
-
-    const netd::Ipv4Hdr* ip = (const netd::Ipv4Hdr*)(frame + sizeof(netd::EthHdr));
-    const uint32_t ihl = (uint32_t)(ip->ver_ihl & 0x0Fu) * 4u;
-    if (ihl < sizeof(netd::Ipv4Hdr)) {
-        return false;
-    }
-
-    if (len < (uint32_t)sizeof(netd::EthHdr) + ihl) {
-        return false;
-    }
-
-    const uint16_t total_len = netd::ntohs(ip->total_len);
-    if (total_len < ihl) {
-        return false;
-    }
-
-    const uint32_t payload_len = (uint32_t)total_len - ihl;
-    if (len < (uint32_t)sizeof(netd::EthHdr) + ihl + payload_len) {
-        return false;
-    }
-
-    out.eth = eth;
-    out.ip = ip;
-    out.payload = (const uint8_t*)ip + ihl;
-    out.payload_len = payload_len;
-    return true;
-}
-
-}
-
-Ipv4Icmp::Ipv4Icmp(Arena& arena, NetDev& dev, Arp& arp)
-    : m_dev(dev),
+Ipv4Icmp::Ipv4Icmp(Arena& arena, Ipv4& ipv4, Arp& arp)
+    : m_ipv4(ipv4),
       m_arp(arp),
-      m_cfg{},
-      m_proto_dispatch(arena),
       m_ops(arena),
       m_key_to_index(arena),
       m_results(arena),
       m_next_wakeup_ms(0u) {
-    (void)m_proto_dispatch.reserve(4u);
-    (void)m_proto_dispatch.add(IP_PROTO_ICMP, this, &Ipv4Icmp::proto_icmp_handler);
     (void)m_ops.reserve(32u);
     (void)m_results.reserve(32u);
 }
@@ -137,60 +84,6 @@ bool Ipv4Icmp::proto_icmp_handler(
     return self->handle_proto_icmp(eth, ip, payload, payload_len, now_ms);
 }
 
-void Ipv4Icmp::set_config(const IpConfig& cfg) {
-    m_cfg = cfg;
-}
-
-bool Ipv4Icmp::add_proto_handler(uint8_t proto, void* ctx, IpProtoDispatch::HandlerFn fn) {
-    return m_proto_dispatch.add(proto, ctx, fn);
-}
-
-uint32_t Ipv4Icmp::next_hop_ip(uint32_t dst_ip_be) const {
-    const uint32_t ip = ntohl(m_cfg.ip_be);
-    const uint32_t mask = ntohl(m_cfg.mask_be);
-    const uint32_t dst = ntohl(dst_ip_be);
-
-    if (((ip ^ dst) & mask) == 0u) {
-        return dst_ip_be;
-    }
-
-    return m_cfg.gw_be;
-}
-
-bool Ipv4Icmp::send_ipv4(const Mac& dst_mac, uint32_t dst_ip_be, uint8_t proto, const uint8_t* payload, uint32_t payload_len) {
-    uint8_t buf[1600];
-    const uint32_t frame_len = (uint32_t)(sizeof(EthHdr) + sizeof(Ipv4Hdr) + payload_len);
-
-    if (frame_len > sizeof(buf)) {
-        return false;
-    }
-
-    EthHdr* eth = (EthHdr*)buf;
-    Ipv4Hdr* ip = (Ipv4Hdr*)(buf + sizeof(EthHdr));
-
-    mac_to_bytes(dst_mac, eth->dst);
-    mac_to_bytes(m_dev.mac(), eth->src);
-    eth->ethertype = htons(ETHERTYPE_IPV4);
-
-    ip->ver_ihl = 0x45u;
-    ip->tos = 0;
-    ip->total_len = htons((uint16_t)(sizeof(Ipv4Hdr) + payload_len));
-    ip->id = 0;
-    ip->frag_off = 0;
-    ip->ttl = 64;
-    ip->proto = proto;
-    ip->hdr_checksum = 0;
-    ip->src = m_cfg.ip_be;
-    ip->dst = dst_ip_be;
-    ip->hdr_checksum = htons(checksum16(ip, sizeof(Ipv4Hdr)));
-
-    if (payload_len > 0) {
-        memcpy((uint8_t*)ip + sizeof(Ipv4Hdr), payload, payload_len);
-    }
-
-    return m_dev.write_frame(buf, frame_len) > 0;
-}
-
 bool Ipv4Icmp::handle_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* payload, uint32_t payload_len) {
     (void)eth;
 
@@ -218,21 +111,7 @@ bool Ipv4Icmp::handle_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* 
     rep->checksum = htons(checksum16(rep, icmp_len));
 
     const Mac dst_mac = mac_from_bytes(((const EthHdr*)((const uint8_t*)eth))->src);
-    return send_ipv4(dst_mac, ip->src, IP_PROTO_ICMP, (const uint8_t*)rep, icmp_len);
-}
-
-bool Ipv4Icmp::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms) {
-    ParsedIpv4 p{};
-    if (!parse_ipv4_frame(frame, len, p)) {
-        return false;
-    }
-
-    if (p.ip->dst != m_cfg.ip_be) {
-        return true;
-    }
-
-    (void)m_proto_dispatch.dispatch(p.ip->proto, p.eth, p.ip, p.payload, p.payload_len, now_ms);
-    return true;
+    return m_ipv4.send_packet(dst_mac, ip->src, IP_PROTO_ICMP, (const uint8_t*)rep, icmp_len, 0);
 }
 
 bool Ipv4Icmp::handle_proto_icmp(
@@ -282,7 +161,7 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
     op.tag = req.tag;
     op.client_token = req.client_token;
     op.dst_ip_be = req.dst_ip_be;
-    op.next_hop_ip_be = next_hop_ip(req.dst_ip_be);
+    op.next_hop_ip_be = m_ipv4.next_hop_ip(req.dst_ip_be);
     op.ident_be = req.ident_be;
     op.seq_be = req.seq_be;
     op.deadline_ms = now_ms + req.timeout_ms;
@@ -380,7 +259,7 @@ void Ipv4Icmp::step(uint32_t now_ms) {
 
                 icmp->checksum = htons(checksum16(payload, (uint32_t)sizeof(payload)));
 
-                if (!send_ipv4(op.dst_mac, op.dst_ip_be, IP_PROTO_ICMP, payload, (uint32_t)sizeof(payload))) {
+                if (!m_ipv4.send_packet(op.dst_mac, op.dst_ip_be, IP_PROTO_ICMP, payload, (uint32_t)sizeof(payload), 0)) {
                     complete_op(i, now_ms, 0u);
                     continue;
                 }

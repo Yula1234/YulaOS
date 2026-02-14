@@ -4,6 +4,7 @@
 #include "arena.h"
 #include "netdev.h"
 #include "arp.h"
+#include "ipv4.h"
 #include "ipv4_icmp.h"
 #include "dns_client.h"
 #include "netd_config.h"
@@ -45,7 +46,8 @@ private:
     NetDev& m_dev;
 
     Inplace<Arp> m_arp;
-    Inplace<Ipv4Icmp> m_ip;
+    Inplace<Ipv4> m_ipv4;
+    Inplace<Ipv4Icmp> m_icmp;
     Inplace<DnsClient> m_dns;
     Inplace<EthertypeDispatch> m_eth_dispatch;
 };
