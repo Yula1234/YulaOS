@@ -4,6 +4,7 @@
 #include "arena.h"
 #include "ipc_server.h"
 #include "net_channel.h"
+#include "netd_config.h"
 #include "netd_core_ipc_bridge.h"
 #include "netd_core_stack.h"
 #include "netd_ipc_runtime.h"
@@ -40,6 +41,8 @@ private:
 
     Arena m_core_arena;
     Arena m_ipc_arena;
+
+    NetdConfig m_cfg;
 
     NetDev m_dev;
 

@@ -6,6 +6,7 @@
 #include "arp.h"
 #include "ipv4_icmp.h"
 #include "dns_client.h"
+#include "netd_config.h"
 #include "net_dispatch.h"
 #include "net_inplace.h"
 
@@ -18,7 +19,7 @@ public:
     NetdCoreStack(const NetdCoreStack&) = delete;
     NetdCoreStack& operator=(const NetdCoreStack&) = delete;
 
-    bool init();
+    bool init(const NetdConfig& cfg);
 
     void step(uint32_t now_ms);
 
@@ -36,16 +37,9 @@ public:
 
     Mac mac() const;
 
-    uint32_t default_ip_be() const;
-    uint32_t default_mask_be() const;
-    uint32_t default_gw_be() const;
-    uint32_t default_dns_be() const;
-
 private:
     static void handle_arp(void* ctx, const uint8_t* frame, uint32_t len, uint32_t now_ms);
     static void handle_ipv4(void* ctx, const uint8_t* frame, uint32_t len, uint32_t now_ms);
-
-    static uint32_t ip_be(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
 
     Arena& m_arena;
     NetDev& m_dev;

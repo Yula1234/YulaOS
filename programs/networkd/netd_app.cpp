@@ -14,6 +14,17 @@ static void print_mac(const netd::Mac& mac) {
     );
 }
 
+static void print_ipv4_be(uint32_t ip_be) {
+    const uint32_t ip = netd::ntohl(ip_be);
+
+    const uint8_t a = (uint8_t)((ip >> 24) & 0xFFu);
+    const uint8_t b = (uint8_t)((ip >> 16) & 0xFFu);
+    const uint8_t c = (uint8_t)((ip >> 8) & 0xFFu);
+    const uint8_t d = (uint8_t)(ip & 0xFFu);
+
+    printf("%u.%u.%u.%u", (unsigned)a, (unsigned)b, (unsigned)c, (unsigned)d);
+}
+
 }
 
 namespace netd {
@@ -52,6 +63,7 @@ void NetdApp::publish_events(uint32_t now_ms) {
 NetdApp::NetdApp()
     : m_core_arena(),
       m_ipc_arena(),
+      m_cfg(default_netd_config()),
       m_dev(),
       m_ipc_to_core_q(),
       m_core_to_ipc_q(),
@@ -115,7 +127,7 @@ bool NetdApp::init_device() {
 
 bool NetdApp::init_stack() {
     NetdCoreStack* stack = m_stack.construct(m_core_arena, m_dev);
-    if (!stack->init()) {
+    if (!stack->init(m_cfg)) {
         printf("networkd: stack init failed\n");
         return false;
     }
@@ -161,11 +173,17 @@ int NetdApp::run() {
     print_mac(mac);
     printf("\n");
 
-    printf("networkd: ip 10.0.2.15 mask 255.255.255.0 gw 10.0.2.2\n");
+    printf("networkd: ip ");
+    print_ipv4_be(m_cfg.ip_be);
+    printf(" mask ");
+    print_ipv4_be(m_cfg.mask_be);
+    printf(" gw ");
+    print_ipv4_be(m_cfg.gw_be);
+    printf("\n");
 
     {
         Mac gw_mac{};
-        (void)m_stack->resolve_gateway(m_stack->default_gw_be(), gw_mac, 2000u);
+        (void)m_stack->resolve_gateway(m_cfg.gw_be, gw_mac, 2000u);
     }
 
     uint8_t frame[1600];

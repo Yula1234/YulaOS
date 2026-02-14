@@ -2,15 +2,6 @@
 
 namespace netd {
 
-uint32_t NetdCoreStack::ip_be(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    const uint32_t ip = ((uint32_t)a << 24) |
-                        ((uint32_t)b << 16) |
-                        ((uint32_t)c << 8) |
-                        (uint32_t)d;
-
-    return htonl(ip);
-}
-
 NetdCoreStack::NetdCoreStack(Arena& arena, NetDev& dev)
     : m_arena(arena),
       m_dev(dev),
@@ -20,7 +11,7 @@ NetdCoreStack::NetdCoreStack(Arena& arena, NetDev& dev)
       m_eth_dispatch() {
 }
 
-bool NetdCoreStack::init() {
+bool NetdCoreStack::init(const NetdConfig& cfg) {
     Arp* arp = m_arp.construct(m_arena, m_dev);
     Ipv4Icmp* ip = m_ip.construct(m_arena, m_dev, *arp);
     DnsClient* dns = m_dns.construct(m_arena, m_dev, *arp);
@@ -29,20 +20,20 @@ bool NetdCoreStack::init() {
     const Mac mac = m_dev.mac();
 
     ArpConfig arp_cfg{};
-    arp_cfg.ip_be = default_ip_be();
+    arp_cfg.ip_be = cfg.ip_be;
     arp_cfg.mac = mac;
     arp->set_config(arp_cfg);
 
     IpConfig ip_cfg{};
     ip_cfg.ip_be = arp_cfg.ip_be;
-    ip_cfg.mask_be = default_mask_be();
-    ip_cfg.gw_be = default_gw_be();
+    ip_cfg.mask_be = cfg.mask_be;
+    ip_cfg.gw_be = cfg.gw_be;
     ip->set_config(ip_cfg);
 
     DnsConfig dns_cfg{};
     dns_cfg.ip_be = ip_cfg.ip_be;
     dns_cfg.gw_be = ip_cfg.gw_be;
-    dns_cfg.dns_ip_be = default_dns_be();
+    dns_cfg.dns_ip_be = cfg.dns_ip_be;
     dns->set_config(dns_cfg);
 
     (void)ip->add_proto_handler(IP_PROTO_UDP, dns, &DnsClient::udp_proto_handler);
@@ -132,22 +123,6 @@ bool NetdCoreStack::resolve_gateway(uint32_t gw_ip_be, Mac& out_mac, uint32_t ti
 
 Mac NetdCoreStack::mac() const {
     return m_dev.mac();
-}
-
-uint32_t NetdCoreStack::default_ip_be() const {
-    return ip_be(10, 0, 2, 15);
-}
-
-uint32_t NetdCoreStack::default_mask_be() const {
-    return ip_be(255, 255, 255, 0);
-}
-
-uint32_t NetdCoreStack::default_gw_be() const {
-    return ip_be(10, 0, 2, 2);
-}
-
-uint32_t NetdCoreStack::default_dns_be() const {
-    return ip_be(8, 8, 8, 8);
 }
 
 }
