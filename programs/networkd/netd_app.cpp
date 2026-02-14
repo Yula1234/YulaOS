@@ -19,26 +19,10 @@ static void print_mac(const netd::Mac& mac) {
 namespace netd {
 
 void NetdApp::poll_once(uint32_t now_ms) {
-    int timeout_ms = 10;
+    uint32_t next_wakeup_ms = 0u;
+    (void)m_stack->try_get_next_wakeup_ms(now_ms, next_wakeup_ms);
 
-    {
-        uint32_t next_wakeup_ms = 0u;
-        if (m_stack->try_get_next_wakeup_ms(now_ms, next_wakeup_ms)) {
-        }
-
-        if (next_wakeup_ms != 0u) {
-            if (next_wakeup_ms <= now_ms) {
-                timeout_ms = 0;
-            } else {
-                const uint32_t dt = next_wakeup_ms - now_ms;
-
-                const uint32_t cap = 10u;
-                if (dt < cap) {
-                    timeout_ms = (int)dt;
-                }
-            }
-        }
-    }
+    const int timeout_ms = m_sched.compute_poll_timeout_ms(now_ms, next_wakeup_ms);
 
     pollfd_t fds[2];
 
@@ -78,7 +62,8 @@ NetdApp::NetdApp()
       m_stack(),
       m_bridge(),
       m_ipc(),
-      m_ipc_rt() {
+      m_ipc_rt(),
+      m_sched(10u) {
 }
 
 bool NetdApp::init() {

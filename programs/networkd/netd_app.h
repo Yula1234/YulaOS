@@ -7,6 +7,7 @@
 #include "netd_core_ipc_bridge.h"
 #include "netd_core_stack.h"
 #include "netd_ipc_runtime.h"
+#include "netd_tick_scheduler.h"
 #include "net_spsc.h"
 #include "netdev.h"
 #include "netd_msgs.h"
@@ -56,6 +57,7 @@ private:
     Inplace<IpcServer> m_ipc;
 
     NetdIpcRuntime m_ipc_rt;
+    NetdTickScheduler m_sched;
 };
 
 }
