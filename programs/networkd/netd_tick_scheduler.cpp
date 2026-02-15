@@ -48,16 +48,8 @@ uint32_t NetdTickScheduler::capacity() const {
 int NetdTickScheduler::compute_poll_timeout_ms(uint32_t now_ms, uint32_t next_wakeup_ms) const {
     int timeout_ms = (int)m_poll_cap_ms;
 
-    uint32_t wheel_next_expiry = 0;
-    if (m_wheel.try_get_next_expiry_ms(now_ms, wheel_next_expiry)) {
-        if (wheel_next_expiry <= now_ms) {
-            return 0;
-        }
-
-        const uint32_t wheel_dt = wheel_next_expiry - now_ms;
-        if (wheel_dt < (uint32_t)timeout_ms) {
-            timeout_ms = (int)wheel_dt;
-        }
+    if (m_wheel.has_pending_timers()) {
+        timeout_ms = 1;
     }
 
     if (next_wakeup_ms == 0u) {

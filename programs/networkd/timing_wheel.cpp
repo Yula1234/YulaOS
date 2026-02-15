@@ -150,26 +150,28 @@ void TimingWheel::determine_wheel_and_slot(
     uint8_t& out_wheel,
     uint8_t& out_slot
 ) const {
+    const uint32_t slot_mask = kSlotsPerWheel - 1u;
+    
     if (delay_ms < kWheel1Granularity) {
         out_wheel = 0;
-        out_slot = (uint8_t)(delay_ms & 0xFFu);
+        out_slot = (uint8_t)(delay_ms & slot_mask);
         return;
     }
 
     if (delay_ms < kWheel2Granularity) {
         out_wheel = 1;
-        out_slot = (uint8_t)((delay_ms >> 8) & 0xFFu);
+        out_slot = (uint8_t)((delay_ms >> (kBitsPerWheel * 1)) & slot_mask);
         return;
     }
 
     if (delay_ms < kWheel3Granularity) {
         out_wheel = 2;
-        out_slot = (uint8_t)((delay_ms >> 16) & 0xFFu);
+        out_slot = (uint8_t)((delay_ms >> (kBitsPerWheel * 2)) & slot_mask);
         return;
     }
 
     out_wheel = 3;
-    out_slot = (uint8_t)((delay_ms >> 24) & 0xFFu);
+    out_slot = (uint8_t)((delay_ms >> (kBitsPerWheel * 3)) & slot_mask);
 }
 
 TimerId TimingWheel::schedule(
@@ -208,7 +210,8 @@ TimerId TimingWheel::schedule_at(
     determine_wheel_and_slot(delay_ms, wheel_idx, slot_idx);
 
     const uint32_t base_slot = m_wheels[wheel_idx].current_slot;
-    slot_idx = (uint8_t)((base_slot + slot_idx) & 0xFFu);
+    const uint32_t slot_mask = kSlotsPerWheel - 1u;
+    slot_idx = (uint8_t)((base_slot + slot_idx) & slot_mask);
 
     link_timer(timer, wheel_idx, slot_idx);
 
@@ -287,14 +290,16 @@ void TimingWheel::cascade_wheel(uint32_t wheel_idx, uint32_t now_ms) {
         determine_wheel_and_slot(delay_ms, new_wheel, new_slot);
 
         const uint32_t base_slot = m_wheels[new_wheel].current_slot;
-        new_slot = (uint8_t)((base_slot + new_slot) & 0xFFu);
+        const uint32_t slot_mask = kSlotsPerWheel - 1u;
+        new_slot = (uint8_t)((base_slot + new_slot) & slot_mask);
 
         link_timer(current, new_wheel, new_slot);
 
         current = next;
     }
 
-    wheel.current_slot = (slot_idx + 1u) & 0xFFu;
+    const uint32_t slot_mask = kSlotsPerWheel - 1u;
+    wheel.current_slot = (slot_idx + 1u) & slot_mask;
 
     if (wheel.current_slot == 0 && wheel_idx + 1u < kWheelCount) {
         cascade_wheel(wheel_idx + 1u, now_ms);
@@ -344,7 +349,8 @@ void TimingWheel::advance_wheel(uint32_t wheel_idx, uint32_t now_ms) {
 
     process_slot(wheel_idx, slot_idx, now_ms);
 
-    wheel.current_slot = (slot_idx + 1u) & 0xFFu;
+    const uint32_t slot_mask = kSlotsPerWheel - 1u;
+    wheel.current_slot = (slot_idx + 1u) & slot_mask;
 
     if (wheel.current_slot == 0 && wheel_idx + 1u < kWheelCount) {
         cascade_wheel(wheel_idx + 1u, now_ms);
@@ -362,43 +368,8 @@ void TimingWheel::tick(uint32_t now_ms) {
     }
 }
 
-bool TimingWheel::try_get_next_expiry_ms(uint32_t now_ms, uint32_t& out_ms) const {
-    if (m_active_count == 0) {
-        return false;
-    }
-
-    uint32_t earliest = 0xFFFFFFFFu;
-
-    for (uint32_t w = 0; w < kWheelCount; w++) {
-        const Wheel& wheel = m_wheels[w];
-
-        for (uint32_t s = 0; s < kSlotsPerWheel; s++) {
-            const Slot& slot = wheel.slots[s];
-
-            const Timer* timer = slot.head;
-            while (timer) {
-                if (!(timer->flags & Timer::FLAG_CANCELLED)) {
-                    if (timer->expires_at_ms < earliest) {
-                        earliest = timer->expires_at_ms;
-                    }
-                }
-
-                timer = timer->tw_next;
-            }
-        }
-    }
-
-    if (earliest == 0xFFFFFFFFu) {
-        return false;
-    }
-
-    if (earliest <= now_ms) {
-        out_ms = now_ms;
-    } else {
-        out_ms = earliest;
-    }
-
-    return true;
+bool TimingWheel::has_pending_timers() const {
+    return m_active_count > 0;
 }
 
 }

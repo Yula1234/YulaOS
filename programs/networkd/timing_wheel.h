@@ -54,14 +54,15 @@ struct TimerId {
 
 class TimingWheel {
 public:
+    static constexpr uint32_t kBitsPerWheel = 8;
     static constexpr uint32_t kWheelCount = 4;
-    static constexpr uint32_t kSlotsPerWheel = 256;
+    static constexpr uint32_t kSlotsPerWheel = 1u << kBitsPerWheel;
     static constexpr uint32_t kMaxTimers = 4096;
     
     static constexpr uint32_t kWheel0Granularity = 1u;
-    static constexpr uint32_t kWheel1Granularity = 256u;
-    static constexpr uint32_t kWheel2Granularity = 65536u;
-    static constexpr uint32_t kWheel3Granularity = 16777216u;
+    static constexpr uint32_t kWheel1Granularity = 1u << (kBitsPerWheel * 1);
+    static constexpr uint32_t kWheel2Granularity = 1u << (kBitsPerWheel * 2);
+    static constexpr uint32_t kWheel3Granularity = 1u << (kBitsPerWheel * 3);
 
     explicit TimingWheel(Arena& arena);
     
@@ -78,7 +79,7 @@ public:
     
     void tick(uint32_t now_ms);
     
-    bool try_get_next_expiry_ms(uint32_t now_ms, uint32_t& out_ms) const;
+    bool has_pending_timers() const;
     
     uint32_t timer_count() const {
         return m_active_count;
