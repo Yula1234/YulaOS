@@ -38,8 +38,6 @@ public:
     bool lookup_arp(uint32_t ip_be, Mac& out_mac, uint32_t now_ms);
     bool request_arp(uint32_t ip_be);
 
-    bool resolve_gateway(uint32_t gw_ip_be, Mac& out_mac, uint32_t timeout_ms);
-
     Mac mac() const;
 
 private:

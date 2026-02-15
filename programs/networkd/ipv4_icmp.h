@@ -69,12 +69,11 @@ private:
         uint16_t ident_be;
         uint16_t seq_be;
 
+        uint32_t timeout_ms;
         uint32_t deadline_ms;
 
         uint32_t sent_time_ms;
-        uint32_t next_arp_tx_ms;
-
-        Mac dst_mac;
+        ArpWaitState arp_wait;
 
         PingState state;
     };

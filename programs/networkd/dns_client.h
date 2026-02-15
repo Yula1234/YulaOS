@@ -6,6 +6,7 @@
 #include "net_hash_map.h"
 #include "dns_types.h"
 #include "udp.h"
+#include "arp.h"
 
 #include <stdint.h>
 
@@ -14,8 +15,6 @@ namespace netd {
 class Arena;
 class Ipv4;
 class Udp;
-class Arp;
-
 class DnsClient {
 public:
     DnsClient(Arena& arena, Ipv4& ipv4, Udp& udp, Arp& arp);
@@ -55,15 +54,13 @@ private:
         uint32_t next_hop_ip_be;
 
         uint32_t deadline_ms;
-        uint32_t next_arp_tx_ms;
-
         uint32_t next_tx_ms;
         uint8_t tries;
 
         uint16_t txid;
         uint16_t src_port;
 
-        Mac dst_mac;
+        ArpWaitState arp_wait;
 
         uint8_t name_len;
         char name[127];

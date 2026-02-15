@@ -133,10 +133,6 @@ bool NetdCoreStack::request_arp(uint32_t ip_be) {
     return m_arp->request(ip_be);
 }
 
-bool NetdCoreStack::resolve_gateway(uint32_t gw_ip_be, Mac& out_mac, uint32_t timeout_ms) {
-    return m_arp->resolve(gw_ip_be, out_mac, timeout_ms);
-}
-
 Mac NetdCoreStack::mac() const {
     return m_dev.mac();
 }

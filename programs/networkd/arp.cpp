@@ -309,58 +309,35 @@ bool Arp::send_reply(const Mac& dst_mac, uint32_t dst_ip_be) {
     return m_dev.write_frame(pb.data(), pb.size()) > 0;
 }
 
-bool Arp::resolve(uint32_t ip_be, Mac& out_mac, uint32_t timeout_ms) {
-    const uint32_t start = uptime_ms();
-    uint32_t next_tx_ms = start;
-    uint8_t frame[1600];
+ArpWaitState::ArpWaitState() : m_mac{}, m_next_tx_ms(0u) {
+}
 
-    for (;;) {
-        const uint32_t now = uptime_ms();
-        m_cache.prune(now);
+void ArpWaitState::reset(uint32_t now_ms) {
+    m_mac = Mac{};
+    m_next_tx_ms = now_ms;
+}
 
-        if (m_cache.lookup(ip_be, out_mac, now)) {
-            return true;
-        }
-
-        if ((now - start) >= timeout_ms) {
-            return false;
-        }
-
-        if (now >= next_tx_ms) {
-            if (!send_request(ip_be)) {
-                return false;
-            }
-
-            next_tx_ms = now + 200u;
-        }
-
-        pollfd_t fds[1];
-        fds[0].fd = m_dev.fd();
-        fds[0].events = POLLIN;
-        fds[0].revents = 0;
-
-        const uint32_t elapsed = now - start;
-        const uint32_t remain = timeout_ms - elapsed;
-
-        int wait_ms = 50;
-        if (remain < (uint32_t)wait_ms) {
-            wait_ms = (int)remain;
-        }
-
-        const int pr = poll(fds, 1, wait_ms);
-        if (pr <= 0) {
-            continue;
-        }
-
-        for (;;) {
-            const int r = m_dev.read_frame(frame, (uint32_t)sizeof(frame));
-            if (r <= 0) {
-                break;
-            }
-
-            (void)handle_frame(frame, (uint32_t)r, uptime_ms());
-        }
+bool ArpWaitState::step(Arp& arp, uint32_t ip_be, uint32_t now_ms, uint32_t retry_ms) {
+    Mac mac{};
+    if (arp.cache().lookup(ip_be, mac, now_ms) && !mac_is_zero(mac)) {
+        m_mac = mac;
+        return true;
     }
+
+    if (now_ms >= m_next_tx_ms) {
+        (void)arp.request(ip_be);
+        m_next_tx_ms = now_ms + retry_ms;
+    }
+
+    return false;
+}
+
+const Mac& ArpWaitState::mac() const {
+    return m_mac;
+}
+
+uint32_t ArpWaitState::next_tx_ms() const {
+    return m_next_tx_ms;
 }
 
 }

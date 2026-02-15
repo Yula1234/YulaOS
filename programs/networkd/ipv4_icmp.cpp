@@ -24,8 +24,8 @@ uint32_t Ipv4Icmp::op_next_wakeup_ms(const PingOp& op) {
     uint32_t t = op.deadline_ms;
 
     if (op.state == PingState::ArpWait) {
-        if (op.next_arp_tx_ms < t) {
-            t = op.next_arp_tx_ms;
+        if (op.arp_wait.next_tx_ms() < t) {
+            t = op.arp_wait.next_tx_ms();
         }
     }
 
@@ -165,10 +165,10 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
     op.next_hop_ip_be = m_ipv4.next_hop_ip(req.dst_ip_be);
     op.ident_be = req.ident_be;
     op.seq_be = req.seq_be;
+    op.timeout_ms = req.timeout_ms;
     op.deadline_ms = now_ms + req.timeout_ms;
     op.sent_time_ms = 0;
-    op.next_arp_tx_ms = now_ms;
-    op.dst_mac = Mac{};
+    op.arp_wait.reset(now_ms);
     op.state = PingState::ArpWait;
 
     {
@@ -243,8 +243,7 @@ void Ipv4Icmp::step(uint32_t now_ms) {
         }
 
         if (op.state == PingState::ArpWait) {
-            m_arp.cache().lookup(op.next_hop_ip_be, op.dst_mac, now_ms);
-            if (!mac_is_zero(op.dst_mac)) {
+            if (op.arp_wait.step(m_arp, op.next_hop_ip_be, now_ms, 200u)) {
                 uint8_t payload[64];
                 IcmpHdr* icmp = (IcmpHdr*)payload;
 
@@ -260,12 +259,13 @@ void Ipv4Icmp::step(uint32_t now_ms) {
 
                 icmp->checksum = htons(checksum16(payload, (uint32_t)sizeof(payload)));
 
-                if (!m_ipv4.send_packet(op.dst_mac, op.dst_ip_be, IP_PROTO_ICMP, payload, (uint32_t)sizeof(payload), 0)) {
+                if (!m_ipv4.send_packet(op.arp_wait.mac(), op.dst_ip_be, IP_PROTO_ICMP, payload, (uint32_t)sizeof(payload), 0)) {
                     complete_op(i, now_ms, 0u);
                     continue;
                 }
 
                 op.sent_time_ms = now_ms;
+                op.deadline_ms = now_ms + op.timeout_ms;
                 op.state = PingState::Sent;
 
                 const uint32_t wake = op_next_wakeup_ms(op);
@@ -277,14 +277,9 @@ void Ipv4Icmp::step(uint32_t now_ms) {
                 continue;
             }
 
-            if (now_ms >= op.next_arp_tx_ms) {
-                (void)m_arp.request(op.next_hop_ip_be);
-                op.next_arp_tx_ms = now_ms + 200u;
-
-                const uint32_t wake = op_next_wakeup_ms(op);
-                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                    m_next_wakeup_ms = wake;
-                }
+            const uint32_t wake = op_next_wakeup_ms(op);
+            if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                m_next_wakeup_ms = wake;
             }
 
             i++;

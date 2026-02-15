@@ -64,8 +64,6 @@ public:
     void set_config(const ArpConfig& cfg);
 
     bool handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms);
-    bool resolve(uint32_t ip_be, Mac& out_mac, uint32_t timeout_ms);
-
     bool request(uint32_t target_ip_be);
 
     ArpCache& cache() {
@@ -83,6 +81,21 @@ private:
     NetDev& m_dev;
     ArpConfig m_cfg;
     ArpCache m_cache;
+};
+
+struct ArpWaitState {
+public:
+    ArpWaitState();
+
+    void reset(uint32_t now_ms);
+    bool step(Arp& arp, uint32_t ip_be, uint32_t now_ms, uint32_t retry_ms);
+
+    const Mac& mac() const;
+    uint32_t next_tx_ms() const;
+
+private:
+    Mac m_mac;
+    uint32_t m_next_tx_ms;
 };
 
 }

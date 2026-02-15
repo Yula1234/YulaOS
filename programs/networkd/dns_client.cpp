@@ -41,8 +41,8 @@ uint32_t DnsClient::op_next_wakeup_ms(const Op& op) {
     uint32_t t = op.deadline_ms;
 
     if (op.state == OpState::ArpWait) {
-        if (op.next_arp_tx_ms < t) {
-            t = op.next_arp_tx_ms;
+        if (op.arp_wait.next_tx_ms() < t) {
+            t = op.arp_wait.next_tx_ms();
         }
     } else if (op.state == OpState::Tx) {
         if (op.next_tx_ms < t) {
@@ -138,7 +138,6 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
     const uint32_t timeout = req.timeout_ms ? req.timeout_ms : 2000u;
 
     op.deadline_ms = now_ms + timeout;
-    op.next_arp_tx_ms = now_ms;
 
     op.next_tx_ms = now_ms;
     op.tries = 0u;
@@ -151,7 +150,7 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
 
     op.src_port = alloc_src_port(now_ms);
 
-    op.dst_mac = Mac{};
+    op.arp_wait.reset(now_ms);
 
     op.name_len = req.name_len;
     memcpy(op.name, req.name, req.name_len);
@@ -237,7 +236,7 @@ bool DnsClient::try_send_query(Op& op, uint32_t now_ms) {
     }
 
     (void)now_ms;
-    return m_udp.send_to(op.dst_mac, op.dst_ip_be, op.src_port, kDnsPort, dns, dns_len, now_ms);
+    return m_udp.send_to(op.arp_wait.mac(), op.dst_ip_be, op.src_port, kDnsPort, dns, dns_len, now_ms);
 }
 
 void DnsClient::step(uint32_t now_ms) {
@@ -250,9 +249,7 @@ void DnsClient::step(uint32_t now_ms) {
         }
 
         if (op.state == OpState::ArpWait) {
-            Mac mac{};
-            if (m_arp.cache().lookup(op.next_hop_ip_be, mac, now_ms) && !mac_is_zero(mac)) {
-                op.dst_mac = mac;
+            if (op.arp_wait.step(m_arp, op.next_hop_ip_be, now_ms, 200u)) {
                 op.state = OpState::Tx;
                 op.next_tx_ms = now_ms;
 
@@ -265,14 +262,9 @@ void DnsClient::step(uint32_t now_ms) {
                 continue;
             }
 
-            if (now_ms >= op.next_arp_tx_ms) {
-                (void)m_arp.request(op.next_hop_ip_be);
-                op.next_arp_tx_ms = now_ms + 200u;
-
-                const uint32_t wake = op_next_wakeup_ms(op);
-                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                    m_next_wakeup_ms = wake;
-                }
+            const uint32_t wake = op_next_wakeup_ms(op);
+            if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
+                m_next_wakeup_ms = wake;
             }
 
             i++;
