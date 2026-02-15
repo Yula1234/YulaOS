@@ -73,6 +73,8 @@ private:
     void complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint32_t now_ms);
 
     static uint64_t make_key(uint32_t client_token, uint32_t tag);
+    static uint64_t make_resp_key(uint32_t src_ip_be, uint16_t src_port, uint16_t txid);
+    static uint64_t make_resp_key(const Op& op);
 
     static uint16_t alloc_src_port(uint32_t now_ms);
 
@@ -84,6 +86,7 @@ private:
 
     Vector<Op> m_ops;
     HashMap<uint64_t, uint32_t> m_key_to_index;
+    HashMap<uint64_t, uint32_t> m_resp_key_to_index;
     Vector<ResolveResult> m_results;
 
     uint16_t m_next_txid;

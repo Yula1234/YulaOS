@@ -29,6 +29,7 @@ DnsClient::DnsClient(Arena& arena, Ipv4& ipv4, Udp& udp, Arp& arp)
       m_cfg{},
       m_ops(arena),
       m_key_to_index(arena),
+      m_resp_key_to_index(arena),
       m_results(arena),
       m_next_txid(1u),
       m_next_wakeup_ms(0u) {
@@ -106,6 +107,17 @@ uint64_t DnsClient::make_key(uint32_t client_token, uint32_t tag) {
     return k;
 }
 
+uint64_t DnsClient::make_resp_key(uint32_t src_ip_be, uint16_t src_port, uint16_t txid) {
+    const uint64_t ip = (uint64_t)src_ip_be;
+    const uint64_t p = (uint64_t)src_port;
+    const uint64_t t = (uint64_t)txid;
+    return (ip << 32) | (p << 16) | t;
+}
+
+uint64_t DnsClient::make_resp_key(const Op& op) {
+    return make_resp_key(op.dst_ip_be, op.src_port, op.txid);
+}
+
 bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
     if (req.name_len == 0u || req.name_len > 127u) {
         return false;
@@ -120,15 +132,8 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
     op.tag = req.tag;
     op.client_token = req.client_token;
 
-    {
-        uint32_t existing = 0;
-        if (m_key_to_index.get(op.key, existing)) {
-            return false;
-        }
-    }
-
     op.dst_ip_be = m_cfg.dns_ip_be;
-    op.next_hop_ip_be = m_cfg.gw_be;
+    op.next_hop_ip_be = m_ipv4.next_hop_ip(op.dst_ip_be);
 
     const uint32_t timeout = req.timeout_ms ? req.timeout_ms : 2000u;
 
@@ -153,11 +158,33 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
 
     op.state = 0u;
 
+    const uint64_t resp_key = make_resp_key(op);
+    {
+        uint32_t existing = 0;
+        if (m_key_to_index.get(op.key, existing)) {
+            return false;
+        }
+        if (m_resp_key_to_index.get(resp_key, existing)) {
+            return false;
+        }
+    }
+
     if (!m_ops.push_back(op)) {
         return false;
     }
 
-    (void)m_key_to_index.put(op.key, m_ops.size() - 1u);
+    const uint32_t op_index = m_ops.size() - 1u;
+
+    if (!m_key_to_index.put(op.key, op_index)) {
+        m_ops.erase_unordered(op_index);
+        return false;
+    }
+
+    if (!m_resp_key_to_index.put(resp_key, op_index)) {
+        (void)m_key_to_index.erase(op.key);
+        m_ops.erase_unordered(op_index);
+        return false;
+    }
 
     const uint32_t wake = op_next_wakeup_ms(op);
     if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
@@ -173,10 +200,10 @@ void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint3
     }
 
     const uint32_t last = m_ops.size() - 1u;
-    const uint64_t removed_key = m_ops[op_index].key;
-    const uint64_t moved_key = (op_index != last) ? m_ops[last].key : 0ull;
 
     const Op op = m_ops[op_index];
+    const uint64_t removed_key = op.key;
+    const uint64_t removed_resp_key = make_resp_key(op);
 
     ResolveResult r{};
     r.ip_be = ip_be;
@@ -187,10 +214,13 @@ void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint3
     (void)m_results.push_back(r);
 
     (void)m_key_to_index.erase(removed_key);
+    (void)m_resp_key_to_index.erase(removed_resp_key);
     m_ops.erase_unordered(op_index);
 
-    if (moved_key != 0ull) {
-        (void)m_key_to_index.put(moved_key, op_index);
+    if (op_index != last) {
+        const Op& moved = m_ops[op_index];
+        (void)m_key_to_index.put(moved.key, op_index);
+        (void)m_resp_key_to_index.put(make_resp_key(moved), op_index);
     }
 
     if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
@@ -315,33 +345,30 @@ bool DnsClient::udp_port_handler(
     }
 
     const uint16_t txid = (uint16_t)payload[0] << 8 | (uint16_t)payload[1];
+    const uint64_t key = make_resp_key(ip->src, dst_port, txid);
 
-    for (uint32_t i = 0; i < self->m_ops.size(); i++) {
-        Op& op = self->m_ops[i];
+    uint32_t op_index = 0;
+    if (!self->m_resp_key_to_index.get(key, op_index)) {
+        return false;
+    }
 
-        if (op.dst_ip_be != ip->src) {
-            continue;
-        }
+    if (op_index >= self->m_ops.size()) {
+        return false;
+    }
 
-        if (op.txid != txid) {
-            continue;
-        }
+    const Op& op = self->m_ops[op_index];
+    if (op.dst_ip_be != ip->src || op.txid != txid || op.src_port != dst_port) {
+        return false;
+    }
 
-        if (op.src_port != dst_port) {
-            continue;
-        }
-
-        uint32_t ip_be = 0;
-        if (dns_wire::parse_dns_a_response(txid, payload, payload_len, ip_be)) {
-            self->complete_op(i, ip_be, 1u, now_ms);
-            return true;
-        }
-
-        self->complete_op(i, 0u, 0u, now_ms);
+    uint32_t ip_be = 0;
+    if (dns_wire::parse_dns_a_response(txid, payload, payload_len, ip_be)) {
+        self->complete_op(op_index, ip_be, 1u, now_ms);
         return true;
     }
 
-    return false;
+    self->complete_op(op_index, 0u, 0u, now_ms);
+    return true;
 }
 
 bool DnsClient::poll_result(ResolveResult& out) {

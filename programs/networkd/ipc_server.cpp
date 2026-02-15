@@ -314,7 +314,9 @@ bool IpcServer::send_msg(Client& c, uint16_t type, uint32_t seq, const void* pay
     return true;
 }
 
-bool IpcServer::try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload) {
+bool IpcServer::try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload, bool& out_invalid) {
+    out_invalid = false;
+
     if (c.rx_len < (uint32_t)sizeof(netd_ipc_hdr_t)) {
         return false;
     }
@@ -323,10 +325,12 @@ bool IpcServer::try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*
     memcpy(&hdr, c.rx_buf, sizeof(hdr));
 
     if (hdr.magic != NETD_IPC_MAGIC || hdr.version != NETD_IPC_VERSION) {
+        out_invalid = true;
         return false;
     }
 
     if (hdr.len > NETD_IPC_MAX_PAYLOAD) {
+        out_invalid = true;
         return false;
     }
 
@@ -360,20 +364,24 @@ void IpcServer::drop_client(uint32_t idx) {
     m_clients.erase_unordered(idx);
 }
 
-void IpcServer::client_step(Client& c, uint32_t now_ms) {
+bool IpcServer::client_step(Client& c, uint32_t now_ms) {
     (void)now_ms;
 
     const int got = read_into_buffer(c.fd_r.get(), c.rx_buf, (uint32_t)sizeof(c.rx_buf), c.rx_len);
     if (got < 0) {
         c.rx_len = (uint32_t)sizeof(c.rx_buf);
-        return;
+        return true;
     }
 
     for (;;) {
         netd_ipc_hdr_t hdr{};
         const uint8_t* payload = nullptr;
+        bool invalid = false;
 
-        if (!try_parse_msg(c, hdr, payload)) {
+        if (!try_parse_msg(c, hdr, payload, invalid)) {
+            if (invalid) {
+                return true;
+            }
             break;
         }
 
@@ -385,6 +393,8 @@ void IpcServer::client_step(Client& c, uint32_t now_ms) {
         err.code = -1;
         (void)send_msg(c, NETD_IPC_MSG_ERROR, hdr.seq, &err, (uint32_t)sizeof(err));
     }
+
+    return false;
 }
 
 void IpcServer::step(uint32_t now_ms) {
@@ -399,9 +409,9 @@ void IpcServer::step(uint32_t now_ms) {
     for (uint32_t i = 0; i < m_clients.size();) {
         Client& c = m_clients[i];
 
-        client_step(c, now_ms);
+        const bool should_drop = client_step(c, now_ms);
 
-        if (c.rx_len >= sizeof(c.rx_buf)) {
+        if (should_drop || c.rx_len >= sizeof(c.rx_buf)) {
             drop_client(i);
             continue;
         }

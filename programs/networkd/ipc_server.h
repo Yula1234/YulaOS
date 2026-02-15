@@ -45,14 +45,14 @@ private:
     static void send_queue_full_error(IpcServer& self, Client& c, uint32_t seq);
 
     bool accept_one();
-    void client_step(Client& c, uint32_t now_ms);
+    bool client_step(Client& c, uint32_t now_ms);
     void drop_client(uint32_t idx);
 
     Client* try_get_client_by_token(uint32_t token);
     void on_client_added(uint32_t client_index);
     void on_client_removed(uint32_t client_index, uint32_t removed_token, uint32_t moved_token);
 
-    bool try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload);
+    bool try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload, bool& out_invalid);
     bool send_msg(Client& c, uint16_t type, uint32_t seq, const void* payload, uint32_t len);
 
     SpscChannel<CoreReqMsg, 256>& m_to_core;
