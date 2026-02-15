@@ -41,6 +41,11 @@ public:
     bool try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const;
 
 private:
+    enum class OpState : uint8_t {
+        ArpWait = 0u,
+        Tx = 1u
+    };
+
     struct Op {
         uint64_t key;
         uint32_t tag;
@@ -63,7 +68,7 @@ private:
         uint8_t name_len;
         char name[127];
 
-        uint8_t state;
+        OpState state;
     };
 
     static uint32_t op_next_wakeup_ms(const Op& op);

@@ -29,6 +29,34 @@ public:
     int run();
 
 private:
+    struct GatewayArpResolver {
+        GatewayArpResolver();
+
+        void start(NetdCoreStack& stack, NetdTickScheduler& sched, uint32_t gw_ip_be, uint32_t timeout_ms, uint32_t now_ms);
+        void stop();
+
+        bool is_active() const;
+        bool is_done() const;
+        bool ok() const;
+        const Mac& mac() const;
+
+    private:
+        static void on_timer(void* ctx, uint32_t now_ms);
+        void handle_timer(uint32_t now_ms);
+        void schedule_next(uint32_t now_ms, uint32_t delay_ms);
+
+        NetdCoreStack* m_stack;
+        NetdTickScheduler* m_sched;
+        uint32_t m_gw_ip_be;
+        uint32_t m_deadline_ms;
+        uint32_t m_retry_ms;
+        bool m_active;
+        bool m_done;
+        bool m_ok;
+        TimerId m_timer;
+        Mac m_mac;
+    };
+
     bool init_arenas();
     bool init_device();
     bool init_stack();
@@ -62,6 +90,8 @@ private:
 
     NetdTickScheduler m_sched;
     NetdIpcRuntime m_ipc_rt;
+
+    GatewayArpResolver m_gw_resolver;
 };
 
 }

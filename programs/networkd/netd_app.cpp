@@ -29,6 +29,108 @@ static void print_ipv4_be(uint32_t ip_be) {
 
 namespace netd {
 
+NetdApp::GatewayArpResolver::GatewayArpResolver()
+    : m_stack(nullptr),
+      m_sched(nullptr),
+      m_gw_ip_be(0u),
+      m_deadline_ms(0u),
+      m_retry_ms(200u),
+      m_active(false),
+      m_done(false),
+      m_ok(false),
+      m_timer(),
+      m_mac{} {
+}
+
+void NetdApp::GatewayArpResolver::start(
+    NetdCoreStack& stack,
+    NetdTickScheduler& sched,
+    uint32_t gw_ip_be,
+    uint32_t timeout_ms,
+    uint32_t now_ms
+) {
+    stop();
+
+    m_stack = &stack;
+    m_sched = &sched;
+    m_gw_ip_be = gw_ip_be;
+    m_deadline_ms = now_ms + timeout_ms;
+    m_retry_ms = 200u;
+    m_active = true;
+    m_done = false;
+    m_ok = false;
+    m_mac = Mac{};
+
+    schedule_next(now_ms, 0u);
+}
+
+void NetdApp::GatewayArpResolver::stop() {
+    if (m_sched && m_timer.is_valid()) {
+        (void)m_sched->cancel(m_timer);
+    }
+
+    m_timer = TimerId();
+    m_active = false;
+}
+
+bool NetdApp::GatewayArpResolver::is_active() const {
+    return m_active;
+}
+
+bool NetdApp::GatewayArpResolver::is_done() const {
+    return m_done;
+}
+
+bool NetdApp::GatewayArpResolver::ok() const {
+    return m_ok;
+}
+
+const Mac& NetdApp::GatewayArpResolver::mac() const {
+    return m_mac;
+}
+
+void NetdApp::GatewayArpResolver::on_timer(void* ctx, uint32_t now_ms) {
+    GatewayArpResolver* self = (GatewayArpResolver*)ctx;
+    if (!self) {
+        return;
+    }
+
+    self->handle_timer(now_ms);
+}
+
+void NetdApp::GatewayArpResolver::handle_timer(uint32_t now_ms) {
+    if (!m_active || !m_stack || !m_sched) {
+        return;
+    }
+
+    Mac mac{};
+    if (m_stack->lookup_arp(m_gw_ip_be, mac, now_ms)) {
+        m_mac = mac;
+        m_ok = true;
+        m_done = true;
+        m_active = false;
+        return;
+    }
+
+    if (now_ms >= m_deadline_ms) {
+        m_ok = false;
+        m_done = true;
+        m_active = false;
+        return;
+    }
+
+    (void)m_stack->request_arp(m_gw_ip_be);
+    schedule_next(now_ms, m_retry_ms);
+}
+
+void NetdApp::GatewayArpResolver::schedule_next(uint32_t now_ms, uint32_t delay_ms) {
+    if (!m_sched) {
+        return;
+    }
+
+    m_timer = m_sched->schedule(delay_ms, this, &GatewayArpResolver::on_timer, now_ms);
+}
+
 void NetdApp::poll_once(uint32_t now_ms) {
     uint32_t next_wakeup_ms = 0u;
     (void)m_stack->try_get_next_wakeup_ms(now_ms, next_wakeup_ms);
@@ -75,7 +177,8 @@ NetdApp::NetdApp()
       m_bridge(),
       m_ipc(),
       m_sched(m_core_arena, 10u),
-      m_ipc_rt() {
+      m_ipc_rt(),
+      m_gw_resolver() {
 }
 
 bool NetdApp::init() {
@@ -194,10 +297,7 @@ int NetdApp::run() {
     print_ipv4_be(m_cfg.gw_be);
     printf("\n");
 
-    {
-        Mac gw_mac{};
-        (void)m_stack->resolve_gateway(m_cfg.gw_be, gw_mac, 2000u);
-    }
+    m_gw_resolver.start(*m_stack.get(), m_sched, m_cfg.gw_be, 2000u, uptime_ms());
 
     uint8_t frame[1600];
 

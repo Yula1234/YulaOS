@@ -54,6 +54,11 @@ private:
 
     bool handle_proto_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* payload, uint32_t payload_len, uint32_t now_ms);
 
+    enum class PingState : uint8_t {
+        ArpWait = 0u,
+        Sent = 1u
+    };
+
     struct PingOp {
         uint32_t key;
         uint32_t tag;
@@ -71,7 +76,7 @@ private:
 
         Mac dst_mac;
 
-        uint8_t state;
+        PingState state;
     };
 
     static uint32_t op_next_wakeup_ms(const PingOp& op);

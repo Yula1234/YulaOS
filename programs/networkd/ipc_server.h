@@ -30,13 +30,21 @@ public:
     int listen_fd() const { return m_listen_fd; }
 
 private:
+    struct RxBuffer {
+        uint8_t data[512];
+        uint32_t len;
+
+        bool read_from(int fd, bool& out_error);
+        bool try_peek(netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload, uint32_t& out_total, bool& out_invalid) const;
+        void consume(uint32_t count);
+    };
+
     struct Client {
         UniqueFd fd_r;
         UniqueFd fd_w;
         uint32_t token;
         uint32_t seq_out;
-        uint8_t rx_buf[512];
-        uint32_t rx_len;
+        RxBuffer rx;
     };
 
     static bool handle_ping_req(void* handler_ctx, void* call_ctx, uint16_t type, uint32_t seq, const uint8_t* payload, uint32_t len, uint32_t now_ms);
@@ -52,7 +60,6 @@ private:
     void on_client_added(uint32_t client_index);
     void on_client_removed(uint32_t client_index, uint32_t removed_token, uint32_t moved_token);
 
-    bool try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload, bool& out_invalid);
     bool send_msg(Client& c, uint16_t type, uint32_t seq, const void* payload, uint32_t len);
 
     SpscChannel<CoreReqMsg, 256>& m_to_core;

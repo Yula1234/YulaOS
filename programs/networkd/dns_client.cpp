@@ -40,11 +40,11 @@ DnsClient::DnsClient(Arena& arena, Ipv4& ipv4, Udp& udp, Arp& arp)
 uint32_t DnsClient::op_next_wakeup_ms(const Op& op) {
     uint32_t t = op.deadline_ms;
 
-    if (op.state == 0u) {
+    if (op.state == OpState::ArpWait) {
         if (op.next_arp_tx_ms < t) {
             t = op.next_arp_tx_ms;
         }
-    } else if (op.state == 1u) {
+    } else if (op.state == OpState::Tx) {
         if (op.next_tx_ms < t) {
             t = op.next_tx_ms;
         }
@@ -156,7 +156,7 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
     op.name_len = req.name_len;
     memcpy(op.name, req.name, req.name_len);
 
-    op.state = 0u;
+    op.state = OpState::ArpWait;
 
     const uint64_t resp_key = make_resp_key(op);
     {
@@ -249,11 +249,11 @@ void DnsClient::step(uint32_t now_ms) {
             continue;
         }
 
-        if (op.state == 0u) {
+        if (op.state == OpState::ArpWait) {
             Mac mac{};
             if (m_arp.cache().lookup(op.next_hop_ip_be, mac, now_ms) && !mac_is_zero(mac)) {
                 op.dst_mac = mac;
-                op.state = 1u;
+                op.state = OpState::Tx;
                 op.next_tx_ms = now_ms;
 
                 const uint32_t wake = op_next_wakeup_ms(op);
@@ -279,7 +279,7 @@ void DnsClient::step(uint32_t now_ms) {
             continue;
         }
 
-        if (op.state == 1u) {
+        if (op.state == OpState::Tx) {
             if (op.tries >= 3u) {
                 i++;
                 continue;

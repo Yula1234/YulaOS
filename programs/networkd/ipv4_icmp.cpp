@@ -23,7 +23,7 @@ Ipv4Icmp::Ipv4Icmp(Arena& arena, Ipv4& ipv4, Arp& arp)
 uint32_t Ipv4Icmp::op_next_wakeup_ms(const PingOp& op) {
     uint32_t t = op.deadline_ms;
 
-    if (op.state == 0u) {
+    if (op.state == PingState::ArpWait) {
         if (op.next_arp_tx_ms < t) {
             t = op.next_arp_tx_ms;
         }
@@ -169,7 +169,7 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
     op.sent_time_ms = 0;
     op.next_arp_tx_ms = now_ms;
     op.dst_mac = Mac{};
-    op.state = 0u;
+    op.state = PingState::ArpWait;
 
     {
         uint32_t existing = 0;
@@ -242,7 +242,7 @@ void Ipv4Icmp::step(uint32_t now_ms) {
             continue;
         }
 
-        if (op.state == 0u) {
+        if (op.state == PingState::ArpWait) {
             m_arp.cache().lookup(op.next_hop_ip_be, op.dst_mac, now_ms);
             if (!mac_is_zero(op.dst_mac)) {
                 uint8_t payload[64];
@@ -266,7 +266,7 @@ void Ipv4Icmp::step(uint32_t now_ms) {
                 }
 
                 op.sent_time_ms = now_ms;
-                op.state = 1u;
+                op.state = PingState::Sent;
 
                 const uint32_t wake = op_next_wakeup_ms(op);
                 if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {

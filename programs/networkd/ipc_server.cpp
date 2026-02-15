@@ -4,31 +4,6 @@
 
 namespace netd {
 
-namespace {
-
-static int read_into_buffer(int fd, uint8_t* buf, uint32_t cap, uint32_t& inout_len) {
-    if (!buf || cap == 0) {
-        return -1;
-    }
-    if (inout_len >= cap) {
-        return -1;
-    }
-
-    const uint32_t free = cap - inout_len;
-    const int got = pipe_try_read(fd, buf + inout_len, free);
-    if (got < 0) {
-        return -1;
-    }
-
-    if (got > 0) {
-        inout_len += (uint32_t)got;
-    }
-
-    return got;
-}
-
-}
-
 static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
     if (v < lo) {
         return lo;
@@ -45,6 +20,76 @@ void IpcServer::send_queue_full_error(IpcServer& self, Client& c, uint32_t seq) 
     netd_ipc_error_t err{};
     err.code = -12;
     (void)self.send_msg(c, NETD_IPC_MSG_ERROR, seq, &err, (uint32_t)sizeof(err));
+}
+
+bool IpcServer::RxBuffer::read_from(int fd, bool& out_error) {
+    out_error = false;
+
+    if (len >= sizeof(data)) {
+        out_error = true;
+        return false;
+    }
+
+    const uint32_t free = (uint32_t)sizeof(data) - len;
+    const int got = pipe_try_read(fd, data + len, free);
+    if (got < 0) {
+        out_error = true;
+        return false;
+    }
+
+    if (got > 0) {
+        len += (uint32_t)got;
+        return true;
+    }
+
+    return false;
+}
+
+bool IpcServer::RxBuffer::try_peek(
+    netd_ipc_hdr_t& out_hdr,
+    const uint8_t*& out_payload,
+    uint32_t& out_total,
+    bool& out_invalid
+) const {
+    out_invalid = false;
+
+    if (len < (uint32_t)sizeof(netd_ipc_hdr_t)) {
+        return false;
+    }
+
+    netd_ipc_hdr_t hdr{};
+    memcpy(&hdr, data, sizeof(hdr));
+
+    if (hdr.magic != NETD_IPC_MAGIC || hdr.version != NETD_IPC_VERSION) {
+        out_invalid = true;
+        return false;
+    }
+
+    if (hdr.len > NETD_IPC_MAX_PAYLOAD) {
+        out_invalid = true;
+        return false;
+    }
+
+    const uint32_t total = (uint32_t)sizeof(netd_ipc_hdr_t) + hdr.len;
+    if (len < total) {
+        return false;
+    }
+
+    out_hdr = hdr;
+    out_payload = data + sizeof(netd_ipc_hdr_t);
+    out_total = total;
+    return true;
+}
+
+void IpcServer::RxBuffer::consume(uint32_t count) {
+    if (count >= len) {
+        len = 0u;
+        return;
+    }
+
+    const uint32_t remain = len - count;
+    memmove(data, data + count, remain);
+    len = remain;
 }
 
 IpcServer::IpcServer(
@@ -273,7 +318,7 @@ bool IpcServer::accept_one() {
     c.fd_w.reset(fds[1]);
     c.token = m_next_token;
     c.seq_out = 1;
-    c.rx_len = 0;
+    c.rx.len = 0;
 
     m_next_token++;
     if (m_next_token == 0u) {
@@ -314,43 +359,6 @@ bool IpcServer::send_msg(Client& c, uint16_t type, uint32_t seq, const void* pay
     return true;
 }
 
-bool IpcServer::try_parse_msg(Client& c, netd_ipc_hdr_t& out_hdr, const uint8_t*& out_payload, bool& out_invalid) {
-    out_invalid = false;
-
-    if (c.rx_len < (uint32_t)sizeof(netd_ipc_hdr_t)) {
-        return false;
-    }
-
-    netd_ipc_hdr_t hdr{};
-    memcpy(&hdr, c.rx_buf, sizeof(hdr));
-
-    if (hdr.magic != NETD_IPC_MAGIC || hdr.version != NETD_IPC_VERSION) {
-        out_invalid = true;
-        return false;
-    }
-
-    if (hdr.len > NETD_IPC_MAX_PAYLOAD) {
-        out_invalid = true;
-        return false;
-    }
-
-    const uint32_t total = (uint32_t)sizeof(netd_ipc_hdr_t) + hdr.len;
-    if (c.rx_len < total) {
-        return false;
-    }
-
-    out_hdr = hdr;
-    out_payload = c.rx_buf + sizeof(netd_ipc_hdr_t);
-
-    const uint32_t remain = c.rx_len - total;
-    if (remain > 0) {
-        memmove(c.rx_buf, c.rx_buf + total, remain);
-    }
-
-    c.rx_len = remain;
-    return true;
-}
-
 void IpcServer::drop_client(uint32_t idx) {
     if (idx >= m_clients.size()) {
         return;
@@ -367,31 +375,32 @@ void IpcServer::drop_client(uint32_t idx) {
 bool IpcServer::client_step(Client& c, uint32_t now_ms) {
     (void)now_ms;
 
-    const int got = read_into_buffer(c.fd_r.get(), c.rx_buf, (uint32_t)sizeof(c.rx_buf), c.rx_len);
-    if (got < 0) {
-        c.rx_len = (uint32_t)sizeof(c.rx_buf);
+    bool read_error = false;
+    (void)c.rx.read_from(c.fd_r.get(), read_error);
+    if (read_error) {
         return true;
     }
 
     for (;;) {
         netd_ipc_hdr_t hdr{};
         const uint8_t* payload = nullptr;
+        uint32_t total = 0u;
         bool invalid = false;
 
-        if (!try_parse_msg(c, hdr, payload, invalid)) {
+        if (!c.rx.try_peek(hdr, payload, total, invalid)) {
             if (invalid) {
                 return true;
             }
             break;
         }
 
-        if (m_dispatch.dispatch(hdr.type, &c, hdr.seq, payload, hdr.len, now_ms)) {
-            continue;
+        if (!m_dispatch.dispatch(hdr.type, &c, hdr.seq, payload, hdr.len, now_ms)) {
+            netd_ipc_error_t err{};
+            err.code = -1;
+            (void)send_msg(c, NETD_IPC_MSG_ERROR, hdr.seq, &err, (uint32_t)sizeof(err));
         }
 
-        netd_ipc_error_t err{};
-        err.code = -1;
-        (void)send_msg(c, NETD_IPC_MSG_ERROR, hdr.seq, &err, (uint32_t)sizeof(err));
+        c.rx.consume(total);
     }
 
     return false;
@@ -411,7 +420,7 @@ void IpcServer::step(uint32_t now_ms) {
 
         const bool should_drop = client_step(c, now_ms);
 
-        if (should_drop || c.rx_len >= sizeof(c.rx_buf)) {
+        if (should_drop || c.rx.len >= sizeof(c.rx.data)) {
             drop_client(i);
             continue;
         }

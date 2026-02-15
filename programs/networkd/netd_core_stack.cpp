@@ -71,6 +71,7 @@ void NetdCoreStack::handle_ipv4(void* ctx, const uint8_t* frame, uint32_t len, u
 }
 
 void NetdCoreStack::step(uint32_t now_ms) {
+    m_arp->cache().prune(now_ms);
     m_icmp->step(now_ms);
     m_dns->step(now_ms);
 }
@@ -122,6 +123,14 @@ bool NetdCoreStack::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) co
 
     out_ms = best;
     return true;
+}
+
+bool NetdCoreStack::lookup_arp(uint32_t ip_be, Mac& out_mac, uint32_t now_ms) {
+    return m_arp->cache().lookup(ip_be, out_mac, now_ms);
+}
+
+bool NetdCoreStack::request_arp(uint32_t ip_be) {
+    return m_arp->request(ip_be);
 }
 
 bool NetdCoreStack::resolve_gateway(uint32_t gw_ip_be, Mac& out_mac, uint32_t timeout_ms) {
