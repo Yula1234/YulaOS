@@ -1,6 +1,7 @@
 #include "arp.h"
 
 #include "arena.h"
+#include "net_packet_builder.h"
 #include "netdev.h"
 #include "net_mac.h"
 
@@ -144,11 +145,16 @@ bool Arp::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms) {
 }
 
 bool Arp::send_request(uint32_t target_ip_be) {
-    uint8_t buf[64];
-    const uint32_t len = (uint32_t)(sizeof(EthHdr) + sizeof(ArpHdr));
+    PacketBuilder pb;
+    ArpHdr* arp = (ArpHdr*)pb.append((uint32_t)sizeof(ArpHdr));
+    if (!arp) {
+        return false;
+    }
 
-    EthHdr* eth = (EthHdr*)buf;
-    ArpHdr* arp = (ArpHdr*)(buf + sizeof(EthHdr));
+    EthHdr* eth = (EthHdr*)pb.prepend((uint32_t)sizeof(EthHdr));
+    if (!eth) {
+        return false;
+    }
 
     const Mac bcast = mac_broadcast();
     mac_to_bytes(bcast, eth->dst);
@@ -169,7 +175,7 @@ bool Arp::send_request(uint32_t target_ip_be) {
 
     arp->tpa = target_ip_be;
 
-    return m_dev.write_frame(buf, len) > 0;
+    return m_dev.write_frame(pb.data(), pb.size()) > 0;
 }
 
 bool Arp::request(uint32_t target_ip_be) {
@@ -177,11 +183,16 @@ bool Arp::request(uint32_t target_ip_be) {
 }
 
 bool Arp::send_reply(const Mac& dst_mac, uint32_t dst_ip_be) {
-    uint8_t buf[64];
-    const uint32_t len = (uint32_t)(sizeof(EthHdr) + sizeof(ArpHdr));
+    PacketBuilder pb;
+    ArpHdr* arp = (ArpHdr*)pb.append((uint32_t)sizeof(ArpHdr));
+    if (!arp) {
+        return false;
+    }
 
-    EthHdr* eth = (EthHdr*)buf;
-    ArpHdr* arp = (ArpHdr*)(buf + sizeof(EthHdr));
+    EthHdr* eth = (EthHdr*)pb.prepend((uint32_t)sizeof(EthHdr));
+    if (!eth) {
+        return false;
+    }
 
     mac_to_bytes(dst_mac, eth->dst);
     mac_to_bytes(m_cfg.mac, eth->src);
@@ -197,7 +208,7 @@ bool Arp::send_reply(const Mac& dst_mac, uint32_t dst_ip_be) {
     mac_to_bytes(dst_mac, arp->tha);
     arp->tpa = dst_ip_be;
 
-    return m_dev.write_frame(buf, len) > 0;
+    return m_dev.write_frame(pb.data(), pb.size()) > 0;
 }
 
 bool Arp::resolve(uint32_t ip_be, Mac& out_mac, uint32_t timeout_ms) {
