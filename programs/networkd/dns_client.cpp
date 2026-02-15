@@ -32,7 +32,7 @@ DnsClient::DnsClient(Arena& arena, Ipv4& ipv4, Udp& udp, Arp& arp)
       m_resp_key_to_index(arena),
       m_results(arena),
       m_next_txid(1u),
-      m_next_wakeup_ms(0u) {
+      m_wakeup() {
     (void)m_ops.reserve(16u);
     (void)m_results.reserve(16u);
 }
@@ -53,41 +53,9 @@ uint32_t DnsClient::op_next_wakeup_ms(const Op& op) {
     return t;
 }
 
-uint32_t DnsClient::recompute_next_wakeup_ms(const Vector<Op>& ops, uint32_t now_ms) {
-    uint32_t best = 0u;
-
-    for (uint32_t i = 0; i < ops.size(); i++) {
-        const uint32_t t = op_next_wakeup_ms(ops[i]);
-
-        if (t <= now_ms) {
-            continue;
-        }
-
-        if (best == 0u || t < best) {
-            best = t;
-        }
-    }
-
-    return best;
-}
-
 bool DnsClient::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const {
-    if (m_ops.size() == 0) {
-        return false;
-    }
-
-    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms > now_ms) {
-        out_ms = m_next_wakeup_ms;
-        return true;
-    }
-
-    const uint32_t best = recompute_next_wakeup_ms(m_ops, now_ms);
-    if (best == 0u) {
-        return false;
-    }
-
-    out_ms = best;
-    return true;
+    const Span<const Op> ops(m_ops.data(), m_ops.size());
+    return m_wakeup.try_get_next(ops, now_ms, out_ms, &DnsClient::op_next_wakeup_ms);
 }
 
 void DnsClient::set_config(const DnsConfig& cfg) {
@@ -186,9 +154,7 @@ bool DnsClient::submit_resolve(const ResolveRequest& req, uint32_t now_ms) {
     }
 
     const uint32_t wake = op_next_wakeup_ms(op);
-    if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-        m_next_wakeup_ms = wake;
-    }
+    m_wakeup.update_candidate(wake);
 
     return true;
 }
@@ -222,9 +188,8 @@ void DnsClient::complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint3
         (void)m_resp_key_to_index.put(make_resp_key(moved), op_index);
     }
 
-    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
-        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
-    }
+    const Span<const Op> ops(m_ops.data(), m_ops.size());
+    m_wakeup.recompute_if_due(ops, now_ms, &DnsClient::op_next_wakeup_ms);
 }
 
 bool DnsClient::try_send_query(Op& op, uint32_t now_ms) {
@@ -254,18 +219,14 @@ void DnsClient::step(uint32_t now_ms) {
                 op.next_tx_ms = now_ms;
 
                 const uint32_t wake = op_next_wakeup_ms(op);
-                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                    m_next_wakeup_ms = wake;
-                }
+                m_wakeup.update_candidate(wake);
 
                 i++;
                 continue;
             }
 
             const uint32_t wake = op_next_wakeup_ms(op);
-            if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                m_next_wakeup_ms = wake;
-            }
+            m_wakeup.update_candidate(wake);
 
             i++;
             continue;
@@ -293,9 +254,7 @@ void DnsClient::step(uint32_t now_ms) {
 
             {
                 const uint32_t wake = op_next_wakeup_ms(op);
-                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                    m_next_wakeup_ms = wake;
-                }
+                m_wakeup.update_candidate(wake);
             }
 
             i++;
@@ -305,8 +264,9 @@ void DnsClient::step(uint32_t now_ms) {
         i++;
     }
 
-    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
-        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
+    {
+        const Span<const Op> ops(m_ops.data(), m_ops.size());
+        m_wakeup.recompute_if_due(ops, now_ms, &DnsClient::op_next_wakeup_ms);
     }
 }
 

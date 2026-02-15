@@ -15,7 +15,7 @@ Ipv4Icmp::Ipv4Icmp(Arena& arena, Ipv4& ipv4, Arp& arp)
       m_ops(arena),
       m_key_to_index(arena),
       m_results(arena),
-      m_next_wakeup_ms(0u) {
+      m_wakeup() {
     (void)m_ops.reserve(32u);
     (void)m_results.reserve(32u);
 }
@@ -32,41 +32,9 @@ uint32_t Ipv4Icmp::op_next_wakeup_ms(const PingOp& op) {
     return t;
 }
 
-uint32_t Ipv4Icmp::recompute_next_wakeup_ms(const Vector<PingOp>& ops, uint32_t now_ms) {
-    uint32_t best = 0u;
-
-    for (uint32_t i = 0; i < ops.size(); i++) {
-        const uint32_t t = op_next_wakeup_ms(ops[i]);
-
-        if (t <= now_ms) {
-            continue;
-        }
-
-        if (best == 0u || t < best) {
-            best = t;
-        }
-    }
-
-    return best;
-}
-
 bool Ipv4Icmp::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const {
-    if (m_ops.size() == 0) {
-        return false;
-    }
-
-    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms > now_ms) {
-        out_ms = m_next_wakeup_ms;
-        return true;
-    }
-
-    const uint32_t best = recompute_next_wakeup_ms(m_ops, now_ms);
-    if (best == 0u) {
-        return false;
-    }
-
-    out_ms = best;
-    return true;
+    const Span<const PingOp> ops(m_ops.data(), m_ops.size());
+    return m_wakeup.try_get_next(ops, now_ms, out_ms, &Ipv4Icmp::op_next_wakeup_ms);
 }
 
 bool Ipv4Icmp::proto_icmp_handler(
@@ -185,9 +153,7 @@ bool Ipv4Icmp::submit_ping(const PingRequest& req, uint32_t now_ms) {
     (void)m_key_to_index.put(op.key, m_ops.size() - 1u);
 
     const uint32_t wake = op_next_wakeup_ms(op);
-    if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-        m_next_wakeup_ms = wake;
-    }
+    m_wakeup.update_candidate(wake);
 
     return true;
 }
@@ -227,9 +193,8 @@ void Ipv4Icmp::complete_op(uint32_t op_index, uint32_t now_ms, uint8_t ok) {
         (void)m_key_to_index.put(moved_key, op_index);
     }
 
-    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
-        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
-    }
+    const Span<const PingOp> ops(m_ops.data(), m_ops.size());
+    m_wakeup.recompute_if_due(ops, now_ms, &Ipv4Icmp::op_next_wakeup_ms);
 }
 
 void Ipv4Icmp::step(uint32_t now_ms) {
@@ -269,18 +234,14 @@ void Ipv4Icmp::step(uint32_t now_ms) {
                 op.state = PingState::Sent;
 
                 const uint32_t wake = op_next_wakeup_ms(op);
-                if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                    m_next_wakeup_ms = wake;
-                }
+                m_wakeup.update_candidate(wake);
 
                 i++;
                 continue;
             }
 
             const uint32_t wake = op_next_wakeup_ms(op);
-            if (m_next_wakeup_ms == 0u || wake < m_next_wakeup_ms) {
-                m_next_wakeup_ms = wake;
-            }
+            m_wakeup.update_candidate(wake);
 
             i++;
             continue;
@@ -289,8 +250,9 @@ void Ipv4Icmp::step(uint32_t now_ms) {
         i++;
     }
 
-    if (m_next_wakeup_ms != 0u && m_next_wakeup_ms <= now_ms) {
-        m_next_wakeup_ms = recompute_next_wakeup_ms(m_ops, now_ms);
+    {
+        const Span<const PingOp> ops(m_ops.data(), m_ops.size());
+        m_wakeup.recompute_if_due(ops, now_ms, &Ipv4Icmp::op_next_wakeup_ms);
     }
 }
 

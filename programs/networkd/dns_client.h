@@ -69,7 +69,6 @@ private:
     };
 
     static uint32_t op_next_wakeup_ms(const Op& op);
-    static uint32_t recompute_next_wakeup_ms(const Vector<Op>& ops, uint32_t now_ms);
 
     bool try_send_query(Op& op, uint32_t now_ms);
     void complete_op(uint32_t op_index, uint32_t ip_be, uint8_t ok, uint32_t now_ms);
@@ -93,7 +92,7 @@ private:
 
     uint16_t m_next_txid;
 
-    uint32_t m_next_wakeup_ms;
+    mutable WakeupTracker<Op> m_wakeup;
 };
 
 }

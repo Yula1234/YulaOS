@@ -26,6 +26,77 @@ struct Span {
     }
 };
 
+template <typename Op>
+class WakeupTracker {
+public:
+    constexpr WakeupTracker() : m_next_ms(0u) {
+    }
+
+    uint32_t next_ms() const {
+        return m_next_ms;
+    }
+
+    void reset() {
+        m_next_ms = 0u;
+    }
+
+    void update_candidate(uint32_t wake_ms) {
+        if (m_next_ms == 0u || wake_ms < m_next_ms) {
+            m_next_ms = wake_ms;
+        }
+    }
+
+    template <typename GetWakeFn>
+    bool try_get_next(const Span<const Op>& ops, uint32_t now_ms, uint32_t& out_ms, GetWakeFn get_wake) {
+        if (ops.size == 0u) {
+            return false;
+        }
+
+        if (m_next_ms != 0u && m_next_ms > now_ms) {
+            out_ms = m_next_ms;
+            return true;
+        }
+
+        const uint32_t best = recompute(ops, now_ms, get_wake);
+        if (best == 0u) {
+            return false;
+        }
+
+        m_next_ms = best;
+        out_ms = best;
+        return true;
+    }
+
+    template <typename GetWakeFn>
+    void recompute_if_due(const Span<const Op>& ops, uint32_t now_ms, GetWakeFn get_wake) {
+        if (m_next_ms != 0u && m_next_ms <= now_ms) {
+            m_next_ms = recompute(ops, now_ms, get_wake);
+        }
+    }
+
+private:
+    template <typename GetWakeFn>
+    static uint32_t recompute(const Span<const Op>& ops, uint32_t now_ms, GetWakeFn get_wake) {
+        uint32_t best = 0u;
+
+        for (uint32_t i = 0; i < ops.size; i++) {
+            const uint32_t t = get_wake(ops.data[i]);
+
+            if (t <= now_ms) {
+                continue;
+            }
+
+            if (best == 0u || t < best) {
+                best = t;
+            }
+        }
+
+        return best;
+    }
+
+    uint32_t m_next_ms;
+};
+
 template <typename T, uint32_t Cap>
 class StaticVec {
 public:
