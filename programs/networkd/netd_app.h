@@ -44,6 +44,7 @@ private:
         static void on_timer(void* ctx, uint32_t now_ms);
         void handle_timer(uint32_t now_ms);
         void schedule_next(uint32_t now_ms, uint32_t delay_ms);
+        void schedule_next_at(uint32_t now_ms, uint32_t next_ms);
 
         NetdCoreStack* m_stack;
         NetdTickScheduler* m_sched;
@@ -54,6 +55,7 @@ private:
         bool m_done;
         bool m_ok;
         TimerId m_timer;
+        ArpWaitState m_wait;
         Mac m_mac;
     };
 
@@ -65,7 +67,10 @@ private:
     bool init_scheduler(uint32_t now_ms);
 
     void poll_once(uint32_t now_ms);
+    void read_frames(uint8_t* frame, uint32_t cap, uint32_t now_ms);
     void drain_core_requests(uint32_t now_ms);
+    void tick_scheduler(uint32_t now_ms);
+    void step_stack(uint32_t now_ms);
     void publish_events(uint32_t now_ms);
 
     Arena m_core_arena;

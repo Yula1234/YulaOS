@@ -133,6 +133,14 @@ bool NetdCoreStack::request_arp(uint32_t ip_be) {
     return m_arp->request(ip_be);
 }
 
+Arp& NetdCoreStack::arp() {
+    return *m_arp.get();
+}
+
+const Arp& NetdCoreStack::arp() const {
+    return *m_arp.get();
+}
+
 Mac NetdCoreStack::mac() const {
     return m_dev.mac();
 }

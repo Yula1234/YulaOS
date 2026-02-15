@@ -39,6 +39,7 @@ NetdApp::GatewayArpResolver::GatewayArpResolver()
       m_done(false),
       m_ok(false),
       m_timer(),
+      m_wait(),
       m_mac{} {
 }
 
@@ -59,6 +60,7 @@ void NetdApp::GatewayArpResolver::start(
     m_active = true;
     m_done = false;
     m_ok = false;
+    m_wait.reset(now_ms);
     m_mac = Mac{};
 
     schedule_next(now_ms, 0u);
@@ -103,15 +105,6 @@ void NetdApp::GatewayArpResolver::handle_timer(uint32_t now_ms) {
         return;
     }
 
-    Mac mac{};
-    if (m_stack->lookup_arp(m_gw_ip_be, mac, now_ms)) {
-        m_mac = mac;
-        m_ok = true;
-        m_done = true;
-        m_active = false;
-        return;
-    }
-
     if (now_ms >= m_deadline_ms) {
         m_ok = false;
         m_done = true;
@@ -119,8 +112,15 @@ void NetdApp::GatewayArpResolver::handle_timer(uint32_t now_ms) {
         return;
     }
 
-    (void)m_stack->request_arp(m_gw_ip_be);
-    schedule_next(now_ms, m_retry_ms);
+    if (m_wait.step(m_stack->arp(), m_gw_ip_be, now_ms, m_retry_ms)) {
+        m_mac = m_wait.mac();
+        m_ok = true;
+        m_done = true;
+        m_active = false;
+        return;
+    }
+
+    schedule_next_at(now_ms, m_wait.next_tx_ms());
 }
 
 void NetdApp::GatewayArpResolver::schedule_next(uint32_t now_ms, uint32_t delay_ms) {
@@ -129,6 +129,19 @@ void NetdApp::GatewayArpResolver::schedule_next(uint32_t now_ms, uint32_t delay_
     }
 
     m_timer = m_sched->schedule(delay_ms, this, &GatewayArpResolver::on_timer, now_ms);
+}
+
+void NetdApp::GatewayArpResolver::schedule_next_at(uint32_t now_ms, uint32_t next_ms) {
+    if (!m_sched) {
+        return;
+    }
+
+    uint32_t delay_ms = 0u;
+    if (next_ms > now_ms) {
+        delay_ms = next_ms - now_ms;
+    }
+
+    schedule_next(now_ms, delay_ms);
 }
 
 void NetdApp::poll_once(uint32_t now_ms) {
@@ -156,6 +169,27 @@ void NetdApp::poll_once(uint32_t now_ms) {
 
 void NetdApp::drain_core_requests(uint32_t now_ms) {
     m_bridge->drain_requests(now_ms);
+}
+
+void NetdApp::read_frames(uint8_t* frame, uint32_t cap, uint32_t now_ms) {
+    for (;;) {
+        const int r = m_dev.read_frame(frame, cap);
+        if (r <= 0) {
+            break;
+        }
+
+        const uint32_t flen = (uint32_t)r;
+
+        (void)m_stack->handle_frame(frame, flen, now_ms);
+    }
+}
+
+void NetdApp::tick_scheduler(uint32_t now_ms) {
+    m_sched.tick(now_ms);
+}
+
+void NetdApp::step_stack(uint32_t now_ms) {
+    m_stack->step(now_ms);
 }
 
 void NetdApp::publish_events(uint32_t now_ms) {
@@ -305,24 +339,10 @@ int NetdApp::run() {
         const uint32_t now = uptime_ms();
 
         poll_once(now);
-
-        for (;;) {
-            const int r = m_dev.read_frame(frame, (uint32_t)sizeof(frame));
-            if (r <= 0) {
-                break;
-            }
-
-            const uint32_t flen = (uint32_t)r;
-
-            (void)m_stack->handle_frame(frame, flen, now);
-        }
-
+        read_frames(frame, (uint32_t)sizeof(frame), now);
         drain_core_requests(now);
-
-        m_sched.tick(now);
-
-        m_stack->step(now);
-
+        tick_scheduler(now);
+        step_stack(now);
         publish_events(now);
     }
 
