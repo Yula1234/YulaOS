@@ -3,8 +3,8 @@
 
 #include "net_core.h"
 #include "net_proto.h"
+#include "net_hash_map.h"
 #include "netdev.h"
-#include "net_vec.h"
 
 #include <stdint.h>
 
@@ -14,6 +14,9 @@ struct ArpEntry {
     uint32_t ip_be;
     Mac mac;
     uint32_t last_seen_ms;
+    
+    ArpEntry* lru_prev;
+    ArpEntry* lru_next;
 };
 
 class ArpCache {
@@ -24,12 +27,29 @@ public:
 
     explicit ArpCache(Arena& arena);
 
-    bool lookup(uint32_t ip_be, Mac& out_mac, uint32_t now_ms) const;
+    bool lookup(uint32_t ip_be, Mac& out_mac, uint32_t now_ms);
     void upsert(uint32_t ip_be, const Mac& mac, uint32_t now_ms);
     void prune(uint32_t now_ms);
+    
+    uint32_t size() const {
+        return m_count;
+    }
 
 private:
-    Vector<ArpEntry> m_entries;
+    ArpEntry* alloc_entry(uint32_t ip_be, const Mac& mac, uint32_t now_ms);
+    void touch_entry(ArpEntry* entry, uint32_t now_ms);
+    void unlink_from_lru(ArpEntry* entry);
+    void push_to_lru_head(ArpEntry* entry);
+    ArpEntry* evict_lru();
+    bool is_expired(const ArpEntry* entry, uint32_t now_ms) const;
+
+    Arena& m_arena;
+    HashMap<uint32_t, ArpEntry*> m_table;
+    
+    ArpEntry* m_lru_head;
+    ArpEntry* m_lru_tail;
+    
+    uint32_t m_count;
 };
 
 struct ArpConfig {
@@ -48,7 +68,13 @@ public:
 
     bool request(uint32_t target_ip_be);
 
-    const ArpCache& cache() const { return m_cache; }
+    ArpCache& cache() {
+        return m_cache;
+    }
+    
+    const ArpCache& cache() const {
+        return m_cache;
+    }
 
 private:
     bool send_request(uint32_t target_ip_be);

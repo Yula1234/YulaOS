@@ -9,93 +9,191 @@
 
 namespace netd {
 
-namespace {
+ArpCache::ArpCache(Arena& arena)
+    : m_arena(arena),
+      m_table(arena),
+      m_lru_head(nullptr),
+      m_lru_tail(nullptr),
+      m_count(0) {
+    (void)m_table.reserve(kInitialReserve);
+}
 
-static uint32_t find_oldest_index(const Vector<ArpEntry>& entries) {
-    uint32_t oldest_i = 0;
-    uint32_t oldest_t = 0u;
-
-    if (entries.size() != 0u) {
-        oldest_t = entries[0].last_seen_ms;
+ArpEntry* ArpCache::alloc_entry(uint32_t ip_be, const Mac& mac, uint32_t now_ms) {
+    void* mem = m_arena.alloc((uint32_t)sizeof(ArpEntry), (uint32_t)alignof(ArpEntry));
+    if (!mem) {
+        return nullptr;
     }
 
-    for (uint32_t i = 1; i < entries.size(); i++) {
-        const uint32_t t = entries[i].last_seen_ms;
-        if (t < oldest_t) {
-            oldest_t = t;
-            oldest_i = i;
-        }
+    ArpEntry* entry = (ArpEntry*)mem;
+    entry->ip_be = ip_be;
+    entry->mac = mac;
+    entry->last_seen_ms = now_ms;
+    entry->lru_prev = nullptr;
+    entry->lru_next = nullptr;
+
+    return entry;
+}
+
+void ArpCache::unlink_from_lru(ArpEntry* entry) {
+    if (!entry) {
+        return;
     }
 
-    return oldest_i;
+    if (entry->lru_prev) {
+        entry->lru_prev->lru_next = entry->lru_next;
+    } else {
+        m_lru_head = entry->lru_next;
+    }
+
+    if (entry->lru_next) {
+        entry->lru_next->lru_prev = entry->lru_prev;
+    } else {
+        m_lru_tail = entry->lru_prev;
+    }
+
+    entry->lru_prev = nullptr;
+    entry->lru_next = nullptr;
 }
 
+void ArpCache::push_to_lru_head(ArpEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    entry->lru_prev = nullptr;
+    entry->lru_next = m_lru_head;
+
+    if (m_lru_head) {
+        m_lru_head->lru_prev = entry;
+    } else {
+        m_lru_tail = entry;
+    }
+
+    m_lru_head = entry;
 }
 
-ArpCache::ArpCache(Arena& arena) : m_entries(arena) {
-    (void)m_entries.reserve(kInitialReserve);
+void ArpCache::touch_entry(ArpEntry* entry, uint32_t now_ms) {
+    if (!entry) {
+        return;
+    }
+
+    entry->last_seen_ms = now_ms;
+    
+    unlink_from_lru(entry);
+    push_to_lru_head(entry);
 }
 
-bool ArpCache::lookup(uint32_t ip_be, Mac& out_mac, uint32_t now_ms) const {
-    for (uint32_t i = 0; i < m_entries.size(); i++) {
-        const ArpEntry& e = m_entries[i];
+ArpEntry* ArpCache::evict_lru() {
+    if (!m_lru_tail) {
+        return nullptr;
+    }
 
-        if (e.ip_be != ip_be) {
-            continue;
-        }
+    ArpEntry* victim = m_lru_tail;
+    const uint32_t victim_ip = victim->ip_be;
 
-        if ((now_ms - e.last_seen_ms) > kTtlMs) {
-            return false;
-        }
+    unlink_from_lru(victim);
+    (void)m_table.erase(victim_ip);
 
-        out_mac = e.mac;
+    if (m_count > 0) {
+        m_count--;
+    }
+
+    return victim;
+}
+
+bool ArpCache::is_expired(const ArpEntry* entry, uint32_t now_ms) const {
+    if (!entry) {
         return true;
     }
 
-    return false;
+    return (now_ms - entry->last_seen_ms) > kTtlMs;
+}
+
+bool ArpCache::lookup(uint32_t ip_be, Mac& out_mac, uint32_t now_ms) {
+    ArpEntry* entry = nullptr;
+    if (!m_table.get(ip_be, entry) || !entry) {
+        return false;
+    }
+
+    if (is_expired(entry, now_ms)) {
+        unlink_from_lru(entry);
+        (void)m_table.erase(ip_be);
+        
+        if (m_count > 0) {
+            m_count--;
+        }
+        
+        return false;
+    }
+
+    touch_entry(entry, now_ms);
+    out_mac = entry->mac;
+    return true;
 }
 
 void ArpCache::upsert(uint32_t ip_be, const Mac& mac, uint32_t now_ms) {
-    for (uint32_t i = 0; i < m_entries.size(); i++) {
-        ArpEntry& e = m_entries[i];
+    ArpEntry* existing = nullptr;
+    
+    if (m_table.get(ip_be, existing) && existing) {
+        existing->mac = mac;
+        touch_entry(existing, now_ms);
+        return;
+    }
 
-        if (e.ip_be == ip_be) {
-            e.mac = mac;
-            e.last_seen_ms = now_ms;
+    if (m_count >= kSoftMaxEntries) {
+        ArpEntry* victim = evict_lru();
+        if (!victim) {
             return;
         }
-    }
 
-    if (m_entries.size() >= kSoftMaxEntries) {
-        const uint32_t oldest_i = find_oldest_index(m_entries);
-        m_entries[oldest_i] = ArpEntry{ ip_be, mac, now_ms };
+        victim->ip_be = ip_be;
+        victim->mac = mac;
+        victim->last_seen_ms = now_ms;
+        victim->lru_prev = nullptr;
+        victim->lru_next = nullptr;
+
+        if (!m_table.put(ip_be, victim)) {
+            return;
+        }
+
+        push_to_lru_head(victim);
+        m_count++;
         return;
     }
 
-    const ArpEntry to_add{ ip_be, mac, now_ms };
-
-    if (m_entries.push_back(to_add)) {
+    ArpEntry* new_entry = alloc_entry(ip_be, mac, now_ms);
+    if (!new_entry) {
         return;
     }
 
-    if (m_entries.size() == 0u) {
+    if (!m_table.put(ip_be, new_entry)) {
         return;
     }
 
-    const uint32_t oldest_i = find_oldest_index(m_entries);
-    m_entries[oldest_i] = to_add;
+    push_to_lru_head(new_entry);
+    m_count++;
 }
 
 void ArpCache::prune(uint32_t now_ms) {
-    for (uint32_t i = 0; i < m_entries.size();) {
-        const ArpEntry& e = m_entries[i];
-
-        if ((now_ms - e.last_seen_ms) > kTtlMs) {
-            m_entries.erase_unordered(i);
-            continue;
+    ArpEntry* current = m_lru_tail;
+    
+    while (current) {
+        ArpEntry* prev = current->lru_prev;
+        
+        if (is_expired(current, now_ms)) {
+            const uint32_t ip = current->ip_be;
+            
+            unlink_from_lru(current);
+            (void)m_table.erase(ip);
+            
+            if (m_count > 0) {
+                m_count--;
+            }
+        } else {
+            break;
         }
-
-        i++;
+        
+        current = prev;
     }
 }
 

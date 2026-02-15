@@ -13,6 +13,53 @@ struct DefaultHashTraits;
 template <typename K, typename V, typename Traits = DefaultHashTraits<K>>
 class HashMap {
 public:
+    class Iterator {
+    public:
+        Iterator(K* keys, V* vals, uint32_t capacity, uint32_t index)
+            : m_keys(keys),
+              m_vals(vals),
+              m_capacity(capacity),
+              m_index(index) {
+            advance_to_valid();
+        }
+
+        bool operator!=(const Iterator& other) const {
+            return m_index != other.m_index;
+        }
+
+        Iterator& operator++() {
+            if (m_index < m_capacity) {
+                m_index++;
+                advance_to_valid();
+            }
+            return *this;
+        }
+
+        K key() const {
+            return m_keys[m_index];
+        }
+
+        V& value() {
+            return m_vals[m_index];
+        }
+
+        const V& value() const {
+            return m_vals[m_index];
+        }
+
+    private:
+        void advance_to_valid() {
+            while (m_index < m_capacity && Traits::is_empty(m_keys[m_index])) {
+                m_index++;
+            }
+        }
+
+        K* m_keys;
+        V* m_vals;
+        uint32_t m_capacity;
+        uint32_t m_index;
+    };
+
     HashMap()
         : m_arena(nullptr),
           m_keys(nullptr),
@@ -180,6 +227,14 @@ public:
         }
 
         return false;
+    }
+
+    Iterator begin() {
+        return Iterator(m_keys, m_vals, m_capacity, 0);
+    }
+
+    Iterator end() {
+        return Iterator(m_keys, m_vals, m_capacity, m_capacity);
     }
 
 private:
