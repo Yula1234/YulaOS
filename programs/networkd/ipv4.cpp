@@ -1,6 +1,7 @@
 #include "ipv4.h"
 
 #include "arena.h"
+#include "net_packet_builder.h"
 #include "netdev.h"
 #include "net_mac.h"
 
@@ -95,15 +96,33 @@ bool Ipv4::send_packet(
     uint32_t payload_len,
     uint16_t id_be
 ) {
-    uint8_t buf[1600];
-    const uint32_t frame_len = (uint32_t)(sizeof(EthHdr) + sizeof(Ipv4Hdr) + payload_len);
+    PacketBuilder pb;
 
-    if (frame_len > sizeof(buf)) {
+    if (!pb.append_copy(payload, payload_len)) {
         return false;
     }
 
-    EthHdr* eth = (EthHdr*)buf;
-    Ipv4Hdr* ip = (Ipv4Hdr*)(buf + sizeof(EthHdr));
+    return send_packet(pb, dst_mac, dst_ip_be, proto, id_be);
+}
+
+bool Ipv4::send_packet(
+    PacketBuilder& pb,
+    const Mac& dst_mac,
+    uint32_t dst_ip_be,
+    uint8_t proto,
+    uint16_t id_be
+) {
+    const uint32_t payload_len = pb.size();
+
+    Ipv4Hdr* ip = (Ipv4Hdr*)pb.prepend((uint32_t)sizeof(Ipv4Hdr));
+    if (!ip) {
+        return false;
+    }
+
+    EthHdr* eth = (EthHdr*)pb.prepend((uint32_t)sizeof(EthHdr));
+    if (!eth) {
+        return false;
+    }
 
     mac_to_bytes(dst_mac, eth->dst);
     mac_to_bytes(m_dev.mac(), eth->src);
@@ -111,7 +130,7 @@ bool Ipv4::send_packet(
 
     ip->ver_ihl = 0x45u;
     ip->tos = 0;
-    ip->total_len = htons((uint16_t)(sizeof(Ipv4Hdr) + payload_len));
+    ip->total_len = htons((uint16_t)((uint32_t)sizeof(Ipv4Hdr) + payload_len));
     ip->id = id_be;
     ip->frag_off = 0;
     ip->ttl = 64;
@@ -121,11 +140,7 @@ bool Ipv4::send_packet(
     ip->dst = dst_ip_be;
     ip->hdr_checksum = htons(checksum16(ip, sizeof(Ipv4Hdr)));
 
-    if (payload_len != 0u) {
-        memcpy((uint8_t*)ip + sizeof(Ipv4Hdr), payload, payload_len);
-    }
-
-    return m_dev.write_frame(buf, frame_len) > 0;
+    return m_dev.write_frame(pb.data(), pb.size()) > 0;
 }
 
 bool Ipv4::handle_frame(const uint8_t* frame, uint32_t len, uint32_t now_ms) {

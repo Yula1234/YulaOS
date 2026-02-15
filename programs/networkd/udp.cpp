@@ -2,6 +2,7 @@
 
 #include "arena.h"
 #include "ipv4.h"
+#include "net_packet_builder.h"
 
 #include <yula.h>
 
@@ -36,25 +37,25 @@ bool Udp::send_to(
     uint32_t payload_len,
     uint32_t now_ms
 ) {
-    const uint32_t udp_len = (uint32_t)sizeof(UdpHdr) + payload_len;
+    PacketBuilder pb;
 
-    uint8_t buf[1600];
-    if (udp_len > sizeof(buf)) {
+    const uint32_t udp_len = (uint32_t)sizeof(UdpHdr) + payload_len;
+    UdpHdr* udp = (UdpHdr*)pb.append((uint32_t)sizeof(UdpHdr));
+    if (!udp) {
         return false;
     }
 
-    UdpHdr* udp = (UdpHdr*)buf;
     udp->src_port = htons(src_port);
     udp->dst_port = htons(dst_port);
     udp->len = htons((uint16_t)udp_len);
     udp->checksum = 0;
 
-    if (payload_len != 0u) {
-        memcpy(buf + sizeof(UdpHdr), payload, payload_len);
+    if (!pb.append_copy(payload, payload_len)) {
+        return false;
     }
 
     const uint16_t id_be = htons((uint16_t)(now_ms & 0xFFFFu));
-    return m_ipv4.send_packet(dst_mac, dst_ip_be, IP_PROTO_UDP, buf, udp_len, id_be);
+    return m_ipv4.send_packet(pb, dst_mac, dst_ip_be, IP_PROTO_UDP, id_be);
 }
 
 bool Udp::ip_proto_udp_handler(

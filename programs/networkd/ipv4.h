@@ -10,6 +10,7 @@ namespace netd {
 
 class Arena;
 class NetDev;
+class PacketBuilder;
 
 struct IpConfig {
     uint32_t ip_be;
@@ -40,6 +41,14 @@ public:
         uint8_t proto,
         const uint8_t* payload,
         uint32_t payload_len,
+        uint16_t id_be
+    );
+
+    bool send_packet(
+        PacketBuilder& pb,
+        const Mac& dst_mac,
+        uint32_t dst_ip_be,
+        uint8_t proto,
         uint16_t id_be
     );
 

@@ -3,6 +3,7 @@
 #include "arena.h"
 #include "arp.h"
 #include "net_mac.h"
+#include "net_packet_builder.h"
 
 #include <yula.h>
 
@@ -96,13 +97,13 @@ bool Ipv4Icmp::handle_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* 
         return true;
     }
 
-    uint8_t out[1600];
     const uint32_t icmp_len = payload_len;
-    if ((uint32_t)(sizeof(Ipv4Hdr) + icmp_len) > (uint32_t)(sizeof(out) - sizeof(EthHdr))) {
+
+    PacketBuilder pb;
+    IcmpHdr* rep = (IcmpHdr*)pb.append(icmp_len);
+    if (!rep) {
         return false;
     }
-
-    IcmpHdr* rep = (IcmpHdr*)(out + sizeof(EthHdr) + sizeof(Ipv4Hdr));
 
     memcpy(rep, payload, icmp_len);
 
@@ -111,7 +112,7 @@ bool Ipv4Icmp::handle_icmp(const EthHdr* eth, const Ipv4Hdr* ip, const uint8_t* 
     rep->checksum = htons(checksum16(rep, icmp_len));
 
     const Mac dst_mac = mac_from_bytes(((const EthHdr*)((const uint8_t*)eth))->src);
-    return m_ipv4.send_packet(dst_mac, ip->src, IP_PROTO_ICMP, (const uint8_t*)rep, icmp_len, 0);
+    return m_ipv4.send_packet(pb, dst_mac, ip->src, IP_PROTO_ICMP, 0);
 }
 
 bool Ipv4Icmp::handle_proto_icmp(
