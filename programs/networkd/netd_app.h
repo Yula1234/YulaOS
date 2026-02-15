@@ -34,6 +34,7 @@ private:
     bool init_stack();
     bool init_bridge();
     bool init_ipc();
+    bool init_scheduler(uint32_t now_ms);
 
     void poll_once(uint32_t now_ms);
     void drain_core_requests(uint32_t now_ms);
@@ -59,8 +60,8 @@ private:
     Inplace<NetdCoreIpcBridge> m_bridge;
     Inplace<IpcServer> m_ipc;
 
-    NetdIpcRuntime m_ipc_rt;
     NetdTickScheduler m_sched;
+    NetdIpcRuntime m_ipc_rt;
 };
 
 }

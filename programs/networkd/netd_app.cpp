@@ -74,8 +74,8 @@ NetdApp::NetdApp()
       m_stack(),
       m_bridge(),
       m_ipc(),
-      m_ipc_rt(),
-      m_sched(10u) {
+      m_sched(m_core_arena, 10u),
+      m_ipc_rt() {
 }
 
 bool NetdApp::init() {
@@ -96,6 +96,10 @@ bool NetdApp::init() {
     }
 
     if (!init_ipc()) {
+        return false;
+    }
+
+    if (!init_scheduler(uptime_ms())) {
         return false;
     }
 
@@ -165,6 +169,15 @@ bool NetdApp::init_ipc() {
     return true;
 }
 
+bool NetdApp::init_scheduler(uint32_t now_ms) {
+    if (!m_sched.init(now_ms)) {
+        printf("networkd: scheduler init failed\n");
+        return false;
+    }
+
+    return true;
+}
+
 int NetdApp::run() {
     const Mac mac = m_stack->mac();
 
@@ -205,6 +218,8 @@ int NetdApp::run() {
         }
 
         drain_core_requests(now);
+
+        m_sched.tick(now);
 
         m_stack->step(now);
 
