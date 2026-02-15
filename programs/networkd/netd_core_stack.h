@@ -35,9 +35,6 @@ public:
 
     bool try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) const;
 
-    bool lookup_arp(uint32_t ip_be, Mac& out_mac, uint32_t now_ms);
-    bool request_arp(uint32_t ip_be);
-
     Arp& arp();
     const Arp& arp() const;
 

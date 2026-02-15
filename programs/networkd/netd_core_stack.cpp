@@ -125,14 +125,6 @@ bool NetdCoreStack::try_get_next_wakeup_ms(uint32_t now_ms, uint32_t& out_ms) co
     return true;
 }
 
-bool NetdCoreStack::lookup_arp(uint32_t ip_be, Mac& out_mac, uint32_t now_ms) {
-    return m_arp->cache().lookup(ip_be, out_mac, now_ms);
-}
-
-bool NetdCoreStack::request_arp(uint32_t ip_be) {
-    return m_arp->request(ip_be);
-}
-
 Arp& NetdCoreStack::arp() {
     return *m_arp.get();
 }

@@ -28,6 +28,13 @@ public:
     void publish_events(uint32_t now_ms);
 
 private:
+    void handle_request(const CoreReqMsg& req, uint32_t now_ms);
+    void handle_ping_submit(const PingSubmitMsg& msg, uint32_t now_ms);
+    void handle_resolve_submit(const DnsResolveSubmitMsg& msg, uint32_t now_ms);
+
+    void publish_ping_events();
+    void publish_resolve_events();
+
     NetdCoreStack& m_stack;
 
     SpscQueue<CoreReqMsg, 256>& m_req_q;
