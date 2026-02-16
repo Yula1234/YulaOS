@@ -32,6 +32,8 @@ CFLAGS_KERN="$CFLAGS_BASE -std=gnu99 -O2 -Wall -Wextra -I src -mno-mmx -mno-sse 
 -fno-strict-aliasing -fno-delete-null-pointer-checks -fno-strict-overflow -fwrapv -fno-common -Wstack-usage=16384 -mno-avx"
 # -fanalyzer
 
+CXXFLAGS_KERN="$CFLAGS_BASE -std=c++23 -O2 -Wall -Wextra -I src -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fomit-frame-pointer -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit"
+
 CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O2 -fomit-frame-pointer"
 
 CXXFLAGS_USER="$CFLAGS_USER -std=c++23 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit"
@@ -67,6 +69,16 @@ for FILE in $(find src -name "*.c"); do
     OBJ="bin/obj/${FLAT%.*}.o"
 
     $CC $CFLAGS_KERN -c "$FILE" -o "$OBJ" &
+    KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
+done
+
+echo "[kernel] compiling C++..."
+for FILE in $(find src -name "*.cpp"); do
+    REL="${FILE#src/}"
+    FLAT="${REL//\//_}"
+    OBJ="bin/obj/${FLAT%.*}.o"
+
+    $CXX $CXXFLAGS_KERN -c "$FILE" -o "$OBJ" &
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
 done
 

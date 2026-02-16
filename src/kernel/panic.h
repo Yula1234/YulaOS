@@ -9,4 +9,6 @@
 
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
 
+#define panic(msg) kernel_panic(msg, __FILE__, __LINE__, 0)
+
 #endif
