@@ -77,12 +77,6 @@ typedef enum {
     PRIO_SUPER = 30,
 } task_prio_t;
 
-typedef struct proc_fd_entry {
-    int fd;
-    struct file_desc* desc;
-    dlist_head_t list;
-} proc_fd_entry_t;
-
 typedef struct file_desc {
     vfs_node_t* node;
     uint32_t offset;
@@ -94,7 +88,8 @@ typedef struct file_desc {
 typedef struct fd_table {
     uint32_t refs;
     spinlock_t lock;
-    dlist_head_t entries;
+    struct file_desc** fds;
+    uint32_t max_fds;
     int fd_next;
 } fd_table_t;
 

@@ -15,7 +15,6 @@
 
 #include <mm/heap.h>
 
-#define IPC_MAX_ENDPOINTS 16
 #define IPC_NAME_MAX      31u
 
 typedef struct ipc_pending_conn {
@@ -28,7 +27,7 @@ typedef struct ipc_pending_conn {
 } ipc_pending_conn_t;
 
 typedef struct ipc_endpoint {
-    int in_use;
+    dlist_head_t list;
     char name[32];
 
     spinlock_t lock;
@@ -41,7 +40,7 @@ typedef struct ipc_endpoint {
 
 static spinlock_t g_ipc_lock;
 static volatile uint32_t g_ipc_inited;
-static ipc_endpoint_t g_ipc_eps[IPC_MAX_ENDPOINTS];
+static dlist_head_t g_ipc_endpoints;
 
 static void ipc_init_once(void) {
     uint32_t st = __atomic_load_n(&g_ipc_inited, __ATOMIC_ACQUIRE);
@@ -51,14 +50,7 @@ static void ipc_init_once(void) {
         uint32_t expected = 0u;
         if (__atomic_compare_exchange_n(&g_ipc_inited, &expected, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             spinlock_init(&g_ipc_lock);
-            for (int i = 0; i < IPC_MAX_ENDPOINTS; i++) {
-                g_ipc_eps[i].in_use = 0;
-                g_ipc_eps[i].listen_node = 0;
-                spinlock_init(&g_ipc_eps[i].lock);
-                dlist_init(&g_ipc_eps[i].pending);
-                poll_waitq_init(&g_ipc_eps[i].poll_waitq);
-                memset(g_ipc_eps[i].name, 0, sizeof(g_ipc_eps[i].name));
-            }
+            dlist_init(&g_ipc_endpoints);
             __atomic_store_n(&g_ipc_inited, 2u, __ATOMIC_RELEASE);
             return;
         }
@@ -97,10 +89,10 @@ static inline uint32_t ipc_name_len_bounded(const char* s) {
 }
 
 static ipc_endpoint_t* ipc_find_endpoint_locked(const char* name) {
-    for (int i = 0; i < IPC_MAX_ENDPOINTS; i++) {
-        if (!g_ipc_eps[i].in_use) continue;
-        if (strcmp(g_ipc_eps[i].name, name) == 0) {
-            return &g_ipc_eps[i];
+    ipc_endpoint_t* ep;
+    dlist_for_each_entry(ep, &g_ipc_endpoints, list) {
+        if (strcmp(ep->name, name) == 0) {
+            return ep;
         }
     }
     return 0;
@@ -119,10 +111,10 @@ static int ipc_listen_close(vfs_node_t* node) {
 
     uint32_t gl_flags = spinlock_acquire_safe(&g_ipc_lock);
 
-    if (ep->in_use && ep->listen_node == node) {
-        ep->listen_node = 0;
-        ep->in_use = 0;
-        memset(ep->name, 0, sizeof(ep->name));
+    if (ep->listen_node == node) {
+        dlist_del(&ep->list);
+        
+        // spinlock_release_safe below will handle g_ipc_lock
     }
 
     spinlock_release_safe(&g_ipc_lock, gl_flags);
@@ -147,6 +139,7 @@ static int ipc_listen_close(vfs_node_t* node) {
     }
     spinlock_release_safe(&ep->lock, ep_flags);
 
+    kfree(ep);
     kfree(node);
     return 0;
 }
@@ -171,21 +164,21 @@ struct vfs_node* ipc_listen_create(const char* name) {
 
     ipc_endpoint_t* ep = ipc_find_endpoint_locked(name);
     if (ep) {
-        if (ep->listen_node) {
-            spinlock_release_safe(&g_ipc_lock, gl_flags);
-            return 0;
-        }
-    } else {
-        for (int i = 0; i < IPC_MAX_ENDPOINTS; i++) {
-            if (!g_ipc_eps[i].in_use) {
-                ep = &g_ipc_eps[i];
-                ep->in_use = 1;
-                strlcpy(ep->name, name, sizeof(ep->name));
-                ep->listen_node = 0;
-                dlist_init(&ep->pending);
-                break;
-            }
-        }
+        spinlock_release_safe(&g_ipc_lock, gl_flags);
+        return 0;
+    }
+
+    ep = (ipc_endpoint_t*)kmalloc(sizeof(ipc_endpoint_t));
+    if (ep) {
+        memset(ep, 0, sizeof(*ep));
+        dlist_init(&ep->list);
+        strlcpy(ep->name, name, sizeof(ep->name));
+        spinlock_init(&ep->lock);
+        dlist_init(&ep->pending);
+        poll_waitq_init(&ep->poll_waitq);
+        ep->listen_node = 0;
+        
+        dlist_add_tail(&ep->list, &g_ipc_endpoints);
     }
 
     if (!ep) {
@@ -195,10 +188,8 @@ struct vfs_node* ipc_listen_create(const char* name) {
 
     vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
     if (!node) {
-        ep->in_use = 0;
-        memset(ep->name, 0, sizeof(ep->name));
-        ep->listen_node = 0;
-        dlist_init(&ep->pending);
+        dlist_del(&ep->list);
+        kfree(ep);
         spinlock_release_safe(&g_ipc_lock, gl_flags);
         return 0;
     }
@@ -296,10 +287,8 @@ void ipc_connect_cancel(void* pending_handle) {
 
     uint32_t gl_flags = spinlock_acquire_safe(&g_ipc_lock);
 
-    for (int i = 0; i < IPC_MAX_ENDPOINTS; i++) {
-        ipc_endpoint_t* ep = &g_ipc_eps[i];
-        if (!ep->in_use) continue;
-
+    ipc_endpoint_t* ep;
+    dlist_for_each_entry(ep, &g_ipc_endpoints, list) {
         uint32_t ep_flags = spinlock_acquire_safe(&ep->lock);
 
         ipc_pending_conn_t* pos;
