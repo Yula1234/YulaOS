@@ -47,10 +47,16 @@ private:
         RxBuffer rx;
     };
 
+    static bool parse_ping_req(const uint8_t* payload, uint32_t len, netd_ipc_ping_req_t& out);
+    static bool parse_resolve_req(const uint8_t* payload, uint32_t len, netd_ipc_resolve_req_t& out);
+
     static bool handle_ping_req(void* handler_ctx, void* call_ctx, uint16_t type, uint32_t seq, const uint8_t* payload, uint32_t len, uint32_t now_ms);
     static bool handle_resolve_req(void* handler_ctx, void* call_ctx, uint16_t type, uint32_t seq, const uint8_t* payload, uint32_t len, uint32_t now_ms);
 
     static void send_queue_full_error(IpcServer& self, Client& c, uint32_t seq);
+
+    bool enqueue_ping_request(const netd_ipc_ping_req_t& req, Client& c, uint32_t seq);
+    bool enqueue_resolve_request(const netd_ipc_resolve_req_t& req, Client& c, uint32_t seq);
 
     bool accept_one();
     bool client_step(Client& c, uint32_t now_ms);
@@ -61,6 +67,10 @@ private:
     void on_client_removed(uint32_t client_index, uint32_t removed_token, uint32_t moved_token);
 
     bool send_msg(Client& c, uint16_t type, uint32_t seq, const void* payload, uint32_t len);
+    void dispatch_core_events();
+    bool handle_core_event(const CoreEvtMsg& evt);
+    bool send_ping_result(const PingResultMsg& res);
+    bool send_resolve_result(const DnsResolveResultMsg& res);
 
     SpscChannel<CoreReqMsg, 256>& m_to_core;
     SpscQueue<CoreEvtMsg, 256>& m_from_core;

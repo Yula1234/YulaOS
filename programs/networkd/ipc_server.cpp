@@ -128,6 +128,29 @@ IpcServer::Client* IpcServer::try_get_client_by_token(uint32_t token) {
     return &c;
 }
 
+bool IpcServer::parse_ping_req(const uint8_t* payload, uint32_t len, netd_ipc_ping_req_t& out) {
+    if (!payload || len != sizeof(netd_ipc_ping_req_t)) {
+        return false;
+    }
+
+    memcpy(&out, payload, sizeof(out));
+    return true;
+}
+
+bool IpcServer::parse_resolve_req(const uint8_t* payload, uint32_t len, netd_ipc_resolve_req_t& out) {
+    if (!payload || len != sizeof(netd_ipc_resolve_req_t)) {
+        return false;
+    }
+
+    memcpy(&out, payload, sizeof(out));
+
+    if (out.name_len == 0u || out.name_len > sizeof(out.name)) {
+        return false;
+    }
+
+    return true;
+}
+
 void IpcServer::on_client_added(uint32_t client_index) {
     if (client_index >= m_clients.size()) {
         return;
@@ -149,6 +172,41 @@ void IpcServer::on_client_removed(uint32_t client_index, uint32_t removed_token,
     (void)m_token_to_index.put(moved_token, client_index);
 }
 
+bool IpcServer::enqueue_ping_request(const netd_ipc_ping_req_t& req, Client& c, uint32_t seq) {
+    CoreReqMsg msg{};
+    msg.type = CoreReqType::PingSubmit;
+    msg.ping.dst_ip_be = req.dst_ip_be;
+    msg.ping.ident_be = req.ident_be;
+    msg.ping.seq_be = req.seq_be;
+    msg.ping.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
+    msg.ping.tag = seq;
+    msg.ping.client_token = c.token;
+
+    if (m_to_core.push_and_wake(msg)) {
+        return true;
+    }
+
+    send_queue_full_error(*this, c, seq);
+    return true;
+}
+
+bool IpcServer::enqueue_resolve_request(const netd_ipc_resolve_req_t& req, Client& c, uint32_t seq) {
+    CoreReqMsg msg{};
+    msg.type = CoreReqType::DnsResolveSubmit;
+    msg.dns.name_len = req.name_len;
+    memcpy(msg.dns.name, req.name, req.name_len);
+    msg.dns.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
+    msg.dns.tag = seq;
+    msg.dns.client_token = c.token;
+
+    if (m_to_core.push_and_wake(msg)) {
+        return true;
+    }
+
+    send_queue_full_error(*this, c, seq);
+    return true;
+}
+
 bool IpcServer::handle_ping_req(
     void* handler_ctx,
     void* call_ctx,
@@ -167,28 +225,12 @@ bool IpcServer::handle_ping_req(
         return false;
     }
 
-    if (len != sizeof(netd_ipc_ping_req_t)) {
+    netd_ipc_ping_req_t req{};
+    if (!self->parse_ping_req(payload, len, req)) {
         return false;
     }
 
-    netd_ipc_ping_req_t req{};
-    memcpy(&req, payload, sizeof(req));
-
-    CoreReqMsg msg{};
-    msg.type = CoreReqType::PingSubmit;
-    msg.ping.dst_ip_be = req.dst_ip_be;
-    msg.ping.ident_be = req.ident_be;
-    msg.ping.seq_be = req.seq_be;
-    msg.ping.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
-    msg.ping.tag = seq;
-    msg.ping.client_token = c->token;
-
-    if (self->m_to_core.push_and_wake(msg)) {
-        return true;
-    }
-
-    send_queue_full_error(*self, *c, seq);
-    return true;
+    return self->enqueue_ping_request(req, *c, seq);
 }
 
 bool IpcServer::handle_resolve_req(
@@ -209,31 +251,12 @@ bool IpcServer::handle_resolve_req(
         return false;
     }
 
-    if (len != sizeof(netd_ipc_resolve_req_t)) {
-        return false;
-    }
-
     netd_ipc_resolve_req_t req{};
-    memcpy(&req, payload, sizeof(req));
-
-    if (req.name_len == 0u || req.name_len > sizeof(req.name)) {
+    if (!self->parse_resolve_req(payload, len, req)) {
         return false;
     }
 
-    CoreReqMsg msg{};
-    msg.type = CoreReqType::DnsResolveSubmit;
-    msg.dns.name_len = req.name_len;
-    memcpy(msg.dns.name, req.name, req.name_len);
-    msg.dns.timeout_ms = clamp_u32(req.timeout_ms, 1u, 10000u);
-    msg.dns.tag = seq;
-    msg.dns.client_token = c->token;
-
-    if (self->m_to_core.push_and_wake(msg)) {
-        return true;
-    }
-
-    send_queue_full_error(*self, *c, seq);
-    return true;
+    return self->enqueue_resolve_request(req, *c, seq);
 }
 
 bool IpcServer::listen() {
@@ -359,6 +382,60 @@ bool IpcServer::send_msg(Client& c, uint16_t type, uint32_t seq, const void* pay
     return true;
 }
 
+void IpcServer::dispatch_core_events() {
+    for (;;) {
+        CoreEvtMsg evt{};
+        if (!m_from_core.pop(evt)) {
+            break;
+        }
+
+        (void)handle_core_event(evt);
+    }
+}
+
+bool IpcServer::handle_core_event(const CoreEvtMsg& evt) {
+    if (evt.type == CoreEvtType::PingResult) {
+        return send_ping_result(evt.ping);
+    }
+
+    if (evt.type == CoreEvtType::DnsResolveResult) {
+        return send_resolve_result(evt.dns);
+    }
+
+    return false;
+}
+
+bool IpcServer::send_ping_result(const PingResultMsg& res) {
+    netd_ipc_ping_rsp_t rsp{};
+    rsp.dst_ip_be = res.dst_ip_be;
+    rsp.ident_be = res.ident_be;
+    rsp.seq_be = res.seq_be;
+    rsp.rtt_ms = res.rtt_ms;
+    rsp.ok = res.ok ? 1u : 0u;
+
+    Client* c = try_get_client_by_token(res.client_token);
+    if (!c) {
+        return false;
+    }
+
+    (void)send_msg(*c, NETD_IPC_MSG_PING_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
+    return true;
+}
+
+bool IpcServer::send_resolve_result(const DnsResolveResultMsg& res) {
+    netd_ipc_resolve_rsp_t rsp{};
+    rsp.ip_be = res.ip_be;
+    rsp.ok = res.ok ? 1u : 0u;
+
+    Client* c = try_get_client_by_token(res.client_token);
+    if (!c) {
+        return false;
+    }
+
+    (void)send_msg(*c, NETD_IPC_MSG_RESOLVE_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
+    return true;
+}
+
 void IpcServer::drop_client(uint32_t idx) {
     if (idx >= m_clients.size()) {
         return;
@@ -428,47 +505,7 @@ void IpcServer::step(uint32_t now_ms) {
         i++;
     }
 
-    for (;;) {
-        CoreEvtMsg evt{};
-        if (!m_from_core.pop(evt)) {
-            break;
-        }
-
-        if (evt.type == CoreEvtType::PingResult) {
-            const PingResultMsg& res = evt.ping;
-
-            netd_ipc_ping_rsp_t rsp{};
-            rsp.dst_ip_be = res.dst_ip_be;
-            rsp.ident_be = res.ident_be;
-            rsp.seq_be = res.seq_be;
-            rsp.rtt_ms = res.rtt_ms;
-            rsp.ok = res.ok ? 1u : 0u;
-
-            Client* c = try_get_client_by_token(res.client_token);
-            if (!c) {
-                continue;
-            }
-
-            (void)send_msg(*c, NETD_IPC_MSG_PING_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
-            continue;
-        }
-
-        if (evt.type == CoreEvtType::DnsResolveResult) {
-            const DnsResolveResultMsg& res = evt.dns;
-
-            netd_ipc_resolve_rsp_t rsp{};
-            rsp.ip_be = res.ip_be;
-            rsp.ok = res.ok ? 1u : 0u;
-
-            Client* c = try_get_client_by_token(res.client_token);
-            if (!c) {
-                continue;
-            }
-
-            (void)send_msg(*c, NETD_IPC_MSG_RESOLVE_RSP, res.tag, &rsp, (uint32_t)sizeof(rsp));
-            continue;
-        }
-    }
+    dispatch_core_events();
 }
 
 }

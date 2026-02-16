@@ -43,6 +43,7 @@ private:
     private:
         static void on_timer(void* ctx, uint32_t now_ms);
         void handle_timer(uint32_t now_ms);
+        void finish(bool ok);
         void schedule_next(uint32_t now_ms, uint32_t delay_ms);
         void schedule_next_at(uint32_t now_ms, uint32_t next_ms);
 
@@ -72,6 +73,7 @@ private:
     void tick_scheduler(uint32_t now_ms);
     void step_stack(uint32_t now_ms);
     void publish_events(uint32_t now_ms);
+    void run_once(uint8_t* frame, uint32_t cap, uint32_t now_ms);
 
     Arena m_core_arena;
     Arena m_ipc_arena;

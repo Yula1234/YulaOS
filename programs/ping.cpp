@@ -50,6 +50,7 @@ static uint32_t bswap32(uint32_t v) {
 }
 
 static uint16_t htons(uint16_t v) { return bswap16(v); }
+static uint16_t ntohs(uint16_t v) { return bswap16(v); }
 static uint32_t htonl(uint32_t v) { return bswap32(v); }
 static uint32_t ntohl(uint32_t v) { return bswap32(v); }
 
@@ -480,6 +481,35 @@ static int recv_ping_rsp(int fd_r, uint32_t rx_timeout_ms, netd_ipc_ping_rsp_t& 
     return read_all_timeout(fd_r, &out, (uint32_t)sizeof(out), rx_timeout_ms);
 }
 
+static int recv_ping_rsp_nonblock(int fd_r, netd_ipc_ping_rsp_t& out) {
+    pollfd_t fds[1];
+    fds[0].fd = fd_r;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+
+    const int pr = poll(fds, 1, 0);
+    if (pr <= 0 || (fds[0].revents & POLLIN) == 0) {
+        return 0;
+    }
+
+    netd_ipc_hdr_t hdr{};
+    const int hr = read_all_timeout(fd_r, &hdr, (uint32_t)sizeof(hdr), 20);
+    if (hr <= 0) {
+        return hr;
+    }
+
+    if (hdr.magic != NETD_IPC_MAGIC || hdr.version != NETD_IPC_VERSION) {
+        return -1;
+    }
+
+    if (hdr.type != NETD_IPC_MSG_PING_RSP || hdr.len != sizeof(netd_ipc_ping_rsp_t)) {
+        (void)drain_unknown_payload(fd_r, 20, hdr.len);
+        return 0;
+    }
+
+    return read_all_timeout(fd_r, &out, (uint32_t)sizeof(out), 20);
+}
+
 static void print_header(const Options& opt) {
     char ip[16];
 
@@ -547,10 +577,112 @@ static void print_summary(const Options& opt, uint32_t transmitted, uint32_t rec
     print_time_us(mdev_us);
     printf(" ms\n");
 }
+struct PingSlot {
+    uint32_t send_ms;
+    uint32_t deadline_ms;
+    uint32_t rtt_ms;
+    uint8_t sent;
+    uint8_t done;
+    uint8_t ok;
+};
+
+static void reset_slots(PingSlot* slots, uint32_t count) {
+    if (!slots) {
+        return;
+    }
+
+    for (uint32_t i = 0; i <= count; i++) {
+        slots[i].send_ms = 0u;
+        slots[i].deadline_ms = 0u;
+        slots[i].rtt_ms = 0u;
+        slots[i].sent = 0u;
+        slots[i].done = 0u;
+        slots[i].ok = 0u;
+    }
+}
+
+static void update_min_deadline(uint32_t candidate, uint32_t& min_deadline_ms) {
+    if (candidate == 0u) {
+        return;
+    }
+
+    if (min_deadline_ms == 0u || candidate < min_deadline_ms) {
+        min_deadline_ms = candidate;
+    }
+}
+
+static uint32_t recompute_min_deadline(const PingSlot* slots, uint32_t count) {
+    uint32_t best = 0u;
+    if (!slots) {
+        return best;
+    }
+
+    for (uint32_t i = 1; i <= count; i++) {
+        if (slots[i].sent == 0u || slots[i].done != 0u) {
+            continue;
+        }
+
+        const uint32_t t = slots[i].deadline_ms;
+        if (t == 0u) {
+            continue;
+        }
+
+        if (best == 0u || t < best) {
+            best = t;
+        }
+    }
+
+    return best;
+}
+
+static void mark_done(PingSlot* slots, uint32_t seq, uint32_t rtt_ms, bool ok, uint32_t& done_count) {
+    if (!slots || seq == 0u) {
+        return;
+    }
+
+    PingSlot& s = slots[seq];
+    if (s.done != 0u) {
+        return;
+    }
+
+    s.done = 1u;
+    s.ok = ok ? 1u : 0u;
+    s.rtt_ms = rtt_ms;
+    done_count++;
+}
+
+static void print_ready(
+    PingSlot* slots,
+    const Options& opt,
+    uint32_t count,
+    uint32_t& next_print_seq,
+    uint32_t& transmitted,
+    uint32_t& received,
+    RttStats& stats
+) {
+    while (next_print_seq <= count) {
+        PingSlot& s = slots[next_print_seq];
+        if (s.done == 0u) {
+            break;
+        }
+
+        if (s.ok != 0u) {
+            received++;
+            stats.add_ms(s.rtt_ms);
+            print_reply_line(next_print_seq, s.rtt_ms, opt);
+        } else {
+            print_timeout_line();
+        }
+
+        next_print_seq++;
+    }
+}
 
 }
 
+
 extern "C" int main(int argc, char** argv) {
+
 
     ping::Options opt{};
 
@@ -597,35 +729,110 @@ extern "C" int main(int argc, char** argv) {
     ping::RttStats stats{};
     stats.reset();
 
-    for (uint32_t seq = 1; seq <= opt.count; seq++) {
-        transmitted++;
+    ping::PingSlot* slots = (ping::PingSlot*)malloc((opt.count + 1u) * sizeof(ping::PingSlot));
+    if (!slots) {
+        printf("ping: out of memory\n");
+        ping::close_fds(fd_r, fd_w);
+        return 1;
+    }
 
-        if (ping::send_ping_req(fd_w, opt.dst_ip_be, ident, (uint16_t)seq, opt.timeout_ms) != 0) {
-            printf("ping: send failed\n");
-            ping::close_fds(fd_r, fd_w);
-            return 1;
+    ping::reset_slots(slots, opt.count);
+
+    uint32_t seq_to_send = 1u;
+    uint32_t next_print_seq = 1u;
+    uint32_t done_count = 0u;
+    uint32_t min_deadline_ms = 0u;
+
+    uint32_t next_send_ms = start_ms;
+
+    while (next_print_seq <= opt.count) {
+        const uint32_t now = uptime_ms();
+
+        while (seq_to_send <= opt.count && now >= next_send_ms) {
+            transmitted++;
+
+            if (ping::send_ping_req(fd_w, opt.dst_ip_be, ident, (uint16_t)seq_to_send, opt.timeout_ms) != 0) {
+                printf("ping: send failed\n");
+                free(slots);
+                ping::close_fds(fd_r, fd_w);
+                return 1;
+            }
+
+            ping::PingSlot& s = slots[seq_to_send];
+            s.sent = 1u;
+            s.done = 0u;
+            s.ok = 0u;
+            s.send_ms = now;
+            s.deadline_ms = now + opt.timeout_ms;
+
+            ping::update_min_deadline(s.deadline_ms, min_deadline_ms);
+
+            seq_to_send++;
+            next_send_ms += opt.interval_ms;
         }
 
-        netd_ipc_ping_rsp_t rsp{};
-        const uint32_t rx_timeout_ms = opt.timeout_ms + 1500u;
-        const int rr = ping::recv_ping_rsp(fd_r, rx_timeout_ms, rsp);
+        for (;;) {
+            netd_ipc_ping_rsp_t rsp{};
+            const int rr = ping::recv_ping_rsp_nonblock(fd_r, rsp);
+            if (rr <= 0) {
+                break;
+            }
 
-        if (rr <= 0 || rsp.ok == 0u) {
-            ping::print_timeout_line();
-        } else {
-            received++;
-            stats.add_ms(rsp.rtt_ms);
-            ping::print_reply_line(seq, rsp.rtt_ms, opt);
+            const uint32_t seq = (uint32_t)ping::ntohs(rsp.seq_be);
+            if (seq == 0u || seq > opt.count) {
+                continue;
+            }
+
+            if (slots[seq].sent == 0u) {
+                continue;
+            }
+
+            ping::mark_done(slots, seq, rsp.rtt_ms, rsp.ok != 0u, done_count);
         }
 
-        if (seq != opt.count) {
-            sleep((int)opt.interval_ms);
+        if (min_deadline_ms != 0u && now >= min_deadline_ms) {
+            for (uint32_t i = 1; i <= opt.count; i++) {
+                if (slots[i].sent == 0u || slots[i].done != 0u) {
+                    continue;
+                }
+
+                if (now >= slots[i].deadline_ms) {
+                    ping::mark_done(slots, i, 0u, false, done_count);
+                }
+            }
+
+            min_deadline_ms = ping::recompute_min_deadline(slots, opt.count);
         }
+
+        ping::print_ready(slots, opt, opt.count, next_print_seq, transmitted, received, stats);
+
+        if (next_print_seq > opt.count) {
+            break;
+        }
+
+        uint32_t next_due_ms = 0u;
+        if (seq_to_send <= opt.count) {
+            next_due_ms = next_send_ms;
+        }
+        ping::update_min_deadline(min_deadline_ms, next_due_ms);
+
+        uint32_t wait_ms = 10u;
+        if (next_due_ms != 0u && next_due_ms > now) {
+            const uint32_t delta = next_due_ms - now;
+            wait_ms = (delta < 50u) ? delta : 50u;
+        }
+
+        pollfd_t fds[1];
+        fds[0].fd = fd_r;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        (void)poll(fds, 1, (int)wait_ms);
     }
 
     const uint32_t total_ms = uptime_ms() - start_ms;
     ping::print_summary(opt, transmitted, received, total_ms, stats);
 
+    free(slots);
     ping::close_fds(fd_r, fd_w);
     return 0;
 }
