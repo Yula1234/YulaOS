@@ -119,6 +119,20 @@ void wm_focus_view_idx(comp_conn_t* c, wm_state_t* st, int idx) {
     wm_ui_raise_and_place(c, st);
 }
 
+void wm_focus_view_hover(comp_conn_t* c, wm_state_t* st, int idx) {
+    if (!c || !st) return;
+    if (idx < 0 || idx >= WM_MAX_VIEWS) return;
+    wm_view_t* v = &st->views[idx];
+    if (!wm_is_view_visible_on_active_ws(st, v)) return;
+    if (v->ui) return;
+
+    wm_clear_focus(st);
+    v->focused = 1;
+    st->focused_idx = idx;
+    (void)comp_wm_focus(c, v->client_id, v->surface_id);
+    wm_ui_draw_bar(st);
+}
+
 void wm_hide_view(comp_conn_t* c, wm_view_t* v) {
     if (!c || !v || !v->mapped) return;
     if (v->ui) return;

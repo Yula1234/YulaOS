@@ -381,6 +381,15 @@ static void wm_on_pointer(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_even
         wm_start_drag(c, st, idx, ev->px, ev->py, left_mask, 1);
         return;
     }
+    
+    if (ev->surface_id != 0 && !(ev->flags & COMP_WM_EVENT_FLAG_BACKGROUND)) {
+        if (ev->surface_id != WM_UI_BAR_SURFACE_ID) {
+            int idx = wm_find_view_idx(st, ev->client_id, ev->surface_id);
+            if (idx >= 0 && idx != st->focused_idx) {
+                wm_focus_view_hover(c, st, idx);
+            }
+        }
+    }
 }
 
 static void wm_on_key(comp_conn_t* c, wm_state_t* st, const comp_ipc_wm_event_t* ev) {

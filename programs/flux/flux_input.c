@@ -248,6 +248,18 @@ void comp_update_focus(comp_client_t* clients, int nclients, comp_input_state_t*
         st->focus_surface_id = 0;
     }
 
+    if (!(wm && wm->connected) && !st->grab_active) {
+        int ci = -1;
+        uint32_t sid = 0;
+        comp_surface_t* s = 0;
+        if (comp_pick_surface_at(clients, nclients, ms->x, ms->y, &ci, &sid, &s)) {
+            if (st->focus_client != ci || st->focus_surface_id != sid) {
+                st->focus_client = ci;
+                st->focus_surface_id = sid;
+            }
+        }
+    }
+
     if (pressed) {
         int ci = -1;
         uint32_t sid = 0;

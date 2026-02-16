@@ -142,6 +142,7 @@ void wm_drop_view(wm_state_t* st, int idx);
 int wm_is_view_visible_on_active_ws(const wm_state_t* st, const wm_view_t* v);
 void wm_clear_focus(wm_state_t* st);
 void wm_focus_view_idx(comp_conn_t* c, wm_state_t* st, int idx);
+void wm_focus_view_hover(comp_conn_t* c, wm_state_t* st, int idx);
 int wm_pick_next_focus_idx(const wm_state_t* st, int start_idx);
 
 void wm_hide_view(comp_conn_t* c, wm_view_t* v);
