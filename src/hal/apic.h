@@ -31,6 +31,8 @@
 #define IPI_TLB_VECTOR      0xF0
 #define IPI_BLIT_VECTOR     0xF1
 
+#define KERNEL_TIMER_HZ     1000
+
 void lapic_init(void);
 void lapic_timer_init(uint32_t hz);
 void lapic_eoi(void);

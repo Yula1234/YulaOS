@@ -400,7 +400,7 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
             if (block_for_focus) {
                 kbd_put_char(c);
 
-                uint32_t target = timer_ticks + 5;
+                uint32_t target = timer_ticks + 1;
                 proc_sleep_add(curr, target);
 
                 if (curr->pending_signals & (1 << 2)) {

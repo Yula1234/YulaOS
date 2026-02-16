@@ -15,6 +15,7 @@
 #include <hal/lock.h>
 #include <hal/io.h>
 #include <hal/simd.h>
+#include <hal/apic.h>
 #include <drivers/fbdev.h>
 #include <kernel/input_focus.h>
 
@@ -1393,7 +1394,7 @@ void proc_usleep(uint32_t us) {
     task_t* curr = proc_current();
     if (!curr) return;
 
-    uint32_t ticks = (us * 15u) / 1000u;
+    uint32_t ticks = (uint32_t)(((uint64_t)us * KERNEL_TIMER_HZ) / 1000000ull);
     if (ticks == 0) ticks = 1;
 
     uint32_t target = timer_ticks + ticks;

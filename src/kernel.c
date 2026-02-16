@@ -75,7 +75,7 @@ static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
     kernel_init_simd();
 
     lapic_init();
-    lapic_timer_init(15000);
+    lapic_timer_init(KERNEL_TIMER_HZ);
 
     if (g_enable_uhci) {
         uhci_quiesce_early();

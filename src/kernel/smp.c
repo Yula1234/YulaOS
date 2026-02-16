@@ -52,7 +52,7 @@ void smp_ap_main(cpu_t* cpu_arg) {
     }
     
     lapic_init();
-    lapic_timer_init(15000);
+    lapic_timer_init(KERNEL_TIMER_HZ);
     kernel_init_simd();
 
     __asm__ volatile("sti");

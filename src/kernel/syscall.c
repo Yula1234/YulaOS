@@ -5,6 +5,7 @@
 #include <lib/string.h>
 #include <hal/lock.h>
 #include <hal/simd.h>
+#include <hal/apic.h>
 
 #include <drivers/vga.h>
 #include <drivers/keyboard.h>
@@ -534,7 +535,7 @@ static void syscall_close(registers_t* regs, task_t* curr) {
 
 static void syscall_sleep(registers_t* regs, task_t* curr) {
     uint32_t ms = regs->ebx;
-    uint32_t target = timer_ticks + (ms * 15u);
+    uint32_t target = timer_ticks + (uint32_t)(((uint64_t)ms * KERNEL_TIMER_HZ) / 1000ull);
     extern void proc_sleep_add(task_t* t, uint32_t tick);
     proc_sleep_add(curr, target);
 }
@@ -1935,7 +1936,7 @@ static void syscall_ioctl(registers_t* regs, task_t* curr) {
 
 static void syscall_uptime_ms(registers_t* regs, task_t* curr) {
     (void)curr;
-    uint64_t ms64 = ((uint64_t)timer_ticks * 1000ull) / 15000ull;
+    uint64_t ms64 = ((uint64_t)timer_ticks * 1000ull) / (uint64_t)KERNEL_TIMER_HZ;
     if (ms64 > 0xFFFFFFFFull) ms64 = 0xFFFFFFFFull;
     regs->eax = (uint32_t)ms64;
 }
@@ -2337,7 +2338,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
     uint32_t end_tick = 0;
     int have_deadline = 0;
     if (timeout_ms > 0) {
-        uint64_t t = (uint64_t)timer_ticks + (uint64_t)((uint32_t)timeout_ms) * 15ull;
+        uint64_t t = (uint64_t)timer_ticks + (uint64_t)((uint32_t)timeout_ms) * KERNEL_TIMER_HZ / 1000ull;
         if (t > 0xFFFFFFFFull) t = 0xFFFFFFFFull;
         end_tick = (uint32_t)t;
         have_deadline = 1;
