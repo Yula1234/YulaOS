@@ -47,8 +47,11 @@ static uint32_t next_pid = 1;
 
 static spinlock_t proc_lock;
 
-static dlist_head_t sleeping_list; 
+static struct rb_root sleeping_tree = RB_ROOT;
 static spinlock_t sleep_lock;
+
+static dlist_head_t zombie_list;
+static spinlock_t zombie_lock;
 
 static task_t* pid_hash[PID_HASH_SIZE];
 static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
@@ -125,9 +128,14 @@ void proc_init(void) {
     tasks_tail = 0;
     total_tasks = 0;
     next_pid = 1;
-    dlist_init(&sleeping_list);
+    
     spinlock_init(&proc_lock);
+    
+    sleeping_tree = RB_ROOT;
     spinlock_init(&sleep_lock);
+    
+    dlist_init(&zombie_list);
+    spinlock_init(&zombie_lock);
 
     for (int i = 0; i < PID_HASH_LOCKS_COUNT; i++) {
         spinlock_init(&pid_hash_locks[i]);
@@ -707,6 +715,12 @@ void proc_kill(task_t* t) {
 
     t->state = TASK_ZOMBIE;
 
+    {
+        uint32_t zflags = spinlock_acquire_safe(&zombie_lock);
+        dlist_add_tail(&t->zombie_node, &zombie_list);
+        spinlock_release_safe(&zombie_lock, zflags);
+    }
+
     sem_signal_all(&t->exit_sem);
 }
 
@@ -1244,50 +1258,28 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 }
 
 void proc_wait(uint32_t pid) {
-    task_t* target = 0;
-
-    task_t* waiter = proc_current();
-
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
-    task_t* curr = tasks_head;
-    while (curr) {
-        if (curr->pid == pid) {
-            target = curr;
-            __sync_fetch_and_add(&target->exit_waiters, 1);
-            if (waiter) waiter->wait_for_pid = pid;
-            break;
-        }
-        curr = curr->next;
-    }
-    spinlock_release_safe(&proc_lock, flags);
-
+    task_t* target = proc_find_by_pid(pid);
     if (!target) return;
 
+    task_t* waiter = proc_current();
+    if (waiter) waiter->wait_for_pid = pid;
+
+    __sync_fetch_and_add(&target->exit_waiters, 1);
+    
     sem_wait(&target->exit_sem);
 
     if (waiter) waiter->wait_for_pid = 0;
     __sync_fetch_and_sub(&target->exit_waiters, 1);
 }
 
- int proc_waitpid(uint32_t pid, int* out_status) {
-     task_t* target = 0;
+int proc_waitpid(uint32_t pid, int* out_status) {
+     task_t* target = proc_find_by_pid(pid);
+     if (!target) return -1;
 
      task_t* waiter = proc_current();
+     if (waiter) waiter->wait_for_pid = pid;
 
-     uint32_t flags = spinlock_acquire_safe(&proc_lock);
-     task_t* curr = tasks_head;
-     while (curr) {
-         if (curr->pid == pid) {
-             target = curr;
-             __sync_fetch_and_add(&target->exit_waiters, 1);
-             if (waiter) waiter->wait_for_pid = pid;
-             break;
-         }
-         curr = curr->next;
-     }
-     spinlock_release_safe(&proc_lock, flags);
-
-     if (!target) return -1;
+     __sync_fetch_and_add(&target->exit_waiters, 1);
 
      sem_wait(&target->exit_sem);
 
@@ -1299,17 +1291,19 @@ void proc_wait(uint32_t pid) {
 
      __sync_fetch_and_sub(&target->exit_waiters, 1);
      return 0;
- }
+}
 
 
 void reaper_task_func(void* arg) {
     (void)arg;
     while (1) {
-        uint32_t flags = spinlock_acquire_safe(&proc_lock);
-        task_t* curr = tasks_head;
-        
-        while (curr) {
-            if (curr->state == TASK_ZOMBIE) {
+        int freed = 0;
+        do {
+            freed = 0;
+            uint32_t flags = spinlock_acquire_safe(&zombie_lock);
+            
+            task_t *curr, *n;
+            dlist_for_each_entry_safe(curr, n, &zombie_list, zombie_node) {
                 int still_running = 0;
                 for (int i = 0; i < MAX_CPUS; i++) {
                     if (cpus[i].current_task == curr) {
@@ -1318,33 +1312,23 @@ void reaper_task_func(void* arg) {
                     }
                 }
                 
-                int has_waiters = !dlist_empty(&curr->exit_sem.wait_list);
-
-                if (has_waiters) {
-                    sem_signal_all(&curr->exit_sem);
-                }
-
                 if (still_running || curr->exit_waiters > 0) {
-                    curr = curr->next;
                     continue;
                 }
 
-                curr->state = TASK_UNUSED; 
-                
-                spinlock_release_safe(&proc_lock, flags);
-                
-                sched_remove(curr);
+                dlist_del(&curr->zombie_node);
+                spinlock_release_safe(&zombie_lock, flags);
                 
                 proc_free_resources(curr);
                 
-                flags = spinlock_acquire_safe(&proc_lock);
-                curr = tasks_head;
-                continue; 
+                freed = 1;
+                break;
             }
-            curr = curr->next;
-        }
-        
-        spinlock_release_safe(&proc_lock, flags);
+            
+            if (!freed) {
+                spinlock_release_safe(&zombie_lock, flags);
+            }
+        } while (freed);
 
         proc_usleep(50000);
     }
@@ -1388,32 +1372,31 @@ task_t* proc_create_idle(int cpu_index) {
     return t;
 }
 
+static void insert_sleeper(task_t* t) {
+    struct rb_node **new_node = &(sleeping_tree.rb_node), *parent = 0;
+    while (*new_node) {
+        task_t *this_task = rb_entry(*new_node, task_t, sleep_rb);
+        parent = *new_node;
+        if (t->wake_tick < this_task->wake_tick)
+            new_node = &((*new_node)->rb_left);
+        else
+            new_node = &((*new_node)->rb_right);
+    }
+    rb_link_node(&t->sleep_rb, parent, new_node);
+    rb_insert_color(&t->sleep_rb, &sleeping_tree);
+}
+
 void proc_sleep_add(task_t* t, uint32_t wake_tick) {
     uint32_t flags = spinlock_acquire_safe(&sleep_lock);
     
-    if (t->sleep_node.next != 0 && t->sleep_node.prev != 0) {
-        dlist_del(&t->sleep_node);
-        t->sleep_node.next = 0;
-        t->sleep_node.prev = 0;
+    if (t->wake_tick != 0) {
+        rb_erase(&t->sleep_rb, &sleeping_tree);
     }
 
     t->wake_tick = wake_tick;
     t->state = TASK_WAITING;
     
-    task_t *curr;
-    int inserted = 0;
-
-    dlist_for_each_entry(curr, &sleeping_list, sleep_node) {
-        if (curr->wake_tick > wake_tick) {
-            dlist_add_tail(&t->sleep_node, &curr->sleep_node);
-            inserted = 1;
-            break;
-        }
-    }
-
-    if (!inserted) {
-        dlist_add_tail(&t->sleep_node, &sleeping_list);
-    }
+    insert_sleeper(t);
     
     spinlock_release_safe(&sleep_lock, flags);
     sched_yield();
@@ -1431,26 +1414,16 @@ void proc_usleep(uint32_t us) {
 }
 
 void proc_check_sleepers(uint32_t current_tick) {
-    if (dlist_empty(&sleeping_list)) return;
-
-    task_t *first = container_of(sleeping_list.next, task_t, sleep_node);
-
-    if (first->wake_tick > current_tick) return;
-
     if (spinlock_try_acquire(&sleep_lock)) {
-        task_t *pos, *n;
-        dlist_for_each_entry_safe(pos, n, &sleeping_list, sleep_node) {
-            if (pos->wake_tick <= current_tick) {
-                dlist_del(&pos->sleep_node);
-                pos->sleep_node.next = 0;
-                pos->sleep_node.prev = 0;
-                
-                pos->wake_tick = 0;
-                pos->state = TASK_RUNNABLE;
-                sched_add(pos);
-            } else {
-                break;
-            }
+        struct rb_node *node;
+        while ((node = rb_first(&sleeping_tree))) {
+            task_t *t = rb_entry(node, task_t, sleep_rb);
+            if (t->wake_tick > current_tick) break;
+            
+            rb_erase(&t->sleep_rb, &sleeping_tree);
+            t->state = TASK_RUNNABLE;
+            t->wake_tick = 0;
+            sched_add(t);
         }
         spinlock_release(&sleep_lock);
     }
@@ -1459,10 +1432,9 @@ void proc_check_sleepers(uint32_t current_tick) {
 void proc_sleep_remove(task_t* t) {
     uint32_t flags = spinlock_acquire_safe(&sleep_lock);
     
-    if (t->sleep_node.next != 0 && t->sleep_node.prev != 0) {
-        dlist_del(&t->sleep_node);
-        t->sleep_node.next = 0;
-        t->sleep_node.prev = 0;
+    if (t->wake_tick != 0) {
+        rb_erase(&t->sleep_rb, &sleeping_tree);
+        t->wake_tick = 0;
     }
     
     spinlock_release_safe(&sleep_lock, flags);
@@ -1476,7 +1448,12 @@ void proc_wake(task_t* t) {
     t->wake_tick = 0;
 
     if (t->blocked_on_sem) return;
-
+    
+    // proc_sleep_remove sets state to RUNNABLE if it was WAITING.
+    // If it was already RUNNABLE (e.g. pre-empted), it stays RUNNABLE.
+    // We should ensure it is added to scheduler if it's not queued.
+    // sched_add handles is_queued check.
+    
     if (t->state == TASK_WAITING) {
         t->state = TASK_RUNNABLE;
         sched_add(t);

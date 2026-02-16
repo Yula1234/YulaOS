@@ -111,7 +111,6 @@ typedef struct task {
 
     uint32_t wait_for_pid;
     uint32_t wake_tick;
-    dlist_head_t sleep_node; 
     int is_blocked_on_kbd;
     
     uint32_t* esp;
@@ -156,7 +155,10 @@ typedef struct task {
 
     dlist_head_t sem_node;
     void* blocked_on_sem;
+    
+    dlist_head_t zombie_node;
 
+    struct rb_node sleep_rb;
     spinlock_t poll_lock;
     dlist_head_t poll_waiters;
 
