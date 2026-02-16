@@ -181,7 +181,8 @@ static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
         yfs_dcache_entry_t *entry = rb_entry(node, yfs_dcache_entry_t, node);
         int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
         if (cmp == 0) {
-            entry->target_ino = 0;
+            rb_erase(&entry->node, &dcache_root);
+            kfree(entry);
             break;
         }
         if (cmp < 0) node = node->rb_left;
