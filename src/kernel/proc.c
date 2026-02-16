@@ -343,13 +343,11 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     int expected = ft->fd_next;
     if (expected < 0) expected = 0;
 
-    // Fast path: check from fd_next
     uint32_t limit = ft->max_fds;
     uint32_t start = (uint32_t)expected;
     
     int found = -1;
     
-    // First pass: from start to limit
     for (uint32_t i = start; i < limit; i++) {
         if (ft->fds[i] == 0) {
             found = (int)i;
@@ -357,7 +355,6 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
         }
     }
     
-    // If not found and start > 0, check from 0 to start
     if (found == -1 && start > 0) {
         for (uint32_t i = 0; i < start; i++) {
             if (ft->fds[i] == 0) {
@@ -367,8 +364,6 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
         }
     }
     
-    // If still not found, we need to expand.
-    // The next available FD is limit.
     if (found == -1) {
         found = (int)limit;
         if (fd_table_ensure_cap(ft, limit) != 0) {
@@ -377,16 +372,8 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
         }
     }
     
-    // Now we have a free slot at 'found'
     ft->fd_next = found + 1;
     spinlock_release_safe(&ft->lock, flags);
-    
-    // We can call proc_fd_add_at, but we already hold the lock above (which we released).
-    // To avoid race conditions, we should probably do the work here or re-acquire.
-    // But proc_fd_add_at acquires the lock. So it is safe to call it after releasing.
-    // However, between release and proc_fd_add_at, someone else might take the slot.
-    // But this is standard behavior. Let's just try to call proc_fd_add_at.
-    // If it fails (race), we can retry loop. But simplistic approach: just call add_at.
     
     return proc_fd_add_at(t, found, out_desc);
 }
@@ -1448,11 +1435,6 @@ void proc_wake(task_t* t) {
     t->wake_tick = 0;
 
     if (t->blocked_on_sem) return;
-    
-    // proc_sleep_remove sets state to RUNNABLE if it was WAITING.
-    // If it was already RUNNABLE (e.g. pre-empted), it stays RUNNABLE.
-    // We should ensure it is added to scheduler if it's not queued.
-    // sched_add handles is_queued check.
     
     if (t->state == TASK_WAITING) {
         t->state = TASK_RUNNABLE;
