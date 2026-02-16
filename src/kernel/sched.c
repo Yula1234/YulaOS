@@ -8,6 +8,7 @@
 #include <hal/io.h>
 #include <hal/simd.h>
 #include <drivers/vga.h>
+#include <lib/rbtree.h>
 
 #include "sched.h"
 #include "cpu.h"
@@ -23,9 +24,9 @@ static uint32_t cache_tick = 0;
 static spinlock_t cpu_cache_lock;
 
 uint32_t calc_weight(task_prio_t prio) {
-	int nice = 10 - (int)prio;
-	if (nice < -20) nice = -20;
-	if (nice > 19) nice = 19;
+    int nice = 10 - (int)prio;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
     
     static const uint32_t prio_to_weight[40] = {
         88761, 71755, 56483, 46273, 36291,
@@ -103,19 +104,41 @@ static int get_best_cpu(void) {
     return best_cpu;
 }
 
-static void runq_append(cpu_t* cpu, task_t* t) {
-    t->sched_next = 0;
-    t->sched_prev = 0;
-    
-    if (!cpu->runq_head) {
-        cpu->runq_head = t;
-        cpu->runq_tail = t;
-    } else {
-        cpu->runq_tail->sched_next = t;
-        t->sched_prev = cpu->runq_tail;
-        cpu->runq_tail = t;
+static void enqueue_task(cpu_t* cpu, task_t* p) {
+    struct rb_node **link = &cpu->runq_root.rb_node;
+    struct rb_node *parent = 0;
+    struct task *entry;
+    int leftmost = 1;
+
+    while (*link) {
+        parent = *link;
+        entry = rb_entry(parent, struct task, rb_node);
+        
+        if (p->vruntime < entry->vruntime) {
+            link = &parent->rb_left;
+        } else {
+            link = &parent->rb_right;
+            leftmost = 0;
+        }
     }
+
+    rb_link_node(&p->rb_node, parent, link);
+    rb_insert_color(&p->rb_node, &cpu->runq_root);
+    
+    if (leftmost)
+        cpu->runq_leftmost = p;
+        
     cpu->runq_count++;
+}
+
+static void dequeue_task(cpu_t* cpu, task_t* p) {
+    if (cpu->runq_leftmost == p) {
+        struct rb_node *next = rb_next(&p->rb_node);
+        cpu->runq_leftmost = next ? rb_entry(next, struct task, rb_node) : 0;
+    }
+
+    rb_erase(&p->rb_node, &cpu->runq_root);
+    cpu->runq_count--;
 }
 
 void sched_add(task_t* t) {
@@ -148,23 +171,15 @@ void sched_add(task_t* t) {
     t->ticks_left = t->quantum;
     
     if (t->vruntime == 0) {
-        task_t* min_task = 0;
-        uint64_t min_vruntime = 0xFFFFFFFFFFFFFFFFULL;
+        uint64_t min_vruntime;
         
-        task_t* curr = target->runq_head;
-        while (curr) {
-            if (curr->state == TASK_RUNNABLE && curr->vruntime < min_vruntime) {
-                min_vruntime = curr->vruntime;
-                min_task = curr;
-            }
-            curr = curr->sched_next;
-        }
-        
-        if (min_task) {
-            t->vruntime = min_task->vruntime;
+        if (target->runq_leftmost) {
+            min_vruntime = target->runq_leftmost->vruntime;
         } else {
-            t->vruntime = (uint64_t)target->sched_ticks * NICE_0_LOAD;
+            min_vruntime = (uint64_t)target->sched_ticks * NICE_0_LOAD;
         }
+        
+        t->vruntime = min_vruntime;
     }
     
     t->exec_start = 0;
@@ -172,7 +187,7 @@ void sched_add(task_t* t) {
     target->total_priority_weight += t->priority;
     target->total_task_count++;
 
-    runq_append(target, t);
+    enqueue_task(target, t);
     
     uint32_t cache_flags = spinlock_acquire_safe(&cpu_cache_lock);
     if (cached_best_cpu == target_cpu_idx) {
@@ -184,48 +199,14 @@ void sched_add(task_t* t) {
 }
 
 static task_t* pick_next_cfs(cpu_t* cpu) {
-    if (!cpu->runq_head) return 0;
+    task_t* left = cpu->runq_leftmost;
     
-    task_t* best = 0;
-    uint64_t min_vruntime = 0xFFFFFFFFFFFFFFFFULL;
+    if (!left) return 0;
     
-    task_t* curr = cpu->runq_head;
-    while (curr) {
-        if ((curr->state == TASK_RUNNABLE || curr->state == TASK_RUNNING) && 
-            curr->vruntime < min_vruntime) {
-            min_vruntime = curr->vruntime;
-            best = curr;
-        }
-        curr = curr->sched_next;
-    }
+    dequeue_task(cpu, left);
+    left->is_queued = 0;
     
-    if (!best) return 0;
-    
-    if (cpu->runq_head == best) {
-        cpu->runq_head = best->sched_next;
-        if (cpu->runq_head) cpu->runq_head->sched_prev = 0;
-        else cpu->runq_tail = 0;
-    } else {
-        if (best->sched_prev) best->sched_prev->sched_next = best->sched_next;
-        if (best->sched_next) best->sched_next->sched_prev = best->sched_prev;
-        else cpu->runq_tail = best->sched_prev;
-    }
-    
-    best->sched_next = 0;
-    best->sched_prev = 0;
-    best->is_queued = 0;
-    
-    if (cpu->runq_tail) {
-        cpu->runq_tail->sched_next = best;
-        best->sched_prev = cpu->runq_tail;
-        cpu->runq_tail = best;
-    } else {
-        cpu->runq_head = best;
-        cpu->runq_tail = best;
-    }
-    best->is_queued = 1;
-    
-    return best;
+    return left;
 }
 
 void sched_set_current(task_t* t) {
@@ -270,6 +251,11 @@ void sched_yield(void) {
             }
         }
         prev->exec_start = 0;
+
+        uint32_t flags = spinlock_acquire_safe(&me->lock);
+        prev->is_queued = 1;
+        enqueue_task(me, prev);
+        spinlock_release_safe(&me->lock, flags);
     }
 
     while (1) {
@@ -335,22 +321,9 @@ void sched_remove(task_t* t) {
     }
     spinlock_release_safe(&cpu_cache_lock, cache_flags);
 
-    task_t* curr = target->runq_head;
-    while (curr) {
-        if (curr == t) {
-            if (t->sched_prev) t->sched_prev->sched_next = t->sched_next;
-            else target->runq_head = t->sched_next;
-
-            if (t->sched_next) t->sched_next->sched_prev = t->sched_prev;
-            else target->runq_tail = t->sched_prev;
-
-            t->sched_next = 0;
-            t->sched_prev = 0;
-            t->is_queued = 0;
-            if (target->runq_count > 0) target->runq_count--;
-            break;
-        }
-        curr = curr->sched_next;
+    if (t->is_queued) {
+        dequeue_task(target, t);
+        t->is_queued = 0;
     }
     
     spinlock_release_safe(&target->lock, flags);

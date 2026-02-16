@@ -8,6 +8,7 @@
 #include <fs/vfs.h>
 #include <hal/lock.h>
 #include <lib/dlist.h>
+#include <lib/rbtree.h>
 #include <yos/proc.h>
 
 #include <stdint.h>
@@ -106,8 +107,7 @@ typedef struct task {
     struct task* next;
     struct task* prev;
     
-    struct task* sched_next;
-    struct task* sched_prev;
+    struct rb_node rb_node;
 
     struct task* hash_next;
     struct task* hash_prev;

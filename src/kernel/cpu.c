@@ -10,7 +10,7 @@ int cpu_count = 0;
 
 void cpu_init_system(void) {
     memset(cpus, 0, sizeof(cpus));
-    for(int i=0; i<MAX_CPUS; i++) {
+    for(int i = 0; i < MAX_CPUS; i++) {
         cpus[i].id = -1;
         cpus[i].index = i;
         cpus[i].started = 0;
@@ -27,8 +27,8 @@ void cpu_init_system(void) {
         cpus[i].total_priority_weight = 0;
         cpus[i].total_task_count = 0;
         
-        cpus[i].runq_head = 0;
-        cpus[i].runq_tail = 0;
+        cpus[i].runq_root = RB_ROOT;
+        cpus[i].runq_leftmost = 0;
         cpus[i].runq_count = 0;
         spinlock_init(&cpus[i].lock);
     }

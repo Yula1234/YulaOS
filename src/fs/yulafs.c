@@ -8,6 +8,7 @@
 #include "../kernel/proc.h"
 #include "../drivers/vga.h"
 #include <hal/lock.h>
+#include <lib/rbtree.h>
 
 #define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4) 
 #define INODE_LOCK_BUCKETS  128
@@ -26,21 +27,14 @@ static int      bmap_cache_dirty = 0;
 
 extern uint32_t ahci_get_capacity(void);
 
-typedef enum { RB_RED, RB_BLACK } rb_color_t;
-
-typedef struct rb_node {
-    struct rb_node *left;
-    struct rb_node *right;
-    struct rb_node *parent;
-    rb_color_t color;
-
+typedef struct {
+    struct rb_node node;
     yfs_ino_t parent_ino;
     char name[YFS_NAME_MAX];
-    
     yfs_ino_t target_ino;
-} rb_node_t;
+} yfs_dcache_entry_t;
 
-static rb_node_t* dcache_root = 0;
+static struct rb_root dcache_root = RB_ROOT;
 static spinlock_t dcache_lock;
 
 #define INODE_TABLE_CACHE_SLOTS 4
@@ -99,175 +93,99 @@ static int rb_compare(yfs_ino_t p1, const char* n1, yfs_ino_t p2, const char* n2
     return strcmp(n1, n2);
 }
 
-static void rb_rotate_left(rb_node_t* x) {
-    rb_node_t* y = x->right;
-    x->right = y->left;
-    
-    if (y->left) y->left->parent = x;
-    y->parent = x->parent;
-    
-    if (!x->parent) dcache_root = y;
-    else if (x == x->parent->left) x->parent->left = y;
-    else x->parent->right = y;
-    
-    y->left = x;
-    x->parent = y;
-}
-
-static void rb_rotate_right(rb_node_t* x) {
-    rb_node_t* y = x->left;
-    x->left = y->right;
-    
-    if (y->right) y->right->parent = x;
-    y->parent = x->parent;
-    
-    if (!x->parent) dcache_root = y;
-    else if (x == x->parent->right) x->parent->right = y;
-    else x->parent->left = y;
-    
-    y->right = x;
-    x->parent = y;
-}
-
-static void rb_insert_fixup(rb_node_t* z) {
-    while (z->parent && z->parent->color == RB_RED) {
-        if (z->parent == z->parent->parent->left) {
-            rb_node_t* y = z->parent->parent->right;
-            if (y && y->color == RB_RED) {
-                z->parent->color = RB_BLACK;
-                y->color = RB_BLACK;
-                z->parent->parent->color = RB_RED;
-                z = z->parent->parent;
-            } else {
-                if (z == z->parent->right) {
-                    z = z->parent;
-                    rb_rotate_left(z);
-                }
-                z->parent->color = RB_BLACK;
-                z->parent->parent->color = RB_RED;
-                rb_rotate_right(z->parent->parent);
-            }
-        } else {
-            rb_node_t* y = z->parent->parent->left;
-            if (y && y->color == RB_RED) {
-                z->parent->color = RB_BLACK;
-                y->color = RB_BLACK;
-                z->parent->parent->color = RB_RED;
-                z = z->parent->parent;
-            } else {
-                if (z == z->parent->left) {
-                    z = z->parent;
-                    rb_rotate_right(z);
-                }
-                z->parent->color = RB_BLACK;
-                z->parent->parent->color = RB_RED;
-                rb_rotate_left(z->parent->parent);
-            }
-        }
-    }
-    dcache_root->color = RB_BLACK;
-}
-
 static void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
     spinlock_acquire(&dcache_lock);
 
-    rb_node_t* x = dcache_root;
-    rb_node_t* y = 0;
+    struct rb_node **new_node = &(dcache_root.rb_node), *parent_node = 0;
 
-    while (x) {
-        y = x;
-        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+    while (*new_node) {
+        yfs_dcache_entry_t *this_entry = rb_entry(*new_node, yfs_dcache_entry_t, node);
+        parent_node = *new_node;
+        int cmp = rb_compare(parent, name, this_entry->parent_ino, this_entry->name);
         if (cmp == 0) {
-            x->target_ino = target;
+            this_entry->target_ino = target;
             spinlock_release(&dcache_lock);
             return;
         }
-        if (cmp < 0) x = x->left;
-        else x = x->right;
+        if (cmp < 0) new_node = &((*new_node)->rb_left);
+        else new_node = &((*new_node)->rb_right);
     }
 
     spinlock_release(&dcache_lock);
 
-    rb_node_t* z = (rb_node_t*)kmalloc(sizeof(rb_node_t));
-    if (!z) {
-        return;
-    }
+    yfs_dcache_entry_t* entry = (yfs_dcache_entry_t*)kmalloc(sizeof(yfs_dcache_entry_t));
+    if (!entry) return;
 
-    z->parent_ino = parent;
-    strlcpy(z->name, name, YFS_NAME_MAX);
-    z->target_ino = target;
-    z->left = z->right = z->parent = 0;
-    z->color = RB_RED;
+    entry->parent_ino = parent;
+    strlcpy(entry->name, name, YFS_NAME_MAX);
+    entry->target_ino = target;
 
     spinlock_acquire(&dcache_lock);
 
-    x = dcache_root;
-    y = 0;
+    new_node = &(dcache_root.rb_node);
+    parent_node = 0;
 
-    while (x) {
-        y = x;
-        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+    while (*new_node) {
+        yfs_dcache_entry_t *this_entry = rb_entry(*new_node, yfs_dcache_entry_t, node);
+        parent_node = *new_node;
+        int cmp = rb_compare(parent, name, this_entry->parent_ino, this_entry->name);
         if (cmp == 0) {
-            x->target_ino = target;
+            this_entry->target_ino = target;
             spinlock_release(&dcache_lock);
-            kfree(z);
+            kfree(entry);
             return;
         }
-        if (cmp < 0) x = x->left;
-        else x = x->right;
+        if (cmp < 0) new_node = &((*new_node)->rb_left);
+        else new_node = &((*new_node)->rb_right);
     }
 
-    z->parent = y;
-    if (!y) {
-        dcache_root = z;
-    } else {
-        int cmp = rb_compare(parent, name, y->parent_ino, y->name);
-        if (cmp < 0) y->left = z;
-        else y->right = z;
-    }
+    rb_link_node(&entry->node, parent_node, new_node);
+    rb_insert_color(&entry->node, &dcache_root);
 
-    rb_insert_fixup(z);
     spinlock_release(&dcache_lock);
 }
 
 static yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name) {
     spinlock_acquire(&dcache_lock);
     
-    rb_node_t* x = dcache_root;
-    while (x) {
-        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+    struct rb_node *node = dcache_root.rb_node;
+    while (node) {
+        yfs_dcache_entry_t *entry = rb_entry(node, yfs_dcache_entry_t, node);
+        int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
         if (cmp == 0) {
-            yfs_ino_t res = x->target_ino;
+            yfs_ino_t res = entry->target_ino;
             spinlock_release(&dcache_lock);
             return res;
         }
-        if (cmp < 0) x = x->left;
-        else x = x->right;
+        if (cmp < 0) node = node->rb_left;
+        else node = node->rb_right;
     }
     
     spinlock_release(&dcache_lock);
     return 0;
 }
 
-static void rb_free_tree(rb_node_t* node) {
+static void rb_free_tree(struct rb_node* node) {
     if (!node) return;
-    rb_free_tree(node->left);
-    rb_free_tree(node->right);
-    kfree(node);
+    rb_free_tree(node->rb_left);
+    rb_free_tree(node->rb_right);
+    yfs_dcache_entry_t *entry = rb_entry(node, yfs_dcache_entry_t, node);
+    kfree(entry);
 }
 
 static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
     spinlock_acquire(&dcache_lock);
     
-    rb_node_t* x = dcache_root;
-    while (x) {
-        int cmp = rb_compare(parent, name, x->parent_ino, x->name);
+    struct rb_node *node = dcache_root.rb_node;
+    while (node) {
+        yfs_dcache_entry_t *entry = rb_entry(node, yfs_dcache_entry_t, node);
+        int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
         if (cmp == 0) {
-            x->target_ino = 0;
+            entry->target_ino = 0;
             break;
         }
-        if (cmp < 0) x = x->left;
-        else x = x->right;
+        if (cmp < 0) node = node->rb_left;
+        else node = node->rb_right;
     }
     
     spinlock_release(&dcache_lock);
@@ -908,7 +826,7 @@ void yulafs_format(uint32_t disk_blocks_4k) {
     last_free_ino_hint = 2;
 
     spinlock_init(&dcache_lock);
-    if (dcache_root) { rb_free_tree(dcache_root); dcache_root = 0; }
+    if (dcache_root.rb_node) { rb_free_tree(dcache_root.rb_node); dcache_root = RB_ROOT; }
 
     yulafs_mkdir("/bin");
     yulafs_mkdir("/home");
@@ -930,7 +848,7 @@ void yulafs_init(void) {
 
     bmap_cache_lba = 0;
     bmap_cache_dirty = 0;
-    dcache_root = 0;
+    dcache_root = RB_ROOT;
     
     uint8_t* buf = kmalloc(YFS_BLOCK_SIZE);
     if (!buf) return;

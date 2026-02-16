@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <hal/lock.h>
+#include <lib/rbtree.h>
 #include "proc.h"
 
 #define MAX_CPUS 32
@@ -16,8 +17,9 @@ typedef struct {
     struct task* current_task;
     volatile int started; 
     
-    struct task* runq_head;
-    struct task* runq_tail;
+    struct rb_root runq_root;
+    struct task* runq_leftmost;
+    
     spinlock_t lock;
     struct task* idle_task;
     
