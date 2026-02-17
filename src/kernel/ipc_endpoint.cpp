@@ -40,10 +40,10 @@ struct IpcPendingConn {
     uint32_t refcount;
     uint32_t queued;
 
-    void init(kernel::IntrusiveRef<IpcEndpoint>&& ep,
-              uint32_t pid,
-              kernel::VirtualFSNode&& in_r,
-              kernel::VirtualFSNode&& out_w) {
+    IpcPendingConn(kernel::IntrusiveRef<IpcEndpoint>&& ep,
+                   uint32_t pid,
+                   kernel::VirtualFSNode&& in_r,
+                   kernel::VirtualFSNode&& out_w) {
         dlist_init(&node);
 
         owner = kernel::move(ep);
@@ -55,6 +55,11 @@ struct IpcPendingConn {
 
         spinlock_init(&lock);
     }
+
+    IpcPendingConn(const IpcPendingConn&) = delete;
+    IpcPendingConn& operator=(const IpcPendingConn&) = delete;
+    IpcPendingConn(IpcPendingConn&&) = delete;
+    IpcPendingConn& operator=(IpcPendingConn&&) = delete;
 
     void retain() {
         kernel::SpinLockSafeGuard guard(lock);
@@ -79,7 +84,7 @@ struct IpcPendingConn {
 
 class IpcEndpoint {
 public:
-    void init(const char* n, vfs_node_t* node) {
+    IpcEndpoint(const char* n, vfs_node_t* node) {
         strlcpy(name, n, sizeof(name));
         spinlock_init(&lock);
         dlist_init(&pending_conns);
@@ -89,6 +94,11 @@ public:
         refcount = 1u;
         closing = 0u;
     }
+
+    IpcEndpoint(const IpcEndpoint&) = delete;
+    IpcEndpoint& operator=(const IpcEndpoint&) = delete;
+    IpcEndpoint(IpcEndpoint&&) = delete;
+    IpcEndpoint& operator=(IpcEndpoint&&) = delete;
 
     const char* endpoint_name() const {
         return name;
@@ -310,13 +320,11 @@ struct vfs_node* ipc_listen_create(const char* name) {
         return nullptr;
     }
 
-    IpcEndpoint* ep = new (kernel::nothrow) IpcEndpoint;
+    IpcEndpoint* ep = new (kernel::nothrow) IpcEndpoint(name, node);
     if (!ep) {
         delete node;
         return nullptr;
     }
-
-    ep->init(name, node);
 
     memset(node, 0, sizeof(*node));
     strlcpy(node->name, "ipc_listen", sizeof(node->name));
@@ -392,16 +400,17 @@ int ipc_connect(const char* name,
         return -1;
     }
 
-    IpcPendingConn* p = new (kernel::nothrow) IpcPendingConn;
+    task_t* curr = proc_current();
+    IpcPendingConn* p = new (kernel::nothrow) IpcPendingConn(
+        kernel::move(ep),
+        curr ? curr->pid : 0u,
+        kernel::move(c2s.read),
+        kernel::move(s2c.write)
+    );
     if (!p) {
         return -1;
     }
 
-    task_t* curr = proc_current();
-    p->init(kernel::move(ep),
-            curr ? curr->pid : 0u,
-            kernel::move(c2s.read),
-            kernel::move(s2c.write));
     if (!ep_raw->enqueue_pending(p)) {
         p->release();
         return -1;
