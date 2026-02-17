@@ -7,7 +7,15 @@
 #include <stdint.h>
 #include <arch/i386/idt.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
+
+#ifdef __cplusplus
+}
+#endif
 
 #define panic(msg) kernel_panic(msg, __FILE__, __LINE__, 0)
 

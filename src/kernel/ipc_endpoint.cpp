@@ -10,11 +10,13 @@
 #include <kernel/poll_waitq.h>
 
 #include <hal/lock.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/vfs.h>
 #include <lib/dlist.h>
 #include <lib/string.h>
 #include <lib/hash_map.h>
 
-#include <mm/heap.h>
+#include <new>
 
 static bool ipc_name_valid(const char* name) {
     if (!name) {
@@ -48,9 +50,8 @@ struct IpcPendingConn {
     }
 
     void retain() {
-        uint32_t flags = spinlock_acquire_safe(&lock);
+        kernel::SpinLockSafeGuard guard(lock);
         refcount++;
-        spinlock_release_safe(&lock, flags);
     }
 
     void release();
@@ -92,26 +93,27 @@ public:
     }
 
     bool retain() {
-        uint32_t flags = spinlock_acquire_safe(&lock);
+        kernel::SpinLockSafeGuard guard(lock);
         if (closing != 0u) {
-            spinlock_release_safe(&lock, flags);
             return false;
         }
+
         refcount++;
-        spinlock_release_safe(&lock, flags);
         return true;
     }
 
     void release() {
         bool do_finalize = false;
-        uint32_t flags = spinlock_acquire_safe(&lock);
-        if (refcount > 0u) {
-            refcount--;
+
+        {
+            kernel::SpinLockSafeGuard guard(lock);
+            if (refcount > 0u) {
+                refcount--;
+            }
+            if (closing != 0u && refcount == 0u) {
+                do_finalize = true;
+            }
         }
-        if (closing != 0u && refcount == 0u) {
-            do_finalize = true;
-        }
-        spinlock_release_safe(&lock, flags);
 
         if (do_finalize) {
             finalize();
@@ -122,15 +124,16 @@ public:
         dlist_head_t to_release;
         dlist_init(&to_release);
 
-        uint32_t flags = spinlock_acquire_safe(&lock);
-        closing = 1u;
-        while (!dlist_empty(&pending_conns)) {
-            IpcPendingConn* p = container_of(pending_conns.next, IpcPendingConn, node);
-            dlist_del(&p->node);
-            p->mark_queued(false);
-            dlist_add_tail(&p->node, &to_release);
+        {
+            kernel::SpinLockSafeGuard guard(lock);
+            closing = 1u;
+            while (!dlist_empty(&pending_conns)) {
+                IpcPendingConn* p = container_of(pending_conns.next, IpcPendingConn, node);
+                dlist_del(&p->node);
+                p->mark_queued(false);
+                dlist_add_tail(&p->node, &to_release);
+            }
         }
-        spinlock_release_safe(&lock, flags);
 
         poll_waitq_wake_all(&poll_waitq);
 
@@ -142,36 +145,34 @@ public:
     }
 
     bool enqueue_pending(IpcPendingConn* conn) {
-        uint32_t flags = spinlock_acquire_safe(&lock);
-        if (closing != 0u) {
-            spinlock_release_safe(&lock, flags);
-            return false;
+        {
+            kernel::SpinLockSafeGuard guard(lock);
+            if (closing != 0u) {
+                return false;
+            }
+
+            conn->retain();
+            conn->mark_queued(true);
+            dlist_add_tail(&conn->node, &pending_conns);
         }
-        conn->retain();
-        conn->mark_queued(true);
-        dlist_add_tail(&conn->node, &pending_conns);
-        spinlock_release_safe(&lock, flags);
         poll_waitq_wake_all(&poll_waitq);
         return true;
     }
 
     bool remove_pending(IpcPendingConn* conn) {
-        uint32_t flags = spinlock_acquire_safe(&lock);
+        kernel::SpinLockSafeGuard guard(lock);
         if (!conn->is_queued()) {
-            spinlock_release_safe(&lock, flags);
             return false;
         }
+
         dlist_del(&conn->node);
         conn->mark_queued(false);
-        spinlock_release_safe(&lock, flags);
         return true;
     }
 
     bool has_pending() {
-        uint32_t flags = spinlock_acquire_safe(&lock);
-        bool empty = dlist_empty(&pending_conns);
-        spinlock_release_safe(&lock, flags);
-        return !empty;
+        kernel::SpinLockSafeGuard guard(lock);
+        return !dlist_empty(&pending_conns);
     }
 
     int register_waiter(poll_waiter_t* w, task_t* task) {
@@ -179,22 +180,21 @@ public:
     }
 
     IpcPendingConn* pop_pending() {
-        uint32_t flags = spinlock_acquire_safe(&lock);
+        kernel::SpinLockSafeGuard guard(lock);
         if (dlist_empty(&pending_conns)) {
-            spinlock_release_safe(&lock, flags);
             return nullptr;
         }
+
         IpcPendingConn* p = container_of(pending_conns.next, IpcPendingConn, node);
         dlist_del(&p->node);
         p->mark_queued(false);
-        spinlock_release_safe(&lock, flags);
         return p;
     }
 
 private:
     void finalize() {
         poll_waitq_detach_all(&poll_waitq);
-        kfree(this);
+        delete this;
     }
 
     char name[IPC_NAME_MAX + 1u];
@@ -208,12 +208,14 @@ private:
 
 void IpcPendingConn::release() {
     bool destroy = false;
-    uint32_t flags = spinlock_acquire_safe(&lock);
-    if (refcount > 0u) {
-        refcount--;
+
+    {
+        kernel::SpinLockSafeGuard guard(lock);
+        if (refcount > 0u) {
+            refcount--;
+        }
+        destroy = (refcount == 0u);
     }
-    destroy = (refcount == 0u);
-    spinlock_release_safe(&lock, flags);
 
     if (!destroy) {
         return;
@@ -228,7 +230,7 @@ void IpcPendingConn::release() {
     if (owner) {
         owner->release();
     }
-    kfree(this);
+    delete this;
 }
 
 struct IpcEndpointName {
@@ -247,17 +249,22 @@ struct IpcEndpointName {
     }
 };
 
+static spinlock_t g_endpoints_lock;
+
 class IpcEndpointRegistry {
 public:
     bool add(const IpcEndpointName& name, IpcEndpoint* ep) {
+        kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         return endpoints.insert_unique(name, ep);
     }
 
     void remove(const IpcEndpointName& name) {
+        kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         endpoints.remove(name);
     }
 
     bool find_and_retain(const IpcEndpointName& name, IpcEndpoint*& out) {
+        kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         return endpoints.with_value(name, [&out](IpcEndpoint* ep) -> bool {
             if (!ep) {
                 return false;
@@ -300,17 +307,17 @@ static vfs_ops_t ipc_listen_ops = {
 };
 
 struct vfs_node* ipc_listen_create(const char* name) {
-    vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-    if (!ipc_name_valid(name) || !node) {
-        if (node) {
-            kfree(node);
-        }
+    vfs_node_t* node = nullptr;
+    if (ipc_name_valid(name)) {
+        node = new (std::nothrow) vfs_node_t;
+    }
+    if (!node) {
         return nullptr;
     }
 
-    IpcEndpoint* ep = (IpcEndpoint*)kmalloc(sizeof(IpcEndpoint));
+    IpcEndpoint* ep = new (std::nothrow) IpcEndpoint;
     if (!ep) {
-        kfree(node);
+        delete node;
         return nullptr;
     }
 
@@ -324,7 +331,7 @@ struct vfs_node* ipc_listen_create(const char* name) {
     node->private_data = ep;
 
     if (!g_endpoints.add(IpcEndpointName(name), ep)) {
-        kfree(node);
+        delete node;
         ep->shutdown();
         ep->release();
         return nullptr;
@@ -337,7 +344,7 @@ static int ipc_listen_close(vfs_node_t* node) {
     if (!node) return -1;
     IpcEndpoint* ep = (IpcEndpoint*)node->private_data;
     if (!ep) {
-        kfree(node);
+        delete node;
         return 0;
     }
 
@@ -345,7 +352,7 @@ static int ipc_listen_close(vfs_node_t* node) {
 
     ep->shutdown();
     ep->release();
-    kfree(node);
+    delete node;
     return 0;
 }
 
@@ -366,41 +373,33 @@ int ipc_connect(const char* name,
         return -1;
     }
 
-    vfs_node_t* c2s_r = 0;
-    vfs_node_t* c2s_w = 0;
-    vfs_node_t* s2c_r = 0;
-    vfs_node_t* s2c_w = 0;
-
-    if (vfs_create_pipe(&c2s_r, &c2s_w) != 0) {
-        ep->release();
-        return -1;
-    }
-    if (vfs_create_pipe(&s2c_r, &s2c_w) != 0) {
-        vfs_node_release(c2s_r);
-        vfs_node_release(c2s_w);
+    kernel::VirtualFSPipe c2s = kernel::create_pipe();
+    if (!c2s) {
         ep->release();
         return -1;
     }
 
-    IpcPendingConn* p = (IpcPendingConn*)kmalloc(sizeof(IpcPendingConn));
+    kernel::VirtualFSPipe s2c = kernel::create_pipe();
+    if (!s2c) {
+        ep->release();
+        return -1;
+    }
+
+    IpcPendingConn* p = new (std::nothrow) IpcPendingConn;
     if (!p) {
-        vfs_node_release(c2s_r);
-        vfs_node_release(c2s_w);
-        vfs_node_release(s2c_r);
-        vfs_node_release(s2c_w);
         ep->release();
         return -1;
     }
 
     task_t* curr = proc_current();
-    p->init(ep, curr ? curr->pid : 0u, c2s_r, s2c_w);
+    p->init(ep, curr ? curr->pid : 0u, c2s.read.release(), s2c.write.release());
     if (!ep->enqueue_pending(p)) {
         p->release();
         return -1;
     }
 
-    *out_c2s_w = c2s_w;
-    *out_s2c_r = s2c_r;
+    *out_c2s_w = c2s.write.release();
+    *out_s2c_r = s2c.read.release();
     *out_pending_handle = (void*)p;
 
     return 0;
