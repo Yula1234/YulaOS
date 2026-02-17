@@ -38,6 +38,7 @@ string& string::operator=(const string& other) {
     if (this == &other) {
         return *this;
     }
+
     (void)assign(other);
     return *this;
 }
@@ -46,6 +47,7 @@ string& string::operator=(string&& other) noexcept {
     if (this == &other) {
         return *this;
     }
+
     destroy();
     move_from(kernel::move(other));
     return *this;
@@ -56,6 +58,7 @@ bool string::assign(const char* s) {
         clear();
         return true;
     }
+
     return assign(s, strlen(s));
 }
 
@@ -65,6 +68,7 @@ bool string::assign(const char* s, size_t len) {
             clear();
             return true;
         }
+
         return false;
     }
 
@@ -80,7 +84,8 @@ bool string::assign(const char* s, size_t len) {
     }
 
     const size_t new_cap = recommend_capacity(len);
-    char* new_buf = new (kernel::nothrow) char[new_cap + 1u];
+    char* new_buf = new (kernel::nothrow)
+        char[new_cap + 1u];
     if (!new_buf) {
         return false;
     }
@@ -102,6 +107,7 @@ bool string::assign(const string& other) {
     if (this == &other) {
         return true;
     }
+
     return assign(other.data(), other.size());
 }
 
@@ -109,6 +115,7 @@ bool string::append(const char* s) {
     if (!s) {
         return false;
     }
+
     return append(s, strlen(s));
 }
 
@@ -121,7 +128,7 @@ bool string::append(const char* s, size_t len) {
     }
 
     const size_t new_size = m_size + len;
-    const bool overlap = (s >= m_data && s < (m_data + m_size));
+    const bool overlap = (s >= m_data) && (s < (m_data + m_size));
 
     if (new_size <= m_capacity) {
         memmove(m_data + m_size, s, len);
@@ -131,7 +138,8 @@ bool string::append(const char* s, size_t len) {
     }
 
     const size_t new_cap = recommend_capacity(new_size);
-    char* new_buf = new (kernel::nothrow) char[new_cap + 1u];
+    char* new_buf = new (kernel::nothrow)
+        char[new_cap + 1u];
     if (!new_buf) {
         return false;
     }
@@ -176,6 +184,7 @@ bool string::reserve(size_t new_cap) {
     if (new_cap <= m_capacity) {
         return true;
     }
+
     return grow(new_cap);
 }
 
@@ -198,7 +207,8 @@ void string::shrink_to_fit() {
         return;
     }
 
-    char* new_buf = new (kernel::nothrow) char[m_size + 1u];
+    char* new_buf = new (kernel::nothrow)
+        char[m_size + 1u];
     if (!new_buf) {
         return;
     }
@@ -221,6 +231,7 @@ bool string::operator==(const string& other) const {
     if (m_size == 0u) {
         return true;
     }
+
     return memcmp(m_data, other.m_data, m_size) == 0;
 }
 
@@ -262,7 +273,8 @@ bool string::grow(size_t min_capacity) {
     }
 
     const size_t new_cap = recommend_capacity(min_capacity);
-    char* new_buf = new (kernel::nothrow) char[new_cap + 1u];
+    char* new_buf = new (kernel::nothrow)
+        char[new_cap + 1u];
     if (!new_buf) {
         return false;
     }
@@ -306,6 +318,7 @@ void string::move_from(string&& other) {
             m_inline[other.m_size] = 0;
             m_size = other.m_size;
         }
+
         other.clear();
         return;
     }

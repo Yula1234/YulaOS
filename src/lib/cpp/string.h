@@ -12,13 +12,16 @@ namespace kernel {
 
 class string {
 public:
+
     static constexpr size_t inline_capacity = 31u;
 
     string();
     explicit string(const char* s);
     string(const char* s, size_t len);
+    
     string(const string& other);
     string(string&& other) noexcept;
+
     ~string();
 
     string& operator=(const string& other);
@@ -36,6 +39,7 @@ public:
 
     void clear();
     bool reserve(size_t new_cap);
+    
     void shrink_to_fit();
 
     size_t size() const {
@@ -58,6 +62,7 @@ public:
         return m_data;
     }
 
+
     char* data() {
         return m_data;
     }
@@ -68,16 +73,21 @@ public:
     uint32_t hash() const;
 
 private:
+
+    size_t recommend_capacity(size_t min_capacity) const;
+
     bool is_inline() const;
     void init_inline();
+
     void destroy();
     bool grow(size_t min_capacity);
-    size_t recommend_capacity(size_t min_capacity) const;
     void move_from(string&& other);
 
     char* m_data;
+    
     size_t m_size;
     size_t m_capacity;
+
     char m_inline[inline_capacity + 1u];
 };
 
