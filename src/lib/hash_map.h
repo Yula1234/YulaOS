@@ -5,6 +5,7 @@
 
 #include <lib/types.h>
 #include <hal/lock.h>
+#include <lib/cpp/new.h>
 #include <mm/heap.h>
 #include <lib/string.h>
 
@@ -51,7 +52,7 @@ public:
             e = e->next;
         }
 
-        Entry* new_entry = (Entry*)kmalloc(sizeof(Entry));
+        Entry* new_entry = new (kernel::nothrow) Entry;
         if (!new_entry) {
             spinlock_release_safe(&b.lock, flags);
             return false;
@@ -82,7 +83,7 @@ public:
             e = e->next;
         }
 
-        Entry* new_entry = (Entry*)kmalloc(sizeof(Entry));
+        Entry* new_entry = new (kernel::nothrow) Entry;
         if (!new_entry) {
             spinlock_release_safe(&b.lock, flags);
             return false;
@@ -133,7 +134,7 @@ public:
                 } else {
                     b.head = e->next;
                 }
-                kfree(e);
+                delete e;
                 spinlock_release_safe(&b.lock, flags);
                 return true;
             }
@@ -173,7 +174,7 @@ public:
             Entry* e = b.head;
             while (e) {
                 Entry* next = e->next;
-                kfree(e);
+                delete e;
                 e = next;
             }
             b.head = nullptr;

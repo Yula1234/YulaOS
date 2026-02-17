@@ -16,6 +16,7 @@
 #include <lib/cpp/utility.h>
 #include <lib/cpp/vfs.h>
 #include <lib/cpp/dlist.h>
+#include <lib/cpp/string.h>
 #include <lib/string.h>
 #include <lib/hash_map.h>
 
@@ -83,8 +84,8 @@ struct IpcPendingConn {
 
 class IpcEndpoint {
 public:
-    IpcEndpoint(const char* n, vfs_node_t* node) {
-        strlcpy(name, n, sizeof(name));
+    IpcEndpoint(const char* n, vfs_node_t* node)
+        : name(n ? n : "") {
         spinlock_init(&lock);
         poll_waitq_init(&poll_waitq);
 
@@ -98,7 +99,7 @@ public:
     IpcEndpoint(IpcEndpoint&&) = delete;
     IpcEndpoint& operator=(IpcEndpoint&&) = delete;
 
-    const char* endpoint_name() const {
+    const kernel::string& endpoint_name() const {
         return name;
     }
 
@@ -224,7 +225,7 @@ private:
         delete this;
     }
 
-    char name[IPC_NAME_MAX + 1u];
+    kernel::string name;
     spinlock_t lock;
     kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> pending_conns;
     poll_waitq_t poll_waitq;
@@ -253,37 +254,21 @@ void IpcPendingConn::release() {
     delete this;
 }
 
-struct IpcEndpointName {
-    char data[IPC_NAME_MAX + 1u];
-
-    IpcEndpointName() {
-        data[0] = 0;
-    }
-
-    explicit IpcEndpointName(const char* s) {
-        strlcpy(data, s ? s : "", sizeof(data));
-    }
-
-    bool operator==(const IpcEndpointName& other) const {
-        return strcmp(data, other.data) == 0;
-    }
-};
-
 static spinlock_t g_endpoints_lock;
 
 class IpcEndpointRegistry {
 public:
-    bool add(const IpcEndpointName& name, IpcEndpoint* ep) {
+    bool add(const kernel::string& name, IpcEndpoint* ep) {
         kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         return endpoints.insert_unique(name, ep);
     }
 
-    void remove(const IpcEndpointName& name) {
+    void remove(const kernel::string& name) {
         kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         endpoints.remove(name);
     }
 
-    bool find_and_retain(const IpcEndpointName& name, kernel::IntrusiveRef<IpcEndpoint>& out) {
+    bool find_and_retain(const kernel::string& name, kernel::IntrusiveRef<IpcEndpoint>& out) {
         kernel::SpinLockSafeGuard guard(g_endpoints_lock);
 
         return endpoints.with_value(name, [&out](IpcEndpoint* ep) -> bool {
@@ -297,18 +282,12 @@ public:
     }
 
 private:
-    HashMap<IpcEndpointName, IpcEndpoint*, 128> endpoints;
+    HashMap<kernel::string, IpcEndpoint*, 128> endpoints;
 };
 
 template<>
-uint32_t HashMap<IpcEndpointName, IpcEndpoint*, 128>::hash(const IpcEndpointName& key) {
-    uint32_t h = 5381u;
-    const char* s = key.data;
-    while (*s) {
-        h = ((h << 5) + h) + (uint32_t)(*s);
-        s++;
-    }
-    return h;
+uint32_t HashMap<kernel::string, IpcEndpoint*, 128>::hash(const kernel::string& key) {
+    return key.hash();
 }
 
 static IpcEndpointRegistry g_endpoints;
@@ -347,7 +326,7 @@ struct vfs_node* ipc_listen_create(const char* name) {
     node->ops = &ipc_listen_ops;
     node->private_data = ep;
 
-    if (!g_endpoints.add(IpcEndpointName(name), ep)) {
+    if (!g_endpoints.add(kernel::string(name), ep)) {
         delete node;
         ep->shutdown();
         ep->release();
@@ -368,7 +347,7 @@ static int ipc_listen_close(vfs_node_t* node) {
         return 0;
     }
 
-    g_endpoints.remove(IpcEndpointName(ep->endpoint_name()));
+    g_endpoints.remove(ep->endpoint_name());
 
     ep->shutdown();
     ep->release();
@@ -398,7 +377,7 @@ int ipc_connect(const char* name,
     }
 
     kernel::IntrusiveRef<IpcEndpoint> ep;
-    if (!g_endpoints.find_and_retain(IpcEndpointName(name), ep)) {
+    if (!g_endpoints.find_and_retain(kernel::string(name), ep)) {
         return -1;
     }
 
