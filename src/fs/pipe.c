@@ -9,12 +9,11 @@
 
 #include "pipe.h"
 
-#define PIPE_SIZE 4096
-
-#define PIPE_BATCH 1024
+#define PIPE_SIZE 32768
 
 typedef struct {
-    char buffer[PIPE_SIZE];
+    char* buffer;
+    uint32_t size;
     uint32_t read_ptr;
     uint32_t write_ptr;
     
@@ -135,8 +134,6 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
         }
 
         uint32_t want = size - read_count;
-        if (want > PIPE_BATCH) want = PIPE_BATCH;
-
         uint32_t take = sem_take_up_to(&p->sem_read, want);
 
         flags = spinlock_acquire_safe(&p->lock);
@@ -151,8 +148,8 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
         uint32_t n = take;
         if (n > now_avail) n = now_avail;
 
-        uint32_t rp = p->read_ptr % PIPE_SIZE;
-        uint32_t contig = PIPE_SIZE - rp;
+        uint32_t rp = p->read_ptr % p->size;
+        uint32_t contig = p->size - rp;
 
         uint32_t n1 = n;
         if (n1 > contig) n1 = contig;
@@ -202,8 +199,6 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
     }
 
     uint32_t want = size;
-    if (want > PIPE_BATCH) want = PIPE_BATCH;
-
     uint32_t take = sem_try_take_up_to(&p->sem_read, want);
     if (take == 0) return 0;
 
@@ -219,8 +214,8 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
     uint32_t n = take;
     if (n > now_avail) n = now_avail;
 
-    uint32_t rp = p->read_ptr % PIPE_SIZE;
-    uint32_t contig = PIPE_SIZE - rp;
+    uint32_t rp = p->read_ptr % p->size;
+    uint32_t contig = p->size - rp;
 
     uint32_t n1 = n;
     if (n1 > contig) n1 = contig;
@@ -248,9 +243,10 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
 int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
     if (!node || !buffer || size == 0) return 0;
     if ((node->flags & VFS_FLAG_PIPE_WRITE) == 0) return -1;
-    if (size > PIPE_SIZE) return 0;
-
+    
     pipe_t* p = (pipe_t*)node->private_data;
+    if (size > p->size) return 0;
+    
     const char* buf = (const char*)buffer;
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
@@ -269,8 +265,8 @@ int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
         return -1;
     }
 
-    uint32_t wp = p->write_ptr % PIPE_SIZE;
-    uint32_t contig = PIPE_SIZE - wp;
+    uint32_t wp = p->write_ptr % p->size;
+    uint32_t contig = p->size - wp;
 
     uint32_t n1 = size;
     if (n1 > contig) n1 = contig;
@@ -305,8 +301,6 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
         }
 
         uint32_t want = size - written_count;
-        if (want > PIPE_BATCH) want = PIPE_BATCH;
-
         uint32_t take = sem_take_up_to(&p->sem_write, want);
 
         flags = spinlock_acquire_safe(&p->lock);
@@ -317,8 +311,8 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
         }
 
         uint32_t n = take;
-        uint32_t wp = p->write_ptr % PIPE_SIZE;
-        uint32_t contig = PIPE_SIZE - wp;
+        uint32_t wp = p->write_ptr % p->size;
+        uint32_t contig = p->size - wp;
 
         uint32_t n1 = n;
         if (n1 > contig) n1 = contig;
@@ -365,7 +359,7 @@ int pipe_poll_info(vfs_node_t* node, uint32_t* out_available, uint32_t* out_spac
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     uint32_t available = p->write_ptr - p->read_ptr;
-    uint32_t space = PIPE_SIZE - available;
+    uint32_t space = p->size - available;
     int readers = p->readers;
     int writers = p->writers;
     spinlock_release_safe(&p->lock, flags);
@@ -395,6 +389,7 @@ static int pipe_close(vfs_node_t* node) {
 
     if (readers == 0 && writers == 0) {
         poll_waitq_detach_all(&p->poll_waitq);
+        if (p->buffer) kfree(p->buffer);
         kfree(p);
     }
     kfree(node);
@@ -413,11 +408,19 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     if (!p) return -1;
     
     memset(p, 0, sizeof(pipe_t));
+    
+    p->size = PIPE_SIZE;
+    p->buffer = (char*)kmalloc(p->size);
+    if (!p->buffer) {
+        kfree(p);
+        return -1;
+    }
+    
     spinlock_init(&p->lock);
     poll_waitq_init(&p->poll_waitq);
     
     sem_init(&p->sem_read, 0);          
-    sem_init(&p->sem_write, PIPE_SIZE); 
+    sem_init(&p->sem_write, p->size); 
     
     p->readers = 1;
     p->writers = 1;
