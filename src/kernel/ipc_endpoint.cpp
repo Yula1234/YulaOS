@@ -12,13 +12,12 @@
 #include <hal/lock.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/intrusive_ref.h>
+#include <lib/cpp/new.h>
+#include <lib/cpp/utility.h>
 #include <lib/cpp/vfs.h>
 #include <lib/dlist.h>
 #include <lib/string.h>
 #include <lib/hash_map.h>
-
-#include <new>
-#include <utility>
 
 static bool ipc_name_valid(const char* name) {
     if (!name) {
@@ -47,10 +46,10 @@ struct IpcPendingConn {
               kernel::VirtualFSNode&& out_w) {
         dlist_init(&node);
 
-        owner = std::move(ep);
+        owner = kernel::move(ep);
         client_pid = pid;
-        c2s_r = std::move(in_r);
-        s2c_w = std::move(out_w);
+        c2s_r = kernel::move(in_r);
+        s2c_w = kernel::move(out_w);
         queued = 0u;
         refcount = 1u;
 
@@ -305,13 +304,13 @@ static vfs_ops_t ipc_listen_ops = {
 struct vfs_node* ipc_listen_create(const char* name) {
     vfs_node_t* node = nullptr;
     if (ipc_name_valid(name)) {
-        node = new (std::nothrow) vfs_node_t;
+        node = new (kernel::nothrow) vfs_node_t;
     }
     if (!node) {
         return nullptr;
     }
 
-    IpcEndpoint* ep = new (std::nothrow) IpcEndpoint;
+    IpcEndpoint* ep = new (kernel::nothrow) IpcEndpoint;
     if (!ep) {
         delete node;
         return nullptr;
@@ -393,16 +392,16 @@ int ipc_connect(const char* name,
         return -1;
     }
 
-    IpcPendingConn* p = new (std::nothrow) IpcPendingConn;
+    IpcPendingConn* p = new (kernel::nothrow) IpcPendingConn;
     if (!p) {
         return -1;
     }
 
     task_t* curr = proc_current();
-    p->init(std::move(ep),
+    p->init(kernel::move(ep),
             curr ? curr->pid : 0u,
-            std::move(c2s.read),
-            std::move(s2c.write));
+            kernel::move(c2s.read),
+            kernel::move(s2c.write));
     if (!ep_raw->enqueue_pending(p)) {
         p->release();
         return -1;

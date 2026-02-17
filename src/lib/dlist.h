@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
-#include <type_traits>
+#include <lib/cpp/type_traits.h>
 #endif
 
 #ifndef offsetof
@@ -16,7 +16,7 @@
 #endif
 
 #ifdef __cplusplus
-#define DLIST_TYPEOF(pos) std::remove_reference<decltype(*(pos))>::type
+#define DLIST_TYPEOF(pos) kernel::remove_reference<decltype(*(pos))>::type
 #else
 #define DLIST_TYPEOF(pos) typeof(*(pos))
 #endif

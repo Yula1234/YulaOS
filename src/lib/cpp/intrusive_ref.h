@@ -1,8 +1,7 @@
 #ifndef LIB_CPP_INTRUSIVE_REF_H
 #define LIB_CPP_INTRUSIVE_REF_H
 
-#include <type_traits>
-#include <utility>
+#include <lib/cpp/utility.h>
 
 namespace kernel {
 
@@ -41,7 +40,7 @@ public:
     IntrusiveRef& operator=(const IntrusiveRef&) = delete;
 
     IntrusiveRef(IntrusiveRef&& other) noexcept
-        : ptr_(other.ptr_) {
+        : ptr_(kernel::move(other.ptr_)) {
         other.ptr_ = nullptr;
     }
 
@@ -52,7 +51,7 @@ public:
 
         reset();
 
-        ptr_ = other.ptr_;
+        ptr_ = kernel::move(other.ptr_);
         other.ptr_ = nullptr;
 
         return *this;
@@ -86,13 +85,19 @@ public:
     }
 
 private:
+    template<typename U>
+    static auto retain_dispatch(U* ptr, int) -> decltype(static_cast<bool>(ptr->retain())) {
+        return ptr->retain();
+    }
+
+    template<typename U>
+    static bool retain_dispatch(U* ptr, long) {
+        ptr->retain();
+        return true;
+    }
+
     static bool retain(T* ptr) {
-        if constexpr (std::is_same_v<decltype(ptr->retain()), bool>) {
-            return ptr->retain();
-        } else {
-            ptr->retain();
-            return true;
-        }
+        return retain_dispatch(ptr, 0);
     }
 
     T* ptr_ = nullptr;
