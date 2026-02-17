@@ -11,17 +11,20 @@
 
 #include <hal/lock.h>
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/intrusive_ref.h>
 #include <lib/cpp/vfs.h>
 #include <lib/dlist.h>
 #include <lib/string.h>
 #include <lib/hash_map.h>
 
 #include <new>
+#include <utility>
 
 static bool ipc_name_valid(const char* name) {
     if (!name) {
         return false;
     }
+
     const size_t nlen = strlen(name);
     return nlen > 0 && nlen <= IPC_NAME_MAX;
 }
@@ -30,22 +33,27 @@ class IpcEndpoint;
 
 struct IpcPendingConn {
     dlist_head_t node;
-    IpcEndpoint* owner;
+    kernel::IntrusiveRef<IpcEndpoint> owner;
     uint32_t client_pid;
-    vfs_node_t* c2s_r;
-    vfs_node_t* s2c_w;
+    kernel::VirtualFSNode c2s_r;
+    kernel::VirtualFSNode s2c_w;
     spinlock_t lock;
     uint32_t refcount;
     uint32_t queued;
 
-    void init(IpcEndpoint* ep, uint32_t pid, vfs_node_t* in_r, vfs_node_t* out_w) {
+    void init(kernel::IntrusiveRef<IpcEndpoint>&& ep,
+              uint32_t pid,
+              kernel::VirtualFSNode&& in_r,
+              kernel::VirtualFSNode&& out_w) {
         dlist_init(&node);
-        owner = ep;
+
+        owner = std::move(ep);
         client_pid = pid;
-        c2s_r = in_r;
-        s2c_w = out_w;
+        c2s_r = std::move(in_r);
+        s2c_w = std::move(out_w);
         queued = 0u;
         refcount = 1u;
+
         spinlock_init(&lock);
     }
 
@@ -57,14 +65,8 @@ struct IpcPendingConn {
     void release();
 
     void discard_nodes() {
-        if (c2s_r) {
-            vfs_node_release(c2s_r);
-        }
-        if (s2c_w) {
-            vfs_node_release(s2c_w);
-        }
-        c2s_r = nullptr;
-        s2c_w = nullptr;
+        c2s_r.reset();
+        s2c_w.reset();
     }
 
     void mark_queued(bool value) {
@@ -83,6 +85,7 @@ public:
         spinlock_init(&lock);
         dlist_init(&pending_conns);
         poll_waitq_init(&poll_waitq);
+
         listen_node = node;
         refcount = 1u;
         closing = 0u;
@@ -155,6 +158,7 @@ public:
             conn->mark_queued(true);
             dlist_add_tail(&conn->node, &pending_conns);
         }
+
         poll_waitq_wake_all(&poll_waitq);
         return true;
     }
@@ -221,15 +225,8 @@ void IpcPendingConn::release() {
         return;
     }
 
-    if (c2s_r) {
-        vfs_node_release(c2s_r);
-    }
-    if (s2c_w) {
-        vfs_node_release(s2c_w);
-    }
-    if (owner) {
-        owner->release();
-    }
+    c2s_r.reset();
+    s2c_w.reset();
     delete this;
 }
 
@@ -263,17 +260,16 @@ public:
         endpoints.remove(name);
     }
 
-    bool find_and_retain(const IpcEndpointName& name, IpcEndpoint*& out) {
+    bool find_and_retain(const IpcEndpointName& name, kernel::IntrusiveRef<IpcEndpoint>& out) {
         kernel::SpinLockSafeGuard guard(g_endpoints_lock);
+
         return endpoints.with_value(name, [&out](IpcEndpoint* ep) -> bool {
             if (!ep) {
                 return false;
             }
-            if (!ep->retain()) {
-                return false;
-            }
-            out = ep;
-            return true;
+
+            out = kernel::IntrusiveRef<IpcEndpoint>::from_borrowed(ep);
+            return (bool)out;
         });
     }
 
@@ -341,7 +337,10 @@ struct vfs_node* ipc_listen_create(const char* name) {
 }
 
 static int ipc_listen_close(vfs_node_t* node) {
-    if (!node) return -1;
+    if (!node) {
+        return -1;
+    }
+
     IpcEndpoint* ep = (IpcEndpoint*)node->private_data;
     if (!ep) {
         delete node;
@@ -360,40 +359,51 @@ int ipc_connect(const char* name,
                 struct vfs_node** out_c2s_w,
                 struct vfs_node** out_s2c_r,
                 void** out_pending_handle) {
-    
-    if (out_c2s_w) *out_c2s_w = 0;
-    if (out_s2c_r) *out_s2c_r = 0;
-    if (out_pending_handle) *out_pending_handle = 0;
+    if (out_c2s_w) {
+        *out_c2s_w = 0;
+    }
+    if (out_s2c_r) {
+        *out_s2c_r = 0;
+    }
+    if (out_pending_handle) {
+        *out_pending_handle = 0;
+    }
 
-    if (!out_c2s_w || !out_s2c_r || !out_pending_handle) return -1;
-    if (!ipc_name_valid(name)) return -1;
+    if (!out_c2s_w || !out_s2c_r || !out_pending_handle) {
+        return -1;
+    }
+    if (!ipc_name_valid(name)) {
+        return -1;
+    }
 
-    IpcEndpoint* ep = nullptr;
+    kernel::IntrusiveRef<IpcEndpoint> ep;
     if (!g_endpoints.find_and_retain(IpcEndpointName(name), ep)) {
         return -1;
     }
 
+    IpcEndpoint* ep_raw = ep.get();
+
     kernel::VirtualFSPipe c2s = kernel::create_pipe();
     if (!c2s) {
-        ep->release();
         return -1;
     }
 
     kernel::VirtualFSPipe s2c = kernel::create_pipe();
     if (!s2c) {
-        ep->release();
         return -1;
     }
 
     IpcPendingConn* p = new (std::nothrow) IpcPendingConn;
     if (!p) {
-        ep->release();
         return -1;
     }
 
     task_t* curr = proc_current();
-    p->init(ep, curr ? curr->pid : 0u, c2s.read.release(), s2c.write.release());
-    if (!ep->enqueue_pending(p)) {
+    p->init(std::move(ep),
+            curr ? curr->pid : 0u,
+            std::move(c2s.read),
+            std::move(s2c.write));
+    if (!ep_raw->enqueue_pending(p)) {
         p->release();
         return -1;
     }
@@ -407,14 +417,20 @@ int ipc_connect(const char* name,
 
 void ipc_connect_commit(void* pending_handle) {
     IpcPendingConn* p = (IpcPendingConn*)pending_handle;
-    if (!p) return;
+    if (!p) {
+        return;
+    }
+
     p->release();
 }
 
 void ipc_connect_cancel(void* pending_handle) {
     IpcPendingConn* p = (IpcPendingConn*)pending_handle;
-    if (!p) return;
-    IpcEndpoint* ep = p->owner;
+    if (!p) {
+        return;
+    }
+
+    IpcEndpoint* ep = p->owner.get();
     if (ep && ep->remove_pending(p)) {
         p->release();
     }
@@ -422,33 +438,64 @@ void ipc_connect_cancel(void* pending_handle) {
 }
 
 int ipc_listen_poll_ready(struct vfs_node* listen_node) {
-    if (!listen_node || (listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) return 0;
+    if (!listen_node) {
+        return 0;
+    }
+    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) {
+        return 0;
+    }
+
     IpcEndpoint* ep = (IpcEndpoint*)listen_node->private_data;
-    if (!ep) return 0;
+    if (!ep) {
+        return 0;
+    }
+
     return ep->has_pending();
 }
 
 int ipc_listen_poll_waitq_register(struct vfs_node* listen_node, poll_waiter_t* w, task_t* task) {
-    if (!listen_node || !w || !task) return -1;
-    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) return -1;
+    if (!listen_node || !w || !task) {
+        return -1;
+    }
+    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) {
+        return -1;
+    }
+
     IpcEndpoint* ep = (IpcEndpoint*)listen_node->private_data;
-    if (!ep) return -1;
+    if (!ep) {
+        return -1;
+    }
+
     return ep->register_waiter(w, task);
 }
 
-int ipc_accept(struct vfs_node* listen_node, struct vfs_node** out_c2s_r, struct vfs_node** out_s2c_w) {
-    if (out_c2s_r) *out_c2s_r = 0;
-    if (out_s2c_w) *out_s2c_w = 0;
+int ipc_accept(struct vfs_node* listen_node,
+               struct vfs_node** out_c2s_r,
+               struct vfs_node** out_s2c_w) {
+    if (out_c2s_r) {
+        *out_c2s_r = 0;
+    }
+    if (out_s2c_w) {
+        *out_s2c_w = 0;
+    }
 
-    if (!listen_node || !out_c2s_r || !out_s2c_w) return -1;
-    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) return -1;
+    if (!listen_node || !out_c2s_r || !out_s2c_w) {
+        return -1;
+    }
+    if ((listen_node->flags & VFS_FLAG_IPC_LISTEN) == 0) {
+        return -1;
+    }
 
     IpcEndpoint* ep = (IpcEndpoint*)listen_node->private_data;
-    if (!ep) return -1;
+    if (!ep) {
+        return -1;
+    }
 
     for (;;) {
         IpcPendingConn* p = ep->pop_pending();
-        if (!p) return 0;
+        if (!p) {
+            return 0;
+        }
 
         bool ok = true;
         if (p->client_pid != 0) {
@@ -464,11 +511,8 @@ int ipc_accept(struct vfs_node* listen_node, struct vfs_node** out_c2s_r, struct
             continue;
         }
 
-        *out_c2s_r = p->c2s_r;
-        *out_s2c_w = p->s2c_w;
-
-        p->c2s_r = nullptr;
-        p->s2c_w = nullptr;
+        *out_c2s_r = p->c2s_r.release();
+        *out_s2c_w = p->s2c_w.release();
         p->release();
 
         return 1;
