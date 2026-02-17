@@ -4,13 +4,15 @@
 
 namespace kernel {
 
-DBLinkedListBase::DBLinkedListBase(CreateFn create_fn,
+DBLinkedListBase::DBLinkedListBase(CreateCopyFn create_copy_fn,
+                                   CreateMoveFn create_move_fn,
                                    DestroyFn destroy_fn,
-                                   CopyOutFn copy_out_fn,
+                                   MoveOutFn move_out_fn,
                                    CompareFn compare_fn)
-    : m_create(create_fn),
+    : m_create_copy(create_copy_fn),
+      m_create_move(create_move_fn),
       m_destroy(destroy_fn),
-      m_copy_out(copy_out_fn),
+      m_move_out(move_out_fn),
       m_compare(compare_fn),
       m_head(nullptr),
       m_tail(nullptr) {
@@ -30,12 +32,12 @@ DBLinkedListBase::~DBLinkedListBase() {
     m_tail = nullptr;
 }
 
-bool DBLinkedListBase::push_back(const void* value) {
-    if (!m_create) {
+bool DBLinkedListBase::push_back_copy(const void* value) {
+    if (!m_create_copy) {
         return false;
     }
 
-    void* payload = m_create(value);
+    void* payload = m_create_copy(value);
     if (!payload) {
         return false;
     }
@@ -61,12 +63,74 @@ bool DBLinkedListBase::push_back(const void* value) {
     return true;
 }
 
-bool DBLinkedListBase::push_front(const void* value) {
-    if (!m_create) {
+bool DBLinkedListBase::push_back_move(void* value) {
+    if (!m_create_move) {
         return false;
     }
 
-    void* payload = m_create(value);
+    void* payload = m_create_move(value);
+    if (!payload) {
+        return false;
+    }
+
+    Node* node = new (kernel::nothrow) Node;
+    if (!node) {
+        if (m_destroy) {
+            m_destroy(payload);
+        }
+        return false;
+    }
+
+    node->prev = m_tail;
+    node->next = nullptr;
+    node->payload = payload;
+
+    if (m_tail) {
+        m_tail->next = node;
+    } else {
+        m_head = node;
+    }
+    m_tail = node;
+    return true;
+}
+
+bool DBLinkedListBase::push_front_copy(const void* value) {
+    if (!m_create_copy) {
+        return false;
+    }
+
+    void* payload = m_create_copy(value);
+    if (!payload) {
+        return false;
+    }
+
+    Node* node = new (kernel::nothrow) Node;
+    if (!node) {
+        if (m_destroy) {
+            m_destroy(payload);
+        }
+        return false;
+    }
+
+    node->prev = nullptr;
+    node->next = m_head;
+    node->payload = payload;
+
+    if (m_head) {
+        m_head->prev = node;
+    } else {
+        m_tail = node;
+    }
+    m_head = node;
+    return true;
+}
+
+bool DBLinkedListBase::push_front_move(void* value) {
+    if (!m_create_move) {
+        return false;
+    }
+
+    void* payload = m_create_move(value);
     if (!payload) {
         return false;
     }
@@ -93,7 +157,7 @@ bool DBLinkedListBase::push_front(const void* value) {
 }
 
 bool DBLinkedListBase::pop_front(void* out) {
-    if (!out || !m_copy_out) {
+    if (!out || !m_move_out) {
         return false;
     }
 
@@ -111,7 +175,7 @@ bool DBLinkedListBase::pop_front(void* out) {
     }
 
     if (n->payload) {
-        m_copy_out(out, n->payload);
+        m_move_out(out, n->payload);
         if (m_destroy) {
             m_destroy(n->payload);
         }
@@ -121,7 +185,7 @@ bool DBLinkedListBase::pop_front(void* out) {
 }
 
 bool DBLinkedListBase::pop_back(void* out) {
-    if (!out || !m_copy_out) {
+    if (!out || !m_move_out) {
         return false;
     }
 
@@ -139,7 +203,7 @@ bool DBLinkedListBase::pop_back(void* out) {
     }
 
     if (n->payload) {
-        m_copy_out(out, n->payload);
+        m_move_out(out, n->payload);
         if (m_destroy) {
             m_destroy(n->payload);
         }

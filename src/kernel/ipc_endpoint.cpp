@@ -59,9 +59,10 @@ struct IpcPendingConn {
     IpcPendingConn(IpcPendingConn&&) = delete;
     IpcPendingConn& operator=(IpcPendingConn&&) = delete;
 
-    void retain() {
+    bool retain() {
         kernel::SpinLockSafeGuard guard(lock);
         refcount++;
+        return true;
     }
 
     void release();
@@ -130,29 +131,28 @@ public:
     }
 
     void shutdown() {
-        kernel::DBLinkedList<IpcPendingConn*> to_release;
+        kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> to_release;
 
         {
             kernel::SpinLockSafeGuard guard(lock);
             closing = 1u;
             while (!pending_conns.empty()) {
-                IpcPendingConn* p = nullptr;
+                kernel::IntrusiveRef<IpcPendingConn> p;
                 if (!pending_conns.pop_front(p)) {
                     break;
                 }
                 p->mark_queued(false);
-                (void)to_release.push_back(p);
+                (void)to_release.push_back(kernel::move(p));
             }
         }
 
         poll_waitq_wake_all(&poll_waitq);
 
         while (!to_release.empty()) {
-            IpcPendingConn* p = nullptr;
+            kernel::IntrusiveRef<IpcPendingConn> p;
             if (!to_release.pop_front(p)) {
                 break;
             }
-            p->release();
         }
     }
 
@@ -163,11 +163,13 @@ public:
                 return false;
             }
 
-            conn->retain();
+            kernel::IntrusiveRef<IpcPendingConn> ref = kernel::IntrusiveRef<IpcPendingConn>::from_borrowed(conn);
+            if (!ref) {
+                return false;
+            }
             conn->mark_queued(true);
-            if (!pending_conns.push_back(conn)) {
+            if (!pending_conns.push_back(kernel::move(ref))) {
                 conn->mark_queued(false);
-                conn->release();
                 return false;
             }
         }
@@ -182,7 +184,11 @@ public:
             return false;
         }
 
-        if (!pending_conns.remove(conn)) {
+        kernel::IntrusiveRef<IpcPendingConn> key = kernel::IntrusiveRef<IpcPendingConn>::from_borrowed(conn);
+        if (!key) {
+            return false;
+        }
+        if (!pending_conns.remove(key)) {
             return false;
         }
         conn->mark_queued(false);
@@ -198,15 +204,15 @@ public:
         return poll_waitq_register(&poll_waitq, w, task);
     }
 
-    IpcPendingConn* pop_pending() {
+    kernel::IntrusiveRef<IpcPendingConn> pop_pending() {
         kernel::SpinLockSafeGuard guard(lock);
         if (pending_conns.empty()) {
-            return nullptr;
+            return {};
         }
 
-        IpcPendingConn* p = nullptr;
+        kernel::IntrusiveRef<IpcPendingConn> p;
         if (!pending_conns.pop_front(p)) {
-            return nullptr;
+            return {};
         }
         p->mark_queued(false);
         return p;
@@ -220,7 +226,7 @@ private:
 
     char name[IPC_NAME_MAX + 1u];
     spinlock_t lock;
-    kernel::DBLinkedList<IpcPendingConn*> pending_conns;
+    kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> pending_conns;
     poll_waitq_t poll_waitq;
     vfs_node_t* listen_node;
     uint32_t refcount;
@@ -419,14 +425,14 @@ int ipc_connect(const char* name,
         return -1;
     }
 
+    kernel::IntrusiveRef<IpcPendingConn> handle = kernel::IntrusiveRef<IpcPendingConn>::adopt(p);
     if (!ep_raw->enqueue_pending(p)) {
-        p->release();
         return -1;
     }
 
     *out_c2s_w = c2s.write.release();
     *out_s2c_r = s2c.read.release();
-    *out_pending_handle = (void*)p;
+    *out_pending_handle = (void*)handle.detach();
 
     return 0;
 }
@@ -437,7 +443,7 @@ void ipc_connect_commit(void* pending_handle) {
         return;
     }
 
-    p->release();
+    kernel::IntrusiveRef<IpcPendingConn> handle = kernel::IntrusiveRef<IpcPendingConn>::adopt(p);
 }
 
 void ipc_connect_cancel(void* pending_handle) {
@@ -447,10 +453,10 @@ void ipc_connect_cancel(void* pending_handle) {
     }
 
     IpcEndpoint* ep = p->owner.get();
-    if (ep && ep->remove_pending(p)) {
-        p->release();
+    if (ep) {
+        (void)ep->remove_pending(p);
     }
-    p->release();
+    kernel::IntrusiveRef<IpcPendingConn> handle = kernel::IntrusiveRef<IpcPendingConn>::adopt(p);
 }
 
 int ipc_listen_poll_ready(struct vfs_node* listen_node) {
@@ -508,7 +514,7 @@ int ipc_accept(struct vfs_node* listen_node,
     }
 
     for (;;) {
-        IpcPendingConn* p = ep->pop_pending();
+        kernel::IntrusiveRef<IpcPendingConn> p = ep->pop_pending();
         if (!p) {
             return 0;
         }
@@ -523,13 +529,11 @@ int ipc_accept(struct vfs_node* listen_node,
 
         if (!ok) {
             p->discard_nodes();
-            p->release();
             continue;
         }
 
         *out_c2s_r = p->c2s_r.release();
         *out_s2c_w = p->s2c_w.release();
-        p->release();
 
         return 1;
     }

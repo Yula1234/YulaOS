@@ -65,6 +65,14 @@ public:
         return ptr_;
     }
 
+    T* operator->() const {
+        return ptr_;
+    }
+
+    T& operator*() const {
+        return *ptr_;
+    }
+
     explicit operator bool() const {
         return ptr_ != nullptr;
     }
@@ -102,6 +110,16 @@ private:
 
     T* ptr_ = nullptr;
 };
+
+template<typename T>
+inline bool operator==(const IntrusiveRef<T>& a, const IntrusiveRef<T>& b) {
+    return a.get() == b.get();
+}
+
+template<typename T>
+inline bool operator!=(const IntrusiveRef<T>& a, const IntrusiveRef<T>& b) {
+    return a.get() != b.get();
+}
 
 }
 

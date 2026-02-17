@@ -4,19 +4,22 @@
 #define YOS_CPP_DLIST_H
 
 #include <lib/cpp/new.h>
+#include <lib/cpp/utility.h>
 
 namespace kernel {
 
 class DBLinkedListBase {
 public:
-    using CreateFn = void* (*)(const void* value);
+    using CreateCopyFn = void* (*)(const void* value);
+    using CreateMoveFn = void* (*)(void* value);
     using DestroyFn = void (*)(void* value);
-    using CopyOutFn = void (*)(void* dst, const void* src);
+    using MoveOutFn = void (*)(void* dst, void* src);
     using CompareFn = bool (*)(const void* a, const void* b);
 
-    DBLinkedListBase(CreateFn create_fn,
+    DBLinkedListBase(CreateCopyFn create_copy_fn,
+                     CreateMoveFn create_move_fn,
                      DestroyFn destroy_fn,
-                     CopyOutFn copy_out_fn,
+                     MoveOutFn move_out_fn,
                      CompareFn compare_fn);
     ~DBLinkedListBase();
 
@@ -25,8 +28,10 @@ public:
     DBLinkedListBase(DBLinkedListBase&&) = delete;
     DBLinkedListBase& operator=(DBLinkedListBase&&) = delete;
 
-    bool push_back(const void* value);
-    bool push_front(const void* value);
+    bool push_back_copy(const void* value);
+    bool push_back_move(void* value);
+    bool push_front_copy(const void* value);
+    bool push_front_move(void* value);
     bool pop_front(void* out);
     bool pop_back(void* out);
     bool remove(const void* value);
@@ -39,9 +44,10 @@ private:
         void* payload;
     };
 
-    CreateFn m_create;
+    CreateCopyFn m_create_copy;
+    CreateMoveFn m_create_move;
     DestroyFn m_destroy;
-    CopyOutFn m_copy_out;
+    MoveOutFn m_move_out;
     CompareFn m_compare;
     Node* m_head;
     Node* m_tail;
@@ -51,9 +57,10 @@ template<typename T>
 class DBLinkedList {
 public:
     DBLinkedList()
-        : m_base(&DBLinkedList::create,
+        : m_base(&DBLinkedList::create_copy,
+                 &DBLinkedList::create_move,
                  &DBLinkedList::destroy,
-                 &DBLinkedList::copy_out,
+                 &DBLinkedList::move_out,
                  &DBLinkedList::compare) {
     }
 
@@ -66,11 +73,19 @@ public:
     DBLinkedList& operator=(DBLinkedList&&) = delete;
 
     bool push_back(const T& value) {
-        return m_base.push_back(&value);
+        return m_base.push_back_copy(&value);
+    }
+
+    bool push_back(T&& value) {
+        return m_base.push_back_move(&value);
     }
 
     bool push_front(const T& value) {
-        return m_base.push_front(&value);
+        return m_base.push_front_copy(&value);
+    }
+
+    bool push_front(T&& value) {
+        return m_base.push_front_move(&value);
     }
 
     bool pop_front(T& out) {
@@ -93,9 +108,25 @@ public:
     }
 
 private:
-    static void* create(const void* value) {
-        const T* src = (const T*)value;
-        return new (kernel::nothrow) T(*src);
+    template<typename U>
+    static auto create_copy_impl(const void* value, int)
+        -> decltype(U(*static_cast<const U*>(value)), (void*)0) {
+        const U* src = static_cast<const U*>(value);
+        return new (kernel::nothrow) U(*src);
+    }
+
+    template<typename U>
+    static void* create_copy_impl(const void*, long) {
+        return nullptr;
+    }
+
+    static void* create_copy(const void* value) {
+        return create_copy_impl<T>(value, 0);
+    }
+
+    static void* create_move(void* value) {
+        T* src = (T*)value;
+        return new (kernel::nothrow) T(kernel::move(*src));
     }
 
     static void destroy(void* value) {
@@ -103,10 +134,10 @@ private:
         delete obj;
     }
 
-    static void copy_out(void* dst, const void* src) {
+    static void move_out(void* dst, void* src) {
         T* out = (T*)dst;
-        const T* in = (const T*)src;
-        *out = *in;
+        T* in = (T*)src;
+        *out = kernel::move(*in);
     }
 
     static bool compare(const void* a, const void* b) {
