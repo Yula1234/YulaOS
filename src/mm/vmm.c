@@ -161,7 +161,33 @@ void* vmm_alloc_pages(size_t count) {
     for (size_t i = 0; i < count; i++) {
         uint32_t phys = (uint32_t)pmm_alloc_block();
         if (!phys) {
-            return 0; 
+            for (size_t j = 0; j < i; j++) {
+                uint32_t prev_phys = paging_get_phys(kernel_page_directory, addr + j * 4096);
+                if (prev_phys) {
+                    pmm_free_block((void*)prev_phys);
+                }
+                paging_map(kernel_page_directory, addr + j * 4096, 0, 0);
+            }
+
+            flags = spinlock_acquire_safe(&vmm_lock);
+
+            vmm_used_pages_count -= count;
+
+            vm_free_block_t* rollback = alloc_node();
+            if (!rollback) {
+                spinlock_release_safe(&vmm_lock, flags);
+                panic("VMM: Out of metadata nodes during rollback!");
+                return 0;
+            }
+
+            rollback->start = addr;
+            rollback->size = size_bytes;
+
+            insert_block_addr(rollback);
+            insert_block_size(rollback);
+
+            spinlock_release_safe(&vmm_lock, flags);
+            return 0;
         }
         paging_map(kernel_page_directory, addr + i * 4096, phys, PTE_PRESENT | PTE_RW);
     }
@@ -180,6 +206,11 @@ void vmm_free_pages(void* ptr, size_t count) {
     for (size_t i = 0; i < count; i++) {
         uint32_t phys = paging_get_phys(kernel_page_directory, addr + i * 4096);
         if (phys) {
+            page_t* page = pmm_phys_to_page(phys);
+            if (page && page->slab_cache) {
+                spinlock_release_safe(&vmm_lock, flags);
+                panic("VMM: freeing slab page");
+            }
             pmm_free_block((void*)phys);
         }
         paging_map(kernel_page_directory, addr + i * 4096, 0, 0); 

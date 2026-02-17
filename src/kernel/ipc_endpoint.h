@@ -7,7 +7,13 @@
 #include <kernel/poll_waitq.h>
 #include <stdint.h>
 
+#define IPC_NAME_MAX 31u
+
 struct vfs_node;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct vfs_node* ipc_listen_create(const char* name);
 
@@ -22,6 +28,12 @@ int ipc_connect(const char* name,
                 struct vfs_node** out_s2c_r,
                 void** out_pending_handle);
 
+void ipc_connect_commit(void* pending_handle);
+
 void ipc_connect_cancel(void* pending_handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

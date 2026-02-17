@@ -152,29 +152,6 @@ static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
             tty_term_print_locked(term, msg);
         }
 
-        if (st == 139 && child) {
-            char pf[128];
-            int p = 0;
-            const char a[] = "PF CR2=";
-            const char b[] = " EIP=";
-            const char c[] = " ERR=";
-            const char e[] = " INT=";
-            const char d[] = "\n";
-
-            for (uint32_t i = 0; i < (uint32_t)(sizeof(a) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = a[i];
-            init_append_hex32(pf, &p, (int)sizeof(pf), child->last_fault_cr2);
-            for (uint32_t i = 0; i < (uint32_t)(sizeof(b) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = b[i];
-            init_append_hex32(pf, &p, (int)sizeof(pf), child->last_fault_eip);
-            for (uint32_t i = 0; i < (uint32_t)(sizeof(c) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = c[i];
-            init_append_hex32(pf, &p, (int)sizeof(pf), child->last_fault_err);
-            for (uint32_t i = 0; i < (uint32_t)(sizeof(e) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = e[i];
-            init_append_hex32(pf, &p, (int)sizeof(pf), (uint32_t)child->last_fault_int);
-            for (uint32_t i = 0; i < (uint32_t)(sizeof(d) - 1u) && p + 1 < (int)sizeof(pf); i++) pf[p++] = d[i];
-            pf[p] = '\0';
-
-            tty_term_print_locked(term, pf);
-        }
-
         proc_usleep(200000);
     }
 }

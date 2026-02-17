@@ -6,6 +6,7 @@
 #include <hal/lock.h>
 #include <drivers/vga.h>
 #include <mm/pmm.h>
+#include <kernel/panic.h>
 
 #include "heap.h"
 #include "vmm.h"
@@ -58,15 +59,15 @@ static int slub_init_page(kmem_cache_t* cache, page_t* page, void* virt_addr) {
     
     uint32_t obj_count = PAGE_SIZE / cache->object_size;
     uint8_t* base = (uint8_t*)virt_addr;
-    void** prev_link = NULL;
     
     for (uint32_t i = 0; i < obj_count; i++) {
-        void** current_obj = (void**)(base + i * cache->object_size);
-        if (i == 0) page->freelist = current_obj;
-        else *prev_link = current_obj;
-        prev_link = current_obj;
+        uintptr_t* current_obj = (uintptr_t*)(base + i * cache->object_size);
+        uintptr_t tagged = ((uintptr_t)(base + (i + 1u) * cache->object_size)) | 1u;
+        if (i + 1u >= obj_count) tagged = 1u;
+
+        if (i == 0) page->freelist = (void*)current_obj;
+        *current_obj = tagged;
     }
-    if (prev_link) *prev_link = NULL;
     return 1;
 }
 
@@ -74,11 +75,50 @@ static void* slub_alloc_from_page(page_t* page) {
     void* obj = page->freelist;
     if (!obj) return 0;
     
-    page->freelist = *(void**)obj;
+    uintptr_t next_tagged = *(uintptr_t*)obj;
+    void* next = (void*)(next_tagged & ~(uintptr_t)1u);
+    page->freelist = next;
     page->objects++;
     
     *(uint32_t*)obj = 0; 
     return obj;
+}
+
+static inline int slub_freelist_mapped(void* p) {
+    if (!p) return 0;
+    uint32_t v = (uint32_t)p;
+
+    if (v < KERNEL_HEAP_START || v >= (KERNEL_HEAP_START + KERNEL_HEAP_SIZE)) {
+        return 0;
+    }
+
+    uint32_t phys = paging_get_phys(kernel_page_directory, v);
+    return phys != 0u;
+}
+
+static inline int slub_ptr_in_heap(uint32_t v) {
+    return (v >= KERNEL_HEAP_START && v < (KERNEL_HEAP_START + KERNEL_HEAP_SIZE)) ? 1 : 0;
+}
+
+static inline int slub_ptr_belongs_to_page(kmem_cache_t* cache, page_t* page, void* p) {
+    if (!cache || !page || !p) return 0;
+
+    uint32_t v = (uint32_t)p;
+    if (!slub_ptr_in_heap(v)) return 0;
+    if ((v & (cache->object_size - 1u)) != 0u) return 0;
+
+    uint32_t phys = paging_get_phys(kernel_page_directory, v);
+    if (!phys) return 0;
+
+    page_t* owner = pmm_phys_to_page(phys & ~0xFFFu);
+    if (owner != page) return 0;
+
+    uint32_t off = v & 0xFFFu;
+    if (off >= PAGE_SIZE) return 0;
+    if (cache->object_size == 0) return 0;
+    if ((off % cache->object_size) != 0u) return 0;
+
+    return 1;
 }
 
 void* kmem_cache_alloc(kmem_cache_t* cache) {
@@ -88,6 +128,27 @@ void* kmem_cache_alloc(kmem_cache_t* cache) {
         page_t* page = cache->cpu_slab;
 
         if (page && page->freelist) {
+            if (!slub_freelist_mapped(page->freelist)) {
+                spinlock_release_safe(&cache->lock, flags);
+                uint32_t v = (uint32_t)page->freelist;
+                if (!slub_ptr_in_heap(v)) {
+                    panic("SLUB: cpu_slab freelist corrupt");
+                }
+                panic("SLUB: cpu_slab freelist unmapped");
+            }
+
+            if (!slub_ptr_belongs_to_page(cache, page, page->freelist)) {
+                spinlock_release_safe(&cache->lock, flags);
+                panic("SLUB: cpu_slab freelist invalid");
+            }
+
+            uintptr_t next_tagged = *(uintptr_t*)page->freelist;
+            void* next = (void*)(next_tagged & ~(uintptr_t)1u);
+            if (next && !slub_ptr_belongs_to_page(cache, page, next)) {
+                spinlock_release_safe(&cache->lock, flags);
+                panic("SLUB: cpu_slab freelist next invalid");
+            }
+
             void* obj = slub_alloc_from_page(page);
             spinlock_release_safe(&cache->lock, flags);
             return obj;
@@ -95,6 +156,27 @@ void* kmem_cache_alloc(kmem_cache_t* cache) {
 
         if (cache->partial) {
             page = cache->partial;
+            if (!slub_freelist_mapped(page->freelist)) {
+                spinlock_release_safe(&cache->lock, flags);
+                uint32_t v = (uint32_t)page->freelist;
+                if (!slub_ptr_in_heap(v)) {
+                    panic("SLUB: partial freelist corrupt");
+                }
+                panic("SLUB: partial freelist unmapped");
+            }
+
+            if (!slub_ptr_belongs_to_page(cache, page, page->freelist)) {
+                spinlock_release_safe(&cache->lock, flags);
+                panic("SLUB: partial freelist invalid");
+            }
+
+            uintptr_t next_tagged = *(uintptr_t*)page->freelist;
+            void* next = (void*)(next_tagged & ~(uintptr_t)1u);
+            if (next && !slub_ptr_belongs_to_page(cache, page, next)) {
+                spinlock_release_safe(&cache->lock, flags);
+                panic("SLUB: partial freelist next invalid");
+            }
+
             slab_list_remove(&cache->partial, page);
             cache->cpu_slab = page;
             void* obj = slub_alloc_from_page(page);
@@ -138,25 +220,61 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
     uint32_t phys = paging_get_phys(kernel_page_directory, virt);
     page_t* page = pmm_phys_to_page(phys);
     
-    if (!page || page->slab_cache != cache) {
+    if (!page) {
         spinlock_release_safe(&cache->lock, flags);
-        return;
+        panic("SLUB: free on invalid page");
+    }
+    if (page->slab_cache != cache) {
+        spinlock_release_safe(&cache->lock, flags);
+        panic("SLUB: free cache mismatch");
+    }
+
+    uint32_t page_virt = virt & ~0xFFFu;
+    uint32_t off = virt - page_virt;
+    if (off >= PAGE_SIZE || cache->object_size == 0 || (off % cache->object_size) != 0u) {
+        spinlock_release_safe(&cache->lock, flags);
+        panic("SLUB: invalid object address");
+    }
+
+    uint32_t max_objs = PAGE_SIZE / cache->object_size;
+    void* it = page->freelist;
+    for (uint32_t i = 0; it && i <= max_objs; i++) {
+        if (it == obj) {
+            spinlock_release_safe(&cache->lock, flags);
+            panic("SLUB: double free");
+        }
+
+        if (!slub_ptr_belongs_to_page(cache, page, it)) {
+            spinlock_release_safe(&cache->lock, flags);
+            panic("SLUB: freelist corrupt in free");
+        }
+
+        uintptr_t next_tagged = *(uintptr_t*)it;
+        void* next = (void*)(next_tagged & ~(uintptr_t)1u);
+        if (next && !slub_ptr_belongs_to_page(cache, page, next)) {
+            spinlock_release_safe(&cache->lock, flags);
+            panic("SLUB: freelist next corrupt in free");
+        }
+
+        it = next;
     }
     
-    *(void**)obj = page->freelist;
+    *(uintptr_t*)obj = ((uintptr_t)page->freelist) | 1u;
     page->freelist = obj;
     page->objects--;
     
     if (page == cache->cpu_slab) {
 
     } else {
-        uint32_t max_objs = PAGE_SIZE / cache->object_size;
-        
         if (page->objects == 0) {
             slab_list_remove(&cache->partial, page);
-            
-            uint32_t page_virt = virt & ~0xFFF;
 
+            page->slab_cache = 0;
+            page->freelist = 0;
+            page->objects = 0;
+            page->prev = 0;
+            page->next = 0;
+            
             spinlock_release_safe(&cache->lock, flags);
             
             vmm_free_pages((void*)page_virt, 1);
@@ -235,6 +353,9 @@ void kfree(void* ptr) {
         kmem_cache_free((kmem_cache_t*)page->slab_cache, ptr);
     } else {
         uint32_t pages_count = page->objects;
+        if (pages_count == 0) {
+            panic("HEAP: kfree non-slab with zero pages");
+        }
         if (pages_count > 0) {
             vmm_free_pages(ptr, pages_count);
             page->objects = 0;

@@ -7,6 +7,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef restrict
+#ifdef __cplusplus
+#define restrict __restrict
+#endif
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 __attribute__((target("sse2"))) size_t strlen(const char* s);
 int strcmp(const char* a, const char* b);
 int strncmp(const char* a, const char* b, size_t n);
@@ -34,5 +44,9 @@ static inline int strcpy_safe(char* dst, size_t dst_size, const char* src) {
     memcpy(dst, src, src_len + 1);
     return 1;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

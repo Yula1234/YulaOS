@@ -18,6 +18,10 @@
 
 struct vfs_node;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct vfs_ops {
     int (*read)(struct vfs_node* node, uint32_t offset, uint32_t size, void* buffer);
     int (*write)(struct vfs_node* node, uint32_t offset, uint32_t size, const void* buffer);
@@ -64,5 +68,9 @@ vfs_node_t* devfs_fetch(const char* name);
 vfs_node_t* devfs_clone(const char* name);
 vfs_node_t* devfs_take(const char* name);
 vfs_node_t* vfs_create_node_from_path(const char* path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

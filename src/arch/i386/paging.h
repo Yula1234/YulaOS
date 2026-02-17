@@ -22,6 +22,7 @@ void paging_switch(uint32_t* dir_phys);
 uint32_t* paging_get_dir(void);
 uint32_t* paging_clone_directory(void); 
 void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags);
+void paging_zero_phys_page(uint32_t phys);
 int paging_is_user_accessible(uint32_t* dir, uint32_t virt);
 uint32_t paging_get_phys(uint32_t* dir, uint32_t virt);
 

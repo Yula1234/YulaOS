@@ -629,14 +629,13 @@ static task_t* alloc_task(void) {
 void proc_free_resources(task_t* t) {
     if (!t) return;
 
+    proc_sleep_remove(t);
     poll_task_cleanup(t);
 
     if (t->fd_table) {
         proc_fd_table_release(t->fd_table);
         t->fd_table = 0;
     }
-
-    proc_sleep_remove(t);
 
     if (t->mem) {
         proc_mem_release(t->mem);
@@ -1290,8 +1289,11 @@ void reaper_task_func(void* arg) {
             freed = 0;
             uint32_t flags = spinlock_acquire_safe(&zombie_lock);
             
-            task_t *curr, *n;
-            dlist_for_each_entry_safe(curr, n, &zombie_list, zombie_node) {
+            dlist_head_t* it = zombie_list.next;
+            while (it && it != &zombie_list) {
+                task_t* curr = container_of(it, task_t, zombie_node);
+                it = it->next;
+
                 int still_running = 0;
                 for (int i = 0; i < MAX_CPUS; i++) {
                     if (cpus[i].current_task == curr) {

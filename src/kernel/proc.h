@@ -15,6 +15,10 @@
 
 #define KSTACK_SIZE 32768
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     TASK_UNUSED = 0,
     TASK_RUNNABLE,
@@ -198,6 +202,10 @@ uint32_t proc_task_count(void);
 task_t* proc_task_at(uint32_t idx);
 task_t* proc_create_idle(int cpu_index);
 task_t* proc_find_by_pid(uint32_t pid);
+
+#ifdef __cplusplus
+}
+#endif
 void proc_sleep_remove(task_t* t);
 void proc_check_sleepers(uint32_t current_tick);
 void proc_sleep_add(task_t* t, uint32_t wake_tick);

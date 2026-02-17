@@ -20,6 +20,122 @@ enable_paging:
     mov cr0, eax
     ret
 
+df_putc:
+    push eax
+    push ebx
+    push edx
+
+    mov bl, al
+
+    mov dx, 0xE9
+    mov al, bl
+    out dx, al
+
+    mov dx, 0x3FD
+df_uart_wait:
+    in al, dx
+    test al, 0x20
+    jz df_uart_wait
+
+    mov dx, 0x3F8
+    mov al, bl
+    out dx, al
+
+    pop edx
+    pop ebx
+    pop eax
+    ret
+
+df_puthex32:
+    push eax
+    push ebx
+    push ecx
+    push edx
+
+    mov ecx, 8
+df_puthex32_loop:
+    mov ebx, eax
+    shr ebx, 28
+    and ebx, 0x0F
+    mov dl, [hex_digits + ebx]
+    mov al, dl
+    call df_putc
+    shl eax, 4
+    dec ecx
+    jnz df_puthex32_loop
+
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+isr_df_entry:
+    cli
+    mov eax, esp
+
+    mov edx, [eax]
+    mov ecx, [eax + 4]
+    mov ebx, [eax + 8]
+    mov esi, [eax + 12]
+
+    mov edi, [eax + 16]
+    mov ebp, [eax + 20]
+
+    mov esp, emergency_stack_top
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    test ebx, 3
+    jz isr_df_no_user
+    push ebp
+    push edi
+isr_df_no_user:
+
+    mov al, 'D'
+    call df_putc
+    mov al, 'F'
+    call df_putc
+    mov al, ' '
+    call df_putc
+
+    mov al, 'e'
+    call df_putc
+    mov al, 'i'
+    call df_putc
+    mov al, 'p'
+    call df_putc
+    mov al, '='
+    call df_putc
+    mov eax, ecx
+    call df_puthex32
+
+    mov al, ' '
+    call df_putc
+
+    mov al, 'c'
+    call df_putc
+    mov al, 'r'
+    call df_putc
+    mov al, '2'
+    call df_putc
+    mov al, '='
+    call df_putc
+    mov eax, cr2
+    call df_puthex32
+
+    mov al, 10
+    call df_putc
+
+    cli
+df_halt:
+    hlt
+    jmp df_halt
+
 isr_common:
     pusha
     push ds
@@ -49,6 +165,9 @@ isr_common:
 macro gen_isr n {
     public isr_stub_#n
     isr_stub_#n:
+        if n = 8
+            jmp isr_df_entry
+        end if
         if n = 8 | (n >= 10 & n <= 14) | n = 17
         else
             push 0
@@ -78,6 +197,13 @@ gen_isr 0xA1
 gen_isr 0xA2
 
 section '.data' writeable
+
+hex_digits db '0123456789ABCDEF'
+
+section '.bss' writeable
+
+emergency_stack rb 8192
+emergency_stack_top:
 
 macro make_isr_table [id] {
     forward

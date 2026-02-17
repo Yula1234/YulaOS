@@ -6,6 +6,7 @@
 #include <mm/heap.h>
 #include <hal/lock.h>
 #include <hal/io.h>
+#include <kernel/cpu.h>
 #include "paging.h"
 
 extern void smp_tlb_shootdown(uint32_t virt);
@@ -18,6 +19,105 @@ uint32_t* kernel_page_directory = 0;
 uint32_t page_dir[1024] __attribute__((aligned(4096)));
 
 static spinlock_t paging_lock;
+
+static uint32_t paging_ram_size_bytes = 0;
+
+#define PAGING_FIXMAP_BASE 0xFFFFE000u
+#define PAGING_FIXMAP_SLOTS 16u
+
+static spinlock_t paging_fixmap_lock;
+
+__attribute__((noreturn)) static void paging_halt(const char* msg);
+
+static inline uint32_t* paging_pt_virt(uint32_t* dir, uint32_t virt) {
+    uint32_t pd_idx = virt >> 22;
+    if ((dir[pd_idx] & 1u) == 0u) {
+        return 0;
+    }
+    return (uint32_t*)(dir[pd_idx] & ~0xFFFu);
+}
+
+static inline int paging_pde_pt_phys_valid(uint32_t pde) {
+    if ((pde & 1u) == 0u) return 0;
+    if ((pde & (1u << 7)) != 0u) return 0;
+
+    uint32_t pt_phys = pde & ~0xFFFu;
+    if (pt_phys == 0u) return 0;
+    if (paging_ram_size_bytes == 0u) return 0;
+    if (pt_phys >= paging_ram_size_bytes) return 0;
+
+    return 1;
+}
+
+static inline uint32_t paging_fixmap_virt(void) {
+    cpu_t* cpu = cpu_current();
+    uint32_t idx = 0;
+
+    if (cpu && cpu->index >= 0 && (uint32_t)cpu->index < PAGING_FIXMAP_SLOTS) {
+        idx = (uint32_t)cpu->index;
+    }
+
+    return PAGING_FIXMAP_BASE - idx * 4096u;
+}
+
+static void paging_fixmap_set(uint32_t virt, uint32_t phys) {
+    uint32_t int_flags = spinlock_acquire_safe(&paging_fixmap_lock);
+
+    uint32_t* pt = paging_pt_virt(kernel_page_directory, virt);
+    if (!pt) {
+        spinlock_release_safe(&paging_fixmap_lock, int_flags);
+        paging_halt("paging_fixmap_set: missing PT");
+    }
+
+    uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+    pt[pt_idx] = (phys & ~0xFFFu) | PTE_PRESENT | PTE_RW;
+
+    spinlock_release_safe(&paging_fixmap_lock, int_flags);
+    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+}
+
+static void paging_fixmap_clear(uint32_t virt) {
+    uint32_t int_flags = spinlock_acquire_safe(&paging_fixmap_lock);
+
+    uint32_t* pt = paging_pt_virt(kernel_page_directory, virt);
+    if (!pt) {
+        spinlock_release_safe(&paging_fixmap_lock, int_flags);
+        paging_halt("paging_fixmap_clear: missing PT");
+    }
+
+    uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+    pt[pt_idx] = 0;
+
+    spinlock_release_safe(&paging_fixmap_lock, int_flags);
+    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+}
+
+static inline int paging_is_enabled(void) {
+    uint32_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    return ((cr0 & (1u << 31)) != 0u) ? 1 : 0;
+}
+
+void paging_zero_phys_page(uint32_t phys) {
+    if ((phys & 0xFFFu) != 0u) {
+        paging_halt("paging_zero_phys_page: unaligned phys");
+    }
+
+    if (!paging_is_enabled()) {
+        memset((void*)phys, 0, 4096);
+        return;
+    }
+
+    if (!kernel_page_directory) {
+        paging_halt("paging_zero_phys_page: kernel_page_directory not set");
+    }
+
+    uint32_t virt = paging_fixmap_virt();
+
+    paging_fixmap_set(virt, phys);
+    memset((void*)virt, 0, 4096);
+    paging_fixmap_clear(virt);
+}
 
 __attribute__((noreturn)) static void paging_halt(const char* msg) {
     (void)msg;
@@ -214,9 +314,7 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
             paging_halt("pmm_alloc_block failed in paging_map");
         }
 
-        uint32_t* new_pt_virt = (uint32_t*)new_pt_phys;
-
-        memset(new_pt_virt, 0, 4096);
+        paging_zero_phys_page((uint32_t)new_pt_phys);
 
         dir[pd_idx] = ((uint32_t)new_pt_phys) | 7;
     }
@@ -228,9 +326,10 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
 
     if (dir == kernel_page_directory) {
         smp_tlb_shootdown(virt);
-    } else {
-        __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+        return;
     }
+
+    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
 }
 
 static void paging_allocate_table(uint32_t virt) {
@@ -240,7 +339,7 @@ static void paging_allocate_table(uint32_t virt) {
     if (!(kernel_page_directory[pd_idx] & 1)) {
         void* new_pt_phys = pmm_alloc_block();
         if (new_pt_phys) {
-            memset(new_pt_phys, 0, 4096);
+            paging_zero_phys_page((uint32_t)new_pt_phys);
             kernel_page_directory[pd_idx] = ((uint32_t)new_pt_phys) | 7;
         }
     }
@@ -251,12 +350,18 @@ static void paging_allocate_table(uint32_t virt) {
 void paging_init(uint32_t ram_size_bytes) {
     paging_init_pat();
     spinlock_init(&paging_lock);
+    spinlock_init(&paging_fixmap_lock);
+
+    if (ram_size_bytes & 0xFFFu) {
+        ram_size_bytes = (ram_size_bytes & ~0xFFFu) + 4096u;
+    }
+    paging_ram_size_bytes = ram_size_bytes;
+
+    kernel_page_directory = page_dir;
 
     for(int i = 0; i < 1024; i++) {
         page_dir[i] = 2; 
     }
-
-    if (ram_size_bytes & 0xFFF) ram_size_bytes = (ram_size_bytes & ~0xFFF) + 4096;
 
     for(uint32_t i = 0; i < ram_size_bytes; i += 4096) { 
         uint32_t pd_idx = i >> 22;
@@ -267,7 +372,7 @@ void paging_init(uint32_t ram_size_bytes) {
             if (!pt_phys) {
                 paging_halt("pmm_alloc_block failed in paging_init");
             }
-            memset(pt_phys, 0, 4096);
+            paging_zero_phys_page((uint32_t)pt_phys);
             page_dir[pd_idx] = ((uint32_t)pt_phys) | 3; // Supervisor | RW | Present
         }
         
@@ -278,8 +383,12 @@ void paging_init(uint32_t ram_size_bytes) {
     }
 
     paging_map(page_dir, 0xFEE00000, 0xFEE00000, 3);
-    
-    kernel_page_directory = page_dir;
+
+    for (uint32_t i = 0; i < PAGING_FIXMAP_SLOTS; i++) {
+        uint32_t virt = PAGING_FIXMAP_BASE - i * 4096u;
+        paging_allocate_table(virt);
+        paging_fixmap_clear(virt);
+    }
     
     for(uint32_t addr = 0xC0000000; addr < 0xC1000000; addr += 0x400000) {
         paging_allocate_table(addr);
@@ -301,7 +410,7 @@ uint32_t* paging_clone_directory(void) {
     uint32_t* new_dir = (uint32_t*)pmm_alloc_block();
     if (!new_dir) return 0;
 
-    memset(new_dir, 0, 4096);
+    paging_zero_phys_page((uint32_t)new_dir);
 
     for (int i = 0; i < 1024; i++) {
         if (kernel_page_directory[i] & 1) {
@@ -318,7 +427,14 @@ int paging_is_user_accessible(uint32_t* dir, uint32_t virt) {
     if (!(dir[pd_idx] & 1)) return 0;
     if (!(dir[pd_idx] & 4)) return 0;
 
-    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
+    if ((dir[pd_idx] & (1u << 7)) != 0u) {
+        return 1;
+    }
+
+    uint32_t pde = dir[pd_idx];
+    if (!paging_pde_pt_phys_valid(pde)) return 0;
+
+    uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
     if (!(pt[pt_idx] & 1)) return 0;
     if (!(pt[pt_idx] & 4)) return 0;
 
@@ -329,10 +445,19 @@ uint32_t paging_get_phys(uint32_t* dir, uint32_t virt) {
     uint32_t pd_idx = virt >> 22;
     uint32_t pt_idx = (virt >> 12) & 0x3FF;
 
-    if (!(dir[pd_idx] & 1)) return 0;
+    uint32_t pde = dir[pd_idx];
+    if ((pde & 1u) == 0u) return 0;
 
-    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
-    if (!(pt[pt_idx] & 1)) return 0;
+    if ((pde & (1u << 7)) != 0u) {
+        uint32_t base = pde & 0xFFC00000u;
+        return base + (virt & 0x003FFFFFu);
+    }
 
-    return (pt[pt_idx] & ~0xFFF) + (virt & 0xFFF);
+    if (!paging_pde_pt_phys_valid(pde)) return 0;
+
+    uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+    uint32_t pte = pt[pt_idx];
+    if ((pte & 1u) == 0u) return 0;
+
+    return (pte & ~0xFFFu) + (virt & 0xFFFu);
 }

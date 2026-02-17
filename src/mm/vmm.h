@@ -7,8 +7,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define KERNEL_HEAP_START 0xD0000000
-#define KERNEL_HEAP_SIZE  (256 * 1024 * 1024)
+#define KERNEL_HEAP_START 0xC0000000u
+#define KERNEL_HEAP_SIZE  0x01000000u
 #define PAGE_SIZE         4096
 
 void vmm_init(void);

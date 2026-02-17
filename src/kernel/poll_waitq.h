@@ -8,6 +8,10 @@
 
 struct task;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct poll_waitq {
     spinlock_t lock;
     dlist_head_t waiters;
@@ -31,5 +35,9 @@ void poll_waitq_wake_all(poll_waitq_t* q);
 void poll_waitq_detach_all(poll_waitq_t* q);
 
 void poll_task_cleanup(struct task* task);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

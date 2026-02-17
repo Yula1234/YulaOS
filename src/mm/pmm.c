@@ -140,6 +140,12 @@ void* pmm_alloc_pages(uint32_t order) {
     page->flags &= ~PMM_FLAG_FREE;
     page->ref_count = 1;
 
+    page->slab_cache = 0;
+    page->freelist = 0;
+    page->objects = 0;
+    page->prev = 0;
+    page->next = 0;
+
     while (current_order > order) {
         current_order--;
         
@@ -200,6 +206,12 @@ void pmm_free_pages(void* addr, uint32_t order) {
 
         order++;
     }
+
+    page->slab_cache = 0;
+    page->freelist = 0;
+    page->objects = 0;
+    page->prev = 0;
+    page->next = 0;
 
     page->flags = PMM_FLAG_FREE;
     page->order = order;

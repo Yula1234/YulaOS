@@ -1748,6 +1748,8 @@ static void syscall_ipc_connect(registers_t* regs, task_t* curr) {
     fw->offset = 0;
     fw->flags = 0;
 
+    ipc_connect_commit(pending);
+
     out_fds[0] = fd_r;
     out_fds[1] = fd_w;
     regs->eax = 0;

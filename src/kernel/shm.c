@@ -10,6 +10,8 @@
 #include <mm/heap.h>
 #include <mm/pmm.h>
 
+#include <arch/i386/paging.h>
+
 #include <lib/string.h>
 
 typedef struct {
@@ -91,7 +93,8 @@ static shm_obj_t* shm_obj_create(uint32_t size) {
             kfree(obj);
             return 0;
         }
-        memset(p, 0, 4096);
+
+        paging_zero_phys_page((uint32_t)p);
         obj->pages[i] = (uint32_t)p;
     }
 
