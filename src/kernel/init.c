@@ -92,33 +92,6 @@ static void init_append_int(char* out, int* io_pos, int cap, int v) {
     *io_pos = pos;
 }
 
-static void init_append_hex32(char* out, int* io_pos, int cap, uint32_t v) {
-    if (!out || !io_pos || cap <= 0) {
-        return;
-    }
-
-    static const char hex[] = "0123456789ABCDEF";
-
-    int pos = *io_pos;
-    if (pos < 0 || pos >= cap) {
-        return;
-    }
-
-    if (pos + 2 < cap) {
-        out[pos++] = '0';
-        out[pos++] = 'x';
-    }
-
-    for (int i = 7; i >= 0; i--) {
-        if (pos + 1 >= cap) {
-            break;
-        }
-        out[pos++] = hex[(v >> (i * 4)) & 0xFu];
-    }
-
-    *io_pos = pos;
-}
-
 static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
     for (;;) {
         char* argv[] = { "ush", 0 };
