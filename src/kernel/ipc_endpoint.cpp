@@ -15,7 +15,7 @@
 #include <lib/cpp/new.h>
 #include <lib/cpp/utility.h>
 #include <lib/cpp/vfs.h>
-#include <lib/dlist.h>
+#include <lib/cpp/dlist.h>
 #include <lib/string.h>
 #include <lib/hash_map.h>
 
@@ -31,7 +31,6 @@ static bool ipc_name_valid(const char* name) {
 class IpcEndpoint;
 
 struct IpcPendingConn {
-    dlist_head_t node;
     kernel::IntrusiveRef<IpcEndpoint> owner;
     uint32_t client_pid;
     kernel::VirtualFSNode c2s_r;
@@ -44,7 +43,6 @@ struct IpcPendingConn {
                    uint32_t pid,
                    kernel::VirtualFSNode&& in_r,
                    kernel::VirtualFSNode&& out_w) {
-        dlist_init(&node);
 
         owner = kernel::move(ep);
         client_pid = pid;
@@ -87,7 +85,6 @@ public:
     IpcEndpoint(const char* n, vfs_node_t* node) {
         strlcpy(name, n, sizeof(name));
         spinlock_init(&lock);
-        dlist_init(&pending_conns);
         poll_waitq_init(&poll_waitq);
 
         listen_node = node;
@@ -133,25 +130,28 @@ public:
     }
 
     void shutdown() {
-        dlist_head_t to_release;
-        dlist_init(&to_release);
+        kernel::DBLinkedList<IpcPendingConn*> to_release;
 
         {
             kernel::SpinLockSafeGuard guard(lock);
             closing = 1u;
-            while (!dlist_empty(&pending_conns)) {
-                IpcPendingConn* p = container_of(pending_conns.next, IpcPendingConn, node);
-                dlist_del(&p->node);
+            while (!pending_conns.empty()) {
+                IpcPendingConn* p = nullptr;
+                if (!pending_conns.pop_front(p)) {
+                    break;
+                }
                 p->mark_queued(false);
-                dlist_add_tail(&p->node, &to_release);
+                (void)to_release.push_back(p);
             }
         }
 
         poll_waitq_wake_all(&poll_waitq);
 
-        while (!dlist_empty(&to_release)) {
-            IpcPendingConn* p = container_of(to_release.next, IpcPendingConn, node);
-            dlist_del(&p->node);
+        while (!to_release.empty()) {
+            IpcPendingConn* p = nullptr;
+            if (!to_release.pop_front(p)) {
+                break;
+            }
             p->release();
         }
     }
@@ -165,7 +165,11 @@ public:
 
             conn->retain();
             conn->mark_queued(true);
-            dlist_add_tail(&conn->node, &pending_conns);
+            if (!pending_conns.push_back(conn)) {
+                conn->mark_queued(false);
+                conn->release();
+                return false;
+            }
         }
 
         poll_waitq_wake_all(&poll_waitq);
@@ -178,14 +182,16 @@ public:
             return false;
         }
 
-        dlist_del(&conn->node);
+        if (!pending_conns.remove(conn)) {
+            return false;
+        }
         conn->mark_queued(false);
         return true;
     }
 
     bool has_pending() {
         kernel::SpinLockSafeGuard guard(lock);
-        return !dlist_empty(&pending_conns);
+        return !pending_conns.empty();
     }
 
     int register_waiter(poll_waiter_t* w, task_t* task) {
@@ -194,12 +200,14 @@ public:
 
     IpcPendingConn* pop_pending() {
         kernel::SpinLockSafeGuard guard(lock);
-        if (dlist_empty(&pending_conns)) {
+        if (pending_conns.empty()) {
             return nullptr;
         }
 
-        IpcPendingConn* p = container_of(pending_conns.next, IpcPendingConn, node);
-        dlist_del(&p->node);
+        IpcPendingConn* p = nullptr;
+        if (!pending_conns.pop_front(p)) {
+            return nullptr;
+        }
         p->mark_queued(false);
         return p;
     }
@@ -212,7 +220,7 @@ private:
 
     char name[IPC_NAME_MAX + 1u];
     spinlock_t lock;
-    dlist_head_t pending_conns;
+    kernel::DBLinkedList<IpcPendingConn*> pending_conns;
     poll_waitq_t poll_waitq;
     vfs_node_t* listen_node;
     uint32_t refcount;
