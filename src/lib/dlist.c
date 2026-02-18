@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+// Copyright (C) 2026 Yula1234
 
 #include "dlist.h"
 

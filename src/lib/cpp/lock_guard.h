@@ -7,11 +7,55 @@
 
 namespace kernel {
 
+class SpinLock {
+public:
+    SpinLock() {
+        spinlock_init(&lock_);
+    }
+
+    SpinLock(const SpinLock&) = delete;
+    SpinLock& operator=(const SpinLock&) = delete;
+
+    SpinLock(SpinLock&&) = delete;
+    SpinLock& operator=(SpinLock&&) = delete;
+
+    uint32_t acquire_safe() {
+        return spinlock_acquire_safe(&lock_);
+    }
+
+    void release_safe(uint32_t flags) {
+        spinlock_release_safe(&lock_, flags);
+    }
+
+    bool try_acquire() {
+        return spinlock_try_acquire(&lock_) != 0;
+    }
+
+    void acquire() {
+        spinlock_acquire(&lock_);
+    }
+
+    void release() {
+        spinlock_release(&lock_);
+    }
+
+    spinlock_t* native_handle() {
+        return &lock_;
+    }
+
+    const spinlock_t* native_handle() const {
+        return &lock_;
+    }
+
+private:
+    spinlock_t lock_;
+};
+
 class SpinLockSafeGuard {
 public:
-    explicit SpinLockSafeGuard(spinlock_t& lock)
+    explicit SpinLockSafeGuard(SpinLock& lock)
         : lock_(&lock),
-          flags_(spinlock_acquire_safe(lock_)) {
+          flags_(lock_->acquire_safe()) {
     }
 
     SpinLockSafeGuard(const SpinLockSafeGuard&) = delete;
@@ -22,12 +66,12 @@ public:
 
     ~SpinLockSafeGuard() {
         if (lock_) {
-            spinlock_release_safe(lock_, flags_);
+            lock_->release_safe(flags_);
         }
     }
 
 private:
-    spinlock_t* lock_;
+    SpinLock* lock_;
     uint32_t flags_;
 };
 

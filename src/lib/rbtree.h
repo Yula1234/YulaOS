@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2025 Yula1234 */
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 Yula1234
 
 #ifndef _LIB_RBTREE_H
 #define _LIB_RBTREE_H

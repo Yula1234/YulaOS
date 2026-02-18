@@ -9,7 +9,6 @@
 #include <kernel/proc.h>
 #include <kernel/poll_waitq.h>
 
-#include <hal/lock.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/intrusive_ref.h>
 #include <lib/cpp/new.h>
@@ -37,7 +36,7 @@ struct IpcPendingConn {
     kernel::VirtualFSNode c2s_r;
     kernel::VirtualFSNode s2c_w;
     
-    spinlock_t lock;
+    kernel::SpinLock lock;
     
     uint32_t client_pid;
     uint32_t refcount;
@@ -55,8 +54,6 @@ struct IpcPendingConn {
 
         queued = 0u;
         refcount = 1u;
-
-        spinlock_init(&lock);
     }
 
     IpcPendingConn(const IpcPendingConn&) = delete;
@@ -91,7 +88,6 @@ class IpcEndpoint {
 public:
     IpcEndpoint(const char* n, vfs_node_t* node)
         : name(n ? n : "") {
-        spinlock_init(&lock);
         poll_waitq_init(&poll_waitq);
 
         listen_node = node;
@@ -241,7 +237,7 @@ private:
     }
 
     kernel::string name;
-    spinlock_t lock;
+    kernel::SpinLock lock;
     kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> pending_conns;
     poll_waitq_t poll_waitq;
     vfs_node_t* listen_node;
@@ -269,7 +265,7 @@ void IpcPendingConn::release() {
     delete this;
 }
 
-static spinlock_t g_endpoints_lock;
+static kernel::SpinLock g_endpoints_lock;
 
 class IpcEndpointRegistry {
 public:
@@ -287,7 +283,7 @@ public:
                          kernel::IntrusiveRef<IpcEndpoint>& out) {
         kernel::SpinLockSafeGuard guard(g_endpoints_lock);
 
-        return endpoints.with_value(
+        return endpoints.with_value_unlocked(
             name,
             [&out](IpcEndpoint* ep) -> bool {
                 if (!ep) {

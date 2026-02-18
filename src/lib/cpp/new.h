@@ -28,6 +28,26 @@ void* operator new[](size_t size, const kernel::nothrow_t& tag) noexcept;
 void operator delete(void* ptr, const kernel::nothrow_t& tag) noexcept;
 void operator delete[](void* ptr, const kernel::nothrow_t& tag) noexcept;
 
+inline void* operator new(size_t size, void* place) noexcept {
+    (void)size;
+    return place;
+}
+
+inline void* operator new[](size_t size, void* place) noexcept {
+    (void)size;
+    return place;
+}
+
+inline void operator delete(void* ptr, void* place) noexcept {
+    (void)ptr;
+    (void)place;
+}
+
+inline void operator delete[](void* ptr, void* place) noexcept {
+    (void)ptr;
+    (void)place;
+}
+
 #if __cpp_aligned_new
 
 namespace std {
