@@ -102,8 +102,8 @@ public:
         size_t old_bucket_count = 0u;
 
         if (this < &other) {
-            kernel::SpinLockSafeGuard lock_this(table_lock);
-            kernel::SpinLockSafeGuard lock_other(other.table_lock);
+            kernel::SpinLockGuard lock_this(table_lock);
+            kernel::SpinLockGuard lock_other(other.table_lock);
 
 
             quiesce_locked();
@@ -116,8 +116,8 @@ public:
 
             steal_from_locked(other);
         } else {
-            kernel::SpinLockSafeGuard lock_other(other.table_lock);
-            kernel::SpinLockSafeGuard lock_this(table_lock);
+            kernel::SpinLockGuard lock_other(other.table_lock);
+            kernel::SpinLockGuard lock_this(table_lock);
 
 
             quiesce_locked();
@@ -161,7 +161,7 @@ public:
             bucket_ = &local_buckets[h];
 
 
-            lock_ = new (&lock_storage_) kernel::SpinLockSafeGuard(bucket_->lock);
+            lock_ = new (&lock_storage_) kernel::SpinLockGuard(bucket_->lock);
 
             Entry* e = bucket_->head;
 
@@ -184,7 +184,7 @@ public:
 
         ~LockedValue() {
             if (lock_) {
-                lock_->~SpinLockSafeGuard();
+                lock_->~SpinLockGuard();
             }
         }
 
@@ -213,10 +213,10 @@ public:
         Bucket* bucket_ = nullptr;
         Entry* entry_ = nullptr;
 
-        alignas(kernel::SpinLockSafeGuard) unsigned char lock_storage_[
-            sizeof(kernel::SpinLockSafeGuard)
+        alignas(kernel::SpinLockGuard) unsigned char lock_storage_[
+            sizeof(kernel::SpinLockGuard)
         ];
-        kernel::SpinLockSafeGuard* lock_ = nullptr;
+        kernel::SpinLockGuard* lock_ = nullptr;
     };
 
     LockedValue find_ptr(const K& key) {
@@ -269,7 +269,7 @@ public:
             const uint32_t h = bucket_index(key, local_mask);
             Bucket& b = local_buckets[h];
 
-            kernel::SpinLockSafeGuard lock(b.lock);
+            kernel::SpinLockGuard lock(b.lock);
 
             Entry* e = b.head;
 
@@ -321,7 +321,7 @@ public:
             const uint32_t h = bucket_index(key, local_mask);
             Bucket& b = local_buckets[h];
 
-            kernel::SpinLockSafeGuard lock(b.lock);
+            kernel::SpinLockGuard lock(b.lock);
 
             Entry* e = b.head;
 
@@ -377,7 +377,7 @@ public:
         const uint32_t h = bucket_index(key, local_mask);
         Bucket& b = local_buckets[h];
 
-        kernel::SpinLockSafeGuard lock(b.lock);
+        kernel::SpinLockGuard lock(b.lock);
 
         Entry* e = b.head;
 
@@ -405,7 +405,7 @@ public:
         const uint32_t h = bucket_index(key, local_mask);
         Bucket& b = local_buckets[h];
 
-        kernel::SpinLockSafeGuard lock(b.lock);
+        kernel::SpinLockGuard lock(b.lock);
 
         Entry* e = b.head;
         Entry* prev = nullptr;
@@ -445,7 +445,7 @@ public:
         Bucket& b = local_buckets[h];
 
 
-        kernel::SpinLockSafeGuard lock(b.lock);
+        kernel::SpinLockGuard lock(b.lock);
 
         Entry* e = b.head;
 
@@ -478,7 +478,7 @@ public:
             const uint32_t h = bucket_index(key, local_mask);
             Bucket& b = local_buckets[h];
 
-            kernel::SpinLockSafeGuard lock(b.lock);
+            kernel::SpinLockGuard lock(b.lock);
 
             Entry* e = b.head;
 
@@ -511,7 +511,7 @@ public:
     }
 
     void clear() {
-        kernel::SpinLockSafeGuard lock(table_lock);
+        kernel::SpinLockGuard lock(table_lock);
 
         resizing.store(1u, kernel::memory_order::relaxed);
         kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
@@ -772,7 +772,7 @@ public:
 
     private:
         HashMap* map_ = nullptr;
-        kernel::SpinLockSafeGuard lock_;
+        kernel::SpinLockGuard lock_;
     };
 
     LockedView locked_view() {
@@ -811,6 +811,8 @@ private:
     }
 
     static void clear_bucket(Bucket& bucket) {
+        kernel::SpinLockGuard lock(bucket.lock);
+
         Entry* e = bucket.head;
 
         while (e) {
@@ -837,7 +839,7 @@ private:
         size_t old_bucket_count = 0u;
 
         {
-            kernel::SpinLockSafeGuard lock_other(other.table_lock);
+            kernel::SpinLockGuard lock_other(other.table_lock);
 
             other.quiesce_locked();
 
@@ -1007,7 +1009,7 @@ private:
 
     bool begin_op(Bucket*& out_buckets, size_t& out_mask) {
         while (1) {
-            kernel::SpinLockSafeGuard lock(table_lock);
+            kernel::SpinLockGuard lock(table_lock);
 
             if (resizing.load(kernel::memory_order::relaxed) != 0u) {
                 kernel::cpu_relax();
@@ -1064,7 +1066,7 @@ private:
         size_t old_bucket_count = 0u;
 
         {
-            kernel::SpinLockSafeGuard lock(table_lock);
+            kernel::SpinLockGuard lock(table_lock);
 
             old_buckets = try_resize_locked(new_size, old_bucket_count);
         }

@@ -75,6 +75,29 @@ private:
     uint32_t flags_;
 };
 
+class SpinLockGuard {
+public:
+    explicit SpinLockGuard(SpinLock& lock)
+        : lock_(&lock) {
+        lock_->acquire();
+    }
+
+    SpinLockGuard(const SpinLockGuard&) = delete;
+    SpinLockGuard& operator=(const SpinLockGuard&) = delete;
+
+    SpinLockGuard(SpinLockGuard&& other) = delete;
+    SpinLockGuard& operator=(SpinLockGuard&& other) = delete;
+
+    ~SpinLockGuard() {
+        if (lock_) {
+            lock_->release();
+        }
+    }
+
+private:
+    SpinLock* lock_;
+};
+
 }
 
 #endif

@@ -14,6 +14,7 @@
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
 #include <kernel/shm.h>
+#include <kernel/panic.h>
 
 #include <hal/io.h>
 #include <hal/apic.h>
@@ -228,25 +229,24 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     if (!m) return 0;
 
     if ((m->map_flags & MAP_SHARED) && m->file && (m->file->flags & VFS_FLAG_SHM) && m->file->private_data) {
-        typedef struct {
-            spinlock_t lock;
-            uint32_t size;
-            uint32_t page_count;
-            uint32_t* pages;
-        } shm_obj_t;
-
-        shm_obj_t* obj = (shm_obj_t*)m->file->private_data;
         uint32_t rel = vaddr - m->vaddr_start;
         uint32_t page_idx = rel / 4096u;
 
-        uint32_t flags = spinlock_acquire_safe(&obj->lock);
-        uint32_t phys = 0;
-        if (obj->pages && page_idx < obj->page_count) {
-            phys = obj->pages[page_idx];
-        }
-        spinlock_release_safe(&obj->lock, flags);
+        const uint32_t* pages = 0;
+        uint32_t page_count = 0u;
 
-        if (!phys) return -1;
+        if (!shm_get_phys_pages(m->file, &pages, &page_count)) {
+            return -1;
+        }
+
+        if (!pages || page_idx >= page_count) {
+            return -1;
+        }
+
+        const uint32_t phys = pages[page_idx];
+        if (!phys) {
+            return -1;
+        }
 
         paging_map(curr->mem->page_dir, vaddr, phys, 7 | 0x200u);
         return 1;
