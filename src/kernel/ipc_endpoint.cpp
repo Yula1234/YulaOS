@@ -300,11 +300,6 @@ private:
     HashMap<kernel::string, IpcEndpoint*, 128> endpoints;
 };
 
-template<>
-uint32_t HashMap<kernel::string, IpcEndpoint*, 128>::hash(const kernel::string& key) {
-    return key.hash();
-}
-
 static IpcEndpointRegistry g_endpoints;
 
 extern "C" {

@@ -40,6 +40,7 @@ public:
         }
 
         const uint32_t page_count = (size + (k_page_size - 1u)) / k_page_size;
+
         if (page_count == 0u) {
             return {};
         }
@@ -50,6 +51,7 @@ public:
         const size_t alloc_size = pages_off + sizeof(uint32_t) * (size_t)page_count;
 
         void* raw = ::operator new(alloc_size, kernel::nothrow);
+
         if (!raw) {
             return {};
         }
@@ -68,11 +70,13 @@ public:
         uint32_t* pages = (uint32_t*)((unsigned char*)raw + pages_off);
         memset(pages, 0, sizeof(uint32_t) * (size_t)page_count);
 
-        kernel::unique_ptr<ShmObject, ObjectDeleter> obj(new (raw) ShmObject(
-            size,
-            page_count,
-            pages
-        ));
+        kernel::unique_ptr<ShmObject, ObjectDeleter> obj(
+            new (raw) ShmObject(
+                size,
+                page_count,
+                pages
+            )
+        );
 
         if (!obj) {
             ::operator delete(raw);
@@ -129,6 +133,7 @@ private:
 
         for (uint32_t i = 0; i < page_count_; i++) {
             const uint32_t phys = pages_[i];
+
             if (phys != 0u) {
                 pmm_free_block((void*)phys);
             }
@@ -174,6 +179,7 @@ private:
                 }
 
                 void* p = pmm_alloc_block();
+
                 if (!p) {
                     return false;
                 }
@@ -206,6 +212,7 @@ private:
         }
 
         builder.commit();
+
         return true;
     }
 
@@ -224,8 +231,10 @@ public:
         obj->retain();
 
         const auto r = named_.insert_unique_ex(name, obj);
+
         if (r != decltype(named_)::InsertUniqueResult::Inserted) {
             obj->release();
+
             return false;
         }
 
@@ -234,7 +243,10 @@ public:
 
     kernel::IntrusiveRef<ShmObject> find_and_retain(const kernel::string& name) {
         ShmObject* obj = nullptr;
-        if (!named_.with_value_locked(name, [&obj](ShmObject* o) -> bool {
+
+        if (!named_.with_value_locked(
+            name,
+            [&obj](ShmObject* o) -> bool {
                 if (!o) {
                     return false;
                 }
@@ -243,7 +255,8 @@ public:
                 obj = o;
 
                 return true;
-            })) {
+            }
+        )) {
             return {};
         }
 
@@ -257,6 +270,7 @@ public:
             name,
             [&removed](ShmObject* o) -> bool {
                 removed = o;
+
                 return true;
             }
         );
@@ -281,17 +295,19 @@ alignas(ShmRegistry) static unsigned char g_registry_storage[sizeof(ShmRegistry)
 
 static ShmRegistry& registry() {
     const uint32_t st = g_registry_state.load(kernel::memory_order::acquire);
+
     if (st == 2u) {
         return *(ShmRegistry*)g_registry_storage;
     }
 
     uint32_t expected = 0u;
+
     if (g_registry_state.compare_exchange_strong(
-            expected,
-            1u,
-            kernel::memory_order::acq_rel,
-            kernel::memory_order::acquire
-        )) {
+        expected,
+        1u,
+        kernel::memory_order::acq_rel,
+        kernel::memory_order::acquire
+    )) {
         new (g_registry_storage) ShmRegistry();
         g_registry_state.store(2u, kernel::memory_order::release);
 
@@ -331,19 +347,142 @@ struct ShmNodeData {
     ShmNodeData& operator=(ShmNodeData&&) = delete;
 };
 
+void shm_object_retain(ShmObject* obj) {
+    if (!obj) {
+        return;
+    }
+
+    obj->retain();
+}
+
+void shm_object_release(ShmObject* obj) {
+    if (!obj) {
+        return;
+    }
+
+    obj->release();
+}
+
+kernel::Expected<ShmObject*, ShmViewError>
+shm_retain_object_from_node(vfs_node_t* node) {
+    if (!node) {
+        return kernel::Expected<ShmObject*, ShmViewError>::failure(
+            ShmViewError::InvalidArg
+        );
+    }
+
+    if ((node->flags & VFS_FLAG_SHM) == 0u) {
+        return kernel::Expected<ShmObject*, ShmViewError>::failure(
+            ShmViewError::NotShmNode
+        );
+    }
+
+    auto* data = (ShmNodeData*)node->private_data;
+
+    if (!data || !data->obj) {
+        return kernel::Expected<ShmObject*, ShmViewError>::failure(
+            ShmViewError::CorruptNode
+        );
+    }
+
+    ShmObject* obj = data->obj.get();
+
+    if (!obj) {
+        return kernel::Expected<ShmObject*, ShmViewError>::failure(
+            ShmViewError::CorruptNode
+        );
+    }
+
+    obj->retain();
+
+    return kernel::Expected<ShmObject*, ShmViewError>::success(obj);
+}
+
+ShmNodeView::ShmNodeView(ShmObject* obj)
+    : obj_(obj) {
+}
+
+ShmNodeView::ShmNodeView(ShmNodeView&& other) noexcept
+    : obj_(other.obj_) {
+    other.obj_ = nullptr;
+}
+
+ShmNodeView& ShmNodeView::operator=(ShmNodeView&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    shm_object_release(obj_);
+
+    obj_ = other.obj_;
+    other.obj_ = nullptr;
+
+    return *this;
+}
+
+ShmNodeView::~ShmNodeView() {
+    shm_object_release(obj_);
+    obj_ = nullptr;
+}
+
+kernel::Expected<ShmNodeView, ShmViewError> ShmNodeView::from_node(vfs_node_t* node) {
+    auto obj = shm_retain_object_from_node(node);
+
+    if (!obj) {
+        return kernel::Expected<ShmNodeView, ShmViewError>::failure(obj.error());
+    }
+
+    return kernel::Expected<ShmNodeView, ShmViewError>::success(
+        ShmNodeView(obj.value())
+    );
+}
+
+uint32_t ShmNodeView::size() const {
+    return obj_ ? obj_->size() : 0u;
+}
+
+bool ShmNodeView::validate_range(uint32_t offset, uint32_t size_bytes) const {
+    if (!obj_ || size_bytes == 0u) {
+        return false;
+    }
+
+    const uint64_t off = (uint64_t)offset;
+    const uint64_t end = off + (uint64_t)size_bytes;
+
+    if (end < off) {
+        return false;
+    }
+
+    return end <= (uint64_t)obj_->size();
+}
+
+bool ShmNodeView::phys_pages(const uint32_t*& out_pages, uint32_t& out_page_count) const {
+    out_pages = nullptr;
+    out_page_count = 0u;
+
+    if (!obj_) {
+        return false;
+    }
+
+    return obj_->get_phys_pages(out_pages, out_page_count);
+}
+
 static vfs_node_t* create_node_for_object(kernel::IntrusiveRef<ShmObject>&& obj) {
     if (!obj) {
         return nullptr;
     }
 
     vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+
     if (!node) {
         return nullptr;
     }
 
     ShmNodeData* data = new (kernel::nothrow) ShmNodeData(kernel::move(obj));
+
     if (!data) {
         kfree(node);
+
         return nullptr;
     }
 
@@ -389,6 +528,7 @@ static int shm_close(vfs_node_t* node) {
     delete data;
 
     kfree(node);
+
     return 0;
 }
 
@@ -401,11 +541,6 @@ static vfs_ops_t shm_ops = {
 };
 
 }
-}
-
-template<>
-uint32_t HashMap<kernel::string, kernel::shm::ShmObject*, 128>::hash(const kernel::string& key) {
-    return key.hash();
 }
 
 extern "C" {
@@ -423,6 +558,7 @@ int shm_get_phys_pages(struct vfs_node* node, const uint32_t** out_pages, uint32
     }
 
     auto* data = (kernel::shm::ShmNodeData*)node->private_data;
+
     if (!data || !data->obj) {
         return 0;
     }
@@ -442,11 +578,13 @@ int shm_get_phys_pages(struct vfs_node* node, const uint32_t** out_pages, uint32
 
 struct vfs_node* shm_create_node(uint32_t size) {
     auto obj = kernel::shm::ShmObject::create(size);
+
     if (!obj) {
         return nullptr;
     }
 
     vfs_node_t* node = kernel::shm::create_node_for_object(kernel::move(obj));
+
     if (!node) {
         return nullptr;
     }
@@ -458,6 +596,7 @@ struct vfs_node* shm_create_node(uint32_t size) {
 
 struct vfs_node* shm_create_named_node(const char* name, uint32_t size) {
     const uint32_t nlen = kernel::shm::name_len_bounded(name);
+
     if (nlen == 0u) {
         return nullptr;
     }
@@ -467,18 +606,22 @@ struct vfs_node* shm_create_named_node(const char* name, uint32_t size) {
     }
 
     auto obj = kernel::shm::ShmObject::create(size);
+
     if (!obj) {
         return nullptr;
     }
 
     const kernel::string key(name);
+
     if (!kernel::shm::registry().insert_unique(key, obj.get())) {
         return nullptr;
     }
 
     vfs_node_t* node = kernel::shm::create_node_for_object(kernel::move(obj));
+
     if (!node) {
         (void)shm_unlink_named(name);
+
         return nullptr;
     }
 
@@ -489,6 +632,7 @@ struct vfs_node* shm_create_named_node(const char* name, uint32_t size) {
 
 struct vfs_node* shm_open_named_node(const char* name) {
     const uint32_t nlen = kernel::shm::name_len_bounded(name);
+
     if (nlen == 0u) {
         return nullptr;
     }
@@ -500,11 +644,13 @@ struct vfs_node* shm_open_named_node(const char* name) {
     const kernel::string key(name);
 
     auto obj = kernel::shm::registry().find_and_retain(key);
+
     if (!obj) {
         return nullptr;
     }
 
     vfs_node_t* node = kernel::shm::create_node_for_object(kernel::move(obj));
+
     if (!node) {
         return nullptr;
     }
@@ -516,6 +662,7 @@ struct vfs_node* shm_open_named_node(const char* name) {
 
 int shm_unlink_named(const char* name) {
     const uint32_t nlen = kernel::shm::name_len_bounded(name);
+
     if (nlen == 0u) {
         return -1;
     }
@@ -527,9 +674,11 @@ int shm_unlink_named(const char* name) {
     const kernel::string key(name);
 
     auto obj = kernel::shm::registry().remove(key);
+
     if (!obj) {
         return -1;
     }
+
     return 0;
 }
 

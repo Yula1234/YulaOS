@@ -4,6 +4,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t width;
     uint32_t height;
@@ -88,5 +92,9 @@ int virtio_gpu_virgl_copy_region(uint32_t dst_resource_id,
                                  uint32_t depth);
 
 int virtio_gpu_resource_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

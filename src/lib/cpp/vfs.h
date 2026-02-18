@@ -10,11 +10,22 @@ namespace kernel {
 class VirtualFSNode {
 public:
     VirtualFSNode();
+
     explicit VirtualFSNode(vfs_node_t* node);
+
+    static VirtualFSNode adopt(vfs_node_t* node) {
+        return VirtualFSNode(node);
+    }
+
     static VirtualFSNode from_borrowed(vfs_node_t* node);
+
+    static VirtualFSNode retained(vfs_node_t* node) {
+        return from_borrowed(node);
+    }
 
     VirtualFSNode(const VirtualFSNode&) = delete;
     VirtualFSNode& operator=(const VirtualFSNode&) = delete;
+
     VirtualFSNode(VirtualFSNode&& other) noexcept;
     VirtualFSNode& operator=(VirtualFSNode&& other) noexcept;
 
@@ -56,6 +67,7 @@ public:
 
     int open() const;
     int close() const;
+    
     int read(uint32_t offset, uint32_t size, void* buffer) const;
     int write(uint32_t offset, uint32_t size, const void* buffer) const;
     int ioctl(uint32_t req, void* arg) const;

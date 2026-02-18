@@ -181,4 +181,4 @@ QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
 -device usb-mouse,bus=uhci.0,port=2
 "
 
-qemu-system-x86_64 -cdrom bin/yulaos.iso $QEMU_ARGS
+qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS

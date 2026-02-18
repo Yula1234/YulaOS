@@ -9,6 +9,7 @@
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
+#include <lib/cpp/hash_traits.h>
 #include <mm/heap.h>
 #include <lib/string.h>
 
@@ -393,6 +394,46 @@ public:
         return false;
     }
 
+    bool remove_and_get(const K& key, V& out_value) {
+        Operation op(*this);
+        if (!op) {
+            return false;
+        }
+
+        Bucket* local_buckets = op.buckets();
+        const size_t local_mask = op.mask();
+
+        const uint32_t h = bucket_index(key, local_mask);
+        Bucket& b = local_buckets[h];
+
+        kernel::SpinLockGuard lock(b.lock);
+
+        Entry* e = b.head;
+        Entry* prev = nullptr;
+
+        while (e) {
+            if (e->key == key) {
+                out_value = e->value;
+
+                if (prev) {
+                    prev->next = e->next;
+                } else {
+                    b.head = e->next;
+                }
+
+                destroy_entry(e);
+
+                size_.fetch_sub(1u, kernel::memory_order::seq_cst);
+                return true;
+            }
+
+            prev = e;
+            e = e->next;
+        }
+
+        return false;
+    }
+
     bool remove(const K& key) {
         Operation op(*this);
         if (!op) {
@@ -571,6 +612,10 @@ public:
             Iterator& operator=(const Iterator&) = default;
 
             bool operator==(const Iterator& other) const {
+                if (!view_ && !other.view_) {
+                    return true;
+                }
+
                 return view_ == other.view_
                     && entry_ == other.entry_
                     && bucket_index_ == other.bucket_index_;
@@ -601,6 +646,10 @@ public:
 
                 if (entry_) {
                     entry_ = entry_->next;
+                }
+
+                if (!entry_) {
+                    bucket_index_++;
                 }
 
                 advance_to_next();
@@ -662,6 +711,10 @@ public:
             ConstIterator& operator=(const ConstIterator&) = default;
 
             bool operator==(const ConstIterator& other) const {
+                if (!view_ && !other.view_) {
+                    return true;
+                }
+
                 return view_ == other.view_
                     && entry_ == other.entry_
                     && bucket_index_ == other.bucket_index_;
@@ -692,6 +745,10 @@ public:
 
                 if (entry_) {
                     entry_ = entry_->next;
+                }
+
+                if (!entry_) {
+                    bucket_index_++;
                 }
 
                 advance_to_next();
@@ -905,7 +962,7 @@ private:
     kernel::atomic<uint32_t> active_ops{0u};
 
     uint32_t bucket_index(const K& key, size_t mask) const {
-        return hash(key) & (uint32_t)mask;
+        return kernel::HashTraits<K>::hash(key) & (uint32_t)mask;
     }
 
     static size_t normalize_bucket_count(size_t value) {
@@ -1076,5 +1133,5 @@ private:
         }
     }
 
-    static uint32_t hash(const K& key);
+    static uint32_t hash(const K& key) = delete;
 };

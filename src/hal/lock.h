@@ -8,6 +8,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     volatile uint32_t locked;
 } spinlock_t;
@@ -95,6 +99,10 @@ void rwlock_acquire_read(rwlock_t* rw);
 void rwlock_release_read(rwlock_t* rw);
 void rwlock_acquire_write(rwlock_t* rw);
 void rwlock_release_write(rwlock_t* rw);
+
+#ifdef __cplusplus
+}
+#endif
 
 
 #endif
