@@ -99,6 +99,29 @@ private:
     uint32_t flags_ = 0u;
 };
 
+class SpinLockNativeGuard {
+public:
+    explicit SpinLockNativeGuard(spinlock_t& lock)
+        : lock_(&lock) {
+        spinlock_acquire(lock_);
+    }
+
+    SpinLockNativeGuard(const SpinLockNativeGuard&) = delete;
+    SpinLockNativeGuard& operator=(const SpinLockNativeGuard&) = delete;
+
+    SpinLockNativeGuard(SpinLockNativeGuard&&) = delete;
+    SpinLockNativeGuard& operator=(SpinLockNativeGuard&&) = delete;
+
+    ~SpinLockNativeGuard() {
+        if (lock_) {
+            spinlock_release(lock_);
+        }
+    }
+
+private:
+    spinlock_t* lock_ = nullptr;
+};
+
 class SpinLockGuard {
 public:
     explicit SpinLockGuard(SpinLock& lock)
