@@ -16,6 +16,10 @@
 #include <kernel/shm.h>
 #include <kernel/panic.h>
 
+#ifdef KERNEL_PROFILE
+#include <kernel/profiler.h>
+#endif
+
 #include <hal/io.h>
 #include <hal/apic.h>
 #include <hal/irq.h>
@@ -289,37 +293,49 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 extern void proc_check_sleepers(uint32_t current_tick);
 
 void isr_handler(registers_t* regs) {
+    cpu_t* cpu = 0;
+    task_t* curr = 0;
+
     if (regs->int_no == 0xFF) {
         return;
     }
 
+#ifdef KERNEL_PROFILE
+    profiler_irq_enter();
+#endif
+
     if (regs->int_no == IPI_TLB_VECTOR) {
         smp_tlb_ipi_handler();
         lapic_eoi();
-        return;
+        goto out;
     }
 
     if (regs->int_no == IPI_BLIT_VECTOR) {
         smp_blit_ipi_handler();
         lapic_eoi();
-        return;
+        goto out;
     }
-    cpu_t* cpu = cpu_current();
-    task_t* curr = cpu->current_task;
+
+    cpu = cpu_current();
+    curr = cpu->current_task;
 
     if (regs->int_no == 0x80) {
         syscall_handler(regs);
         cpu = cpu_current();
         curr = cpu ? cpu->current_task : 0;
+
         if (curr) {
             maybe_deliver_pending_signal(curr, regs);
         }
-        return;
+
+        goto out;
     }
 
-    if (regs->int_no == 255) return; 
+    if (regs->int_no == 255) {
+        goto out;
+    }
 
-    else if (regs->int_no >= 32) {
+    if (regs->int_no >= 32) {
         if (regs->int_no == 32) {
             cpu->sched_ticks++;
 
@@ -363,188 +379,183 @@ void isr_handler(registers_t* regs) {
                         curr->exec_start = cpu->sched_ticks;
                     }
                 }
-                
-                if (curr->ticks_left > 0) curr->ticks_left--;
+
+                if (curr->ticks_left > 0) {
+                    curr->ticks_left--;
+                }
+
                 if (curr->ticks_left == 0) {
-                    curr->ticks_left = curr->quantum; 
+                    curr->ticks_left = curr->quantum;
                     lapic_eoi();
                     sched_yield();
-                    return; 
+                    goto out;
                 }
             }
 
             if (curr) {
                 maybe_deliver_pending_signal(curr, regs);
             }
-            lapic_eoi();
-            return;
-        } 
-        else {
-            if (irq_vector_handlers[regs->int_no]) {
-                irq_vector_handlers[regs->int_no](regs);
-            }
-
-            if (curr) {
-                maybe_deliver_pending_signal(curr, regs);
-            }
-
-            if (g_legacy_pic_enabled && regs->int_no >= 32 && regs->int_no <= 47) {
-                if (regs->int_no >= 40) outb(0xA0, 0x20);
-                outb(0x20, 0x20);
-            }
 
             lapic_eoi();
-            return;
+            goto out;
         }
+
+        if (irq_vector_handlers[regs->int_no]) {
+            irq_vector_handlers[regs->int_no](regs);
+        }
+
+        if (curr) {
+            maybe_deliver_pending_signal(curr, regs);
+        }
+
+        if (g_legacy_pic_enabled && regs->int_no >= 32 && regs->int_no <= 47) {
+            if (regs->int_no >= 40) {
+                outb(0xA0, 0x20);
+            }
+            outb(0x20, 0x20);
+        }
+
+        lapic_eoi();
+        goto out;
     }
 
-    else if (regs->int_no < 32) {
-        if (regs->int_no == 14) {
-            uint32_t cr2;
-            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    if (regs->int_no < 32) {
+        if (regs->int_no == 8) {
+            early_exception_halt("Double Fault", regs, 0);
+        }
 
-            int handled = 0;
+        uint32_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 
-            if (cr2 >= 0xC0000000) {
-                uint32_t pd_idx = cr2 >> 22;
-                uint32_t* current_dir = (uint32_t*)get_cr3();
-                if ((kernel_page_directory[pd_idx] & 1) && !(current_dir[pd_idx] & 1)) {
-                    current_dir[pd_idx] = kernel_page_directory[pd_idx];
-                    __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
-                    return;
-                }
+        int handled = 0;
+
+        if (cr2 >= 0xC0000000) {
+            uint32_t pd_idx = cr2 >> 22;
+            uint32_t* current_dir = (uint32_t*)get_cr3();
+            if ((kernel_page_directory[pd_idx] & 1) && !(current_dir[pd_idx] & 1)) {
+                current_dir[pd_idx] = kernel_page_directory[pd_idx];
+                __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
+                goto out;
             }
-            
-            int is_user_access = (regs->cs == 0x1B);
-            int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
+        }
 
-            if (!handled && (is_user_access || is_kernel_access_to_user) && !(regs->err_code & 1) && curr && curr->mem && curr->mem->page_dir) {
-                
-                if (!handled && cr2 >= curr->stack_bottom && cr2 < curr->stack_top) {
-                    void* new_page = pmm_alloc_block();
-                    if (new_page) {
-                        uint32_t vaddr = cr2 & ~0xFFF;
-                        paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
-                        curr->mem->mem_pages++;
-                        __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
-                        handled = 1;
-                    } else {
-                        curr->pending_signals |= (1u << SIGSEGV);
-                        if (regs->cs == 0x1B) {
-                            maybe_deliver_pending_signal(curr, regs);
-                            return;
-                        }
-                        proc_kill(curr);
-                        sched_yield();
-                        return;
-                    }
-                }
+        const int is_user_access = (regs->cs == 0x1B);
+        const int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
-                if (!handled) {
-                    if (cr2 >= curr->mem->heap_start && cr2 < curr->mem->prog_break) {
-                        void* new_page = pmm_alloc_block();
-                        if (new_page) {
-                            uint32_t vaddr = cr2 & ~0xFFF;
-                            paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
-                            curr->mem->mem_pages++;
-                            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
-                            handled = 1;
-                        } else {
-                            curr->pending_signals |= (1u << SIGSEGV);
-                            if (regs->cs == 0x1B) {
-                                maybe_deliver_pending_signal(curr, regs);
-                                return;
-                            }
-                            proc_kill(curr);
-                            sched_yield();
-                            return;
-                        }
+        if (!handled && (is_user_access || is_kernel_access_to_user) && !(regs->err_code & 1) && curr && curr->mem && curr->mem->page_dir) {
+            if (!handled && cr2 >= curr->stack_bottom && cr2 < curr->stack_top) {
+                void* new_page = pmm_alloc_block();
+                if (new_page) {
+                    uint32_t vaddr = cr2 & ~0xFFF;
+                    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                    curr->mem->mem_pages++;
+                    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                    handled = 1;
+                } else {
+                    curr->pending_signals |= (1u << SIGSEGV);
+                    if (regs->cs == 0x1B) {
+                        maybe_deliver_pending_signal(curr, regs);
+                        goto out;
                     }
-                }
-
-                if (!handled) {
-                    int r = handle_mmap_demand_fault(curr, cr2);
-                    if (r == 1) {
-                        handled = 1;
-                    } else if (r < 0) {
-                        curr->pending_signals |= (1u << SIGSEGV);
-                        if (regs->cs == 0x1B) {
-                            maybe_deliver_pending_signal(curr, regs);
-                            return;
-                        }
-                        proc_kill(curr);
-                        sched_yield();
-                        return;
-                    }
+                    proc_kill(curr);
+                    sched_yield();
+                    goto out;
                 }
             }
 
-            if (!handled && regs->cs == 0x08) {
-                uint32_t* dir = (uint32_t*)get_cr3();
-                uint32_t pd_idx = cr2 >> 22;
-                uint32_t pt_idx = (cr2 >> 12) & 0x3FF;
-
-                if (dir[pd_idx] & 1) {
-                    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
-                    if (pt[pt_idx] & 1) {
-                        __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
-                        return;
+            if (!handled && cr2 >= curr->mem->heap_start && cr2 < curr->mem->prog_break) {
+                void* new_page = pmm_alloc_block();
+                if (new_page) {
+                    uint32_t vaddr = cr2 & ~0xFFF;
+                    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                    curr->mem->mem_pages++;
+                    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                    handled = 1;
+                } else {
+                    curr->pending_signals |= (1u << SIGSEGV);
+                    if (regs->cs == 0x1B) {
+                        maybe_deliver_pending_signal(curr, regs);
+                        goto out;
                     }
+                    proc_kill(curr);
+                    sched_yield();
+                    goto out;
                 }
             }
 
             if (!handled) {
-                int is_kernel_access_to_user2 = (regs->cs == 0x08 && cr2 < 0xC0000000);
-
-                if (regs->cs != 0x1B && !is_kernel_access_to_user2) {
-                    if (!g_fb_mapped) {
-                        early_exception_halt("Kernel Page Fault", regs, cr2);
+                int r = handle_mmap_demand_fault(curr, cr2);
+                if (r == 1) {
+                    handled = 1;
+                } else if (r < 0) {
+                    curr->pending_signals |= (1u << SIGSEGV);
+                    if (regs->cs == 0x1B) {
+                        maybe_deliver_pending_signal(curr, regs);
+                        goto out;
                     }
-                    kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
-                } else {
-                    if (curr) {
-                        curr->last_fault_cr2 = cr2;
-                        curr->last_fault_eip = regs->eip;
-                        curr->last_fault_err = regs->err_code;
-                        curr->last_fault_int = (uint8_t)regs->int_no;
-
-                        curr->pending_signals |= (1u << SIGSEGV);
-                        if (regs->cs == 0x1B) {
-                            maybe_deliver_pending_signal(curr, regs);
-                        } else {
-                            proc_kill(curr);
-                            sched_yield();
-                        }
-                    } else {
-                        if (!g_fb_mapped) {
-                            early_exception_halt("Page Fault in Kernel", regs, cr2);
-                        }
-                        kernel_panic("Page Fault in Kernel", "idt.c", regs->int_no, regs);
-                    }
+                    proc_kill(curr);
+                    sched_yield();
+                    goto out;
                 }
-            }
-        } else {
-            const char* msg = "Unknown Exception";
-            if (regs->int_no < 32) {
-                msg = exception_messages[regs->int_no];
-            }
-
-            if (regs->cs == 0x1B && curr) {
-                (void)msg;
-                curr->pending_signals |= (1u << SIGILL);
-                maybe_deliver_pending_signal(curr, regs);
-            } else {
-                if (!g_fb_mapped) {
-                    early_exception_halt(msg, regs, 0);
-                }
-                kernel_panic(msg, "idt.c", regs->int_no, regs);
             }
         }
+
+        if (!handled && regs->cs == 0x08) {
+            uint32_t* dir = (uint32_t*)get_cr3();
+            uint32_t pd_idx = cr2 >> 22;
+            uint32_t pt_idx = (cr2 >> 12) & 0x3FF;
+
+            if (dir[pd_idx] & 1) {
+                uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
+                if (pt[pt_idx] & 1) {
+                    __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
+                    goto out;
+                }
+            }
+        }
+
+        if (!handled) {
+            int is_kernel_access_to_user2 = (regs->cs == 0x08 && cr2 < 0xC0000000);
+
+            if (regs->cs != 0x1B && !is_kernel_access_to_user2) {
+                if (!g_fb_mapped) {
+                    early_exception_halt("Kernel Page Fault", regs, cr2);
+                }
+                kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
+            } else {
+                if (curr) {
+                    curr->last_fault_cr2 = cr2;
+                    curr->last_fault_eip = regs->eip;
+                    curr->last_fault_err = regs->err_code;
+                    curr->last_fault_int = (uint8_t)regs->int_no;
+
+                    curr->pending_signals |= (1u << SIGSEGV);
+                    if (regs->cs == 0x1B) {
+                        maybe_deliver_pending_signal(curr, regs);
+                    } else {
+                        proc_kill(curr);
+                        sched_yield();
+                    }
+                } else {
+                    if (!g_fb_mapped) {
+                        early_exception_halt("Page Fault in Kernel", regs, cr2);
+                    }
+                    kernel_panic("Page Fault in Kernel", "idt.c", regs->int_no, regs);
+                }
+            }
+        }
+
+        goto out;
     }
 
     if (curr) {
         maybe_deliver_pending_signal(curr, regs);
     }
+
+out:
+#ifdef KERNEL_PROFILE
+    profiler_irq_exit();
+#endif
 }
 
 irq_handler_t irq_get_handler(int irq_no) {

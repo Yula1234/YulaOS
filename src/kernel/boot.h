@@ -25,7 +25,10 @@ typedef struct {
     uint32_t mods_count;
     uint32_t mods_addr;
 
-    uint32_t unused[4];
+    uint32_t elf_num;
+    uint32_t elf_size;
+    uint32_t elf_addr;
+    uint32_t elf_shndx;
 
     uint32_t mmap_length;
     uint32_t mmap_addr;

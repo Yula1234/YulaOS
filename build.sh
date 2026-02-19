@@ -40,6 +40,11 @@ CXXFLAGS_USER="$CFLAGS_USER -std=c++23 -fno-exceptions -fno-rtti -fno-threadsafe
 
 LDFLAGS_USER="--no-warn-rwx-segments -T usr/linker.ld"
 
+if [[ "${KERNEL_PROFILE:-0}" == "1" ]]; then
+    CFLAGS_KERN+=" -finstrument-functions -fno-optimize-sibling-calls -DKERNEL_PROFILE=1"
+    CXXFLAGS_KERN+=" -finstrument-functions -fno-optimize-sibling-calls -DKERNEL_PROFILE=1"
+fi
+
 mkdir -p "${DIRS[@]}"
 
 gcc -O3 tools/yulafs_tool.c -o "$TOOL" &
@@ -78,7 +83,11 @@ for FILE in $(find src -name "*.cpp"); do
     FLAT="${REL//\//_}"
     OBJ="bin/obj/${FLAT%.*}.o"
 
-    $CXX $CXXFLAGS_KERN -c "$FILE" -o "$OBJ" &
+    if [[ "${KERNEL_PROFILE:-0}" == "1" && "$FILE" == "src/kernel/profiler.cpp" ]]; then
+        $CXX $CXXFLAGS_KERN -fno-instrument-functions -c "$FILE" -o "$OBJ" &
+    else
+        $CXX $CXXFLAGS_KERN -c "$FILE" -o "$OBJ" &
+    fi
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
 done
 
@@ -125,7 +134,31 @@ wait
 
 echo "[ld] linking kernel..."
 SORTED_K_OBJS=$(echo $KERNEL_OBJ_FILES | tr ' ' '\n' | sort | tr '\n' ' ')
-$LD -T src/linker.ld -o bin/kernel.bin $SORTED_K_OBJS &
+
+if [[ "${KERNEL_PROFILE:-0}" == "1" ]]; then
+    $LD -T src/linker.ld -o bin/kernel.elf $SORTED_K_OBJS
+
+    nm -n bin/kernel.elf \
+        | awk '$2=="t" || $2=="T" { print $1 " " $3 }' \
+        | awk 'BEGIN { \
+                print "#include <kernel/ksyms.h>"; \
+                print "const ksym_t ksyms_table[] = {"; \
+            } \
+            { \
+                printf "    { 0x%s, \"%s\" },\n", $1, $2; \
+            } \
+            END { \
+                print "};"; \
+                print "const uint32_t ksyms_count = sizeof(ksyms_table) / sizeof(ksyms_table[0]);"; \
+            }' \
+        > bin/obj/ksyms_table.c
+
+    $CC $CFLAGS_KERN -fno-instrument-functions -c bin/obj/ksyms_table.c -o bin/obj/ksyms_table.o
+
+    $LD -T src/linker.ld -o bin/kernel.bin $SORTED_K_OBJS bin/obj/ksyms_table.o &
+else
+    $LD -T src/linker.ld -o bin/kernel.bin $SORTED_K_OBJS &
+fi
 
 for APP in "${USER_APPS[@]}"; do
     (
@@ -178,7 +211,7 @@ QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
 -drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe,aio=io_uring
 -accel kvm -device virtio-vga-gl,xres=1680,yres=1050 -display sdl,gl=on -smp 3 -mem-prealloc
 -cpu host,migratable=no,+invtsc,l3-cache=on -audiodev pa,id=snd0
--device usb-mouse,bus=uhci.0,port=2
+-device usb-mouse,bus=uhci.0,port=2 -serial file:trace.txt
 "
 
 qemu-system-i386 -cdrom bin/yulaos.iso $QEMU_ARGS

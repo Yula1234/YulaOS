@@ -44,6 +44,9 @@
 #include <mm/pmm.h>
 #include <kernel/panic.h>
 
+#include <kernel/profiler.h>
+#include <kernel/symbols.h>
+
 #include <stdint.h>
 
 volatile uint32_t kernel_simd_caps;
@@ -63,6 +66,8 @@ static int g_enable_uhci = ENABLE_UHCI;
 
 static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
     validate_multiboot(magic, mb_info);
+
+    symbols_init(mb_info);
 
     kernel_enable_sse();
     cpu_init_system();
@@ -191,6 +196,10 @@ static void kmain_spawn_service_tasks(void) {
 
     ahci_set_async_mode(1);
     proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
+
+#ifdef KERNEL_PROFILE
+    proc_spawn_kthread("profiler", PRIO_LOW, profiler_task, 0);
+#endif
 }
 
 __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* mb_info) {
@@ -206,6 +215,10 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     kmain_spawn_core_tasks();
     kmain_smp_init();
     kmain_spawn_service_tasks();
+
+#ifdef KERNEL_PROFILE
+    profiler_init();
+#endif
 
     __asm__ volatile("sti");
     sched_yield();
