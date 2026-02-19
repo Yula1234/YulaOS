@@ -292,6 +292,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 
 extern void proc_check_sleepers(uint32_t current_tick);
 
+__attribute__((no_instrument_function))
 void isr_handler(registers_t* regs) {
     cpu_t* cpu = 0;
     task_t* curr = 0;
