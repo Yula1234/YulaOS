@@ -22,7 +22,7 @@ constexpr uint32_t kFnTableSize = 8192;
 constexpr uint32_t kEdgeTableSize = 8192;
 constexpr uint32_t kMaxStackDepth = 64;
 
-constexpr uint32_t kTopN = 24;
+constexpr uint32_t kTopN = 20;
 constexpr uint32_t kTopChildren = 8;
 
 struct FnStat {
@@ -966,7 +966,7 @@ void profiler_task(void* arg) {
     (void)arg;
 
     for (;;) {
-        proc_usleep(10000000);
+        proc_usleep(5000000);
         profiler_dump_stats();
         profiler_reset_stats();
     }
