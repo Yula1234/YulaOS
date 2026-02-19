@@ -6,6 +6,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define PTE_PRESENT 0x001u
 #define PTE_RW      0x002u
 #define PTE_USER    0x004u
@@ -27,5 +31,9 @@ int paging_is_user_accessible(uint32_t* dir, uint32_t virt);
 uint32_t paging_get_phys(uint32_t* dir, uint32_t virt);
 
 extern uint32_t* kernel_page_directory;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

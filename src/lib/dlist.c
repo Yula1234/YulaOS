@@ -27,6 +27,7 @@ static inline void __dlist_del(dlist_head_t *prev, dlist_head_t *next) {
 
 void dlist_del(dlist_head_t *entry) {
     __dlist_del(entry->prev, entry->next);
+    
     entry->next = 0;
     entry->prev = 0;
 }
