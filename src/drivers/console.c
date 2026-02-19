@@ -11,6 +11,9 @@
 #include <hal/lock.h>
 #include <yos/ioctl.h>
 
+#include <drivers/console.h>
+#include <drivers/vga.h>
+
 #include "console.h"
 #include "vga.h"
 
@@ -95,6 +98,8 @@ static int console_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
         int max_view_row = term->max_row - view_rows + 1;
         if (max_view_row < 0) max_view_row = 0;
 
+        int old_view_row = term->view_row;
+
         if (s->delta == 0) {
             term->view_row = max_view_row;
         } else if (s->delta > 0) {
@@ -105,6 +110,10 @@ static int console_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             int next = term->view_row - s->delta;
             if (next > max_view_row) next = max_view_row;
             term->view_row = next;
+        }
+
+        if (term->view_row != old_view_row) {
+            term_invalidate_view(term);
         }
 
         spinlock_release(&term->lock);

@@ -28,8 +28,16 @@ typedef struct {
     uint32_t* fg_colors;
     uint32_t* bg_colors;
 
+    uint64_t seq;
+    uint64_t view_seq;
+
     int history_cap_rows;
     int history_rows;
+
+    uint8_t* dirty_rows;
+    int* dirty_x1;
+    int* dirty_x2;
+    int full_redraw;
 
     uint32_t curr_fg;
     uint32_t curr_bg;
@@ -67,6 +75,10 @@ void term_reflow(term_instance_t* term, int new_cols);
 void term_clear_row(term_instance_t* term, int row);
 void term_get_cell(term_instance_t* term, int row, int col, char* out_ch, uint32_t* out_fg, uint32_t* out_bg);
 void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg, uint32_t bg);
+
+void term_invalidate_view(term_instance_t* term);
+
+int term_dirty_extract_visible(term_instance_t* term, uint8_t* out_rows, int* out_x1, int* out_x2, int out_rows_cap, int* out_full_redraw);
 
 void vga_init(void);
 void vga_init_graphics(void);

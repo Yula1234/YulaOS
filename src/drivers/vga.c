@@ -11,6 +11,76 @@
 
 #include "vga.h"
 
+static inline void term_bump_seq(term_instance_t* term) {
+    if (!term) return;
+    term->seq++;
+    if (term->seq == 0) term->seq = 1;
+}
+
+static inline void term_bump_view_seq(term_instance_t* term) {
+    if (!term) return;
+    term->view_seq++;
+    if (term->view_seq == 0) term->view_seq = 1;
+}
+
+static inline void term_dirty_reset_row(term_instance_t* term, int row, int cols) {
+    if (!term || !term->dirty_rows || !term->dirty_x1 || !term->dirty_x2) return;
+    if (row < 0 || row >= term->history_cap_rows) return;
+
+    term->dirty_rows[row] = 0;
+    term->dirty_x1[row] = cols;
+    term->dirty_x2[row] = -1;
+}
+
+static inline void term_dirty_mark_range(term_instance_t* term, int row, int x0, int x1) {
+    if (!term) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    if (row < 0) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 > cols) x1 = cols;
+    if (x0 >= x1) return;
+
+    if (!term->dirty_rows || !term->dirty_x1 || !term->dirty_x2) {
+        term->full_redraw = 1;
+        return;
+    }
+
+    if (row >= term->history_cap_rows) return;
+
+    term->dirty_rows[row] = 1;
+    if (term->dirty_x1[row] > x0) term->dirty_x1[row] = x0;
+    if (term->dirty_x2[row] < x1) term->dirty_x2[row] = x1;
+}
+
+static void term_mark_all_dirty(term_instance_t* term) {
+    if (!term) return;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    int rows = term->history_rows;
+    if (rows < 1) rows = 1;
+    if (rows > term->history_cap_rows) rows = term->history_cap_rows;
+
+    if (!term->dirty_rows || !term->dirty_x1 || !term->dirty_x2) {
+        term->full_redraw = 1;
+        return;
+    }
+
+    for (int r = 0; r < rows; r++) {
+        term->dirty_rows[r] = 1;
+        term->dirty_x1[r] = 0;
+        term->dirty_x2[r] = cols;
+    }
+
+    for (int r = rows; r < term->history_cap_rows; r++) {
+        term_dirty_reset_row(term, r, cols);
+    }
+}
+
 static inline int vga_get_hw_fb(uint32_t** out_ptr, uint32_t* out_pitch, uint32_t* out_w, uint32_t* out_h) {
     if (out_ptr) *out_ptr = 0;
     if (out_pitch) *out_pitch = 0;
@@ -253,12 +323,22 @@ static int term_ensure_rows(term_instance_t* term, int rows_needed) {
     term->fg_colors = (uint32_t*)krealloc(term->fg_colors, new_cells * sizeof(uint32_t));
     term->bg_colors = (uint32_t*)krealloc(term->bg_colors, new_cells * sizeof(uint32_t));
 
-    if (!term->buffer || !term->fg_colors || !term->bg_colors) return -1;
+    term->dirty_rows = (uint8_t*)krealloc(term->dirty_rows, (size_t)new_cap);
+    term->dirty_x1 = (int*)krealloc(term->dirty_x1, (size_t)new_cap * sizeof(int));
+    term->dirty_x2 = (int*)krealloc(term->dirty_x2, (size_t)new_cap * sizeof(int));
+
+    if (!term->buffer || !term->fg_colors || !term->bg_colors || !term->dirty_rows || !term->dirty_x1 || !term->dirty_x2) return -1;
 
     for (size_t i = old_cells; i < new_cells; i++) {
         term->buffer[i] = ' ';
         term->fg_colors[i] = term->curr_fg;
         term->bg_colors[i] = term->curr_bg;
+    }
+
+    for (int r = old_cap; r < new_cap; r++) {
+        term->dirty_rows[r] = 1;
+        term->dirty_x1[r] = 0;
+        term->dirty_x2[r] = cols;
     }
 
     term->history_cap_rows = new_cap;
@@ -314,6 +394,8 @@ static void term_set_cursor(term_instance_t* term, int row, int col) {
 
     if (term->row >= term->history_rows) term->history_rows = term->row + 1;
     if (term->row > term->max_row) term->max_row = term->row;
+
+    term_bump_view_seq(term);
 }
 
 static void term_clear_row_range(term_instance_t* term, int row, int x0, int x1) {
@@ -341,6 +423,9 @@ static void term_clear_row_range(term_instance_t* term, int row, int x0, int x1)
 
     if (row >= term->history_rows) term->history_rows = row + 1;
     if (row > term->max_row) term->max_row = row;
+
+    term_dirty_mark_range(term, row, x0, x1);
+    term_bump_seq(term);
 }
 
 static void term_clear_all(term_instance_t* term) {
@@ -358,6 +443,10 @@ static void term_clear_all(term_instance_t* term) {
     term->view_row = 0;
     term->max_row = 0;
     term->history_rows = 1;
+
+    term->full_redraw = 1;
+    term_mark_all_dirty(term);
+    term_bump_view_seq(term);
 }
 
 static void term_apply_sgr(term_instance_t* term) {
@@ -464,6 +553,9 @@ void term_init(term_instance_t* term) {
 
     spinlock_init(&term->lock);
 
+    term->seq = 1;
+    term->view_seq = 1;
+
     term->history_cap_rows = 0;
     term->history_rows = 1;
 
@@ -479,7 +571,14 @@ void term_init(term_instance_t* term) {
     term->fg_colors = 0;
     term->bg_colors = 0;
 
+    term->dirty_rows = 0;
+    term->dirty_x1 = 0;
+    term->dirty_x2 = 0;
+    term->full_redraw = 1;
+
     term_ensure_rows(term, 1);
+
+    term_mark_all_dirty(term);
 
     term->col = 0;
     term->row = 0;
@@ -500,9 +599,15 @@ void term_destroy(term_instance_t* term) {
     if (term->buffer) kfree(term->buffer);
     if (term->fg_colors) kfree(term->fg_colors);
     if (term->bg_colors) kfree(term->bg_colors);
+    if (term->dirty_rows) kfree(term->dirty_rows);
+    if (term->dirty_x1) kfree(term->dirty_x1);
+    if (term->dirty_x2) kfree(term->dirty_x2);
     term->buffer = 0;
     term->fg_colors = 0;
     term->bg_colors = 0;
+    term->dirty_rows = 0;
+    term->dirty_x1 = 0;
+    term->dirty_x2 = 0;
     term->history_cap_rows = 0;
     term->history_rows = 0;
 }
@@ -522,6 +627,9 @@ void term_clear_row(term_instance_t* term, int row) {
     }
 
     if (row >= term->history_rows) term->history_rows = row + 1;
+
+    term_dirty_mark_range(term, row, 0, cols);
+    term_bump_seq(term);
 }
 
 void term_get_cell(term_instance_t* term, int row, int col, char* out_ch, uint32_t* out_fg, uint32_t* out_bg) {
@@ -551,12 +659,21 @@ void term_set_cell(term_instance_t* term, int row, int col, char ch, uint32_t fg
     if (term_ensure_rows(term, row + 1) != 0) return;
 
     size_t idx = (size_t)row * (size_t)cols + (size_t)col;
+    if (term->buffer[idx] == ch && term->fg_colors[idx] == fg && term->bg_colors[idx] == bg) {
+        if (row >= term->history_rows) term->history_rows = row + 1;
+        if (row > term->max_row) term->max_row = row;
+        return;
+    }
+
     term->buffer[idx] = ch;
     term->fg_colors[idx] = fg;
     term->bg_colors[idx] = bg;
 
     if (row >= term->history_rows) term->history_rows = row + 1;
     if (row > term->max_row) term->max_row = row;
+
+    term_dirty_mark_range(term, row, col, col + 1);
+    term_bump_seq(term);
 }
 
 void term_putc(term_instance_t* term, char c) {
@@ -575,11 +692,15 @@ void term_putc(term_instance_t* term, char c) {
         term->max_row = 0;
         term->history_rows = 1;
         term_clear_row(term, 0);
+        term->full_redraw = 1;
+        term_mark_all_dirty(term);
+        term_bump_view_seq(term);
         return;
     }
 
     if (c == '\r') {
         term->col = 0;
+        term_bump_view_seq(term);
         return;
     }
 
@@ -596,6 +717,8 @@ void term_putc(term_instance_t* term, char c) {
             term->buffer[idx + k] = ' ';
         }
 
+        term_dirty_mark_range(term, term->row, term->col, cols);
+
         term->col = 0; 
         term->row++;
 
@@ -607,12 +730,16 @@ void term_putc(term_instance_t* term, char c) {
         term->buffer[idx] = ' ';
         term->fg_colors[idx] = term_effective_fg(term);
         term->bg_colors[idx] = term_effective_bg(term);
+
+        term_dirty_mark_range(term, term->row, term->col, term->col + 1);
     } else {
         if (term_ensure_rows(term, term->row + 1) != 0) return;
         int idx = term->row * cols + term->col;
         term->buffer[idx] = c;
         term->fg_colors[idx] = term_effective_fg(term);
         term->bg_colors[idx] = term_effective_bg(term);
+
+        term_dirty_mark_range(term, term->row, term->col, term->col + 1);
         term->col++;
     }
 
@@ -625,11 +752,95 @@ void term_putc(term_instance_t* term, char c) {
     if (term->row >= term->history_rows) term->history_rows = term->row + 1;
     if (term->row > term->max_row) term->max_row = term->row;
 
+    int old_view_row = term->view_row;
+
     int at_bottom = (term->view_row + view_rows) >= term->row;
     if (at_bottom) {
         if (term->row >= view_rows) term->view_row = term->row - view_rows + 1;
         else term->view_row = 0;
     }
+
+    term_bump_seq(term);
+
+    if (term->view_row != old_view_row) {
+        term_invalidate_view(term);
+    } else {
+        term_bump_view_seq(term);
+    }
+}
+
+void term_invalidate_view(term_instance_t* term) {
+    if (!term) return;
+
+    term->full_redraw = 1;
+    term_mark_all_dirty(term);
+    term_bump_view_seq(term);
+}
+
+int term_dirty_extract_visible(term_instance_t* term, uint8_t* out_rows, int* out_x1, int* out_x2, int out_rows_cap, int* out_full_redraw) {
+    if (out_full_redraw) *out_full_redraw = 0;
+    if (!term || !out_rows || !out_x1 || !out_x2 || out_rows_cap <= 0) return 0;
+
+    int cols = term->cols;
+    if (cols <= 0) cols = TERM_W;
+
+    int view_rows = term->view_rows;
+    if (view_rows <= 0) view_rows = TERM_H;
+
+    int n = (view_rows < out_rows_cap) ? view_rows : out_rows_cap;
+
+    int full = term->full_redraw;
+    if (out_full_redraw) *out_full_redraw = full ? 1 : 0;
+
+    if (full || !term->dirty_rows || !term->dirty_x1 || !term->dirty_x2) {
+        for (int y = 0; y < n; y++) {
+            out_rows[y] = 1;
+            out_x1[y] = 0;
+            out_x2[y] = cols;
+        }
+
+        term->full_redraw = 0;
+
+        if (term->dirty_rows && term->dirty_x1 && term->dirty_x2) {
+            int rows = term->history_rows;
+            if (rows < 1) rows = 1;
+            if (rows > term->history_cap_rows) rows = term->history_cap_rows;
+
+            for (int r = 0; r < rows; r++) {
+                term_dirty_reset_row(term, r, cols);
+            }
+        }
+
+        return n;
+    }
+
+    for (int y = 0; y < n; y++) {
+        int src_row = term->view_row + y;
+        if (src_row < 0 || src_row >= term->history_cap_rows) {
+            out_rows[y] = 0;
+            out_x1[y] = cols;
+            out_x2[y] = -1;
+            continue;
+        }
+
+        if (!term->dirty_rows[src_row]) {
+            out_rows[y] = 0;
+            out_x1[y] = cols;
+            out_x2[y] = -1;
+            continue;
+        }
+
+        out_rows[y] = 1;
+        out_x1[y] = term->dirty_x1[src_row];
+        out_x2[y] = term->dirty_x2[src_row];
+
+        if (out_x1[y] < 0) out_x1[y] = 0;
+        if (out_x2[y] > cols) out_x2[y] = cols;
+
+        term_dirty_reset_row(term, src_row, cols);
+    }
+
+    return n;
 }
 
 void term_write(term_instance_t* term, const char* buf, uint32_t len) {
@@ -723,9 +934,26 @@ void term_reflow(term_instance_t* term, int new_cols) {
     char* nb = (char*)kmalloc(cells ? cells : 1);
     uint32_t* nfg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
     uint32_t* nbg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
-    if (!nb || !nfg || !nbg) { if (nb) kfree(nb); if (nfg) kfree(nfg); if (nbg) kfree(nbg); return; }
+    uint8_t* ndr = (uint8_t*)kmalloc((size_t)cap_rows ? (size_t)cap_rows : 1u);
+    int* ndx1 = (int*)kmalloc(((size_t)cap_rows ? (size_t)cap_rows : 1u) * sizeof(int));
+    int* ndx2 = (int*)kmalloc(((size_t)cap_rows ? (size_t)cap_rows : 1u) * sizeof(int));
+    if (!nb || !nfg || !nbg || !ndr || !ndx1 || !ndx2) {
+        if (nb) kfree(nb);
+        if (nfg) kfree(nfg);
+        if (nbg) kfree(nbg);
+        if (ndr) kfree(ndr);
+        if (ndx1) kfree(ndx1);
+        if (ndx2) kfree(ndx2);
+        return;
+    }
 
     for (size_t i = 0; i < cells; i++) { nb[i] = ' '; nfg[i] = term->curr_fg; nbg[i] = term->curr_bg; }
+
+    for (int r = 0; r < cap_rows; r++) {
+        ndr[r] = 1;
+        ndx1[r] = 0;
+        ndx2[r] = new_cols;
+    }
 
     int cur_row = term->row, cur_col = term->col;
     if (cur_row < 0) cur_row = 0;
@@ -768,9 +996,15 @@ void term_reflow(term_instance_t* term, int new_cols) {
     kfree(term->buffer);
     kfree(term->fg_colors);
     kfree(term->bg_colors);
+    if (term->dirty_rows) kfree(term->dirty_rows);
+    if (term->dirty_x1) kfree(term->dirty_x1);
+    if (term->dirty_x2) kfree(term->dirty_x2);
     term->buffer = nb;
     term->fg_colors = nfg;
     term->bg_colors = nbg;
+    term->dirty_rows = ndr;
+    term->dirty_x1 = ndx1;
+    term->dirty_x2 = ndx2;
     term->cols = new_cols;
     term->history_cap_rows = cap_rows;
     term->history_rows = out_r + 1;
@@ -786,6 +1020,11 @@ void term_reflow(term_instance_t* term, int new_cols) {
     if (term->row > term->max_row) term->row = term->max_row;
     if (term->col < 0) term->col = 0;
     if (term->col >= term->cols) term->col = term->cols - 1;
+
+    term->full_redraw = 1;
+    term_mark_all_dirty(term);
+    term_bump_seq(term);
+    term_bump_view_seq(term);
 }
 
 void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y) {
@@ -794,13 +1033,56 @@ void vga_render_terminal_instance(term_instance_t* term, int win_x, int win_y) {
     int view_rows = term ? term->view_rows : 0;
     if (view_rows <= 0) view_rows = TERM_H;
 
+    int use_dirty = (term && term->dirty_rows && term->dirty_x1 && term->dirty_x2 && !term->full_redraw);
+
     for (int y = 0; y < view_rows; y++) {
-        for (int x = 0; x < cols; x++) {
-            char ch;
-            uint32_t fg, bg;
-            term_get_cell(term, term->view_row + y, x, &ch, &fg, &bg);
-            if (bg != COLOR_BLACK) vga_draw_rect(win_x + x * 8, win_y + y * 16, 8, 16, bg);
-            if (ch != ' ') vga_draw_char_sse(win_x + x * 8, win_y + y * 16, ch, fg);
+        int src_row = (term ? (term->view_row + y) : y);
+
+        int x0 = 0;
+        int x1 = cols;
+        if (use_dirty) {
+            if (src_row < 0 || src_row >= term->history_cap_rows) continue;
+            if (!term->dirty_rows[src_row]) continue;
+
+            x0 = term->dirty_x1[src_row];
+            x1 = term->dirty_x2[src_row];
+            if (x0 < 0) x0 = 0;
+            if (x1 > cols) x1 = cols;
+            if (x0 >= x1) continue;
+        }
+
+        if (!term || !term->buffer || !term->fg_colors || !term->bg_colors) continue;
+        if (src_row < 0 || src_row >= term->history_rows) continue;
+
+        size_t row_base = (size_t)src_row * (size_t)cols;
+        int py = win_y + y * 16;
+
+        int run_x0 = x0;
+        uint32_t run_bg = term->bg_colors[row_base + (size_t)x0];
+
+        for (int x = x0 + 1; x < x1; x++) {
+            uint32_t bg = term->bg_colors[row_base + (size_t)x];
+            if (bg == run_bg) continue;
+
+            int px = win_x + run_x0 * 8;
+            vga_draw_rect(px, py, (x - run_x0) * 8, 16, run_bg);
+
+            run_x0 = x;
+            run_bg = bg;
+        }
+
+        {
+            int px = win_x + run_x0 * 8;
+            vga_draw_rect(px, py, (x1 - run_x0) * 8, 16, run_bg);
+        }
+
+        for (int x = x0; x < x1; x++) {
+            size_t idx = row_base + (size_t)x;
+            char ch = term->buffer[idx];
+            if (ch == ' ') continue;
+
+            int px = win_x + x * 8;
+            vga_draw_char_sse(px, py, ch, term->fg_colors[idx]);
         }
     }
 }
