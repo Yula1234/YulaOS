@@ -9,7 +9,6 @@
 #include <kernel/tty/tty_service.h>
 #include <kernel/tty/tty_internal.h>
 
-
 static kernel::term::TermSnapshot tty_snapshot;
 static kernel::term::VgaTermRenderer tty_renderer;
 
@@ -40,8 +39,10 @@ extern "C" void tty_task(void* arg) {
 
         uint32_t reasons = kernel::tty::TtyService::instance().consume_render_requests();
 
-        if ((reasons & static_cast<uint32_t>(kernel::tty::TtyService::RenderReason::ActiveChanged)) != 0u
-            || (reasons & static_cast<uint32_t>(kernel::tty::TtyService::RenderReason::Resize)) != 0u) {
+        if (
+            (reasons & static_cast<uint32_t>(kernel::tty::TtyService::RenderReason::ActiveChanged)) != 0u
+            || (reasons & static_cast<uint32_t>(kernel::tty::TtyService::RenderReason::Resize)) != 0u
+        ) {
             last_seq = (uint64_t)-1;
             last_view_seq = (uint64_t)-1;
             last_cursor_row = -1;
@@ -136,7 +137,12 @@ extern "C" void tty_task(void* arg) {
             vga_mark_dirty(term_x, term_y, term_w, term_h);
         } else if (have_bbox) {
             tty_renderer.render(tty_snapshot, term_x, term_y);
-            vga_mark_dirty(term_x + bb_x1 * 8, term_y + bb_y1 * 16, (bb_x2 - bb_x1) * 8, (bb_y2 - bb_y1) * 16);
+            vga_mark_dirty(
+                term_x + bb_x1 * 8,
+                term_y + bb_y1 * 16,
+                (bb_x2 - bb_x1) * 8,
+                (bb_y2 - bb_y1) * 16
+            );
         }
 
         int rel_row = tty_snapshot.cursor_row();

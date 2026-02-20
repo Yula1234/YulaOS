@@ -42,6 +42,7 @@ public:
     int dirty_row_range(int row, int& out_x1, int& out_x2) const;
 
     char ch_at(int row, int col) const;
+    
     uint32_t fg_at(int row, int col) const;
     uint32_t bg_at(int row, int col) const;
 

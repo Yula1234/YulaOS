@@ -55,7 +55,10 @@ extern "C" tty_handle_t* tty_bridge_create_default(void) {
 
 extern "C" void tty_bridge_set_active(tty_handle_t* tty) {
     kernel::tty::TtyService::instance().set_active(tty);
-    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::ActiveChanged);
+
+    kernel::tty::TtyService::instance().request_render(
+        kernel::tty::TtyService::RenderReason::ActiveChanged
+    );
 }
 
 extern "C" void tty_bridge_print(tty_handle_t* tty, const char* s) {
@@ -66,7 +69,9 @@ extern "C" void tty_bridge_print(tty_handle_t* tty, const char* s) {
 
     term->print(s);
 
-    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
+    kernel::tty::TtyService::instance().request_render(
+        kernel::tty::TtyService::RenderReason::Output
+    );
 }
 
 extern "C" void tty_bridge_putc(tty_handle_t* tty, char c) {
@@ -77,7 +82,9 @@ extern "C" void tty_bridge_putc(tty_handle_t* tty, char c) {
 
     term->putc(c);
 
-    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
+    kernel::tty::TtyService::instance().request_render(
+        kernel::tty::TtyService::RenderReason::Output
+    );
 }
 
 extern "C" void tty_bridge_set_colors(tty_handle_t* tty, uint32_t fg, uint32_t bg) {
@@ -88,7 +95,9 @@ extern "C" void tty_bridge_set_colors(tty_handle_t* tty, uint32_t fg, uint32_t b
 
     term->set_colors(fg, bg);
 
-    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
+    kernel::tty::TtyService::instance().request_render(
+        kernel::tty::TtyService::RenderReason::Output
+    );
 }
 
 extern "C" void tty_bridge_force_redraw_active(void) {
@@ -98,5 +107,7 @@ extern "C" void tty_bridge_force_redraw_active(void) {
         term->invalidate_view();
     }
 
-    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::ActiveChanged);
+    kernel::tty::TtyService::instance().request_render(
+        kernel::tty::TtyService::RenderReason::ActiveChanged
+    );
 }

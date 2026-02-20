@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include <hal/lock.h>
+#include <lib/cpp/lock_guard.h>
 
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/semaphore.h>
@@ -67,10 +67,10 @@ private:
 
     kernel::atomic<uint32_t> m_init_state;
 
-    spinlock_t m_active_lock;
+    kernel::SpinLock m_active_lock;
     tty_handle_t* m_active;
 
-    spinlock_t m_sessions_lock;
+    kernel::SpinLock m_sessions_lock;
     TtySession* m_sessions_head;
 
     kernel::atomic<uint32_t> m_pending_render;

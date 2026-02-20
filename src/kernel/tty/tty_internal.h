@@ -14,7 +14,9 @@ static inline kernel::tty::TtySession* tty_session_ptr(tty_handle_t* tty) {
     return tty ? tty->session : nullptr;
 }
 
-static inline const kernel::tty::TtySession* tty_session_ptr_const(const tty_handle_t* tty) {
+static inline const kernel::tty::TtySession* tty_session_ptr_const(
+    const tty_handle_t* tty
+) {
     return tty ? tty->session : nullptr;
 }
 
@@ -23,7 +25,9 @@ static inline kernel::term::Term* tty_term_ptr(tty_handle_t* tty) {
     return session ? session->term() : nullptr;
 }
 
-static inline const kernel::term::Term* tty_term_ptr_const(const tty_handle_t* tty) {
+static inline const kernel::term::Term* tty_term_ptr_const(
+    const tty_handle_t* tty
+) {
     const kernel::tty::TtySession* session = tty_session_ptr_const(tty);
     return session ? session->term() : nullptr;
 }

@@ -13,9 +13,7 @@ TtyService& TtyService::instance() {
 
 TtyService::TtyService()
     : m_init_state(encode_init_state(InitState::Uninit))
-    , m_active_lock()
     , m_active(nullptr)
-    , m_sessions_lock()
     , m_sessions_head(nullptr)
     , m_pending_render(0u)
     , m_render_reasons(0u)
@@ -30,21 +28,25 @@ void TtyService::ensure_init() {
 
     if (state == InitState::Uninit) {
         uint32_t expected = encode_init_state(InitState::Uninit);
-        if (m_init_state.compare_exchange_strong(
+        if (
+            m_init_state.compare_exchange_strong(
                 expected,
                 encode_init_state(InitState::Initing),
                 kernel::memory_order::acq_rel,
                 kernel::memory_order::acquire
-            )) {
-            spinlock_init(&m_active_lock);
-            spinlock_init(&m_sessions_lock);
-
-            m_init_state.store(encode_init_state(InitState::Ready), kernel::memory_order::release);
+            )
+        ) {
+            m_init_state.store(
+                encode_init_state(InitState::Ready),
+                kernel::memory_order::release
+            );
             return;
         }
     }
 
-    while (decode_init_state(m_init_state.load(kernel::memory_order::acquire)) != InitState::Ready) {
+    while (
+        decode_init_state(m_init_state.load(kernel::memory_order::acquire)) != InitState::Ready
+    ) {
         kernel::cpu_relax();
     }
 }
@@ -52,9 +54,8 @@ void TtyService::ensure_init() {
 tty_handle_t* TtyService::get_active_for_render() {
     ensure_init();
 
-    uint32_t flags = spinlock_acquire_safe(&m_active_lock);
+    kernel::SpinLockSafeGuard g(m_active_lock);
     tty_handle_t* cur = m_active;
-    spinlock_release_safe(&m_active_lock, flags);
 
     return cur;
 }
@@ -62,19 +63,17 @@ tty_handle_t* TtyService::get_active_for_render() {
 void TtyService::set_active(tty_handle_t* tty) {
     ensure_init();
 
-    uint32_t flags = spinlock_acquire_safe(&m_active_lock);
+    kernel::SpinLockSafeGuard g(m_active_lock);
     m_active = tty;
-    spinlock_release_safe(&m_active_lock, flags);
 }
 
 void TtyService::clear_active_if_matches(tty_handle_t* tty) {
     ensure_init();
 
-    uint32_t flags = spinlock_acquire_safe(&m_active_lock);
+    kernel::SpinLockSafeGuard g(m_active_lock);
     if (m_active == tty) {
         m_active = nullptr;
     }
-    spinlock_release_safe(&m_active_lock, flags);
 }
 
 void TtyService::register_session(TtySession* session) {
@@ -84,7 +83,7 @@ void TtyService::register_session(TtySession* session) {
 
     ensure_init();
 
-    uint32_t flags = spinlock_acquire_safe(&m_sessions_lock);
+    kernel::SpinLockSafeGuard g(m_sessions_lock);
 
     if (!m_sessions_head) {
         m_sessions_head = session;
@@ -92,8 +91,6 @@ void TtyService::register_session(TtySession* session) {
         session->link_before(m_sessions_head);
         m_sessions_head = session;
     }
-
-    spinlock_release_safe(&m_sessions_lock, flags);
 }
 
 void TtyService::request_render(RenderReason reason) {
@@ -121,15 +118,13 @@ void TtyService::unregister_session(TtySession* session) {
 
     ensure_init();
 
-    uint32_t flags = spinlock_acquire_safe(&m_sessions_lock);
+    kernel::SpinLockSafeGuard g(m_sessions_lock);
 
     if (m_sessions_head == session) {
         m_sessions_head = session->next();
     }
 
     session->unlink();
-
-    spinlock_release_safe(&m_sessions_lock, flags);
 }
 
 void TtyService::render_wakeup() {

@@ -1,7 +1,5 @@
-
 #include <kernel/term/term.h>
 
-#include <hal/lock.h>
 #include <stdint.h>
 
 #include <lib/cpp/lock_guard.h>
@@ -54,8 +52,6 @@ struct TermState {
     int csi_params[8];
     int ansi_bright;
     int ansi_inverse;
-
-    spinlock_t lock;
 };
 
 static constexpr uint32_t kAnsiColors[8] = {
@@ -88,7 +84,7 @@ using I32Buf = kernel::unique_ptr<int, kernel::default_delete<int[]>>;
 class TermSnapshotImpl {
 public:
     TermSnapshotImpl() {
-        memset(&state, 0, sizeof(state));
+        state = {};
     }
 
     TermSnapshotImpl(const TermSnapshotImpl&) = delete;
@@ -111,8 +107,7 @@ public:
 class TermImpl {
 public:
     explicit TermImpl(int cols, int view_rows) {
-        memset(&term, 0, sizeof(term));
-        spinlock_init(&term.lock);
+        term = {};
 
         if (cols < 1) {
             cols = 1;
@@ -188,7 +183,7 @@ public:
             kfree(term.dirty_x2);
         }
 
-        memset(&term, 0, sizeof(term));
+        term = {};
     }
 
     TermImpl(const TermImpl&) = delete;
@@ -419,7 +414,9 @@ public:
         }
 
         size_t worst = ((size_t)(old_last_row + 1) * (size_t)old_cols) + (size_t)(old_last_row + 1);
+        
         int cap_rows = (int)(worst / (size_t)new_cols) + 2;
+        
         if (cap_rows < 1) {
             cap_rows = 1;
         }
@@ -427,13 +424,22 @@ public:
         size_t cells = (size_t)cap_rows * (size_t)new_cols;
 
         char* nb = (char*)kmalloc(cells ? cells : 1);
+        
         uint32_t* nfg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
         uint32_t* nbg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
         uint8_t* ndr = (uint8_t*)kmalloc((size_t)cap_rows ? (size_t)cap_rows : 1u);
+        
         int* ndx1 = (int*)kmalloc(((size_t)cap_rows ? (size_t)cap_rows : 1u) * sizeof(int));
         int* ndx2 = (int*)kmalloc(((size_t)cap_rows ? (size_t)cap_rows : 1u) * sizeof(int));
 
-        if (!nb || !nfg || !nbg || !ndr || !ndx1 || !ndx2) {
+        if (
+            !nb
+            || !nfg
+            || !nbg
+            || !ndr
+            || !ndx1
+            || !ndx2
+        ) {
             if (nb) {
                 kfree(nb);
             }
@@ -498,14 +504,22 @@ public:
         int new_view_r = 0;
         int have_view = 0;
 
-        for (int r = 0; r <= old_last_row && out_r < cap_rows; r++) {
+        for (
+            int r = 0;
+            r <= old_last_row
+                && out_r < cap_rows;
+            r++
+        ) {
             if (!have_view && r == term.view_row) {
                 new_view_r = out_r;
                 have_view = 1;
             }
 
             int end = old_cols - 1;
-            while (end >= 0 && term.buffer[(size_t)r * (size_t)old_cols + (size_t)end] == ' ') {
+            while (
+                end >= 0
+                && term.buffer[(size_t)r * (size_t)old_cols + (size_t)end] == ' '
+            ) {
                 end--;
             }
 
@@ -522,7 +536,12 @@ public:
                 }
             }
 
-            for (int c = 0; c < row_len && out_r < cap_rows; c++) {
+            for (
+                int c = 0;
+                c < row_len
+                    && out_r < cap_rows;
+                c++
+            ) {
                 if (!have_cur && r == cur_row && c == take_cur) {
                     new_cur_r = out_r;
                     new_cur_c = out_c;
@@ -667,7 +686,11 @@ public:
             rows = term.history_cap_rows;
         }
 
-        if (!term.dirty_rows || !term.dirty_x1 || !term.dirty_x2) {
+        if (
+            !term.dirty_rows
+            || !term.dirty_x1
+            || !term.dirty_x2
+        ) {
             term.full_redraw = 1;
             return;
         }
@@ -694,7 +717,12 @@ public:
             *out_full_redraw = 0;
         }
 
-        if (!out_rows || !out_x1 || !out_x2 || out_rows_cap <= 0) {
+        if (
+            !out_rows
+            || !out_x1
+            || !out_x2
+            || out_rows_cap <= 0
+        ) {
             return 0;
         }
 
@@ -715,7 +743,12 @@ public:
             *out_full_redraw = full ? 1 : 0;
         }
 
-        if (full || !term.dirty_rows || !term.dirty_x1 || !term.dirty_x2) {
+        if (
+            full
+            || !term.dirty_rows
+            || !term.dirty_x1
+            || !term.dirty_x2
+        ) {
             for (int y = 0; y < n; y++) {
                 out_rows[y] = 1;
                 out_x1[y] = 0;
@@ -724,7 +757,11 @@ public:
 
             term.full_redraw = 0;
 
-            if (term.dirty_rows && term.dirty_x1 && term.dirty_x2) {
+            if (
+                term.dirty_rows
+                && term.dirty_x1
+                && term.dirty_x2
+            ) {
                 int rows = term.history_rows;
                 if (rows < 1) {
                     rows = 1;
@@ -780,6 +817,8 @@ public:
     TermState term{};
     int inited = 0;
 
+    kernel::SpinLock lock_;
+
 private:
     int ensure_rows_locked(int need_rows) {
         if (need_rows < 1) {
@@ -824,7 +863,14 @@ private:
         term.dirty_x1 = (int*)krealloc(term.dirty_x1, ((size_t)new_cap ? (size_t)new_cap : 1u) * sizeof(int));
         term.dirty_x2 = (int*)krealloc(term.dirty_x2, ((size_t)new_cap ? (size_t)new_cap : 1u) * sizeof(int));
 
-        if (!term.buffer || !term.fg_colors || !term.bg_colors || !term.dirty_rows || !term.dirty_x1 || !term.dirty_x2) {
+        if (
+            !term.buffer
+            || !term.fg_colors
+            || !term.bg_colors
+            || !term.dirty_rows
+            || !term.dirty_x1
+            || !term.dirty_x2
+        ) {
             return -1;
         }
 
@@ -863,7 +909,11 @@ private:
             cols = kDefaultCols;
         }
 
-        if (!term.dirty_rows || !term.dirty_x1 || !term.dirty_x2) {
+        if (
+            !term.dirty_rows
+            || !term.dirty_x1
+            || !term.dirty_x2
+        ) {
             term.full_redraw = 1;
             return;
         }
@@ -1161,7 +1211,11 @@ private:
     }
 
     void reset_dirty_row(int row, int cols) {
-        if (!term.dirty_rows || !term.dirty_x1 || !term.dirty_x2) {
+        if (
+            !term.dirty_rows
+            || !term.dirty_x1
+            || !term.dirty_x2
+        ) {
             return;
         }
 
@@ -1295,7 +1349,11 @@ int TermSnapshot::mark_dirty_cell(int row, int col) {
     }
 
     TermState& s = impl_->state;
-    if (!s.dirty_rows || !s.dirty_x1 || !s.dirty_x2) {
+    if (
+        !s.dirty_rows
+        || !s.dirty_x1
+        || !s.dirty_x2
+    ) {
         return -1;
     }
 
@@ -1346,7 +1404,11 @@ int TermSnapshot::dirty_bbox(int& out_x1, int& out_y1, int& out_x2, int& out_y2)
     }
 
     const TermState& s = impl_->state;
-    if (!s.dirty_rows || !s.dirty_x1 || !s.dirty_x2) {
+    if (
+        !s.dirty_rows
+        || !s.dirty_x1
+        || !s.dirty_x2
+    ) {
         return -1;
     }
 
@@ -1423,7 +1485,11 @@ int TermSnapshot::dirty_row_range(int row, int& out_x1, int& out_x2) const {
     }
 
     const TermState& s = impl_->state;
-    if (!s.dirty_rows || !s.dirty_x1 || !s.dirty_x2) {
+    if (
+        !s.dirty_rows
+        || !s.dirty_x1
+        || !s.dirty_x2
+    ) {
         return -1;
     }
 
@@ -1560,7 +1626,7 @@ void Term::write(const char* buf, uint32_t len) {
         return;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
     impl_->write_locked(buf, len);
 }
 
@@ -1569,7 +1635,7 @@ void Term::print(const char* s) {
         return;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
     impl_->print_locked(s);
 }
 
@@ -1578,7 +1644,7 @@ void Term::putc(char c) {
         return;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
     impl_->putc_locked(c);
 }
 
@@ -1587,7 +1653,7 @@ void Term::set_colors(uint32_t fg, uint32_t bg) {
         return;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
 
     impl_->term.curr_fg = fg;
     impl_->term.curr_bg = bg;
@@ -1602,7 +1668,7 @@ int Term::get_winsz(uint16_t& out_cols, uint16_t& out_rows) const {
         return -1;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
 
     out_cols = (uint16_t)(impl_->term.cols > 0 ? impl_->term.cols : 1);
     out_rows = (uint16_t)(impl_->term.view_rows > 0 ? impl_->term.view_rows : 1);
@@ -1615,7 +1681,7 @@ int Term::set_winsz(uint16_t cols, uint16_t rows) {
         return -1;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
 
     if (cols > 0) {
         impl_->term.cols = (int)cols;
@@ -1635,7 +1701,7 @@ int Term::scroll(int delta) {
         return -1;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
 
     int view_rows = impl_->term.view_rows;
     if (view_rows < 1) {
@@ -1677,7 +1743,7 @@ void Term::invalidate_view() {
         return;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
     impl_->invalidate_view_locked();
 }
 
@@ -1686,7 +1752,7 @@ uint64_t Term::seq() const {
         return 0;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
     return impl_->term.seq;
 }
 
@@ -1695,7 +1761,7 @@ uint64_t Term::view_seq() const {
         return 0;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
     return impl_->term.view_seq;
 }
 
@@ -1704,10 +1770,10 @@ int Term::capture_snapshot(TermSnapshot& out_snapshot) {
         return -1;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
 
     TermState& dst = out_snapshot.impl_->state;
-    memset(&dst, 0, sizeof(dst));
+    dst = {};
 
     int cols = impl_->term.cols > 0 ? impl_->term.cols : kDefaultCols;
     int view_rows = impl_->term.view_rows > 0 ? impl_->term.view_rows : kDefaultRows;
@@ -1809,9 +1875,23 @@ int Term::capture_snapshot(TermSnapshot& out_snapshot) {
 
         size_t row_src = (size_t)src_row * (size_t)cols;
 
-        memcpy(dst.buffer + row_dst + (size_t)x0, impl_->term.buffer + row_src + (size_t)x0, (size_t)(x1 - x0));
-        memcpy(dst.fg_colors + row_dst + (size_t)x0, impl_->term.fg_colors + row_src + (size_t)x0, (size_t)(x1 - x0) * sizeof(uint32_t));
-        memcpy(dst.bg_colors + row_dst + (size_t)x0, impl_->term.bg_colors + row_src + (size_t)x0, (size_t)(x1 - x0) * sizeof(uint32_t));
+        memcpy(
+            dst.buffer + row_dst + (size_t)x0,
+            impl_->term.buffer + row_src + (size_t)x0,
+            (size_t)(x1 - x0)
+        );
+
+        memcpy(
+            dst.fg_colors + row_dst + (size_t)x0,
+            impl_->term.fg_colors + row_src + (size_t)x0,
+            (size_t)(x1 - x0) * sizeof(uint32_t)
+        );
+
+        memcpy(
+            dst.bg_colors + row_dst + (size_t)x0,
+            impl_->term.bg_colors + row_src + (size_t)x0,
+            (size_t)(x1 - x0) * sizeof(uint32_t)
+        );
     }
 
     return 0;
@@ -1847,7 +1927,7 @@ int Term::capture_cell(TermSnapshot& snapshot, int rel_row, int col) {
         x = cols - 1;
     }
 
-    kernel::SpinLockNativeGuard g(impl_->term.lock);
+    kernel::SpinLockGuard g(impl_->lock_);
 
     int src_row = impl_->term.view_row + rel_row;
     size_t dst_i = (size_t)rel_row * (size_t)cols + (size_t)x;
