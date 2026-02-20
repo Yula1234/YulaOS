@@ -6,6 +6,7 @@
 #include <drivers/fbdev.h>
 
 #include <kernel/term/term.h>
+#include <kernel/tty/tty_service.h>
 #include <kernel/tty/tty_internal.h>
 
 
@@ -24,7 +25,7 @@ static void tty_render_fallback(void) {
 extern "C" void tty_task(void* arg) {
     (void)arg;
 
-    tty_render_wakeup();
+    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
 
     uint64_t last_seq = 0;
     uint64_t last_view_seq = 0;
@@ -37,6 +38,16 @@ extern "C" void tty_task(void* arg) {
     for (;;) {
         tty_render_wait();
 
+        uint32_t reasons = kernel::tty::TtyService::instance().consume_render_requests();
+
+        if ((reasons & static_cast<uint32_t>(kernel::tty::TtyService::RenderReason::ActiveChanged)) != 0u
+            || (reasons & static_cast<uint32_t>(kernel::tty::TtyService::RenderReason::Resize)) != 0u) {
+            last_seq = (uint64_t)-1;
+            last_view_seq = (uint64_t)-1;
+            last_cursor_row = -1;
+            last_cursor_col = -1;
+        }
+
         while (tty_render_try_acquire()) {
         }
 
@@ -44,7 +55,7 @@ extern "C" void tty_task(void* arg) {
         if (!fb_renderable) {
             fb_was_renderable = 0;
             proc_usleep(10000);
-            tty_render_wakeup();
+            kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
             continue;
         }
 

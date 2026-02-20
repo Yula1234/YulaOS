@@ -30,6 +30,8 @@ int tty_scroll(tty_handle_t* tty, int delta);
 
 void tty_render_tick(tty_handle_t* tty);
 
+void tty_force_redraw_active(void);
+
 #ifdef __cplusplus
 }
 #endif

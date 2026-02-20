@@ -5,6 +5,8 @@
 #include <hal/lock.h>
 #include <kernel/input_focus.h>
 
+#include <kernel/tty/tty_api.h>
+
 #include "fbdev.h"
 
 #include <drivers/virtio_gpu.h>
@@ -89,20 +91,31 @@ int fb_release(uint32_t pid) {
         ok = 1;
     }
     spinlock_release_safe(&fb_owner_lock, flags);
+
+    if (ok) {
+        tty_force_redraw_active();
+    }
+
     return ok ? 0 : -1;
 }
 
 void fb_release_by_pid(uint32_t pid) {
     if (pid == 0) return;
     uint32_t flags = spinlock_acquire_safe(&fb_owner_lock);
+    int ok = 0;
     if (fb_owner_pid == pid) {
         fb_owner_pid = 0;
         if (input_focus_get_pid() == pid) {
             input_focus_set_pid((uint32_t)fb_prev_focus_pid);
         }
         fb_prev_focus_pid = 0;
+        ok = 1;
     }
     spinlock_release_safe(&fb_owner_lock, flags);
+
+    if (ok) {
+        tty_force_redraw_active();
+    }
 }
 
 int fb_kernel_can_render(void) {
