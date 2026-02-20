@@ -36,7 +36,7 @@ extern "C" void tty_task(void* arg) {
     int fb_was_renderable = 0;
 
     for (;;) {
-        tty_render_wait();
+        kernel::tty::TtyService::instance().render_wait();
 
         uint32_t reasons = kernel::tty::TtyService::instance().consume_render_requests();
 
@@ -48,7 +48,7 @@ extern "C" void tty_task(void* arg) {
             last_cursor_col = -1;
         }
 
-        while (tty_render_try_acquire()) {
+        while (kernel::tty::TtyService::instance().render_try_acquire()) {
         }
 
         int fb_renderable = fb_kernel_can_render() ? 1 : 0;
@@ -67,7 +67,7 @@ extern "C" void tty_task(void* arg) {
             last_cursor_col = -1;
         }
 
-        tty_handle_t* tty = tty_get_active_for_render();
+        tty_handle_t* tty = kernel::tty::TtyService::instance().get_active_for_render();
         kernel::term::Term* term = tty_term_ptr(tty);
 
         if (!term) {

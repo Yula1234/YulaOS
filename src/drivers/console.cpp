@@ -11,7 +11,8 @@
 #include <drivers/console.h>
 #include <drivers/vga.h>
 
-#include <kernel/tty/tty_api.h>
+#include <kernel/tty/tty_internal.h>
+#include <kernel/tty/tty_service.h>
 
 #include "console.h"
 #include "vga.h"
@@ -35,7 +36,14 @@ int console_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
 
     const char* char_buf = (const char*)buffer;
 
-    tty_write(tty, char_buf, size);
+    kernel::term::Term* term = tty_term_ptr(tty);
+    if (!term) {
+        return -1;
+    }
+
+    term->write(char_buf, size);
+
+    kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
 
     return (int)size;
 }
@@ -49,6 +57,11 @@ int console_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
     }
 
     tty_handle_t* tty = (tty_handle_t*)curr->terminal;
+
+    kernel::term::Term* term = tty_term_ptr(tty);
+    if (!term) {
+        return -1;
+    }
 
     if (req == YOS_TCGETS) {
         if (!arg) {
@@ -70,7 +83,19 @@ int console_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             return -1;
         }
 
-        return tty_get_winsz(tty, (yos_winsize_t*)arg);
+        uint16_t cols = 0;
+        uint16_t rows = 0;
+        if (term->get_winsz(cols, rows) != 0) {
+            return -1;
+        }
+
+        yos_winsize_t* ws = (yos_winsize_t*)arg;
+        ws->ws_col = cols;
+        ws->ws_row = rows;
+        ws->ws_xpixel = 0;
+        ws->ws_ypixel = 0;
+
+        return 0;
     }
 
     if (req == YOS_TIOCSWINSZ) {
@@ -78,7 +103,14 @@ int console_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             return -1;
         }
 
-        return tty_set_winsz(tty, (const yos_winsize_t*)arg);
+        const yos_winsize_t* ws = (const yos_winsize_t*)arg;
+        if (term->set_winsz(ws->ws_col, ws->ws_row) != 0) {
+            return -1;
+        }
+
+        kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Resize);
+
+        return 0;
     }
 
     if (req == YOS_TTY_SCROLL) {
@@ -87,7 +119,12 @@ int console_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
         }
 
         yos_tty_scroll_t* s = (yos_tty_scroll_t*)arg;
-        return tty_scroll(tty, s->delta);
+        int rc = term->scroll(s->delta);
+        if (rc == 0) {
+            kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Scroll);
+        }
+
+        return rc;
     }
 
     return -1;
