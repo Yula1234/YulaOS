@@ -6,6 +6,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t width;
     uint32_t height;
@@ -28,5 +32,9 @@ int fb_acquire(uint32_t pid);
 int fb_release(uint32_t pid);
 void fb_release_by_pid(uint32_t pid);
 int fb_kernel_can_render(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

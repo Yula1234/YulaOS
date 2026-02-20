@@ -12,6 +12,7 @@
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
 #include <drivers/virtio_gpu.h>
+#include <kernel/tty/tty_api.h>
 #include <kernel/input_focus.h>
 #include <kernel/rtc.h>
 #include <kernel/shm.h>
@@ -449,10 +450,8 @@ static void syscall_exit(registers_t* regs, task_t* curr) {
 static void syscall_print(registers_t* regs, task_t* curr) {
     char* s = (char*)regs->ebx;
     if (curr->terminal) {
-        term_instance_t* term = (term_instance_t*)curr->terminal;
-        spinlock_acquire(&term->lock);
-        term_print(term, s);
-        spinlock_release(&term->lock);
+        tty_handle_t* tty = (tty_handle_t*)curr->terminal;
+        tty_print(tty, s);
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -751,13 +750,8 @@ static void syscall_set_console_color(registers_t* regs, task_t* curr) {
     uint32_t bg = (uint32_t)regs->ecx;
 
     if (curr->terminal) {
-        term_instance_t* term = (term_instance_t*)curr->terminal;
-        spinlock_acquire(&term->lock);
-        term->curr_fg = fg;
-        term->curr_bg = bg;
-        term->def_fg = fg;
-        term->def_bg = bg;
-        spinlock_release(&term->lock);
+        tty_handle_t* tty = (tty_handle_t*)curr->terminal;
+        tty_set_colors(tty, fg, bg);
     }
     regs->eax = 0;
 }

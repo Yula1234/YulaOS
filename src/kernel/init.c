@@ -10,7 +10,8 @@
 #include <drivers/uhci.h>
 #include <drivers/vga.h>
 
-#include <kernel/tty.h>
+#include <kernel/tty/tty.h>
+#include <kernel/tty/tty_api.h>
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/input_focus.h>
@@ -28,21 +29,15 @@ static void init_task_prepare_dirs(void) {
     if (yulafs_lookup("/home") == -1) (void)yulafs_mkdir("/home");
 }
 
-static term_instance_t* init_task_create_terminal(task_t* self) {
-    term_instance_t* term = (term_instance_t*)kmalloc(sizeof(*term));
-    if (!term) return 0;
-    memset(term, 0, sizeof(*term));
+static tty_handle_t* init_task_create_terminal(task_t* self) {
+    tty_handle_t* tty = tty_create_default();
+    if (!tty) return 0;
 
-    tty_term_apply_default_size(term);
-    term->curr_fg = 0xD4D4D4;
-    term->curr_bg = 0x141414;
-    term_init(term);
-
-    self->terminal = term;
+    self->terminal = tty;
     self->term_mode = 1;
-    tty_set_terminal(term);
 
-    return term;
+    tty_set_active(tty);
+    return tty;
 }
 
 static void init_task_open_devices(void) {
@@ -92,12 +87,12 @@ static void init_append_int(char* out, int* io_pos, int cap, int v) {
     *io_pos = pos;
 }
 
-static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
+static void init_task_spawn_shell_loop(task_t* self, tty_handle_t* tty) {
     for (;;) {
         char* argv[] = { "ush", 0 };
         task_t* child = proc_spawn_elf("/bin/ush.exe", 1, argv);
         if (!child) {
-            tty_term_print_locked(term, "init: failed to spawn /bin/ush.exe\n");
+            tty_print(tty, "init: failed to spawn /bin/ush.exe\n");
             proc_usleep(200000);
             continue;
         }
@@ -122,7 +117,7 @@ static void init_task_spawn_shell_loop(task_t* self, term_instance_t* term) {
             }
             msg[pos] = '\0';
 
-            tty_term_print_locked(term, msg);
+            tty_print(tty, msg);
         }
 
         proc_usleep(200000);
@@ -136,16 +131,14 @@ void init_task(void* arg) {
     task_t* self = proc_current();
     if (!self) return;
 
-    term_instance_t* term = init_task_create_terminal(self);
-    if (!term) return;
+    tty_handle_t* tty = init_task_create_terminal(self);
+    if (!tty) return;
 
     init_task_open_devices();
-    spinlock_acquire(&term->lock);
-    term_putc(term, 0x0C);
-    spinlock_release(&term->lock);
+    tty_putc(tty, 0x0C);
 
     init_task_set_cwd(self);
-    init_task_spawn_shell_loop(self, term);
+    init_task_spawn_shell_loop(self, tty);
 }
 
 void uhci_late_init_task(void* arg) {

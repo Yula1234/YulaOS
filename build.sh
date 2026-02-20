@@ -71,7 +71,7 @@ for FILE in $(find src -name "*.c"); do
 
     REL="${FILE#src/}"
     FLAT="${REL//\//_}"
-    OBJ="bin/obj/${FLAT%.*}.o"
+    OBJ="bin/obj/${FLAT}.o"
 
     $CC $CFLAGS_KERN -c "$FILE" -o "$OBJ" &
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
@@ -81,7 +81,7 @@ echo "[kernel] compiling C++..."
 for FILE in $(find src -name "*.cpp"); do
     REL="${FILE#src/}"
     FLAT="${REL//\//_}"
-    OBJ="bin/obj/${FLAT%.*}.o"
+    OBJ="bin/obj/${FLAT}.o"
 
     if [[ "${KERNEL_PROFILE:-0}" == "1" && "$FILE" == "src/kernel/profiler.cpp" ]]; then
         $CXX $CXXFLAGS_KERN -fno-instrument-functions -c "$FILE" -o "$OBJ" &

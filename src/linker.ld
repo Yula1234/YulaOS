@@ -20,6 +20,13 @@ SECTIONS
         *(.rodata*)
     }
 
+    .init_array : ALIGN(0x1000)
+    {
+        __init_array_start = .;
+        KEEP(*(.init_array*))
+        __init_array_end = .;
+    }
+
     .data : ALIGN(0x1000)
     {
         *(.data)

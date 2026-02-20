@@ -24,7 +24,7 @@
 #include <kernel/clipboard.h>
 #include <kernel/boot.h>
 #include <kernel/init.h>
-#include <kernel/tty.h>
+#include <kernel/tty/tty.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
@@ -46,6 +46,8 @@
 
 #include <kernel/profiler.h>
 #include <kernel/symbols.h>
+
+#include <lib/cpp/ctors.h>
 
 #include <stdint.h>
 
@@ -206,6 +208,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     kmain_cpu_init(magic, mb_info);
 
     uint32_t memory_end_addr = kmain_memory_init(mb_info);
+
+    cpp_call_global_ctors();
 
     kmain_video_init(memory_end_addr);
     kmain_platform_init();
