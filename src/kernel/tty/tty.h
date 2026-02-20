@@ -1,7 +1,7 @@
 #ifndef KERNEL_TTY_H
 #define KERNEL_TTY_H
 
-#include <kernel/tty/tty_api.h>
+#include <kernel/tty/tty_bridge.h>
 
 #ifdef __cplusplus
 extern "C" {

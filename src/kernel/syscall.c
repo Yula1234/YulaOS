@@ -12,7 +12,7 @@
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
 #include <drivers/virtio_gpu.h>
-#include <kernel/tty/tty_api.h>
+#include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
 #include <kernel/rtc.h>
 #include <kernel/shm.h>
@@ -451,7 +451,7 @@ static void syscall_print(registers_t* regs, task_t* curr) {
     char* s = (char*)regs->ebx;
     if (curr->terminal) {
         tty_handle_t* tty = (tty_handle_t*)curr->terminal;
-        tty_print(tty, s);
+        tty_bridge_print(tty, s);
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -751,7 +751,7 @@ static void syscall_set_console_color(registers_t* regs, task_t* curr) {
 
     if (curr->terminal) {
         tty_handle_t* tty = (tty_handle_t*)curr->terminal;
-        tty_set_colors(tty, fg, bg);
+        tty_bridge_set_colors(tty, fg, bg);
     }
     regs->eax = 0;
 }

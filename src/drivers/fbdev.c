@@ -5,7 +5,7 @@
 #include <hal/lock.h>
 #include <kernel/input_focus.h>
 
-#include <kernel/tty/tty_api.h>
+#include <kernel/tty/tty_bridge.h>
 
 #include "fbdev.h"
 
@@ -93,7 +93,7 @@ int fb_release(uint32_t pid) {
     spinlock_release_safe(&fb_owner_lock, flags);
 
     if (ok) {
-        tty_force_redraw_active();
+        tty_bridge_force_redraw_active();
     }
 
     return ok ? 0 : -1;
@@ -114,7 +114,7 @@ void fb_release_by_pid(uint32_t pid) {
     spinlock_release_safe(&fb_owner_lock, flags);
 
     if (ok) {
-        tty_force_redraw_active();
+        tty_bridge_force_redraw_active();
     }
 }
 

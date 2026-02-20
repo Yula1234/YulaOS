@@ -1,9 +1,10 @@
 #ifndef KERNEL_TTY_INTERNAL_H
 #define KERNEL_TTY_INTERNAL_H
 
-#include <kernel/tty/tty_api.h>
-
 #include <kernel/tty/tty_session.h>
+
+struct tty_handle;
+using tty_handle_t = tty_handle;
 
 struct tty_handle {
     kernel::tty::TtySession* session;

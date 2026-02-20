@@ -11,7 +11,7 @@
 #include <drivers/vga.h>
 
 #include <kernel/tty/tty.h>
-#include <kernel/tty/tty_api.h>
+#include <kernel/tty/tty_bridge.h>
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/input_focus.h>
@@ -30,13 +30,13 @@ static void init_task_prepare_dirs(void) {
 }
 
 static tty_handle_t* init_task_create_terminal(task_t* self) {
-    tty_handle_t* tty = tty_create_default();
+    tty_handle_t* tty = tty_bridge_create_default();
     if (!tty) return 0;
 
     self->terminal = tty;
     self->term_mode = 1;
 
-    tty_set_active(tty);
+    tty_bridge_set_active(tty);
     return tty;
 }
 
@@ -92,7 +92,7 @@ static void init_task_spawn_shell_loop(task_t* self, tty_handle_t* tty) {
         char* argv[] = { "ush", 0 };
         task_t* child = proc_spawn_elf("/bin/ush.exe", 1, argv);
         if (!child) {
-            tty_print(tty, "init: failed to spawn /bin/ush.exe\n");
+            tty_bridge_print(tty, "init: failed to spawn /bin/ush.exe\n");
             proc_usleep(200000);
             continue;
         }
@@ -117,7 +117,7 @@ static void init_task_spawn_shell_loop(task_t* self, tty_handle_t* tty) {
             }
             msg[pos] = '\0';
 
-            tty_print(tty, msg);
+            tty_bridge_print(tty, msg);
         }
 
         proc_usleep(200000);
@@ -135,7 +135,7 @@ void init_task(void* arg) {
     if (!tty) return;
 
     init_task_open_devices();
-    tty_putc(tty, 0x0C);
+    tty_bridge_putc(tty, 0x0C);
 
     init_task_set_cwd(self);
     init_task_spawn_shell_loop(self, tty);

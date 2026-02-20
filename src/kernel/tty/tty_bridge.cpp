@@ -1,17 +1,18 @@
-#include <kernel/tty/tty_internal.h>
+#include <kernel/tty/tty_bridge.h>
 
+#include <kernel/tty/tty_internal.h>
 #include <kernel/tty/tty_service.h>
 
 #include <drivers/fbdev.h>
-
-#include <hal/lock.h>
 
 #include <lib/cpp/new.h>
 
 #include <lib/string.h>
 #include <mm/heap.h>
 
-static void tty_default_size(int& out_cols, int& out_view_rows) {
+namespace {
+
+void tty_default_size(int& out_cols, int& out_view_rows) {
     int cols = (int)(fb_width / 8u);
     int view_rows = (int)(fb_height / 16u);
 
@@ -27,10 +28,12 @@ static void tty_default_size(int& out_cols, int& out_view_rows) {
     out_view_rows = view_rows;
 }
 
-extern "C" tty_handle_t* tty_create_default(void) {
+}
+
+extern "C" tty_handle_t* tty_bridge_create_default(void) {
     tty_handle_t* tty = (tty_handle_t*)kmalloc(sizeof(*tty));
     if (!tty) {
-        return 0;
+        return nullptr;
     }
 
     memset(tty, 0, sizeof(*tty));
@@ -42,7 +45,7 @@ extern "C" tty_handle_t* tty_create_default(void) {
     kernel::tty::TtySession* session = kernel::tty::TtySession::create(cols, view_rows);
     if (!session) {
         kfree(tty);
-        return 0;
+        return nullptr;
     }
 
     tty->session = session;
@@ -50,12 +53,12 @@ extern "C" tty_handle_t* tty_create_default(void) {
     return tty;
 }
 
-extern "C" void tty_set_active(tty_handle_t* tty) {
+extern "C" void tty_bridge_set_active(tty_handle_t* tty) {
     kernel::tty::TtyService::instance().set_active(tty);
     kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::ActiveChanged);
 }
 
-extern "C" void tty_print(tty_handle_t* tty, const char* s) {
+extern "C" void tty_bridge_print(tty_handle_t* tty, const char* s) {
     kernel::term::Term* term = tty_term_ptr(tty);
     if (!term || !s) {
         return;
@@ -66,7 +69,7 @@ extern "C" void tty_print(tty_handle_t* tty, const char* s) {
     kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
 }
 
-extern "C" void tty_putc(tty_handle_t* tty, char c) {
+extern "C" void tty_bridge_putc(tty_handle_t* tty, char c) {
     kernel::term::Term* term = tty_term_ptr(tty);
     if (!term) {
         return;
@@ -77,7 +80,7 @@ extern "C" void tty_putc(tty_handle_t* tty, char c) {
     kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
 }
 
-extern "C" void tty_set_colors(tty_handle_t* tty, uint32_t fg, uint32_t bg) {
+extern "C" void tty_bridge_set_colors(tty_handle_t* tty, uint32_t fg, uint32_t bg) {
     kernel::term::Term* term = tty_term_ptr(tty);
     if (!term) {
         return;
@@ -88,8 +91,7 @@ extern "C" void tty_set_colors(tty_handle_t* tty, uint32_t fg, uint32_t bg) {
     kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::Output);
 }
 
-
-extern "C" void tty_force_redraw_active(void) {
+extern "C" void tty_bridge_force_redraw_active(void) {
     tty_handle_t* active = kernel::tty::TtyService::instance().get_active_for_render();
     kernel::term::Term* term = tty_term_ptr(active);
     if (term) {
@@ -98,5 +100,3 @@ extern "C" void tty_force_redraw_active(void) {
 
     kernel::tty::TtyService::instance().request_render(kernel::tty::TtyService::RenderReason::ActiveChanged);
 }
-
-
