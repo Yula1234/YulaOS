@@ -205,6 +205,8 @@ section '.bss' writeable
 emergency_stack rb 8192
 emergency_stack_top:
 
+section '.data' writeable
+
 macro make_isr_table [id] {
     forward
         dd isr_stub_#id
