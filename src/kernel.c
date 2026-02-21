@@ -42,6 +42,7 @@
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
+#include <mm/vmm.h>
 #include <kernel/panic.h>
 
 #include <kernel/profiler.h>
@@ -95,6 +96,7 @@ static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
 
     pmm_init(memory_end_addr, (uint32_t)&kernel_end);
     paging_init(memory_end_addr);
+    vmm_init();
     heap_init();
 
     return memory_end_addr;
