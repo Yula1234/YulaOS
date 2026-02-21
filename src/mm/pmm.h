@@ -47,6 +47,7 @@ public:
     void free_pages(void* addr, uint32_t order) noexcept;
 
     [[nodiscard]] page_t* phys_to_page(uint32_t phys_addr) noexcept;
+
     [[nodiscard]] uint32_t page_to_phys(page_t* page) const noexcept;
 
     [[nodiscard]] uint32_t get_used_blocks() const noexcept;
@@ -57,6 +58,7 @@ private:
     static uint32_t align_up(uint32_t addr) noexcept;
     static void list_add(page_t** head, page_t* page) noexcept;
     static void list_remove(page_t** head, page_t* page) noexcept;
+
     void free_pages_unlocked(void* addr, uint32_t order) noexcept;
 
     SpinLock lock_;
@@ -77,6 +79,9 @@ private:
 
 } // namespace kernel
 
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 

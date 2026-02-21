@@ -53,7 +53,9 @@ void PmmState::init(uint32_t mem_size, uint32_t kernel_end_addr) noexcept {
 
     while (i < total_pages_ && (i & (max_block_size - 1u)) != 0u) {
         mem_map_[i].flags = PMM_FLAG_USED;
+
         free_pages_unlocked(reinterpret_cast<void*>(i * PAGE_SIZE), 0u);
+
         i++;
     }
 
@@ -80,7 +82,9 @@ void PmmState::init(uint32_t mem_size, uint32_t kernel_end_addr) noexcept {
 
     while (i < total_pages_) {
         mem_map_[i].flags = PMM_FLAG_USED;
+
         free_pages_unlocked(reinterpret_cast<void*>(i * PAGE_SIZE), 0u);
+
         i++;
     }
 }
@@ -97,6 +101,7 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
         if (free_areas_[current_order].head) {
             break;
         }
+
         current_order++;
     }
 
@@ -122,8 +127,8 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
         current_order--;
 
         const uint32_t pfn = static_cast<uint32_t>(page - mem_map_);
-
         const uint32_t buddy_pfn = pfn + (1u << current_order);
+
         page_t* buddy = &mem_map_[buddy_pfn];
 
         buddy->flags = PMM_FLAG_FREE;
@@ -144,6 +149,7 @@ void PmmState::free_pages(void* addr, uint32_t order) noexcept {
     if (!addr) {
         return;
     }
+
     if (order > PMM_MAX_ORDER) {
         return;
     }
@@ -154,6 +160,7 @@ void PmmState::free_pages(void* addr, uint32_t order) noexcept {
     }
 
     SpinLockSafeGuard guard(lock_);
+
     free_pages_unlocked(addr, order);
 }
 
@@ -169,6 +176,7 @@ page_t* PmmState::phys_to_page(uint32_t phys_addr) noexcept {
 
 uint32_t PmmState::page_to_phys(page_t* page) const noexcept {
     const uint32_t idx = static_cast<uint32_t>(page - mem_map_);
+
     return idx * PAGE_SIZE;
 }
 
@@ -216,7 +224,6 @@ void PmmState::list_remove(page_t** head, page_t* page) noexcept {
 
 void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
     page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(addr)));
-
     if (!page) {
         return;
     }

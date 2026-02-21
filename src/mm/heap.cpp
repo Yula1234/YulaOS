@@ -79,6 +79,7 @@ public:
                     }
 
                     obj = slub_alloc_from_page(*page);
+
                     return obj;
                 }
 
@@ -97,6 +98,7 @@ public:
                     cache.cpu_slab = page;
 
                     obj = slub_alloc_from_page(*page);
+
                     return obj;
                 }
             }
@@ -111,6 +113,7 @@ public:
 
             if (kernel::unlikely(!new_page)) {
                 vmm_->free_pages(new_virt, 1);
+
                 return nullptr;
             }
 
@@ -194,6 +197,7 @@ public:
 
         if (kernel::likely(size <= k_malloc_max_size)) {
             const int idx = get_cache_index(size);
+
             return cache_alloc(caches_[idx]);
         }
 
@@ -265,6 +269,7 @@ public:
             if (size < align) {
                 size = align;
             }
+
             return malloc(size);
         }
 
@@ -286,6 +291,7 @@ public:
 
         if (kernel::unlikely(new_size == 0)) {
             free(ptr);
+
             return nullptr;
         }
 
@@ -385,6 +391,7 @@ private:
         page.objects++;
 
         *reinterpret_cast<uint32_t*>(obj) = 0;
+
         return obj;
     }
 
@@ -431,7 +438,7 @@ static inline HeapState* heap_state_if_inited() noexcept {
     return g_heap;
 }
 
-}
+} // namespace
 
 extern "C" {
 

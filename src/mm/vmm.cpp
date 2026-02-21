@@ -238,7 +238,6 @@ void VmmState::init() noexcept {
     used_pages_count_.store(0u, kernel::memory_order::relaxed);
 
     VmFreeBlock* initial = alloc_node(free_nodes_head_);
-
     if (kernel::unlikely(!initial)) {
         panic("VMM: Out of metadata nodes during init!");
         return;
@@ -267,7 +266,6 @@ void* VmmState::alloc_pages(size_t count) noexcept {
         kernel::SpinLockSafeGuard guard(lock_);
 
         VmFreeBlock* block = find_best_fit(size_bytes, size_tree_);
-
         if (kernel::unlikely(!block)) {
             return nullptr;
         }
@@ -389,7 +387,7 @@ VmmState* vmm_state() noexcept {
     return g_vmm;
 }
 
-static inline VmmState& vmm_state_init_once() {
+static inline VmmState& vmm_state_init_once() noexcept {
     if (!g_vmm) {
         g_vmm = new (g_vmm_storage) VmmState();
     }
