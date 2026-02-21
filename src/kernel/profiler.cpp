@@ -295,6 +295,45 @@ static inline uint64_t u64_divmod_u32(uint64_t n, uint32_t d, uint32_t* out_rem)
 }
 
 __attribute__((no_instrument_function))
+static inline uint64_t u64_divmod_u64(uint64_t n, uint64_t d, uint64_t* out_rem) {
+    if (out_rem) {
+        *out_rem = 0u;
+    }
+
+    if (d == 0u) {
+        return 0u;
+    }
+
+    uint64_t q = 0u;
+    uint64_t r = 0u;
+
+    for (int i = 63; i >= 0; --i) {
+        r = (r << 1u) | ((n >> static_cast<uint32_t>(i)) & 1u);
+        if (r >= d) {
+            r -= d;
+            q |= (1ull << static_cast<uint32_t>(i));
+        }
+    }
+
+    if (out_rem) {
+        *out_rem = r;
+    }
+
+    return q;
+}
+
+extern "C" {
+
+__attribute__((no_instrument_function))
+uint64_t __umoddi3(uint64_t n, uint64_t d) {
+    uint64_t r = 0u;
+    (void)u64_divmod_u64(n, d, &r);
+    return r;
+}
+
+}
+
+__attribute__((no_instrument_function))
 static void serial_write_dec_u64(uint64_t v) {
     char buf[21];
     uint32_t n = 0;

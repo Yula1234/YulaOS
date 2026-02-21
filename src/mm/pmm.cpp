@@ -308,7 +308,7 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
 
 void* pmm_alloc_pages(uint32_t order) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return nullptr;
     }
 
@@ -317,7 +317,7 @@ void* pmm_alloc_pages(uint32_t order) {
 
 void pmm_free_pages(void* addr, uint32_t order) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return;
     }
 
@@ -334,7 +334,7 @@ void pmm_free_block(void* addr) {
 
 page_t* pmm_phys_to_page(uint32_t phys_addr) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return nullptr;
     }
 
@@ -343,7 +343,7 @@ page_t* pmm_phys_to_page(uint32_t phys_addr) {
 
 uint32_t pmm_page_to_phys(page_t* page) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return 0u;
     }
 
@@ -352,7 +352,7 @@ uint32_t pmm_page_to_phys(page_t* page) {
 
 uint32_t pmm_get_used_blocks(void) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return 0u;
     }
 
@@ -361,7 +361,7 @@ uint32_t pmm_get_used_blocks(void) {
 
 uint32_t pmm_get_free_blocks(void) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return 0u;
     }
 
@@ -370,7 +370,7 @@ uint32_t pmm_get_free_blocks(void) {
 
 uint32_t pmm_get_total_blocks(void) {
     PmmState* pmm = pmm_state_if_inited();
-    if (unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm)) {
         return 0u;
     }
 
