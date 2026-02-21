@@ -318,53 +318,64 @@ private:
     }
 
     void merge_adjacent(VmFreeBlock& block) {
-        auto it = addr_tree_.find_key(block.start);
-        if (it == addr_tree_.end()) {
-            panic("VMM: rb-tree invariant violated (merge/find)");
-            return;
-        }
+        VmFreeBlock* curr = &block;
 
-        VmFreeBlock* curr = &(*it);
+        bool merged = true;
+        while (merged) {
+            merged = false;
 
-        {
-            auto next_it = it;
-            ++next_it;
+            auto it = addr_tree_.find_key(curr->start);
+            if (it == addr_tree_.end()) {
+                panic("VMM: rb-tree invariant violated (merge/find)");
+                return;
+            }
 
-            if (next_it != addr_tree_.end()) {
-                VmFreeBlock* next = &(*next_it);
+            {
+                auto next_it = it;
+                ++next_it;
 
-                if (curr->start + curr->size == next->start) {
-                    tree_erase(*next);
+                if (next_it != addr_tree_.end()) {
+                    VmFreeBlock* next = &(*next_it);
 
-                    curr->size += next->size;
-                    size_tree_reinsert_after_size_change(*curr);
+                    if (curr->start + curr->size == next->start) {
+                        tree_erase(*next);
 
-                    free_node(*next);
+                        curr->size += next->size;
+                        size_tree_reinsert_after_size_change(*curr);
+
+                        free_node(*next);
+                        merged = true;
+                    }
                 }
             }
-        }
 
-        it = addr_tree_.find_key(curr->start);
-        if (it == addr_tree_.end()) {
-            panic("VMM: rb-tree invariant violated (merge/refind)");
-            return;
-        }
+            if (merged) {
+                continue;
+            }
 
-        curr = &(*it);
+            it = addr_tree_.find_key(curr->start);
+            if (it == addr_tree_.end()) {
+                panic("VMM: rb-tree invariant violated (merge/refind)");
+                return;
+            }
 
-        if (it != addr_tree_.begin()) {
-            auto prev_it = it;
-            --prev_it;
+            if (it != addr_tree_.begin()) {
+                auto prev_it = it;
+                --prev_it;
 
-            VmFreeBlock* prev = &(*prev_it);
+                VmFreeBlock* prev = &(*prev_it);
 
-            if (prev->start + prev->size == curr->start) {
-                tree_erase(*curr);
+                if (prev->start + prev->size == curr->start) {
+                    tree_erase(*curr);
 
-                prev->size += curr->size;
-                size_tree_reinsert_after_size_change(*prev);
+                    prev->size += curr->size;
+                    size_tree_reinsert_after_size_change(*prev);
 
-                free_node(*curr);
+                    free_node(*curr);
+
+                    curr = prev;
+                    merged = true;
+                }
             }
         }
     }
