@@ -427,11 +427,13 @@ extern "C" {
 
 void heap_init(void) {
     HeapState& heap = heap_state_init_once();
+
     heap.init();
 }
 
 void* kmalloc(size_t size) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }
@@ -441,6 +443,7 @@ void* kmalloc(size_t size) {
 
 void* kzalloc(size_t size) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }
@@ -450,6 +453,7 @@ void* kzalloc(size_t size) {
 
 void* krealloc(void* ptr, size_t new_size) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }
@@ -459,6 +463,7 @@ void* krealloc(void* ptr, size_t new_size) {
 
 void kfree(void* ptr) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return;
     }
@@ -468,6 +473,7 @@ void kfree(void* ptr) {
 
 void* kmalloc_aligned(size_t size, uint32_t align) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }
@@ -477,6 +483,7 @@ void* kmalloc_aligned(size_t size, uint32_t align) {
 
 void* kmalloc_a(size_t size) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }
@@ -490,6 +497,7 @@ void* kmem_cache_alloc(kmem_cache_t* cache) {
     }
 
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }
@@ -503,6 +511,7 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
     }
 
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return;
     }
@@ -512,6 +521,7 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
 
 kmem_cache_t* kmem_cache_create(const char* name, size_t size, uint32_t align, uint32_t flags) {
     HeapState* heap = heap_state_if_inited();
+
     if (kernel::unlikely(!heap)) {
         return nullptr;
     }

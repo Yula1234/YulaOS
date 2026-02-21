@@ -83,12 +83,12 @@ extern "C" {
 void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr);
 
 void* pmm_alloc_block(void);
-void  pmm_free_block(void* addr);
+void pmm_free_block(void* addr);
 
 void* pmm_alloc_pages(uint32_t order);
-void  pmm_free_pages(void* addr, uint32_t order);
+void pmm_free_pages(void* addr, uint32_t order);
 
-page_t*  pmm_phys_to_page(uint32_t phys_addr);
+page_t* pmm_phys_to_page(uint32_t phys_addr);
 uint32_t pmm_page_to_phys(page_t* page);
 
 uint32_t pmm_get_used_blocks(void);

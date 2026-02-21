@@ -191,11 +191,14 @@ public:
         }
 
         kernel::SpinLockSafeGuard guard(lock_);
+
         paging_map(kernel_page_directory, virt, phys, flags);
+
         return 1;
     }
 
-    [[nodiscard]] size_t get_used_pages() const noexcept {
+    [[nodiscard]] size_t get_used_pages() const noexcept
+    {
         return used_pages_count_.load(kernel::memory_order::relaxed);
     }
 
@@ -276,6 +279,7 @@ private:
         size_tree_.erase(block);
 
         const bool inserted = size_tree_.insert_unique(block);
+
         if (kernel::unlikely(!inserted)) {
             panic("VMM: rb-tree invariant violated (size reinsert)");
         }
@@ -285,6 +289,7 @@ private:
         const VmFreeBlockSizeKey key{size, 0u};
 
         auto it = size_tree_.lower_bound_key(key);
+
         if (it == size_tree_.end()) {
             return nullptr;
         }
@@ -454,11 +459,13 @@ extern "C" {
 
 void vmm_init(void) {
     VmmState& vmm = vmm_state_init_once();
+
     vmm.init();
 }
 
 void* vmm_alloc_pages(size_t pages) {
     VmmState* vmm = vmm_state_if_inited();
+
     if (kernel::unlikely(!vmm)) {
         return nullptr;
     }
@@ -468,6 +475,7 @@ void* vmm_alloc_pages(size_t pages) {
 
 void vmm_free_pages(void* virt, size_t pages) {
     VmmState* vmm = vmm_state_if_inited();
+
     if (kernel::unlikely(!vmm)) {
         return;
     }
@@ -477,6 +485,7 @@ void vmm_free_pages(void* virt, size_t pages) {
 
 int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
     VmmState* vmm = vmm_state_if_inited();
+
     if (kernel::unlikely(!vmm)) {
         return 0;
     }
@@ -486,6 +495,7 @@ int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
 
 size_t vmm_get_used_pages(void) {
     VmmState* vmm = vmm_state_if_inited();
+
     if (kernel::unlikely(!vmm)) {
         return 0u;
     }
