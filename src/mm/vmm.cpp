@@ -12,10 +12,11 @@
 #include <lib/cpp/rbtree.h>
 #include <lib/string.h>
 
+#include <mm/pmm.h>
+
 extern "C" {
 
 #include <arch/i386/paging.h>
-#include <mm/pmm.h>
 
 #include "vmm.h"
 
@@ -65,6 +66,8 @@ public:
     static constexpr uint32_t k_max_nodes = 4096u;
 
     void init() noexcept {
+        pmm_ = kernel::pmm_state();
+
         init_node_pool();
 
         addr_tree_.clear();
@@ -74,7 +77,7 @@ public:
 
         VmFreeBlock* initial = alloc_node();
 
-        if (!initial) {
+        if (kernel::unlikely(!initial)) {
             panic("VMM: Out of metadata nodes during init!");
             return;
         }
@@ -86,11 +89,11 @@ public:
     }
 
     [[nodiscard]] void* alloc_pages(size_t count) noexcept {
-        if (count == 0u) {
+        if (kernel::unlikely(count == 0u)) {
             return nullptr;
         }
 
-        if (count > SIZE_MAX / PAGE_SIZE) {
+        if (kernel::unlikely(count > SIZE_MAX / PAGE_SIZE)) {
             return nullptr;
         }
 
@@ -103,7 +106,7 @@ public:
 
             VmFreeBlock* block = find_best_fit(size_bytes);
 
-            if (!block) {
+            if (kernel::unlikely(!block)) {
                 return nullptr;
             }
 
@@ -123,7 +126,7 @@ public:
             used_pages_count_.fetch_add(count, kernel::memory_order::relaxed);
         }
 
-        if (!map_new_pages(virt_base, count)) {
+        if (kernel::unlikely(!map_new_pages(virt_base, count))) {
             rollback_range(virt_base, count);
             return nullptr;
         }
@@ -132,13 +135,13 @@ public:
     }
 
     void free_pages(void* ptr, size_t count) noexcept {
-        if (!ptr || count == 0u) {
+        if (kernel::unlikely(!ptr || count == 0u)) {
             return;
         }
 
         const uintptr_t virt_base = reinterpret_cast<uintptr_t>(ptr);
 
-        if (count > SIZE_MAX / PAGE_SIZE) {
+        if (kernel::unlikely(count > SIZE_MAX / PAGE_SIZE)) {
             return;
         }
 
@@ -150,20 +153,20 @@ public:
             const uintptr_t virt = virt_base + (i * PAGE_SIZE);
 
             const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
-            if (phys) {
-                page_t* page = pmm_phys_to_page(phys);
-                if (page && page->slab_cache) {
+            if (kernel::likely(phys && pmm_)) {
+                page_t* page = pmm_->phys_to_page(phys);
+                if (kernel::unlikely(page && page->slab_cache)) {
                     panic("VMM: freeing slab page");
                 }
 
-                pmm_free_block(reinterpret_cast<void*>(static_cast<uintptr_t>(phys)));
+                pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys)), 0);
             }
 
             paging_map(kernel_page_directory, static_cast<uint32_t>(virt), 0, 0);
         }
 
         VmFreeBlock* block = alloc_node();
-        if (!block) {
+        if (kernel::unlikely(!block)) {
             panic("VMM: Out of metadata nodes during free!");
             return;
         }
@@ -179,11 +182,11 @@ public:
     }
 
     [[nodiscard]] int map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {
-        if ((virt & (PAGE_SIZE - 1u)) != 0u) {
+        if (kernel::unlikely((virt & (PAGE_SIZE - 1u)) != 0u)) {
             return 0;
         }
 
-        if ((phys & (PAGE_SIZE - 1u)) != 0u) {
+        if (kernel::unlikely((phys & (PAGE_SIZE - 1u)) != 0u)) {
             return 0;
         }
 
@@ -225,7 +228,7 @@ private:
     }
 
     VmFreeBlock* alloc_node() noexcept {
-        if (!free_nodes_head_) {
+        if (kernel::unlikely(!free_nodes_head_)) {
             return nullptr;
         }
 
@@ -290,11 +293,15 @@ private:
     }
 
     bool map_new_pages(uintptr_t virt_base, size_t count) noexcept {
+        if (kernel::unlikely(!pmm_)) {
+            return false;
+        }
+
         for (size_t i = 0; i < count; i++) {
             const uintptr_t virt = virt_base + (i * PAGE_SIZE);
 
-            const uintptr_t phys_raw = reinterpret_cast<uintptr_t>(pmm_alloc_block());
-            const uint32_t phys = static_cast<uint32_t>(phys_raw);
+            void* phys_ptr = pmm_->alloc_pages(0);
+            const uint32_t phys = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys_ptr));
 
             if (kernel::unlikely(!phys)) {
                 for (size_t j = 0; j < i; j++) {
@@ -302,7 +309,7 @@ private:
                     const uint32_t mapped_phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(mapped_virt));
 
                     if (mapped_phys) {
-                        pmm_free_block(reinterpret_cast<void*>(static_cast<uintptr_t>(mapped_phys)));
+                        pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(mapped_phys)), 0);
                     }
 
                     paging_map(kernel_page_directory, static_cast<uint32_t>(mapped_virt), 0, 0);
@@ -325,7 +332,7 @@ private:
         used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
 
         VmFreeBlock* rollback = alloc_node();
-        if (!rollback) {
+        if (kernel::unlikely(!rollback)) {
             panic("VMM: Out of metadata nodes during rollback!");
             return;
         }
@@ -346,7 +353,7 @@ private:
             merged = false;
 
             auto it = addr_tree_.find_key(curr->start);
-            if (it == addr_tree_.end()) {
+            if (kernel::unlikely(it == addr_tree_.end())) {
                 panic("VMM: rb-tree invariant violated (merge/find)");
                 return;
             }
@@ -375,7 +382,7 @@ private:
             }
 
             it = addr_tree_.find_key(curr->start);
-            if (it == addr_tree_.end()) {
+            if (kernel::unlikely(it == addr_tree_.end())) {
                 panic("VMM: rb-tree invariant violated (merge/refind)");
                 return;
             }
@@ -402,6 +409,8 @@ private:
     }
 
     kernel::SpinLock lock_;
+
+    kernel::PmmState* pmm_ = nullptr;
 
     VmFreeBlock node_pool_[k_max_nodes]{};
     VmFreeBlock* free_nodes_head_ = nullptr;
