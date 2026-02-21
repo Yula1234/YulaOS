@@ -7,7 +7,6 @@
 
 #include <lib/cpp/new.h>
 
-#include <lib/string.h>
 #include <mm/heap.h>
 
 namespace {
@@ -31,26 +30,31 @@ void tty_default_size(int& out_cols, int& out_view_rows) {
 }
 
 extern "C" tty_handle_t* tty_bridge_create_default(void) {
-    tty_handle_t* tty = (tty_handle_t*)kmalloc(sizeof(*tty));
-    if (!tty) {
-        return nullptr;
-    }
-
-    memset(tty, 0, sizeof(*tty));
-
     int cols = 0;
     int view_rows = 0;
     tty_default_size(cols, view_rows);
 
     kernel::tty::TtySession* session = kernel::tty::TtySession::create(cols, view_rows);
     if (!session) {
-        kfree(tty);
         return nullptr;
     }
 
-    tty->session = session;
+    tty_handle_t* tty = new (kernel::nothrow) tty_handle_t(session);
+    if (!tty) {
+        delete session;
+        return nullptr;
+    }
 
     return tty;
+}
+
+extern "C" void tty_bridge_destroy(tty_handle_t* tty) {
+    if (!tty) {
+        return;
+    }
+
+    kernel::tty::TtyService::instance().clear_active_if_matches(tty);
+    delete tty;
 }
 
 extern "C" void tty_bridge_set_active(tty_handle_t* tty) {

@@ -26,9 +26,7 @@ TtySession* TtySession::create(int cols, int view_rows) {
 }
 
 TtySession::TtySession(kernel::term::Term* term)
-    : m_term(term)
-    , m_prev(nullptr)
-    , m_next(nullptr) {
+    : m_term(term) {
 }
 
 TtySession::~TtySession() {
@@ -46,42 +44,6 @@ kernel::term::Term* TtySession::term() {
 
 const kernel::term::Term* TtySession::term() const {
     return m_term;
-}
-
-TtySession* TtySession::prev() const {
-    return m_prev;
-}
-
-TtySession* TtySession::next() const {
-    return m_next;
-}
-
-void TtySession::link_before(TtySession* node) {
-    if (!node) {
-        return;
-    }
-
-    m_next = node;
-    m_prev = node->m_prev;
-
-    node->m_prev = this;
-
-    if (m_prev) {
-        m_prev->m_next = this;
-    }
-}
-
-void TtySession::unlink() {
-    if (m_prev) {
-        m_prev->m_next = m_next;
-    }
-
-    if (m_next) {
-        m_next->m_prev = m_prev;
-    }
-
-    m_prev = nullptr;
-    m_next = nullptr;
 }
 
 }

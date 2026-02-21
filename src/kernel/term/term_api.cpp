@@ -10,6 +10,92 @@
 
 namespace kernel::term {
 
+template <typename T>
+class RawBuffer {
+public:
+    RawBuffer() = default;
+
+    RawBuffer(const RawBuffer&) = delete;
+    RawBuffer& operator=(const RawBuffer&) = delete;
+
+    RawBuffer(RawBuffer&& other) noexcept {
+        swap(other);
+    }
+
+    RawBuffer& operator=(RawBuffer&& other) noexcept {
+        if (this != &other) {
+            reset();
+            swap(other);
+        }
+
+        return *this;
+    }
+
+    ~RawBuffer() {
+        reset();
+    }
+
+    void reset() {
+        if (ptr_) {
+            kfree(ptr_);
+            ptr_ = nullptr;
+        }
+
+        cap_elems_ = 0;
+    }
+
+    int reserve_elems(size_t need_elems) {
+        if (need_elems <= cap_elems_) {
+            return 0;
+        }
+
+        if (need_elems == 0) {
+            need_elems = 1;
+        }
+
+        size_t bytes = need_elems * sizeof(T);
+        if (bytes / sizeof(T) != need_elems) {
+            return -1;
+        }
+
+        void* np = krealloc(ptr_, bytes);
+        if (!np) {
+            return -1;
+        }
+
+        ptr_ = static_cast<T*>(np);
+        cap_elems_ = need_elems;
+
+        return 0;
+    }
+
+    T* data() {
+        return ptr_;
+    }
+
+    const T* data() const {
+        return ptr_;
+    }
+
+    size_t capacity_elems() const {
+        return cap_elems_;
+    }
+
+    void swap(RawBuffer& other) noexcept {
+        T* p = ptr_;
+        ptr_ = other.ptr_;
+        other.ptr_ = p;
+
+        size_t c = cap_elems_;
+        cap_elems_ = other.cap_elems_;
+        other.cap_elems_ = c;
+    }
+
+private:
+    T* ptr_ = nullptr;
+    size_t cap_elems_ = 0;
+};
+
 static constexpr int kDefaultCols = 80;
 static constexpr int kDefaultRows = 12;
 
@@ -151,40 +237,9 @@ public:
         (void)ensure_rows_locked(1);
         mark_all_dirty_locked();
         bump_view_seq_locked();
-        inited = 1;
     }
 
-    ~TermImpl() {
-        if (!inited) {
-            return;
-        }
-
-        if (term.buffer) {
-            kfree(term.buffer);
-        }
-
-        if (term.fg_colors) {
-            kfree(term.fg_colors);
-        }
-
-        if (term.bg_colors) {
-            kfree(term.bg_colors);
-        }
-
-        if (term.dirty_rows) {
-            kfree(term.dirty_rows);
-        }
-
-        if (term.dirty_x1) {
-            kfree(term.dirty_x1);
-        }
-
-        if (term.dirty_x2) {
-            kfree(term.dirty_x2);
-        }
-
-        term = {};
-    }
+    ~TermImpl() = default;
 
     TermImpl(const TermImpl&) = delete;
     TermImpl& operator=(const TermImpl&) = delete;
@@ -423,60 +478,41 @@ public:
 
         size_t cells = (size_t)cap_rows * (size_t)new_cols;
 
-        char* nb = (char*)kmalloc(cells ? cells : 1);
-        
-        uint32_t* nfg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
-        uint32_t* nbg = (uint32_t*)kmalloc((cells ? cells : 1) * sizeof(uint32_t));
-        uint8_t* ndr = (uint8_t*)kmalloc((size_t)cap_rows ? (size_t)cap_rows : 1u);
-        
-        int* ndx1 = (int*)kmalloc(((size_t)cap_rows ? (size_t)cap_rows : 1u) * sizeof(int));
-        int* ndx2 = (int*)kmalloc(((size_t)cap_rows ? (size_t)cap_rows : 1u) * sizeof(int));
+        RawBuffer<char> nb;
+        RawBuffer<uint32_t> nfg;
+        RawBuffer<uint32_t> nbg;
+        RawBuffer<uint8_t> ndr;
+        RawBuffer<int> ndx1;
+        RawBuffer<int> ndx2;
 
         if (
-            !nb
-            || !nfg
-            || !nbg
-            || !ndr
-            || !ndx1
-            || !ndx2
+            nb.reserve_elems(cells ? cells : 1) != 0
+            || nfg.reserve_elems(cells ? cells : 1) != 0
+            || nbg.reserve_elems(cells ? cells : 1) != 0
+            || ndr.reserve_elems((size_t)cap_rows ? (size_t)cap_rows : 1u) != 0
+            || ndx1.reserve_elems((size_t)cap_rows ? (size_t)cap_rows : 1u) != 0
+            || ndx2.reserve_elems((size_t)cap_rows ? (size_t)cap_rows : 1u) != 0
         ) {
-            if (nb) {
-                kfree(nb);
-            }
-
-            if (nfg) {
-                kfree(nfg);
-            }
-
-            if (nbg) {
-                kfree(nbg);
-            }
-
-            if (ndr) {
-                kfree(ndr);
-            }
-
-            if (ndx1) {
-                kfree(ndx1);
-            }
-
-            if (ndx2) {
-                kfree(ndx2);
-            }
-
             return;
         }
 
+        char* nb_data = nb.data();
+        uint32_t* nfg_data = nfg.data();
+        uint32_t* nbg_data = nbg.data();
+        uint8_t* ndr_data = ndr.data();
+        int* ndx1_data = ndx1.data();
+        int* ndx2_data = ndx2.data();
+
         for (size_t i = 0; i < cells; i++) {
-            nb[i] = ' ';
-            nfg[i] = term.curr_fg;
-            nbg[i] = term.curr_bg;
+            nb_data[i] = ' ';
+            nfg_data[i] = term.curr_fg;
+            nbg_data[i] = term.curr_bg;
         }
 
         for (int r = 0; r < cap_rows; r++) {
-            ndr[r] = 1;
-            ndx1[r] = 0;
-            ndx2[r] = new_cols;
+            ndr_data[r] = 1;
+            ndx1_data[r] = 0;
+            ndx2_data[r] = new_cols;
         }
 
         int cur_row = term.row;
@@ -551,9 +587,9 @@ public:
                 size_t dst = (size_t)out_r * (size_t)new_cols + (size_t)out_c;
                 size_t src = (size_t)r * (size_t)old_cols + (size_t)c;
 
-                nb[dst] = term.buffer[src];
-                nfg[dst] = term.fg_colors[src];
-                nbg[dst] = term.bg_colors[src];
+                nb_data[dst] = term.buffer[src];
+                nfg_data[dst] = term.fg_colors[src];
+                nbg_data[dst] = term.bg_colors[src];
 
                 if (++out_c >= new_cols) {
                     out_c = 0;
@@ -579,37 +615,15 @@ public:
             out_c = 0;
         }
 
-        if (term.buffer) {
-            kfree(term.buffer);
-        }
+        buffer_.swap(nb);
+        fg_colors_.swap(nfg);
+        bg_colors_.swap(nbg);
 
-        if (term.fg_colors) {
-            kfree(term.fg_colors);
-        }
+        dirty_rows_.swap(ndr);
+        dirty_x1_.swap(ndx1);
+        dirty_x2_.swap(ndx2);
 
-        if (term.bg_colors) {
-            kfree(term.bg_colors);
-        }
-
-        if (term.dirty_rows) {
-            kfree(term.dirty_rows);
-        }
-
-        if (term.dirty_x1) {
-            kfree(term.dirty_x1);
-        }
-
-        if (term.dirty_x2) {
-            kfree(term.dirty_x2);
-        }
-
-        term.buffer = nb;
-        term.fg_colors = nfg;
-        term.bg_colors = nbg;
-
-        term.dirty_rows = ndr;
-        term.dirty_x1 = ndx1;
-        term.dirty_x2 = ndx2;
+        sync_term_views();
 
         term.cols = new_cols;
         term.history_cap_rows = cap_rows;
@@ -815,11 +829,28 @@ public:
     }
 
     TermState term{};
-    int inited = 0;
 
     kernel::SpinLock lock_;
 
+    RawBuffer<char> buffer_;
+    RawBuffer<uint32_t> fg_colors_;
+    RawBuffer<uint32_t> bg_colors_;
+
+    RawBuffer<uint8_t> dirty_rows_;
+    RawBuffer<int> dirty_x1_;
+    RawBuffer<int> dirty_x2_;
+
 private:
+    void sync_term_views() {
+        term.buffer = buffer_.data();
+        term.fg_colors = fg_colors_.data();
+        term.bg_colors = bg_colors_.data();
+
+        term.dirty_rows = dirty_rows_.data();
+        term.dirty_x1 = dirty_x1_.data();
+        term.dirty_x2 = dirty_x2_.data();
+    }
+
     int ensure_rows_locked(int need_rows) {
         if (need_rows < 1) {
             need_rows = 1;
@@ -855,24 +886,46 @@ private:
         size_t old_cells = (size_t)old_cap * (size_t)cols;
         size_t new_cells = (size_t)new_cap * (size_t)cols;
 
-        term.buffer = (char*)krealloc(term.buffer, new_cells ? new_cells : 1);
-        term.fg_colors = (uint32_t*)krealloc(term.fg_colors, (new_cells ? new_cells : 1) * sizeof(uint32_t));
-        term.bg_colors = (uint32_t*)krealloc(term.bg_colors, (new_cells ? new_cells : 1) * sizeof(uint32_t));
+        RawBuffer<char> nb;
+        RawBuffer<uint32_t> nfg;
+        RawBuffer<uint32_t> nbg;
 
-        term.dirty_rows = (uint8_t*)krealloc(term.dirty_rows, (size_t)new_cap ? (size_t)new_cap : 1u);
-        term.dirty_x1 = (int*)krealloc(term.dirty_x1, ((size_t)new_cap ? (size_t)new_cap : 1u) * sizeof(int));
-        term.dirty_x2 = (int*)krealloc(term.dirty_x2, ((size_t)new_cap ? (size_t)new_cap : 1u) * sizeof(int));
+        RawBuffer<uint8_t> ndr;
+        RawBuffer<int> ndx1;
+        RawBuffer<int> ndx2;
 
         if (
-            !term.buffer
-            || !term.fg_colors
-            || !term.bg_colors
-            || !term.dirty_rows
-            || !term.dirty_x1
-            || !term.dirty_x2
+            nb.reserve_elems(new_cells ? new_cells : 1) != 0
+            || nfg.reserve_elems(new_cells ? new_cells : 1) != 0
+            || nbg.reserve_elems(new_cells ? new_cells : 1) != 0
+            || ndr.reserve_elems((size_t)new_cap ? (size_t)new_cap : 1u) != 0
+            || ndx1.reserve_elems((size_t)new_cap ? (size_t)new_cap : 1u) != 0
+            || ndx2.reserve_elems((size_t)new_cap ? (size_t)new_cap : 1u) != 0
         ) {
             return -1;
         }
+
+        if (old_cells > 0) {
+            memcpy(nb.data(), buffer_.data(), old_cells * sizeof(char));
+            memcpy(nfg.data(), fg_colors_.data(), old_cells * sizeof(uint32_t));
+            memcpy(nbg.data(), bg_colors_.data(), old_cells * sizeof(uint32_t));
+        }
+
+        if (old_cap > 0) {
+            memcpy(ndr.data(), dirty_rows_.data(), (size_t)old_cap * sizeof(uint8_t));
+            memcpy(ndx1.data(), dirty_x1_.data(), (size_t)old_cap * sizeof(int));
+            memcpy(ndx2.data(), dirty_x2_.data(), (size_t)old_cap * sizeof(int));
+        }
+
+        buffer_.swap(nb);
+        fg_colors_.swap(nfg);
+        bg_colors_.swap(nbg);
+
+        dirty_rows_.swap(ndr);
+        dirty_x1_.swap(ndx1);
+        dirty_x2_.swap(ndx2);
+
+        sync_term_views();
 
         for (size_t i = old_cells; i < new_cells; i++) {
             term.buffer[i] = ' ';

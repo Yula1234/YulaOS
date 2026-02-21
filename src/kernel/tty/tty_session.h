@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include <lib/dlist.h>
+
 #include <kernel/term/term.h>
 
 namespace kernel::tty {
@@ -22,21 +24,14 @@ public:
     kernel::term::Term* term();
     const kernel::term::Term* term() const;
 
-    TtySession* prev() const;
-    TtySession* next() const;
-
 private:
     explicit TtySession(kernel::term::Term* term);
 
     friend class TtyService;
 
-    void link_before(TtySession* node);
-    void unlink();
+    dlist_head_t m_sessions_node{};
 
     kernel::term::Term* m_term;
-
-    TtySession* m_prev;
-    TtySession* m_next;
 };
 
 }

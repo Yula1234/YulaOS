@@ -6,14 +6,15 @@
 #include <lib/cpp/lock_guard.h>
 
 #include <lib/cpp/atomic.h>
+#include <lib/cpp/dlist.h>
 #include <lib/cpp/semaphore.h>
+
+#include <kernel/tty/tty_session.h>
 
 struct tty_handle;
 using tty_handle_t = tty_handle;
 
 namespace kernel::tty {
-
-class TtySession;
 
 class TtyService {
 public:
@@ -71,7 +72,7 @@ private:
     tty_handle_t* m_active;
 
     kernel::SpinLock m_sessions_lock;
-    TtySession* m_sessions_head;
+    kernel::CDBLinkedList<TtySession, &TtySession::m_sessions_node> m_sessions;
 
     kernel::atomic<uint32_t> m_pending_render;
     kernel::atomic<uint32_t> m_render_reasons;

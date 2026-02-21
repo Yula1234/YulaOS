@@ -4,6 +4,8 @@
 
 #include <lib/cpp/new.h>
 
+#include <lib/dlist.h>
+
 namespace kernel::tty {
 
 TtyService& TtyService::instance() {
@@ -14,7 +16,6 @@ TtyService& TtyService::instance() {
 TtyService::TtyService()
     : m_init_state(encode_init_state(InitState::Uninit))
     , m_active(nullptr)
-    , m_sessions_head(nullptr)
     , m_pending_render(0u)
     , m_render_reasons(0u)
     , m_render_sem(0) {
@@ -85,12 +86,7 @@ void TtyService::register_session(TtySession* session) {
 
     kernel::SpinLockSafeGuard g(m_sessions_lock);
 
-    if (!m_sessions_head) {
-        m_sessions_head = session;
-    } else {
-        session->link_before(m_sessions_head);
-        m_sessions_head = session;
-    }
+    m_sessions.push_front(*session);
 }
 
 void TtyService::request_render(RenderReason reason) {
@@ -120,11 +116,10 @@ void TtyService::unregister_session(TtySession* session) {
 
     kernel::SpinLockSafeGuard g(m_sessions_lock);
 
-    if (m_sessions_head == session) {
-        m_sessions_head = session->next();
-    }
-
-    session->unlink();
+    (void)dlist_remove_node_if_present(
+        m_sessions.native_head(),
+        &session->m_sessions_node
+    );
 }
 
 void TtyService::render_wakeup() {
