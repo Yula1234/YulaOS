@@ -64,7 +64,7 @@ class VmmState {
 public:
     static constexpr uint32_t k_max_nodes = 4096u;
 
-    void init() {
+    void init() noexcept {
         init_node_pool();
 
         addr_tree_.clear();
@@ -85,7 +85,7 @@ public:
         tree_insert(*initial);
     }
 
-    void* alloc_pages(size_t count) {
+    [[nodiscard]] void* alloc_pages(size_t count) noexcept {
         if (count == 0u) {
             return nullptr;
         }
@@ -131,7 +131,7 @@ public:
         return reinterpret_cast<void*>(virt_base);
     }
 
-    void free_pages(void* ptr, size_t count) {
+    void free_pages(void* ptr, size_t count) noexcept {
         if (!ptr || count == 0u) {
             return;
         }
@@ -178,7 +178,7 @@ public:
         used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
     }
 
-    int map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
+    [[nodiscard]] int map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {
         if ((virt & (PAGE_SIZE - 1u)) != 0u) {
             return 0;
         }
@@ -192,15 +192,17 @@ public:
         return 1;
     }
 
-    size_t get_used_pages() const noexcept {
+    [[nodiscard]] size_t get_used_pages() const noexcept {
         return used_pages_count_.load(kernel::memory_order::relaxed);
     }
 
 private:
-    void init_node_pool() {
-        memset(node_pool_, 0, sizeof(node_pool_));
+    void init_node_pool() noexcept {
+        for (size_t i = 0; i < k_max_nodes; i++) {
+            init_block(node_pool_[i]);
+        }
 
-        for (uint32_t i = 0; i + 1u < k_max_nodes; i++) {
+        for (size_t i = 0; i + 1u < k_max_nodes; i++) {
             node_pool_[i].next_free = &node_pool_[i + 1u];
         }
 
@@ -208,7 +210,7 @@ private:
         free_nodes_head_ = &node_pool_[0];
     }
 
-    void init_block(VmFreeBlock& block) {
+    void init_block(VmFreeBlock& block) noexcept {
         block.node_addr.__parent_color = 0;
         block.node_addr.rb_left = nullptr;
         block.node_addr.rb_right = nullptr;
@@ -222,7 +224,7 @@ private:
         block.next_free = nullptr;
     }
 
-    VmFreeBlock* alloc_node() {
+    VmFreeBlock* alloc_node() noexcept {
         if (!free_nodes_head_) {
             return nullptr;
         }
@@ -235,12 +237,12 @@ private:
         return node;
     }
 
-    void free_node(VmFreeBlock& node) {
+    void free_node(VmFreeBlock& node) noexcept {
         node.next_free = free_nodes_head_;
         free_nodes_head_ = &node;
     }
 
-    void tree_insert(VmFreeBlock& block) {
+    void tree_insert(VmFreeBlock& block) noexcept {
         const bool inserted_addr = addr_tree_.insert_unique(block);
         const bool inserted_size = size_tree_.insert_unique(block);
 
@@ -257,17 +259,17 @@ private:
         }
     }
 
-    void tree_erase(VmFreeBlock& block) {
+    void tree_erase(VmFreeBlock& block) noexcept {
         addr_tree_.erase(block);
         size_tree_.erase(block);
     }
 
-    void tree_reinsert_after_key_change(VmFreeBlock& block) {
+    void tree_reinsert_after_key_change(VmFreeBlock& block) noexcept {
         tree_erase(block);
         tree_insert(block);
     }
 
-    void size_tree_reinsert_after_size_change(VmFreeBlock& block) {
+    void size_tree_reinsert_after_size_change(VmFreeBlock& block) noexcept {
         size_tree_.erase(block);
 
         const bool inserted = size_tree_.insert_unique(block);
@@ -276,7 +278,7 @@ private:
         }
     }
 
-    VmFreeBlock* find_best_fit(size_t size) {
+    VmFreeBlock* find_best_fit(size_t size) noexcept {
         const VmFreeBlockSizeKey key{size, 0u};
 
         auto it = size_tree_.lower_bound_key(key);
@@ -287,7 +289,7 @@ private:
         return &(*it);
     }
 
-    bool map_new_pages(uintptr_t virt_base, size_t count) {
+    bool map_new_pages(uintptr_t virt_base, size_t count) noexcept {
         for (size_t i = 0; i < count; i++) {
             const uintptr_t virt = virt_base + (i * PAGE_SIZE);
 
@@ -315,7 +317,7 @@ private:
         return true;
     }
 
-    void rollback_range(uintptr_t virt_base, size_t count) {
+    void rollback_range(uintptr_t virt_base, size_t count) noexcept {
         const size_t size_bytes = count * PAGE_SIZE;
 
         kernel::SpinLockSafeGuard guard(lock_);
@@ -336,7 +338,7 @@ private:
         merge_adjacent(*rollback);
     }
 
-    void merge_adjacent(VmFreeBlock& block) {
+    void merge_adjacent(VmFreeBlock& block) noexcept {
         VmFreeBlock* curr = &block;
 
         bool merged = true;
