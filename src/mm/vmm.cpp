@@ -26,21 +26,21 @@ struct VmFreeBlock {
     rb_node node_addr;
     rb_node node_size;
 
-    uint32_t start;
-    uint32_t size;
+    uintptr_t start;
+    size_t size;
 
     VmFreeBlock* next_free;
 };
 
 struct VmFreeBlockAddrKeyOfValue {
-    const uint32_t& operator()(const VmFreeBlock& block) const {
+    const uintptr_t& operator()(const VmFreeBlock& block) const {
         return block.start;
     }
 };
 
 struct VmFreeBlockSizeKey {
-    uint32_t size;
-    uint32_t start;
+    size_t size;
+    uintptr_t start;
 };
 
 struct VmFreeBlockSizeKeyOfValue {
@@ -78,8 +78,8 @@ public:
             return;
         }
 
-        initial->start = KERNEL_HEAP_START;
-        initial->size = KERNEL_HEAP_SIZE;
+        initial->start = static_cast<uintptr_t>(KERNEL_HEAP_START);
+        initial->size = static_cast<size_t>(KERNEL_HEAP_SIZE);
 
         tree_insert(*initial);
     }
@@ -89,13 +89,13 @@ public:
             return nullptr;
         }
 
-        if (count > 0xFFFFFFFFu / PAGE_SIZE) {
+        if (count > SIZE_MAX / PAGE_SIZE) {
             return nullptr;
         }
 
-        const uint32_t size_bytes = (uint32_t)count * PAGE_SIZE;
+        const size_t size_bytes = count * PAGE_SIZE;
 
-        uint32_t virt_base = 0u;
+        uintptr_t virt_base = 0u;
 
         {
             kernel::SpinLockSafeGuard guard(lock_);
@@ -127,7 +127,7 @@ public:
             return nullptr;
         }
 
-        return (void*)virt_base;
+        return reinterpret_cast<void*>(virt_base);
     }
 
     void free_pages(void* ptr, size_t count) {
@@ -135,30 +135,30 @@ public:
             return;
         }
 
-        const uint32_t virt_base = (uint32_t)ptr;
+        const uintptr_t virt_base = reinterpret_cast<uintptr_t>(ptr);
 
-        if (count > 0xFFFFFFFFu / PAGE_SIZE) {
+        if (count > SIZE_MAX / PAGE_SIZE) {
             return;
         }
 
-        const uint32_t size_bytes = (uint32_t)count * PAGE_SIZE;
+        const size_t size_bytes = count * PAGE_SIZE;
 
         kernel::SpinLockSafeGuard guard(lock_);
 
         for (size_t i = 0; i < count; i++) {
-            const uint32_t virt = virt_base + (uint32_t)(i * PAGE_SIZE);
+            const uintptr_t virt = virt_base + (i * PAGE_SIZE);
 
-            uint32_t phys = paging_get_phys(kernel_page_directory, virt);
+            const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
             if (phys) {
                 page_t* page = pmm_phys_to_page(phys);
                 if (page && page->slab_cache) {
                     panic("VMM: freeing slab page");
                 }
 
-                pmm_free_block((void*)phys);
+                pmm_free_block(reinterpret_cast<void*>(static_cast<uintptr_t>(phys)));
             }
 
-            paging_map(kernel_page_directory, virt, 0, 0);
+            paging_map(kernel_page_directory, static_cast<uint32_t>(virt), 0, 0);
         }
 
         VmFreeBlock* block = alloc_node();
@@ -207,6 +207,20 @@ private:
         free_nodes_head_ = &node_pool_[0];
     }
 
+    void init_block(VmFreeBlock& block) {
+        block.node_addr.__parent_color = 0;
+        block.node_addr.rb_left = nullptr;
+        block.node_addr.rb_right = nullptr;
+
+        block.node_size.__parent_color = 0;
+        block.node_size.rb_left = nullptr;
+        block.node_size.rb_right = nullptr;
+
+        block.start = 0;
+        block.size = 0;
+        block.next_free = nullptr;
+    }
+
     VmFreeBlock* alloc_node() {
         if (!free_nodes_head_) {
             return nullptr;
@@ -215,7 +229,7 @@ private:
         VmFreeBlock* node = free_nodes_head_;
         free_nodes_head_ = node->next_free;
 
-        memset(node, 0, sizeof(*node));
+        init_block(*node);
 
         return node;
     }
@@ -261,7 +275,7 @@ private:
         }
     }
 
-    VmFreeBlock* find_best_fit(uint32_t size) {
+    VmFreeBlock* find_best_fit(size_t size) {
         const VmFreeBlockSizeKey key{size, 0u};
 
         auto it = size_tree_.lower_bound_key(key);
@@ -272,35 +286,36 @@ private:
         return &(*it);
     }
 
-    bool map_new_pages(uint32_t virt_base, size_t count) {
+    bool map_new_pages(uintptr_t virt_base, size_t count) {
         for (size_t i = 0; i < count; i++) {
-            const uint32_t virt = virt_base + (uint32_t)(i * PAGE_SIZE);
+            const uintptr_t virt = virt_base + (i * PAGE_SIZE);
 
-            const uint32_t phys = (uint32_t)(uintptr_t)pmm_alloc_block();
+            const uintptr_t phys_raw = reinterpret_cast<uintptr_t>(pmm_alloc_block());
+            const uint32_t phys = static_cast<uint32_t>(phys_raw);
 
             if (kernel::unlikely(!phys)) {
                 for (size_t j = 0; j < i; j++) {
-                    const uint32_t mapped_virt = virt_base + (uint32_t)(j * PAGE_SIZE);
-                    const uint32_t mapped_phys = paging_get_phys(kernel_page_directory, mapped_virt);
+                    const uintptr_t mapped_virt = virt_base + (j * PAGE_SIZE);
+                    const uint32_t mapped_phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(mapped_virt));
 
                     if (mapped_phys) {
-                        pmm_free_block((void*)mapped_phys);
+                        pmm_free_block(reinterpret_cast<void*>(static_cast<uintptr_t>(mapped_phys)));
                     }
 
-                    paging_map(kernel_page_directory, mapped_virt, 0, 0);
+                    paging_map(kernel_page_directory, static_cast<uint32_t>(mapped_virt), 0, 0);
                 }
 
                 return false;
             }
 
-            paging_map(kernel_page_directory, virt, phys, PTE_PRESENT | PTE_RW);
+            paging_map(kernel_page_directory, static_cast<uint32_t>(virt), phys, PTE_PRESENT | PTE_RW);
         }
 
         return true;
     }
 
-    void rollback_range(uint32_t virt_base, size_t count) {
-        const uint32_t size_bytes = (uint32_t)count * PAGE_SIZE;
+    void rollback_range(uintptr_t virt_base, size_t count) {
+        const size_t size_bytes = count * PAGE_SIZE;
 
         kernel::SpinLockSafeGuard guard(lock_);
 
@@ -389,7 +404,7 @@ private:
     kernel::IntrusiveRbTree<
         VmFreeBlock,
         kernel::detail::RbMemberHook<VmFreeBlock, offsetof(VmFreeBlock, node_addr)>,
-        uint32_t,
+        uintptr_t,
         VmFreeBlockAddrKeyOfValue
     > addr_tree_{};
 
