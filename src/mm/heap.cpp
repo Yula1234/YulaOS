@@ -11,13 +11,14 @@
 
 #include <lib/string.h>
 
+#include <arch/i386/paging.h>
+
+#include <mm/pmm.h>
+#include <mm/vmm.h>
+
 extern "C" {
 
-#include <arch/i386/paging.h>
-#include <mm/pmm.h>
-
 #include "heap.h"
-#include "vmm.h"
 
 }
 
@@ -42,7 +43,8 @@ constexpr size_t k_cache_count = k_malloc_shift_high - k_malloc_shift_low + 1;
 class HeapState {
 public:
     void init() noexcept {
-        vmm_init();
+        vmm_ = kernel::vmm_state();
+        pmm_ = kernel::pmm_state();
 
         size_t size = k_malloc_min_size;
         for (size_t i = 0; i < k_cache_count; i++) {
@@ -99,16 +101,16 @@ public:
                 }
             }
 
-            void* new_virt = vmm_alloc_pages(1);
+            void* new_virt = vmm_->alloc_pages(1);
             if (kernel::unlikely(!new_virt)) {
                 return nullptr;
             }
 
             const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_virt)));
-            page_t* new_page = pmm_phys_to_page(phys);
+            page_t* new_page = pmm_->phys_to_page(phys);
 
             if (kernel::unlikely(!new_page)) {
-                vmm_free_pages(new_virt, 1);
+                vmm_->free_pages(new_virt, 1);
                 return nullptr;
             }
 
@@ -133,7 +135,7 @@ public:
 
         const uintptr_t virt = reinterpret_cast<uintptr_t>(obj);
         const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
-        page_t* page = pmm_phys_to_page(phys);
+        page_t* page = pmm_->phys_to_page(phys);
 
         if (kernel::unlikely(!page)) {
             panic("SLUB: free on invalid page");
@@ -181,7 +183,7 @@ public:
         }
 
         if (need_free_page) {
-            vmm_free_pages(reinterpret_cast<void*>(page_virt), 1);
+            vmm_->free_pages(reinterpret_cast<void*>(page_virt), 1);
         }
     }
 
@@ -197,13 +199,13 @@ public:
 
         const uint32_t pages_needed = static_cast<uint32_t>((size + PAGE_SIZE - 1) / PAGE_SIZE);
 
-        void* ptr = vmm_alloc_pages(pages_needed);
+        void* ptr = vmm_->alloc_pages(pages_needed);
         if (kernel::unlikely(!ptr)) {
             return nullptr;
         }
 
         const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ptr)));
-        page_t* p = pmm_phys_to_page(phys);
+        page_t* p = pmm_->phys_to_page(phys);
 
         if (kernel::likely(p)) {
             p->slab_cache = nullptr;
@@ -229,7 +231,7 @@ public:
             return;
         }
 
-        page_t* page = pmm_phys_to_page(phys);
+        page_t* page = pmm_->phys_to_page(phys);
         if (kernel::unlikely(!page)) {
             return;
         }
@@ -243,7 +245,7 @@ public:
                 panic("HEAP: kfree non-slab with zero pages");
             }
 
-            vmm_free_pages(ptr, pages_count);
+            vmm_->free_pages(ptr, pages_count);
             page->objects = 0;
         }
     }
@@ -409,6 +411,9 @@ private:
     }
 
     KmemCache caches_[k_cache_count]{};
+
+    kernel::VmmState* vmm_ = nullptr;
+    kernel::PmmState* pmm_ = nullptr;
 };
 
 alignas(HeapState) static unsigned char g_heap_storage[sizeof(HeapState)];
