@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define PAGE_SIZE       4096
 #define PAGE_SHIFT      12
 #define PAGE_ALIGN(x)   (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
@@ -47,5 +51,9 @@ uint32_t pmm_page_to_phys(page_t* page);
 uint32_t pmm_get_used_blocks(void);
 uint32_t pmm_get_free_blocks(void);
 uint32_t pmm_get_total_blocks(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
