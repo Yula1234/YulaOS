@@ -63,129 +63,134 @@ public:
 
     [[nodiscard]] void* cache_alloc(KmemCache& cache) noexcept {
         while (true) {
-            kernel::SpinLockSafeGuard guard(cache.lock);
+            page_t* page = nullptr;
+            void* obj = nullptr;
 
-            page_t* page = cache.cpu_slab;
+            {
+                kernel::SpinLockSafeGuard guard(cache.lock);
 
-            if (page && page->freelist) {
-                if (page->slab_cache != &cache) {
-                    guard.~SpinLockSafeGuard();
-                    panic("SLUB: cpu_slab cache mismatch");
+                page = cache.cpu_slab;
+
+                if (page && page->freelist) {
+                    if (kernel::unlikely(page->slab_cache != &cache)) {
+                        panic("SLUB: cpu_slab cache mismatch");
+                    }
+
+                    obj = slub_alloc_from_page(*page);
+                    return obj;
                 }
 
-                void* obj = slub_alloc_from_page(*page);
-                return obj;
+                if (cache.partial) {
+                    page = cache.partial;
+
+                    if (kernel::unlikely(page->slab_cache != &cache)) {
+                        panic("SLUB: partial page cache mismatch");
+                    }
+
+                    if (kernel::unlikely(!page->freelist)) {
+                        panic("SLUB: partial page has null freelist");
+                    }
+
+                    slab_list_remove(cache.partial, *page);
+                    cache.cpu_slab = page;
+
+                    obj = slub_alloc_from_page(*page);
+                    return obj;
+                }
             }
-
-            if (cache.partial) {
-                page = cache.partial;
-
-                if (page->slab_cache != &cache) {
-                    guard.~SpinLockSafeGuard();
-                    panic("SLUB: partial page cache mismatch");
-                }
-
-                if (!page->freelist) {
-                    guard.~SpinLockSafeGuard();
-                    panic("SLUB: partial page has null freelist");
-                }
-
-                slab_list_remove(cache.partial, *page);
-                cache.cpu_slab = page;
-
-                void* obj = slub_alloc_from_page(*page);
-                return obj;
-            }
-
-            guard.~SpinLockSafeGuard();
 
             void* new_virt = vmm_alloc_pages(1);
-            if (!new_virt) {
+            if (kernel::unlikely(!new_virt)) {
                 return nullptr;
             }
 
             const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_virt)));
             page_t* new_page = pmm_phys_to_page(phys);
 
-            if (!new_page) {
+            if (kernel::unlikely(!new_page)) {
                 vmm_free_pages(new_virt, 1);
                 return nullptr;
             }
 
             slub_init_page(cache, *new_page, new_virt);
 
-            kernel::SpinLockSafeGuard guard2(cache.lock);
+            {
+                kernel::SpinLockSafeGuard guard(cache.lock);
 
-            if (!cache.cpu_slab) {
-                cache.cpu_slab = new_page;
-            } else {
-                slab_list_add(cache.partial, *new_page);
+                if (!cache.cpu_slab) {
+                    cache.cpu_slab = new_page;
+                } else {
+                    slab_list_add(cache.partial, *new_page);
+                }
             }
         }
     }
 
     void cache_free(KmemCache& cache, void* obj) noexcept {
-        if (!obj) {
+        if (kernel::unlikely(!obj)) {
             return;
         }
-
-        kernel::SpinLockSafeGuard guard(cache.lock);
 
         const uintptr_t virt = reinterpret_cast<uintptr_t>(obj);
         const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
         page_t* page = pmm_phys_to_page(phys);
 
-        if (!page) {
-            guard.~SpinLockSafeGuard();
+        if (kernel::unlikely(!page)) {
             panic("SLUB: free on invalid page");
         }
 
-        if (page->slab_cache != &cache) {
-            guard.~SpinLockSafeGuard();
+        if (kernel::unlikely(page->slab_cache != &cache)) {
             panic("SLUB: free cache mismatch");
         }
 
         const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1);
         const uintptr_t off = virt - page_virt;
 
-        if (off >= PAGE_SIZE || cache.object_size == 0 || (off % cache.object_size) != 0u) {
-            guard.~SpinLockSafeGuard();
+        if (kernel::unlikely(off >= PAGE_SIZE || cache.object_size == 0 || (off % cache.object_size) != 0u)) {
             panic("SLUB: invalid object address");
         }
 
-        *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(page->freelist) | 1u;
-        page->freelist = obj;
-        page->objects--;
+        bool need_free_page = false;
 
-        if (page != cache.cpu_slab) {
-            if (page->objects == 0) {
-                slab_list_remove(cache.partial, *page);
+        {
+            kernel::SpinLockSafeGuard guard(cache.lock);
 
-                page->slab_cache = nullptr;
-                page->freelist = nullptr;
-                page->objects = 0;
-                page->prev = nullptr;
-                page->next = nullptr;
+            *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(page->freelist) | 1u;
+            page->freelist = obj;
+            page->objects--;
 
-                guard.~SpinLockSafeGuard();
+            if (page != cache.cpu_slab) {
+                if (page->objects == 0) {
+                    slab_list_remove(cache.partial, *page);
 
-                vmm_free_pages(reinterpret_cast<void*>(page_virt), 1);
-                return;
+                    page->slab_cache = nullptr;
+                    page->freelist = nullptr;
+                    page->objects = 0;
+                    page->prev = nullptr;
+                    page->next = nullptr;
+
+                    need_free_page = true;
+                } else {
+                    const uint32_t max_objs = PAGE_SIZE / cache.object_size;
+
+                    if (page->objects == max_objs - 1) {
+                        slab_list_add(cache.partial, *page);
+                    }
+                }
             }
+        }
 
-            const uint32_t max_objs = PAGE_SIZE / cache.object_size;
-            if (page->objects == max_objs - 1) {
-                slab_list_add(cache.partial, *page);
-            }
+        if (need_free_page) {
+            vmm_free_pages(reinterpret_cast<void*>(page_virt), 1);
         }
     }
 
     [[nodiscard]] void* malloc(size_t size) noexcept {
-        if (size == 0) {
+        if (kernel::unlikely(size == 0)) {
             return nullptr;
         }
 
-        if (size <= k_malloc_max_size) {
+        if (kernel::likely(size <= k_malloc_max_size)) {
             const int idx = get_cache_index(size);
             return cache_alloc(caches_[idx]);
         }
@@ -193,14 +198,14 @@ public:
         const uint32_t pages_needed = static_cast<uint32_t>((size + PAGE_SIZE - 1) / PAGE_SIZE);
 
         void* ptr = vmm_alloc_pages(pages_needed);
-        if (!ptr) {
+        if (kernel::unlikely(!ptr)) {
             return nullptr;
         }
 
         const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ptr)));
         page_t* p = pmm_phys_to_page(phys);
 
-        if (p) {
+        if (kernel::likely(p)) {
             p->slab_cache = nullptr;
             p->objects = pages_needed;
         }
@@ -209,47 +214,47 @@ public:
     }
 
     void free(void* ptr) noexcept {
-        if (!ptr) {
+        if (kernel::unlikely(!ptr)) {
             return;
         }
 
         const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
 
-        if (!heap_range_contains(addr)) {
+        if (kernel::unlikely(!heap_range_contains(addr))) {
             return;
         }
 
         const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(addr));
-        if (!phys) {
+        if (kernel::unlikely(!phys)) {
             return;
         }
 
         page_t* page = pmm_phys_to_page(phys);
-        if (!page) {
+        if (kernel::unlikely(!page)) {
             return;
         }
 
-        if (page->slab_cache) {
+        if (kernel::likely(page->slab_cache)) {
             cache_free(*static_cast<KmemCache*>(page->slab_cache), ptr);
         } else {
             const uint32_t pages_count = page->objects;
 
-            if (pages_count == 0) {
+            if (kernel::unlikely(pages_count == 0)) {
                 panic("HEAP: kfree non-slab with zero pages");
             }
 
-            if (pages_count > 0) {
-                vmm_free_pages(ptr, pages_count);
-                page->objects = 0;
-            }
+            vmm_free_pages(ptr, pages_count);
+            page->objects = 0;
         }
     }
 
     [[nodiscard]] void* zalloc(size_t size) noexcept {
         void* ptr = malloc(size);
-        if (ptr) {
+
+        if (kernel::likely(ptr)) {
             memset(ptr, 0, size);
         }
+
         return ptr;
     }
 
@@ -273,11 +278,11 @@ public:
     }
 
     [[nodiscard]] void* realloc(void* ptr, size_t new_size) noexcept {
-        if (!ptr) {
+        if (kernel::unlikely(!ptr)) {
             return malloc(new_size);
         }
 
-        if (new_size == 0) {
+        if (kernel::unlikely(new_size == 0)) {
             free(ptr);
             return nullptr;
         }
@@ -292,12 +297,12 @@ public:
             old_size = static_cast<size_t>(page->objects) * PAGE_SIZE;
         }
 
-        if (new_size <= old_size) {
+        if (kernel::likely(new_size <= old_size)) {
             return ptr;
         }
 
         void* new_ptr = malloc(new_size);
-        if (new_ptr) {
+        if (kernel::likely(new_ptr)) {
             memcpy(new_ptr, ptr, old_size);
             free(ptr);
         }
