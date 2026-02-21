@@ -3,6 +3,7 @@
 
 #include <lib/compiler.h>
 
+#include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
 
@@ -69,7 +70,7 @@ public:
         addr_tree_.clear();
         size_tree_.clear();
 
-        used_pages_count_ = 0u;
+        used_pages_count_.store(0u, kernel::memory_order::relaxed);
 
         VmFreeBlock* initial = alloc_node();
 
@@ -119,7 +120,7 @@ public:
                 tree_insert(*block);
             }
 
-            used_pages_count_ += count;
+            used_pages_count_.fetch_add(count, kernel::memory_order::relaxed);
         }
 
         if (!map_new_pages(virt_base, count)) {
@@ -174,7 +175,7 @@ public:
 
         merge_adjacent(*block);
 
-        used_pages_count_ -= count;
+        used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
     }
 
     int map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
@@ -191,8 +192,8 @@ public:
         return 1;
     }
 
-    size_t get_used_pages() const {
-        return used_pages_count_;
+    size_t get_used_pages() const noexcept {
+        return used_pages_count_.load(kernel::memory_order::relaxed);
     }
 
 private:
@@ -319,7 +320,7 @@ private:
 
         kernel::SpinLockSafeGuard guard(lock_);
 
-        used_pages_count_ -= count;
+        used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
 
         VmFreeBlock* rollback = alloc_node();
         if (!rollback) {
@@ -331,6 +332,8 @@ private:
         rollback->size = size_bytes;
 
         tree_insert(*rollback);
+
+        merge_adjacent(*rollback);
     }
 
     void merge_adjacent(VmFreeBlock& block) {
@@ -416,7 +419,7 @@ private:
         VmFreeBlockSizeKeyCompare
     > size_tree_{};
 
-    size_t used_pages_count_ = 0u;
+    kernel::atomic<size_t> used_pages_count_{0u};
 };
 
 alignas(VmmState) static unsigned char g_vmm_storage[sizeof(VmmState)];
