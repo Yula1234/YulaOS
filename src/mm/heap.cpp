@@ -552,8 +552,20 @@ private:
             return false;
         }
 
+        if (kernel::unlikely((addr & static_cast<uintptr_t>(PAGE_SIZE - 1u)) == 0u)) {
+            return false;
+        }
+
         const uintptr_t header_addr = addr - sizeof(AlignedAllocHeader);
         if (kernel::unlikely(!heap_range_contains(header_addr))) {
+            return false;
+        }
+
+        const uint32_t header_phys = paging_get_phys(
+            kernel_page_directory,
+            static_cast<uint32_t>(header_addr)
+        );
+        if (kernel::unlikely(!header_phys)) {
             return false;
         }
 
