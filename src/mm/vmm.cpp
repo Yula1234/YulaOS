@@ -186,6 +186,7 @@ public:
             return 0;
         }
 
+        kernel::SpinLockSafeGuard guard(lock_);
         paging_map(kernel_page_directory, virt, phys, flags);
         return 1;
     }
