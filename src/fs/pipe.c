@@ -392,7 +392,6 @@ static int pipe_close(vfs_node_t* node) {
         if (p->buffer) kfree(p->buffer);
         kfree(p);
     }
-    kfree(node);
     return 0;
 }
 
@@ -404,6 +403,17 @@ static vfs_ops_t pipe_ops = {
 };
 
 int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
+    if (read_node) {
+        *read_node = 0;
+    }
+    if (write_node) {
+        *write_node = 0;
+    }
+
+    if (!read_node || !write_node) {
+        return -1;
+    }
+
     pipe_t* p = (pipe_t*)kmalloc(sizeof(pipe_t));
     if (!p) return -1;
     
@@ -428,16 +438,41 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     *read_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
     *write_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
 
+    if (!*read_node || !*write_node) {
+        if (*read_node) {
+            kfree(*read_node);
+            *read_node = 0;
+        }
+        if (*write_node) {
+            kfree(*write_node);
+            *write_node = 0;
+        }
+
+        kfree(p->buffer);
+        kfree(p);
+
+        return -1;
+    }
+
+    memset(*read_node, 0, sizeof(**read_node));
+    memset(*write_node, 0, sizeof(**write_node));
+
     strlcpy((*read_node)->name, "pipe_r", 32);
     (*read_node)->ops = &pipe_ops;
     (*read_node)->private_data = p;
+    (*read_node)->private_retain = 0;
+    (*read_node)->private_release = 0;
     (*read_node)->inode_idx = 0;
+    (*read_node)->size = 0;
     (*read_node)->flags = VFS_FLAG_PIPE_READ;
 
     strlcpy((*write_node)->name, "pipe_w", 32);
     (*write_node)->ops = &pipe_ops;
     (*write_node)->private_data = p;
+    (*write_node)->private_retain = 0;
+    (*write_node)->private_release = 0;
     (*write_node)->inode_idx = 0;
+    (*write_node)->size = 0;
     (*write_node)->flags = VFS_FLAG_PIPE_WRITE;
 
     (*read_node)->refs = 1; 

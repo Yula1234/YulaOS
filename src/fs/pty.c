@@ -530,7 +530,6 @@ static int pty_close(vfs_node_t* node) {
 
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) {
-        kfree(node);
         return 0;
     }
 
@@ -572,11 +571,6 @@ static int pty_close(vfs_node_t* node) {
         }
     }
 
-    if (node->private_release && node->private_data) {
-        node->private_release(node->private_data);
-        node->private_data = 0;
-    }
-    kfree(node);
     return 0;
 }
 

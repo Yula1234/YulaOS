@@ -497,6 +497,9 @@ static vfs_node_t* create_node_for_object(kernel::IntrusiveRef<ShmObject>&& obj)
     node->refs = 1;
 
     node->private_data = data;
+    node->private_release = [](void* p) {
+        delete (ShmNodeData*)p;
+    };
 
     return node;
 }
@@ -523,11 +526,6 @@ static int shm_close(vfs_node_t* node) {
     if (!node) {
         return -1;
     }
-
-    ShmNodeData* data = (ShmNodeData*)node->private_data;
-    delete data;
-
-    kfree(node);
 
     return 0;
 }

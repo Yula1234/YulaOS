@@ -1014,10 +1014,6 @@ static int vfs_close(vfs_node_t* node) {
         node->private_data = nullptr;
     }
 
-    if ((node->flags & VFS_FLAG_DEVFS_ALLOC) != 0u) {
-        kfree(node);
-    }
-
     return 0;
 }
 

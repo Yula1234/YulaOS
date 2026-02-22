@@ -186,8 +186,7 @@ void vfs_node_release(vfs_node_t* node) {
     }
 
     if (node->ops && node->ops->close) {
-        node->ops->close(node);
-        return;
+        (void)node->ops->close(node);
     }
 
     if (node->private_release && node->private_data) {

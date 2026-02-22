@@ -19,6 +19,8 @@
 #include <lib/string.h>
 #include <lib/hash_map.h>
 
+#include <mm/heap.h>
+
 static bool ipc_name_valid(const char* name) {
     if (!name) {
         return false;
@@ -317,7 +319,7 @@ static vfs_ops_t ipc_listen_ops = {
 struct vfs_node* ipc_listen_create(const char* name) {
     vfs_node_t* node = nullptr;
     if (ipc_name_valid(name)) {
-        node = new (kernel::nothrow) vfs_node_t;
+        node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
     }
     if (!node) {
         return nullptr;
@@ -325,7 +327,7 @@ struct vfs_node* ipc_listen_create(const char* name) {
 
     IpcEndpoint* ep = new (kernel::nothrow) IpcEndpoint(name, node);
     if (!ep) {
-        delete node;
+        kfree(node);
         return nullptr;
     }
 
@@ -335,9 +337,18 @@ struct vfs_node* ipc_listen_create(const char* name) {
     node->refs = 1;
     node->ops = &ipc_listen_ops;
     node->private_data = ep;
+    node->private_release = [](void* p) {
+        if (!p) {
+            return;
+        }
+
+        IpcEndpoint* ep = (IpcEndpoint*)p;
+        ep->shutdown();
+        ep->release();
+    };
 
     if (!g_endpoints.add(kernel::string(name), ep)) {
-        delete node;
+        kfree(node);
         ep->shutdown();
         ep->release();
         return nullptr;
@@ -353,15 +364,10 @@ static int ipc_listen_close(vfs_node_t* node) {
 
     IpcEndpoint* ep = (IpcEndpoint*)node->private_data;
     if (!ep) {
-        delete node;
         return 0;
     }
 
     g_endpoints.remove(ep->endpoint_name());
-
-    ep->shutdown();
-    ep->release();
-    delete node;
     return 0;
 }
 
