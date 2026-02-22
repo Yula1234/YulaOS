@@ -60,7 +60,8 @@ static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
 
-extern void irq_return(void);
+extern "C" void irq_return(void);
+extern "C" void idle_task_func(void*);
 extern volatile uint32_t timer_ticks;
 
 uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
@@ -893,7 +894,7 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
 }
 
 static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, uint32_t size, uint32_t file_size, uint32_t offset) {
-    mmap_area_t* area = kmalloc(sizeof(mmap_area_t));
+    mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
     if (!area) return;
 
     uint32_t aligned_vaddr = vaddr & ~0xFFF;
@@ -958,7 +959,7 @@ static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom
         return 1;
     }
 
-    mmap_area_t* area = kmalloc(sizeof(*area));
+    mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(*area));
     if (!area) return 0;
 
     memset(area, 0, sizeof(*area));
@@ -1341,8 +1342,6 @@ task_t* proc_create_idle(int cpu_index) {
     }
 
     uint32_t* sp = proc_kstack_top(t);
-    
-    extern void idle_task_func(void*);
     
     *--sp = 0;
     *--sp = 0; // Fake Return Address

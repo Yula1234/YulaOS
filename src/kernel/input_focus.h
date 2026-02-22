@@ -6,8 +6,16 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 uint32_t input_focus_get_pid(void);
 void input_focus_set_pid(uint32_t pid);
 uint32_t input_focus_exchange_pid(uint32_t pid);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

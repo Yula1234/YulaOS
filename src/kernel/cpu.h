@@ -11,6 +11,10 @@
 
 #define MAX_CPUS 32
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int id;                 // LAPIC ID
     int index; 
@@ -46,5 +50,9 @@ extern volatile int ap_running_count;
 
 void cpu_init_system(void);
 cpu_t* cpu_current(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
