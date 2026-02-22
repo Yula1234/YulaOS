@@ -20,6 +20,8 @@
 #include <kernel/input_focus.h>
 
 #include <lib/hash_map.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/unique_ptr.h>
 
 #include "sched.h"
 #include "proc.h"
@@ -50,18 +52,88 @@ static task_t* tasks_tail = 0;
 static uint32_t total_tasks = 0;
 static uint32_t next_pid = 1;
 
-static spinlock_t proc_lock;
+static kernel::SpinLock proc_lock;
 
 static struct rb_root sleeping_tree = RB_ROOT;
-static spinlock_t sleep_lock;
+static kernel::SpinLock sleep_lock;
 
 static dlist_head_t zombie_list;
-static spinlock_t zombie_lock;
+static kernel::SpinLock zombie_lock;
 
 static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
 
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
+
+class ScopedIrqDisable {
+public:
+    ScopedIrqDisable() {
+        uint32_t flags;
+        __asm__ volatile (
+            "pushfl\n\t"
+            "popl %0\n\t"
+            "cli"
+            : "=r"(flags)
+            :
+            : "memory"
+        );
+
+        flags_ = flags;
+    }
+
+    ScopedIrqDisable(const ScopedIrqDisable&) = delete;
+    ScopedIrqDisable& operator=(const ScopedIrqDisable&) = delete;
+
+    ScopedIrqDisable(ScopedIrqDisable&&) = delete;
+    ScopedIrqDisable& operator=(ScopedIrqDisable&&) = delete;
+
+    ~ScopedIrqDisable() {
+        if ((flags_ & 0x200u) != 0u) {
+            __asm__ volatile("sti");
+        }
+    }
+
+private:
+    uint32_t flags_ = 0u;
+};
+
+class ScopedPagingSwitch {
+public:
+    explicit ScopedPagingSwitch(uint32_t* dir)
+        : prev_dir_(paging_get_dir()) {
+        paging_switch(dir);
+    }
+
+    ScopedPagingSwitch(const ScopedPagingSwitch&) = delete;
+    ScopedPagingSwitch& operator=(const ScopedPagingSwitch&) = delete;
+
+    ScopedPagingSwitch(ScopedPagingSwitch&&) = delete;
+    ScopedPagingSwitch& operator=(ScopedPagingSwitch&&) = delete;
+
+    ~ScopedPagingSwitch() {
+        paging_switch(prev_dir_);
+    }
+
+private:
+    uint32_t* prev_dir_ = nullptr;
+};
+
+template<typename T>
+struct KfreeDeleter {
+    void operator()(T* ptr) const noexcept {
+        if (ptr) {
+            kfree(ptr);
+        }
+    }
+};
+
+struct VfsNodeReleaseDeleter {
+    void operator()(vfs_node_t* node) const noexcept {
+        if (node) {
+            vfs_node_release(node);
+        }
+    }
+};
 
 static void pid_map_insert(uint32_t pid, task_t* t) {
     if (!t) return;
@@ -85,7 +157,7 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
 
     uint32_t count = 0;
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    kernel::SpinLockSafeGuard guard(proc_lock);
 
     task_t* t = tasks_head;
     while (t && count < cap) {
@@ -101,8 +173,6 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
         }
         t = t->next;
     }
-
-    spinlock_release_safe(&proc_lock, flags);
     return count;
 }
 
@@ -111,14 +181,17 @@ void proc_init(void) {
     tasks_tail = 0;
     total_tasks = 0;
     next_pid = 1;
-    
-    spinlock_init(&proc_lock);
-    
+
+    spinlock_init(proc_lock.native_handle());
+
     sleeping_tree = RB_ROOT;
-    spinlock_init(&sleep_lock);
-    
+
+    spinlock_init(sleep_lock.native_handle());
+
     dlist_init(&zombie_list);
-    spinlock_init(&zombie_lock);
+
+    spinlock_init(zombie_lock.native_handle());
+
 
     initial_fpu_state_size = fpu_state_size();
     initial_fpu_state = (uint8_t*)kmalloc_a(initial_fpu_state_size);
@@ -212,7 +285,7 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return 0;
 
-    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    kernel::SpinLockNativeSafeGuard guard(ft->lock);
     
     file_desc_t* out = 0;
     if ((uint32_t)fd < ft->max_fds && ft->fds) {
@@ -220,7 +293,6 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     }
     
     if (out) file_desc_retain(out);
-    spinlock_release_safe(&ft->lock, flags);
     return out;
 }
 
@@ -253,21 +325,18 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    kernel::SpinLockNativeSafeGuard guard(ft->lock);
     
     if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
-        spinlock_release_safe(&ft->lock, flags);
         return -1;
     }
 
     if (ft->fds[fd]) {
-        spinlock_release_safe(&ft->lock, flags);
         return -1;
     }
 
     file_desc_t* d = (file_desc_t*)kmalloc(sizeof(*d));
     if (!d) {
-        spinlock_release_safe(&ft->lock, flags);
         return -1;
     }
 
@@ -278,7 +347,6 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     ft->fds[fd] = d;
     if (fd >= ft->fd_next) ft->fd_next = fd + 1;
     
-    spinlock_release_safe(&ft->lock, flags);
     if (out_desc) *out_desc = d;
     return fd;
 }
@@ -288,15 +356,13 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    kernel::SpinLockNativeSafeGuard guard(ft->lock);
     
     if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
-        spinlock_release_safe(&ft->lock, flags);
         return -1;
     }
 
     if (ft->fds[fd]) {
-        spinlock_release_safe(&ft->lock, flags);
         return -1;
     }
 
@@ -305,7 +371,6 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
 
     if (fd >= ft->fd_next) ft->fd_next = fd + 1;
     
-    spinlock_release_safe(&ft->lock, flags);
     return fd;
 }
 
@@ -315,43 +380,43 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    uint32_t flags = spinlock_acquire_safe(&ft->lock);
-
-    int expected = ft->fd_next;
-    if (expected < 0) expected = 0;
-
-    uint32_t limit = ft->max_fds;
-    uint32_t start = (uint32_t)expected;
-    
     int found = -1;
-    
-    for (uint32_t i = start; i < limit; i++) {
-        if (ft->fds[i] == 0) {
-            found = (int)i;
-            break;
-        }
-    }
-    
-    if (found == -1 && start > 0) {
-        for (uint32_t i = 0; i < start; i++) {
+
+    {
+        kernel::SpinLockNativeSafeGuard guard(ft->lock);
+
+        int expected = ft->fd_next;
+        if (expected < 0) expected = 0;
+
+        uint32_t limit = ft->max_fds;
+        uint32_t start = (uint32_t)expected;
+
+        for (uint32_t i = start; i < limit; i++) {
             if (ft->fds[i] == 0) {
                 found = (int)i;
                 break;
             }
         }
-    }
-    
-    if (found == -1) {
-        found = (int)limit;
-        if (fd_table_ensure_cap(ft, limit) != 0) {
-            spinlock_release_safe(&ft->lock, flags);
-            return -1;
+
+        if (found == -1 && start > 0) {
+            for (uint32_t i = 0; i < start; i++) {
+                if (ft->fds[i] == 0) {
+                    found = (int)i;
+                    break;
+                }
+            }
         }
+
+        if (found == -1) {
+            found = (int)limit;
+            if (fd_table_ensure_cap(ft, limit) != 0) {
+                return -1;
+            }
+        }
+
+        ft->fd_next = found + 1;
     }
-    
-    ft->fd_next = found + 1;
-    spinlock_release_safe(&ft->lock, flags);
-    
+
     return proc_fd_add_at(t, found, out_desc);
 }
 
@@ -361,10 +426,9 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    uint32_t flags = spinlock_acquire_safe(&ft->lock);
+    kernel::SpinLockNativeSafeGuard guard(ft->lock);
     
     if ((uint32_t)fd >= ft->max_fds || !ft->fds || !ft->fds[fd]) {
-        spinlock_release_safe(&ft->lock, flags);
         return -1;
     }
 
@@ -372,8 +436,6 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     ft->fds[fd] = 0;
 
     if (fd < ft->fd_next) ft->fd_next = fd;
-    
-    spinlock_release_safe(&ft->lock, flags);
 
     if (out_desc) *out_desc = d;
     return 0;
@@ -389,12 +451,11 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     ft->refs = 1;
     spinlock_init(&ft->lock);
 
-    uint32_t flags = spinlock_acquire_safe(&src->lock);
+    kernel::SpinLockNativeSafeGuard guard(src->lock);
     
     ft->max_fds = src->max_fds;
     ft->fds = (file_desc_t**)kmalloc(sizeof(file_desc_t*) * ft->max_fds);
     if (!ft->fds) {
-        spinlock_release_safe(&src->lock, flags);
         kfree(ft);
         return 0;
     }
@@ -408,8 +469,6 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
             file_desc_retain(ft->fds[i]);
         }
     }
-
-    spinlock_release_safe(&src->lock, flags);
     return ft;
 }
 
@@ -541,11 +600,10 @@ static void proc_mem_release(proc_mem_t* mem) {
 }
 
 static task_t* alloc_task(void) {
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    kernel::SpinLockSafeGuard guard(proc_lock);
     
     task_t* t = (task_t*)kmalloc_a(sizeof(task_t));
     if (!t) {
-        spinlock_release_safe(&proc_lock, flags);
         return 0;
     }
     
@@ -556,7 +614,6 @@ static task_t* alloc_task(void) {
     dlist_init(&t->poll_waiters);
 
     if (!initial_fpu_state) {
-        spinlock_release_safe(&proc_lock, flags);
         kfree(t);
         return 0;
     }
@@ -564,7 +621,6 @@ static task_t* alloc_task(void) {
     t->fpu_state_size = initial_fpu_state_size;
     t->fpu_state = (uint8_t*)kmalloc_a(t->fpu_state_size);
     if (!t->fpu_state) {
-        spinlock_release_safe(&proc_lock, flags);
         kfree(t);
         return 0;
     }
@@ -586,8 +642,7 @@ static task_t* alloc_task(void) {
     pid_map_insert(t->pid, t);
     
     list_append(t);
-    
-    spinlock_release_safe(&proc_lock, flags);
+
     return t;
 }
 
@@ -623,10 +678,9 @@ void proc_free_resources(task_t* t) {
     t->pid = 0;
     memset(t->name, 0, sizeof(t->name));
     
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    kernel::SpinLockSafeGuard guard(proc_lock);
     list_remove(t);
     kfree(t);
-    spinlock_release_safe(&proc_lock, flags);
 }
 
 void proc_kill(task_t* t) {
@@ -645,7 +699,7 @@ void proc_kill(task_t* t) {
     }
 
     {
-        uint32_t flags = spinlock_acquire_safe(&proc_lock);
+        kernel::SpinLockSafeGuard guard(proc_lock);
         uint32_t pid_to_clean = (uint32_t)t->pid;
         task_t* child = tasks_head;
         while (child) {
@@ -654,7 +708,6 @@ void proc_kill(task_t* t) {
             }
             child = child->next;
         }
-        spinlock_release_safe(&proc_lock, flags);
     }
 
     sem_remove_task(t);
@@ -668,9 +721,8 @@ void proc_kill(task_t* t) {
     t->state = TASK_ZOMBIE;
 
     {
-        uint32_t zflags = spinlock_acquire_safe(&zombie_lock);
+        kernel::SpinLockSafeGuard guard(zombie_lock);
         dlist_add_tail(&t->zombie_node, &zombie_list);
-        spinlock_release_safe(&zombie_lock, zflags);
     }
 
     sem_signal_all(&t->exit_sem);
@@ -724,18 +776,16 @@ task_t* proc_get_list_head() { return tasks_head; }
 uint32_t proc_task_count(void) { return total_tasks; }
 
 task_t* proc_task_at(uint32_t idx) {
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    kernel::SpinLockSafeGuard guard(proc_lock);
     task_t* curr = tasks_head;
     uint32_t i = 0;
     while (curr) {
         if (i == idx) {
-             spinlock_release_safe(&proc_lock, flags);
              return curr;
         }
         curr = curr->next;
         i++;
     }
-    spinlock_release_safe(&proc_lock, flags);
     return 0;
 }
 
@@ -784,18 +834,17 @@ static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32
     uint32_t user_sp = stack_top & ~0xFu;
     if (user_sp < stack_bottom + 8u) return 0;
 
-    uint32_t* prev_pd = paging_get_dir();
-    __asm__ volatile("cli");
-    paging_switch(t->mem->page_dir);
-
     uint32_t sp = user_sp;
-    sp -= 4u;
-    *(uint32_t*)sp = arg;
-    sp -= 4u;
-    *(uint32_t*)sp = 0u;
 
-    paging_switch(prev_pd);
-    __asm__ volatile("sti");
+    {
+        ScopedIrqDisable irq_guard;
+        ScopedPagingSwitch paging_guard(t->mem->page_dir);
+
+        sp -= 4u;
+        *(uint32_t*)sp = arg;
+        sp -= 4u;
+        *(uint32_t*)sp = 0u;
+    }
 
     *out_user_esp = sp;
     return 1;
@@ -942,96 +991,103 @@ static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom
 }
 
 task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
-    vfs_node_t* exec_node = vfs_create_node_from_path(filename);
+    kernel::unique_ptr<vfs_node_t, VfsNodeReleaseDeleter> exec_node(vfs_create_node_from_path(filename));
     if (!exec_node) return 0;
 
     Elf32_Ehdr header;
-    Elf32_Phdr* phdrs = 0;
+    kernel::unique_ptr<Elf32_Phdr, KfreeDeleter<Elf32_Phdr>> phdrs;
     uint32_t max_vaddr = 0;
 
-    if (exec_node->ops->read(exec_node, 0, sizeof(Elf32_Ehdr), &header) < (int)sizeof(Elf32_Ehdr)) {
-        vfs_node_release(exec_node);
+    if (exec_node->ops->read(exec_node.get(), 0, sizeof(Elf32_Ehdr), &header) < (int)sizeof(Elf32_Ehdr)) {
         return 0;
     }
     
     if (header.e_ident[0] != 0x7F || header.e_ident[1] != 'E' || header.e_ident[2] != 'L' || header.e_ident[3] != 'F') {
-        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_ident[EI_CLASS] != ELFCLASS32 || header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_ident[EI_VERSION] != EV_CURRENT) {
-        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_type != ET_EXEC || header.e_machine != EM_386 || header.e_version != EV_CURRENT) {
-        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_ehsize != sizeof(Elf32_Ehdr) || header.e_phentsize != sizeof(Elf32_Phdr)) {
-        vfs_node_release(exec_node);
         return 0;
     }
     if (header.e_phnum == 0 || header.e_phnum > 64) {
-        vfs_node_release(exec_node);
         return 0;
     }
     {
         uint64_t ph_end = (uint64_t)header.e_phoff + (uint64_t)header.e_phnum * (uint64_t)sizeof(Elf32_Phdr);
         if (header.e_phoff == 0 || ph_end > (uint64_t)exec_node->size) {
-            vfs_node_release(exec_node);
             return 0;
         }
     }
 
     size_t phdr_bytes = (size_t)header.e_phnum * sizeof(Elf32_Phdr);
-    phdrs = (Elf32_Phdr*)kmalloc(phdr_bytes);
+    phdrs.reset((Elf32_Phdr*)kmalloc(phdr_bytes));
     if (!phdrs) {
-        vfs_node_release(exec_node);
         return 0;
     }
-    if (exec_node->ops->read(exec_node, header.e_phoff, (uint32_t)phdr_bytes, phdrs) < (int)phdr_bytes) {
-        kfree(phdrs);
-        vfs_node_release(exec_node);
+    if (exec_node->ops->read(exec_node.get(), header.e_phoff, (uint32_t)phdr_bytes, phdrs.get()) < (int)phdr_bytes) {
         return 0;
     }
 
     int have_load = 0;
     int entry_ok = 0;
     for (int i = 0; i < header.e_phnum; i++) {
-        if (phdrs[i].p_type != PT_LOAD) continue;
+        if (phdrs.get()[i].p_type != PT_LOAD) continue;
 
-        uint32_t start_v = phdrs[i].p_vaddr;
-        uint32_t mem_sz  = phdrs[i].p_memsz;
-        uint32_t file_off= phdrs[i].p_offset;
-        uint32_t file_sz = phdrs[i].p_filesz;
+        uint32_t start_v = phdrs.get()[i].p_vaddr;
+        uint32_t mem_sz  = phdrs.get()[i].p_memsz;
+        uint32_t file_off= phdrs.get()[i].p_offset;
+        uint32_t file_sz = phdrs.get()[i].p_filesz;
 
-        if (mem_sz < file_sz) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
+        if (mem_sz < file_sz) { return 0; }
 
         uint32_t end_v = start_v + mem_sz;
-        if (end_v < start_v) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
-        if (start_v < USER_ELF_MIN_VADDR || end_v > USER_ELF_MAX_VADDR) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
+        if (end_v < start_v) { return 0; }
+        if (start_v < USER_ELF_MIN_VADDR || end_v > USER_ELF_MAX_VADDR) { return 0; }
 
         uint32_t diff = start_v & 0xFFFu;
-        if (file_off < diff) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
+        if (file_off < diff) { return 0; }
 
         uint64_t file_end = (uint64_t)file_off + (uint64_t)file_sz;
-        if (file_end > (uint64_t)exec_node->size) { kfree(phdrs); vfs_node_release(exec_node); return 0; }
+        if (file_end > (uint64_t)exec_node->size) { return 0; }
 
         have_load = 1;
         if (end_v > max_vaddr) max_vaddr = end_v;
         if (header.e_entry >= start_v && header.e_entry < end_v) entry_ok = 1;
     }
     if (!have_load || !entry_ok || max_vaddr == 0) {
-        kfree(phdrs);
-        vfs_node_release(exec_node);
         return 0;
     }
 
     char** k_argv = (char**)kmalloc((argc + 1) * sizeof(char*));
     if (!k_argv) {
-        kfree(phdrs);
-        vfs_node_release(exec_node);
         return 0;
     }
+
+    struct KargvDeleter {
+        int argc = 0;
+
+        void operator()(char** argv) const noexcept {
+            if (!argv) {
+                return;
+            }
+
+            for (int i = 0; i < argc; i++) {
+                if (argv[i]) {
+                    kfree(argv[i]);
+                    argv[i] = nullptr;
+                }
+            }
+
+            kfree(argv);
+        }
+    };
+
+    kernel::unique_ptr<char*, KargvDeleter> kargv_guard(k_argv, KargvDeleter{argc});
     
     for (int i = 0; i < argc; i++) {
         int len = strlen(argv[i]) + 1;
@@ -1042,10 +1098,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     task_t* t = alloc_task();
     if (!t) {
-        for(int i=0; i<argc; i++) kfree(k_argv[i]);
-        kfree(k_argv);
-        kfree(phdrs);
-        vfs_node_release(exec_node);
         return 0;
     }
 
@@ -1063,10 +1115,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         task_t* parent = proc_current();
         fd_table_t* cloned = proc_fd_table_clone(parent->fd_table);
         if (!cloned) {
-            vfs_node_release(exec_node);
-            for(int i=0; i<argc; i++) kfree(k_argv[i]);
-            kfree(k_argv);
-            kfree(phdrs);
             proc_free_resources(t);
             return 0;
         }
@@ -1101,10 +1149,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     t->mem = proc_mem_create(t->pid);
     if (!t->mem) {
-        vfs_node_release(exec_node);
-        for(int i=0; i<argc; i++) kfree(k_argv[i]);
-        kfree(k_argv);
-        kfree(phdrs);
         proc_free_resources(t);
         return 0;
     }
@@ -1112,30 +1156,21 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     t->kstack_size = KSTACK_SIZE;
     t->kstack = kmalloc_a(t->kstack_size);
     if (!t->kstack) {
-        vfs_node_release(exec_node);
-        for(int i=0; i<argc; i++) kfree(k_argv[i]);
-        kfree(k_argv);
-        kfree(phdrs);
         proc_free_resources(t);
         return 0;
     }
     memset(t->kstack, 0, t->kstack_size);
 
-    uint32_t* my_pd = paging_get_dir();
-
     for (int i = 0; i < header.e_phnum; i++) {
-        if (phdrs[i].p_type == 1) {
-            uint32_t start_v = phdrs[i].p_vaddr;
-            uint32_t mem_sz  = phdrs[i].p_memsz;
-            uint32_t file_off= phdrs[i].p_offset;
-            uint32_t file_sz = phdrs[i].p_filesz;
+        if (phdrs.get()[i].p_type == 1) {
+            uint32_t start_v = phdrs.get()[i].p_vaddr;
+            uint32_t mem_sz  = phdrs.get()[i].p_memsz;
+            uint32_t file_off= phdrs.get()[i].p_offset;
+            uint32_t file_sz = phdrs.get()[i].p_filesz;
             
-            proc_add_mmap_region(t, exec_node, start_v, mem_sz, file_sz, file_off);
+            proc_add_mmap_region(t, exec_node.get(), start_v, mem_sz, file_sz, file_off);
         }
     }
-    
-    kfree(phdrs);
-    vfs_node_release(exec_node);
 
     uint32_t start_pde_idx = 0x08000000 >> 22;
     uint32_t end_pde_idx   = (max_vaddr - 1) >> 22;
@@ -1167,41 +1202,39 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         }
     }
 
-    __asm__ volatile("cli");
-    paging_switch(t->mem->page_dir);
+    uint32_t final_user_esp = 0;
 
-    uint32_t ustack_top = ustack_top_limit; 
+    {
+        ScopedIrqDisable irq_guard;
+        ScopedPagingSwitch paging_guard(t->mem->page_dir);
 
-    uint32_t arg_ptrs[16];
-    int actual_argc = (argc > 16) ? 16 : argc;
+        uint32_t ustack_top = ustack_top_limit;
 
-    for (int i = actual_argc - 1; i >= 0; i--) {
-        size_t len = strlen(k_argv[i]) + 1;
-        ustack_top -= len;
-        memcpy((void*)ustack_top, k_argv[i], len);
-        arg_ptrs[i] = ustack_top;
+        uint32_t arg_ptrs[16];
+        int actual_argc = (argc > 16) ? 16 : argc;
+
+        for (int i = actual_argc - 1; i >= 0; i--) {
+            size_t len = strlen(k_argv[i]) + 1;
+            ustack_top -= len;
+            memcpy((void*)ustack_top, k_argv[i], len);
+            arg_ptrs[i] = ustack_top;
+        }
+
+        ustack_top &= ~0xF;
+        uint32_t* us = (uint32_t*)ustack_top;
+
+        *--us = 0;
+
+        for (int i = actual_argc - 1; i >= 0; i--) *--us = arg_ptrs[i];
+
+        uint32_t argv_ptr = (uint32_t)us;
+
+        *--us = argv_ptr;
+        *--us = (uint32_t)actual_argc;
+        *--us = 0;
+
+        final_user_esp = (uint32_t)us;
     }
-
-    ustack_top &= ~0xF;
-    uint32_t* us = (uint32_t*)ustack_top;
-    
-    *--us = 0;
-    
-    for (int i = actual_argc - 1; i >= 0; i--) *--us = arg_ptrs[i];
-    
-    uint32_t argv_ptr = (uint32_t)us;
-    
-    *--us = argv_ptr; 
-    *--us = (uint32_t)actual_argc;
-    *--us = 0;  
-    
-    uint32_t final_user_esp = (uint32_t)us;
-
-    paging_switch(my_pd);
-    __asm__ volatile("sti");
-
-    for(int i=0; i<argc; i++) kfree(k_argv[i]);
-    kfree(k_argv);
 
     proc_init_user_context(t, header.e_entry, final_user_esp);
 
@@ -1252,36 +1285,37 @@ void reaper_task_func(void* arg) {
         int freed = 0;
         do {
             freed = 0;
-            uint32_t flags = spinlock_acquire_safe(&zombie_lock);
-            
-            dlist_head_t* it = zombie_list.next;
-            while (it && it != &zombie_list) {
-                task_t* curr = container_of(it, task_t, zombie_node);
-                it = it->next;
+            task_t* victim = 0;
 
-                int still_running = 0;
-                for (int i = 0; i < MAX_CPUS; i++) {
-                    if (cpus[i].current_task == curr) {
-                        still_running = 1;
-                        break;
+            {
+                kernel::SpinLockSafeGuard guard(zombie_lock);
+
+                dlist_head_t* it = zombie_list.next;
+                while (it && it != &zombie_list) {
+                    task_t* curr = container_of(it, task_t, zombie_node);
+                    it = it->next;
+
+                    int still_running = 0;
+                    for (int i = 0; i < MAX_CPUS; i++) {
+                        if (cpus[i].current_task == curr) {
+                            still_running = 1;
+                            break;
+                        }
                     }
-                }
-                
-                if (still_running || curr->exit_waiters > 0) {
-                    continue;
-                }
 
-                dlist_del(&curr->zombie_node);
-                spinlock_release_safe(&zombie_lock, flags);
-                
-                proc_free_resources(curr);
-                
-                freed = 1;
-                break;
+                    if (still_running || curr->exit_waiters > 0) {
+                        continue;
+                    }
+
+                    dlist_del(&curr->zombie_node);
+                    victim = curr;
+                    break;
+                }
             }
-            
-            if (!freed) {
-                spinlock_release_safe(&zombie_lock, flags);
+
+            if (victim) {
+                proc_free_resources(victim);
+                freed = 1;
             }
         } while (freed);
 
@@ -1319,10 +1353,9 @@ task_t* proc_create_idle(int cpu_index) {
     
     t->esp = sp;
 
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+    kernel::SpinLockSafeGuard guard(proc_lock);
     list_remove(t);
     pid_map_remove(old_pid);
-    spinlock_release_safe(&proc_lock, flags);
 
     return t;
 }
@@ -1342,18 +1375,19 @@ static void insert_sleeper(task_t* t) {
 }
 
 void proc_sleep_add(task_t* t, uint32_t wake_tick) {
-    uint32_t flags = spinlock_acquire_safe(&sleep_lock);
-    
-    if (t->wake_tick != 0) {
-        rb_erase(&t->sleep_rb, &sleeping_tree);
+    {
+        kernel::SpinLockSafeGuard guard(sleep_lock);
+
+        if (t->wake_tick != 0) {
+            rb_erase(&t->sleep_rb, &sleeping_tree);
+        }
+
+        t->wake_tick = wake_tick;
+        t->state = TASK_WAITING;
+
+        insert_sleeper(t);
     }
 
-    t->wake_tick = wake_tick;
-    t->state = TASK_WAITING;
-    
-    insert_sleeper(t);
-    
-    spinlock_release_safe(&sleep_lock, flags);
     sched_yield();
 }
 
@@ -1369,30 +1403,53 @@ void proc_usleep(uint32_t us) {
 }
 
 void proc_check_sleepers(uint32_t current_tick) {
-    if (spinlock_try_acquire(&sleep_lock)) {
-        struct rb_node *node;
+    class TrySpinLockGuard {
+    public:
+        explicit TrySpinLockGuard(kernel::SpinLock& lock)
+            : lock_(&lock),
+              acquired_(lock.try_acquire()) {
+        }
+
+        TrySpinLockGuard(const TrySpinLockGuard&) = delete;
+        TrySpinLockGuard& operator=(const TrySpinLockGuard&) = delete;
+
+        ~TrySpinLockGuard() {
+            if (acquired_) {
+                lock_->release();
+            }
+        }
+
+        explicit operator bool() const {
+            return acquired_;
+        }
+
+    private:
+        kernel::SpinLock* lock_ = nullptr;
+        bool acquired_ = false;
+    };
+
+    TrySpinLockGuard guard(sleep_lock);
+    if (guard) {
+        struct rb_node* node;
         while ((node = rb_first(&sleeping_tree))) {
-            task_t *t = rb_entry(node, task_t, sleep_rb);
+            task_t* t = rb_entry(node, task_t, sleep_rb);
             if (t->wake_tick > current_tick) break;
-            
+
             rb_erase(&t->sleep_rb, &sleeping_tree);
             t->state = TASK_RUNNABLE;
             t->wake_tick = 0;
             sched_add(t);
         }
-        spinlock_release(&sleep_lock);
     }
 }
 
 void proc_sleep_remove(task_t* t) {
-    uint32_t flags = spinlock_acquire_safe(&sleep_lock);
+    kernel::SpinLockSafeGuard guard(sleep_lock);
     
     if (t->wake_tick != 0) {
         rb_erase(&t->sleep_rb, &sleeping_tree);
         t->wake_tick = 0;
     }
-    
-    spinlock_release_safe(&sleep_lock, flags);
 }
 
 void proc_wake(task_t* t) {
