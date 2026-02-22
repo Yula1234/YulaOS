@@ -50,11 +50,12 @@ class DevFSRegistry {
 public:
     void register_node(vfs_node_t* node) noexcept;
     int unregister_node(const char* name) noexcept;
-    vfs_node_t* fetch(const char* name) noexcept;
+    vfs_node_t* fetch_borrowed(const char* name) noexcept;
     vfs_node_t* clone(const char* name) noexcept;
     vfs_node_t* take(const char* name) noexcept;
 
 private:
+    kernel::SpinLock lock_;
     HashMap<kernel::string, vfs_node_t*, 256> nodes_;
 };
 
@@ -74,6 +75,7 @@ void DevFSRegistry::register_node(vfs_node_t* node) noexcept {
     }
 
     const kernel::string key(node->name);
+    kernel::SpinLockSafeGuard guard(lock_);
     nodes_.insert_or_assign(key, node);
 }
 
@@ -83,16 +85,19 @@ int DevFSRegistry::unregister_node(const char* name) noexcept {
     }
 
     const kernel::string key(name);
+
+    kernel::SpinLockSafeGuard guard(lock_);
     return nodes_.remove(key) ? 0 : -1;
 }
 
-vfs_node_t* DevFSRegistry::fetch(const char* name) noexcept {
+vfs_node_t* DevFSRegistry::fetch_borrowed(const char* name) noexcept {
     if (!name || name[0] == '\0') {
         return nullptr;
     }
 
     const kernel::string key(name);
 
+    kernel::SpinLockSafeGuard guard(lock_);
     auto locked = nodes_.find_ptr(key);
     if (!locked) {
         return nullptr;
@@ -110,6 +115,7 @@ vfs_node_t* DevFSRegistry::take(const char* name) noexcept {
     const kernel::string key(name);
     vfs_node_t* out = nullptr;
 
+    kernel::SpinLockSafeGuard guard(lock_);
     if (!nodes_.remove_and_get(key, out)) {
         return nullptr;
     }
@@ -124,30 +130,40 @@ vfs_node_t* DevFSRegistry::clone(const char* name) noexcept {
 
     const kernel::string key(name);
 
-    auto locked = nodes_.find_ptr(key);
-    if (!locked) {
-        return nullptr;
+    vfs_node_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+
+    {
+        kernel::SpinLockSafeGuard guard(lock_);
+        
+        auto locked = nodes_.find_ptr(key);
+        if (!locked) {
+            return nullptr;
+        }
+
+        vfs_node_t** src_ptr = locked.value_ptr();
+        if (!src_ptr || !*src_ptr) {
+            return nullptr;
+        }
+
+        vfs_node_t* src = *src_ptr;
+	memcpy(&snapshot, src, sizeof(snapshot));
+
+	if(snapshot.private_retain && snapshot.private_data) {
+	    snapshot.private_retain(snapshot.private_data);
+	}
     }
-
-    vfs_node_t** src_ptr = locked.value_ptr();
-    if (!src_ptr || !*src_ptr) {
-        return nullptr;
-    }
-
-    vfs_node_t* src = *src_ptr;
-
+    
     auto* node = static_cast<vfs_node_t*>(kmalloc(sizeof(vfs_node_t)));
     if (!node) {
-        return nullptr;
+	if (snapshot.private_release && snapshot.private_data) {
+	    snapshot.private_release(snapshot.private_data);
+	}
     }
 
-    memcpy(node, src, sizeof(*node));
+    memcpy(node, &snapshot, sizeof(*node));
     node->refs = 1;
     node->flags |= VFS_FLAG_DEVFS_ALLOC;
-
-    if (node->private_retain && node->private_data) {
-        node->private_retain(node->private_data);
-    }
 
     return node;
 }
@@ -163,7 +179,7 @@ int devfs_unregister(const char* name) {
 }
 
 vfs_node_t* devfs_fetch(const char* name) {
-    return devfs_registry().fetch(name);
+    return devfs_registry().fetch_borrowed(name);
 }
 
 vfs_node_t* devfs_clone(const char* name) {
