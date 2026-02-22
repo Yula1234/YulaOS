@@ -19,14 +19,15 @@
 #include <drivers/fbdev.h>
 #include <kernel/input_focus.h>
 
+#include <lib/hash_map.h>
+
 #include "sched.h"
 #include "proc.h"
 #include "poll_waitq.h"
 #include "elf.h"
 #include "cpu.h"
 
-#define PID_HASH_SIZE 16384
-#define PID_HASH_LOCKS_COUNT 256
+#define PID_MAP_BUCKETS 256
 
 #define EI_CLASS 4
 #define EI_DATA 5
@@ -57,46 +58,18 @@ static spinlock_t sleep_lock;
 static dlist_head_t zombie_list;
 static spinlock_t zombie_lock;
 
-static task_t* pid_hash[PID_HASH_SIZE];
-static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
+static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
 
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
 
-static void pid_hash_insert(task_t* t) {
-    uint32_t idx = t->pid % PID_HASH_SIZE;
-    uint32_t lock_idx = t->pid % PID_HASH_LOCKS_COUNT;
-
-    uint32_t flags = spinlock_acquire_safe(&pid_hash_locks[lock_idx]);
-
-    t->hash_next = pid_hash[idx];
-    t->hash_prev = 0;
-    if (pid_hash[idx]) {
-        pid_hash[idx]->hash_prev = t;
-    }
-    pid_hash[idx] = t;
-
-    spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
+static void pid_map_insert(uint32_t pid, task_t* t) {
+    if (!t) return;
+    (void)pid_map.insert_or_assign(pid, t);
 }
 
-static void pid_hash_remove(task_t* t) {
-    uint32_t idx = t->pid % PID_HASH_SIZE;
-    uint32_t lock_idx = t->pid % PID_HASH_LOCKS_COUNT;
-
-    uint32_t flags = spinlock_acquire_safe(&pid_hash_locks[lock_idx]);
-
-    if (t->hash_prev) {
-        t->hash_prev->hash_next = t->hash_next;
-    } else {
-        pid_hash[idx] = t->hash_next;
-    }
-    if (t->hash_next) {
-        t->hash_next->hash_prev = t->hash_prev;
-    }
-    t->hash_next = 0;
-    t->hash_prev = 0;
-
-    spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
+static void pid_map_remove(uint32_t pid) {
+    (void)pid_map.remove(pid);
 }
 
 }
@@ -146,12 +119,6 @@ void proc_init(void) {
     
     dlist_init(&zombie_list);
     spinlock_init(&zombie_lock);
-
-    for (int i = 0; i < PID_HASH_LOCKS_COUNT; i++) {
-        spinlock_init(&pid_hash_locks[i]);
-    }
-
-    memset(pid_hash, 0, sizeof(pid_hash));
 
     initial_fpu_state_size = fpu_state_size();
     initial_fpu_state = (uint8_t*)kmalloc_a(initial_fpu_state_size);
@@ -475,22 +442,11 @@ static void list_remove(task_t* t) {
 }
 
 task_t* proc_find_by_pid(uint32_t pid) {
-    uint32_t idx = pid % PID_HASH_SIZE;
-    uint32_t lock_idx = pid % PID_HASH_LOCKS_COUNT;
-    
-    uint32_t flags = spinlock_acquire_safe(&pid_hash_locks[lock_idx]);
-    
-    task_t* curr = pid_hash[idx];
-    while (curr) {
-        if (curr->pid == pid) {
-            spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
-            return curr;
-        }
-        curr = curr->hash_next;
+    task_t* t = 0;
+    if (!pid_map.try_get(pid, t)) {
+        return 0;
     }
-    
-    spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
-    return 0;
+    return t;
 }
 
 static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
@@ -627,7 +583,7 @@ static task_t* alloc_task(void) {
     t->vruntime = 0;
     t->exec_start = 0;
 
-    pid_hash_insert(t);
+    pid_map_insert(t->pid, t);
     
     list_append(t);
     
@@ -662,7 +618,7 @@ void proc_free_resources(task_t* t) {
         t->fpu_state_size = 0;
     }
     
-    pid_hash_remove(t);
+    pid_map_remove(t->pid);
 
     t->pid = 0;
     memset(t->name, 0, sizeof(t->name));
@@ -1337,6 +1293,8 @@ task_t* proc_create_idle(int cpu_index) {
     task_t* t = alloc_task();
     if (!t) return 0;
 
+    const uint32_t old_pid = t->pid;
+
     strlcpy(t->name, "idle", 32);
     t->state = TASK_RUNNING;
     t->pid = 0;             
@@ -1363,7 +1321,7 @@ task_t* proc_create_idle(int cpu_index) {
 
     uint32_t flags = spinlock_acquire_safe(&proc_lock);
     list_remove(t);
-    pid_hash_remove(t);
+    pid_map_remove(old_pid);
     spinlock_release_safe(&proc_lock, flags);
 
     return t;
