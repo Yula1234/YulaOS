@@ -21,6 +21,7 @@
 
 #include <lib/hash_map.h>
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/rbtree.h>
 #include <lib/cpp/unique_ptr.h>
 
 #include "sched.h"
@@ -54,7 +55,34 @@ static uint32_t next_pid = 1;
 
 static kernel::SpinLock proc_lock;
 
-static struct rb_root sleeping_tree = RB_ROOT;
+struct SleepKey {
+    uint32_t wake_tick = 0;
+    uintptr_t tie = 0;
+};
+
+struct SleepKeyOfValue {
+    const SleepKey operator()(const task_t& t) const noexcept {
+        return SleepKey{
+            t.wake_tick,
+            reinterpret_cast<uintptr_t>(&t),
+        };
+    }
+};
+
+struct SleepKeyLess {
+    bool operator()(const SleepKey& a, const SleepKey& b) const noexcept {
+        if (a.wake_tick != b.wake_tick) {
+            return a.wake_tick < b.wake_tick;
+        }
+
+        return a.tie < b.tie;
+    }
+};
+
+using SleepHook = kernel::detail::RbMemberHook<task_t, offsetof(task_t, sleep_rb)>;
+using SleepingTree = kernel::IntrusiveRbTree<task_t, SleepHook, SleepKey, SleepKeyOfValue, SleepKeyLess>;
+
+static SleepingTree sleeping_tree;
 static kernel::SpinLock sleep_lock;
 
 static dlist_head_t zombie_list;
@@ -330,7 +358,7 @@ void proc_init(void) {
 
     spinlock_init(proc_lock.native_handle());
 
-    sleeping_tree = RB_ROOT;
+    sleeping_tree.clear();
 
     spinlock_init(sleep_lock.native_handle());
 
@@ -1509,17 +1537,11 @@ task_t* proc_create_idle(int cpu_index) {
 }
 
 static void insert_sleeper(task_t* t) {
-    struct rb_node **new_node = &(sleeping_tree.rb_node), *parent = 0;
-    while (*new_node) {
-        task_t *this_task = rb_entry(*new_node, task_t, sleep_rb);
-        parent = *new_node;
-        if (t->wake_tick < this_task->wake_tick)
-            new_node = &((*new_node)->rb_left);
-        else
-            new_node = &((*new_node)->rb_right);
+    if (!t) {
+        return;
     }
-    rb_link_node(&t->sleep_rb, parent, new_node);
-    rb_insert_color(&t->sleep_rb, &sleeping_tree);
+
+    (void)sleeping_tree.insert_unique(*t);
 }
 
 void proc_sleep_add(task_t* t, uint32_t wake_tick) {
@@ -1527,7 +1549,7 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         kernel::SpinLockSafeGuard guard(sleep_lock);
 
         if (t->wake_tick != 0) {
-            rb_erase(&t->sleep_rb, &sleeping_tree);
+            sleeping_tree.erase(*t);
         }
 
         t->wake_tick = wake_tick;
@@ -1578,15 +1600,16 @@ void proc_check_sleepers(uint32_t current_tick) {
 
     TrySpinLockGuard guard(sleep_lock);
     if (guard) {
-        struct rb_node* node;
-        while ((node = rb_first(&sleeping_tree))) {
-            task_t* t = rb_entry(node, task_t, sleep_rb);
-            if (t->wake_tick > current_tick) break;
+        while (!sleeping_tree.empty()) {
+            task_t& t = *sleeping_tree.begin();
+            if (t.wake_tick > current_tick) {
+                break;
+            }
 
-            rb_erase(&t->sleep_rb, &sleeping_tree);
-            t->state = TASK_RUNNABLE;
-            t->wake_tick = 0;
-            sched_add(t);
+            sleeping_tree.erase(t);
+            t.state = TASK_RUNNABLE;
+            t.wake_tick = 0;
+            sched_add(&t);
         }
     }
 }
@@ -1595,7 +1618,7 @@ void proc_sleep_remove(task_t* t) {
     kernel::SpinLockSafeGuard guard(sleep_lock);
     
     if (t->wake_tick != 0) {
-        rb_erase(&t->sleep_rb, &sleeping_tree);
+        sleeping_tree.erase(*t);
         t->wake_tick = 0;
     }
 }
