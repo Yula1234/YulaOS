@@ -28,7 +28,7 @@ static inline NetdConfig default_netd_config() {
     cfg.ip_be = make_ipv4_be(10, 0, 2, 15);
     cfg.mask_be = make_ipv4_be(255, 255, 255, 0);
     cfg.gw_be = make_ipv4_be(10, 0, 2, 2);
-    cfg.dns_ip_be = make_ipv4_be(8, 8, 8, 8);
+    cfg.dns_ip_be = make_ipv4_be(10, 0, 2, 3);
     return cfg;
 }
 
