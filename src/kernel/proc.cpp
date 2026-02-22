@@ -40,6 +40,9 @@
 #define USER_ELF_MIN_VADDR 0x08000000u
 #define USER_ELF_MAX_VADDR 0xB0000000u
 
+namespace proc {
+namespace detail {
+
 static task_t* tasks_head = 0;
 static task_t* tasks_tail = 0;
 
@@ -59,35 +62,6 @@ static spinlock_t pid_hash_locks[PID_HASH_LOCKS_COUNT];
 
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
-
-extern "C" void irq_return(void);
-extern "C" void idle_task_func(void*);
-extern volatile uint32_t timer_ticks;
-
-uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
-    if (!out || cap == 0) return 0;
-
-    uint32_t count = 0;
-    uint32_t flags = spinlock_acquire_safe(&proc_lock);
-
-    task_t* t = tasks_head;
-    while (t && count < cap) {
-        if (t->state != TASK_UNUSED) {
-            yos_proc_info_t* e = &out[count++];
-            e->pid = t->pid;
-            e->parent_pid = t->parent_pid;
-            e->state = (uint32_t)t->state;
-            e->priority = (uint32_t)t->priority;
-            e->mem_pages = (t->mem) ? t->mem->mem_pages : 0;
-            e->term_mode = (uint32_t)t->term_mode;
-            strlcpy(e->name, t->name, sizeof(e->name));
-        }
-        t = t->next;
-    }
-
-    spinlock_release_safe(&proc_lock, flags);
-    return count;
-}
 
 static void pid_hash_insert(task_t* t) {
     uint32_t idx = t->pid % PID_HASH_SIZE;
@@ -123,6 +97,40 @@ static void pid_hash_remove(task_t* t) {
     t->hash_prev = 0;
 
     spinlock_release_safe(&pid_hash_locks[lock_idx], flags);
+}
+
+}
+}
+
+using namespace proc::detail;
+
+extern "C" void irq_return(void);
+extern "C" void idle_task_func(void*);
+extern volatile uint32_t timer_ticks;
+
+uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
+    if (!out || cap == 0) return 0;
+
+    uint32_t count = 0;
+    uint32_t flags = spinlock_acquire_safe(&proc_lock);
+
+    task_t* t = tasks_head;
+    while (t && count < cap) {
+        if (t->state != TASK_UNUSED) {
+            yos_proc_info_t* e = &out[count++];
+            e->pid = t->pid;
+            e->parent_pid = t->parent_pid;
+            e->state = (uint32_t)t->state;
+            e->priority = (uint32_t)t->priority;
+            e->mem_pages = (t->mem) ? t->mem->mem_pages : 0;
+            e->term_mode = (uint32_t)t->term_mode;
+            strlcpy(e->name, t->name, sizeof(e->name));
+        }
+        t = t->next;
+    }
+
+    spinlock_release_safe(&proc_lock, flags);
+    return count;
 }
 
 void proc_init(void) {
