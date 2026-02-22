@@ -135,6 +135,152 @@ struct VfsNodeReleaseDeleter {
     }
 };
 
+class FileDescRef {
+public:
+    FileDescRef() = default;
+
+    static FileDescRef adopt(file_desc_t* desc) noexcept {
+        return FileDescRef(desc);
+    }
+
+    static FileDescRef from_borrowed(file_desc_t* desc) noexcept {
+        if (!desc) {
+            return {};
+        }
+
+        file_desc_retain(desc);
+        return adopt(desc);
+    }
+
+    FileDescRef(const FileDescRef&) = delete;
+    FileDescRef& operator=(const FileDescRef&) = delete;
+
+    FileDescRef(FileDescRef&& other) noexcept
+        : desc_(other.desc_) {
+        other.desc_ = nullptr;
+    }
+
+    FileDescRef& operator=(FileDescRef&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        reset();
+
+        desc_ = other.desc_;
+        other.desc_ = nullptr;
+
+        return *this;
+    }
+
+    ~FileDescRef() {
+        reset();
+    }
+
+    file_desc_t* get() const noexcept {
+        return desc_;
+    }
+
+    explicit operator bool() const noexcept {
+        return desc_ != nullptr;
+    }
+
+    file_desc_t* detach() noexcept {
+        file_desc_t* out = desc_;
+        desc_ = nullptr;
+        return out;
+    }
+
+private:
+    explicit FileDescRef(file_desc_t* desc) noexcept
+        : desc_(desc) {
+    }
+
+    void reset() noexcept {
+        if (!desc_) {
+            return;
+        }
+
+        file_desc_release(desc_);
+        desc_ = nullptr;
+    }
+
+    file_desc_t* desc_ = nullptr;
+};
+
+class FdTableRef {
+public:
+    FdTableRef() = default;
+
+    static FdTableRef adopt(fd_table_t* table) noexcept {
+        return FdTableRef(table);
+    }
+
+    static FdTableRef from_borrowed(fd_table_t* table) noexcept {
+        if (!table) {
+            return {};
+        }
+
+        proc_fd_table_retain(table);
+        return adopt(table);
+    }
+
+    FdTableRef(const FdTableRef&) = delete;
+    FdTableRef& operator=(const FdTableRef&) = delete;
+
+    FdTableRef(FdTableRef&& other) noexcept
+        : table_(other.table_) {
+        other.table_ = nullptr;
+    }
+
+    FdTableRef& operator=(FdTableRef&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        reset();
+
+        table_ = other.table_;
+        other.table_ = nullptr;
+
+        return *this;
+    }
+
+    ~FdTableRef() {
+        reset();
+    }
+
+    fd_table_t* get() const noexcept {
+        return table_;
+    }
+
+    explicit operator bool() const noexcept {
+        return table_ != nullptr;
+    }
+
+    fd_table_t* detach() noexcept {
+        fd_table_t* out = table_;
+        table_ = nullptr;
+        return out;
+    }
+
+private:
+    explicit FdTableRef(fd_table_t* table) noexcept
+        : table_(table) {
+    }
+
+    void reset() noexcept {
+        if (!table_) {
+            return;
+        }
+
+        proc_fd_table_release(table_);
+        table_ = nullptr;
+    }
+
+    fd_table_t* table_ = nullptr;
+};
+
 static void pid_map_insert(uint32_t pid, task_t* t) {
     if (!t) return;
     (void)pid_map.insert_or_assign(pid, t);
@@ -291,9 +437,9 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     if ((uint32_t)fd < ft->max_fds && ft->fds) {
         out = ft->fds[fd];
     }
-    
-    if (out) file_desc_retain(out);
-    return out;
+
+    FileDescRef out_ref = FileDescRef::from_borrowed(out);
+    return out_ref.detach();
 }
 
 static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
@@ -444,32 +590,34 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
 static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     if (!src) return 0;
 
-    fd_table_t* ft = (fd_table_t*)kmalloc(sizeof(*ft));
-    if (!ft) return 0;
+    fd_table_t* ft_raw = (fd_table_t*)kmalloc(sizeof(*ft_raw));
+    if (!ft_raw) return 0;
 
-    memset(ft, 0, sizeof(*ft));
-    ft->refs = 1;
-    spinlock_init(&ft->lock);
+    FdTableRef ft = FdTableRef::adopt(ft_raw);
+
+    memset(ft.get(), 0, sizeof(*ft.get()));
+    ft.get()->refs = 1;
+    spinlock_init(&ft.get()->lock);
 
     kernel::SpinLockNativeSafeGuard guard(src->lock);
     
-    ft->max_fds = src->max_fds;
-    ft->fds = (file_desc_t**)kmalloc(sizeof(file_desc_t*) * ft->max_fds);
-    if (!ft->fds) {
-        kfree(ft);
+    ft.get()->max_fds = src->max_fds;
+    ft.get()->fds = (file_desc_t**)kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds);
+    if (!ft.get()->fds) {
         return 0;
     }
-    memset(ft->fds, 0, sizeof(file_desc_t*) * ft->max_fds);
+    memset(ft.get()->fds, 0, sizeof(file_desc_t*) * ft.get()->max_fds);
     
-    ft->fd_next = src->fd_next;
+    ft.get()->fd_next = src->fd_next;
 
-    for (uint32_t i = 0; i < ft->max_fds; i++) {
+    for (uint32_t i = 0; i < ft.get()->max_fds; i++) {
         if (src->fds[i]) {
-            ft->fds[i] = src->fds[i];
-            file_desc_retain(ft->fds[i]);
+            ft.get()->fds[i] = src->fds[i];
+            file_desc_retain(ft.get()->fds[i]);
         }
     }
-    return ft;
+
+    return ft.detach();
 }
 
 static void list_append(task_t* t) {
