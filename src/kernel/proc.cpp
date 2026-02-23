@@ -1579,32 +1579,7 @@ void proc_usleep(uint32_t us) {
 }
 
 void proc_check_sleepers(uint32_t current_tick) {
-    class TrySpinLockGuard {
-    public:
-        explicit TrySpinLockGuard(kernel::SpinLock& lock)
-            : lock_(&lock),
-              acquired_(lock.try_acquire()) {
-        }
-
-        TrySpinLockGuard(const TrySpinLockGuard&) = delete;
-        TrySpinLockGuard& operator=(const TrySpinLockGuard&) = delete;
-
-        ~TrySpinLockGuard() {
-            if (acquired_) {
-                lock_->release();
-            }
-        }
-
-        explicit operator bool() const {
-            return acquired_;
-        }
-
-    private:
-        kernel::SpinLock* lock_ = nullptr;
-        bool acquired_ = false;
-    };
-
-    TrySpinLockGuard guard(proc::detail::sleep_lock);
+    kernel::TrySpinLockGuard guard(proc::detail::sleep_lock);
     if (guard) {
         while (!proc::detail::sleeping_tree.empty()) {
             task_t& t = *proc::detail::sleeping_tree.begin();

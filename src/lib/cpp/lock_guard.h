@@ -145,6 +145,34 @@ private:
     SpinLock* lock_;
 };
 
+class TrySpinLockGuard {
+public:
+    explicit TrySpinLockGuard(SpinLock& lock)
+        : lock_(&lock),
+          acquired_(lock.try_acquire()) {
+    }
+
+    TrySpinLockGuard(const TrySpinLockGuard&) = delete;
+    TrySpinLockGuard& operator=(const TrySpinLockGuard&) = delete;
+
+    TrySpinLockGuard(TrySpinLockGuard&&) = delete;
+    TrySpinLockGuard& operator=(TrySpinLockGuard&&) = delete;
+
+    ~TrySpinLockGuard() {
+        if (acquired_) {
+            lock_->release();
+        }
+    }
+
+    explicit operator bool() const noexcept {
+        return acquired_;
+    }
+
+private:
+    SpinLock* lock_;
+    bool acquired_;
+};
+
 }
 
 #endif
