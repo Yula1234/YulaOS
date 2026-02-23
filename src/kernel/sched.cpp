@@ -17,16 +17,29 @@
 
 extern volatile uint32_t timer_ticks;
 
-#define NICE_0_LOAD 1024
-#define MIN_GRANULARITY 1
-#define CPU_CACHE_INVALIDATE_TICKS 100 
+namespace {
+
+namespace sched_detail {
+
+static constexpr uint32_t nice_0_load = 1024u;
+static constexpr uint32_t min_granularity = 1u;
+static constexpr uint32_t cpu_cache_invalidate_ticks = 100u;
+
+static constexpr uint32_t best_cpu_runq_mul = 20u;
+static constexpr uint32_t best_cpu0_penalty = 25u;
+
+static constexpr uint32_t u32_max = 0xFFFFFFFFu;
+
+}
+
+}
 
 static int cached_best_cpu = -1;
 static uint32_t cache_tick = 0;
 static spinlock_t cpu_cache_lock;
 
 uint32_t calc_weight(task_prio_t prio) {
-    int nice = 10 - (int)prio;
+    int nice = 10 - static_cast<int>(prio);
     if (nice < -20) nice = -20;
     if (nice > 19) nice = 19;
     
@@ -46,7 +59,7 @@ uint32_t calc_weight(task_prio_t prio) {
 
 uint64_t calc_delta_vruntime(uint64_t delta_exec, uint32_t weight) {
     if (weight == 0) return delta_exec;
-    return (delta_exec * NICE_0_LOAD) / weight;
+    return (delta_exec * sched_detail::nice_0_load) / weight;
 }
 
 void sched_init(void) {
@@ -64,7 +77,7 @@ static int get_best_cpu(void) {
 
         int cache_valid = (cached_best_cpu >= 0 &&
                            cache_tick != 0 &&
-                           current_tick - cache_tick < CPU_CACHE_INVALIDATE_TICKS);
+                           current_tick - cache_tick < sched_detail::cpu_cache_invalidate_ticks);
 
         if (cache_valid && active_cpus <= 1) {
             return cached_best_cpu;
@@ -72,7 +85,7 @@ static int get_best_cpu(void) {
     }
 
     int best_cpu = 0;
-    uint32_t min_score = 0xFFFFFFFF;
+    uint32_t min_score = sched_detail::u32_max;
 
     cpu_t* me = cpu_current();
     int start_cpu = me ? me->index : 0;
@@ -85,10 +98,12 @@ static int get_best_cpu(void) {
         uint32_t runq = c->runq_count;
         int weight = c->total_priority_weight;
         
-        uint32_t score = load + (runq * 20) + (weight > 0 ? weight : 0);
+        uint32_t score = load
+            + (runq * sched_detail::best_cpu_runq_mul)
+            + (weight > 0 ? weight : 0);
 
         if (i == 0 && active_cpus > 1) {
-            score += 25;
+            score += sched_detail::best_cpu0_penalty;
         }
 
         if (score < min_score) {
@@ -109,7 +124,7 @@ static int get_best_cpu(void) {
 
 static void enqueue_task(cpu_t* cpu, task_t* p) {
     struct rb_node **link = &cpu->runq_root.rb_node;
-    struct rb_node *parent = 0;
+    struct rb_node *parent = nullptr;
     struct task *entry;
     int leftmost = 1;
 
@@ -137,7 +152,7 @@ static void enqueue_task(cpu_t* cpu, task_t* p) {
 static void dequeue_task(cpu_t* cpu, task_t* p) {
     if (cpu->runq_leftmost == p) {
         struct rb_node *next = rb_next(&p->rb_node);
-        cpu->runq_leftmost = next ? rb_entry(next, struct task, rb_node) : 0;
+        cpu->runq_leftmost = next ? rb_entry(next, struct task, rb_node) : nullptr;
     }
 
     rb_erase(&p->rb_node, &cpu->runq_root);
@@ -178,7 +193,7 @@ void sched_add(task_t* t) {
         if (target->runq_leftmost) {
             min_vruntime = target->runq_leftmost->vruntime;
         } else {
-            min_vruntime = (uint64_t)target->sched_ticks * NICE_0_LOAD;
+            min_vruntime = static_cast<uint64_t>(target->sched_ticks) * sched_detail::nice_0_load;
         }
         
         t->vruntime = min_vruntime;
@@ -203,7 +218,7 @@ void sched_add(task_t* t) {
 static task_t* pick_next_cfs(cpu_t* cpu) {
     task_t* left = cpu->runq_leftmost;
     
-    if (!left) return 0;
+    if (!left) return nullptr;
     
     dequeue_task(cpu, left);
     left->is_queued = 0;
@@ -215,7 +230,7 @@ void sched_set_current(task_t* t) {
     cpu_t* cpu = cpu_current();
     cpu->current_task = t;
     
-    uint32_t kstack_top = (uint32_t)t->kstack + t->kstack_size;
+    uint32_t kstack_top = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t->kstack)) + t->kstack_size;
     kstack_top &= ~0xF; 
     
     tss_set_stack(cpu->index, kstack_top); 
@@ -261,7 +276,7 @@ void sched_yield(void) {
     }
 
     while (1) {
-        task_t* next = 0;
+        task_t* next = nullptr;
 
         {
             kernel::SpinLockNativeSafeGuard guard(me->lock);
@@ -300,7 +315,7 @@ void sched_yield(void) {
             return;
         }
 
-        me->current_task = 0;
+        me->current_task = nullptr;
 
         __asm__ volatile("sti; hlt; cli");
     }
@@ -314,7 +329,7 @@ void sched_remove(task_t* t) {
     
     kernel::SpinLockNativeSafeGuard guard(target->lock);
     
-    if (target->total_priority_weight >= (int)t->priority)
+    if (target->total_priority_weight >= static_cast<int>(t->priority))
         target->total_priority_weight -= t->priority;
     else 
         target->total_priority_weight = 0;
@@ -362,13 +377,13 @@ void sem_wait(semaphore_t* sem) {
             if (sem->count > 0) {
                 __sync_fetch_and_sub(&sem->count, 1);
                 task_t* curr = proc_current();
-                curr->blocked_on_sem = 0;
+                curr->blocked_on_sem = nullptr;
                 return;
             }
 
             task_t* curr = proc_current();
 
-            curr->blocked_on_sem = (void*)sem;
+            curr->blocked_on_sem = static_cast<void*>(sem);
 
             dlist_add_tail(&curr->sem_node, &sem->wait_list);
 
@@ -392,9 +407,9 @@ void sem_signal(semaphore_t* sem) {
 
     dlist_del(&t->sem_node);
 
-    t->sem_node.next = 0;
-    t->sem_node.prev = 0;
-    t->blocked_on_sem = 0;
+    t->sem_node.next = nullptr;
+    t->sem_node.prev = nullptr;
+    t->blocked_on_sem = nullptr;
 
     if (t->state == TASK_ZOMBIE) {
         return;
@@ -412,9 +427,9 @@ void sem_signal_all(semaphore_t* sem) {
 
         dlist_del(&t->sem_node);
 
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
+        t->sem_node.next = nullptr;
+        t->sem_node.prev = nullptr;
+        t->blocked_on_sem = nullptr;
 
         __sync_fetch_and_add(&sem->count, 1);
 
@@ -439,11 +454,11 @@ void sem_remove_task(task_t* t) {
 
         if (t->sem_node.next && t->sem_node.prev) {
             dlist_del(&t->sem_node);
-            t->sem_node.next = 0;
-            t->sem_node.prev = 0;
+            t->sem_node.next = nullptr;
+            t->sem_node.prev = nullptr;
         }
 
-        t->blocked_on_sem = 0;
+        t->blocked_on_sem = nullptr;
     }
 }
 
