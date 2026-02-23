@@ -125,38 +125,6 @@ static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
 
-class ScopedIrqDisable {
-public:
-    ScopedIrqDisable() {
-        uint32_t flags;
-        __asm__ volatile (
-            "pushfl\n\t"
-            "popl %0\n\t"
-            "cli"
-            : "=r"(flags)
-            :
-            : "memory"
-        );
-
-        flags_ = flags;
-    }
-
-    ScopedIrqDisable(const ScopedIrqDisable&) = delete;
-    ScopedIrqDisable& operator=(const ScopedIrqDisable&) = delete;
-
-    ScopedIrqDisable(ScopedIrqDisable&&) = delete;
-    ScopedIrqDisable& operator=(ScopedIrqDisable&&) = delete;
-
-    ~ScopedIrqDisable() {
-        if ((flags_ & irq_if_mask) != 0u) {
-            __asm__ volatile("sti");
-        }
-    }
-
-private:
-    uint32_t flags_ = 0u;
-};
-
 class ScopedPagingSwitch {
 public:
     explicit ScopedPagingSwitch(uint32_t* dir)
@@ -1088,7 +1056,7 @@ static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32
     uint32_t sp = user_sp;
 
     {
-        proc::detail::ScopedIrqDisable irq_guard;
+        kernel::ScopedIrqDisable irq_guard;
         proc::detail::ScopedPagingSwitch paging_guard(t->mem->page_dir);
 
         sp -= 4u;
@@ -1508,7 +1476,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     uint32_t final_user_esp = 0;
 
     {
-        proc::detail::ScopedIrqDisable irq_guard;
+        kernel::ScopedIrqDisable irq_guard;
         proc::detail::ScopedPagingSwitch paging_guard(t->mem->page_dir);
 
         uint32_t ustack_top = ustack_top_limit;

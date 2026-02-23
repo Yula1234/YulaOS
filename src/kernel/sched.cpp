@@ -10,6 +10,8 @@
 #include <drivers/vga.h>
 #include <lib/rbtree.h>
 
+#include <lib/cpp/lock_guard.h>
+
 #include "sched.h"
 #include "cpu.h"
 
@@ -54,22 +56,21 @@ void sched_init(void) {
 }
 
 static int get_best_cpu(void) {
-    uint32_t flags = spinlock_acquire_safe(&cpu_cache_lock);
-    
     uint32_t current_tick = timer_ticks;
     int active_cpus = 1 + ap_running_count;
-    int cache_valid = (cached_best_cpu >= 0 && 
-                       cache_tick != 0 &&
-                       current_tick - cache_tick < CPU_CACHE_INVALIDATE_TICKS);
-    
-    if (cache_valid && active_cpus <= 1) {
-        int result = cached_best_cpu;
-        spinlock_release_safe(&cpu_cache_lock, flags);
-        return result;
+
+    {
+        kernel::SpinLockNativeSafeGuard guard(cpu_cache_lock);
+
+        int cache_valid = (cached_best_cpu >= 0 &&
+                           cache_tick != 0 &&
+                           current_tick - cache_tick < CPU_CACHE_INVALIDATE_TICKS);
+
+        if (cache_valid && active_cpus <= 1) {
+            return cached_best_cpu;
+        }
     }
-    
-    spinlock_release_safe(&cpu_cache_lock, flags);
-    
+
     int best_cpu = 0;
     uint32_t min_score = 0xFFFFFFFF;
 
@@ -96,10 +97,12 @@ static int get_best_cpu(void) {
         }
     }
     
-    flags = spinlock_acquire_safe(&cpu_cache_lock);
-    cached_best_cpu = best_cpu;
-    cache_tick = current_tick;
-    spinlock_release_safe(&cpu_cache_lock, flags);
+    {
+        kernel::SpinLockNativeSafeGuard guard(cpu_cache_lock);
+
+        cached_best_cpu = best_cpu;
+        cache_tick = current_tick;
+    }
     
     return best_cpu;
 }
@@ -149,10 +152,9 @@ void sched_add(task_t* t) {
     int target_cpu_idx = t->assigned_cpu;
     cpu_t* target = &cpus[target_cpu_idx];
 
-    uint32_t flags = spinlock_acquire_safe(&target->lock);
+    kernel::SpinLockNativeSafeGuard guard(target->lock);
 
     if (t->is_queued) {
-        spinlock_release_safe(&target->lock, flags);
         return; 
     }
 
@@ -189,13 +191,13 @@ void sched_add(task_t* t) {
 
     enqueue_task(target, t);
     
-    uint32_t cache_flags = spinlock_acquire_safe(&cpu_cache_lock);
-    if (cached_best_cpu == target_cpu_idx) {
-        cache_tick = 0;
+    {
+        kernel::SpinLockNativeSafeGuard cache_guard(cpu_cache_lock);
+
+        if (cached_best_cpu == target_cpu_idx) {
+            cache_tick = 0;
+        }
     }
-    spinlock_release_safe(&cpu_cache_lock, cache_flags);
-    
-    spinlock_release_safe(&target->lock, flags);
 }
 
 static task_t* pick_next_cfs(cpu_t* cpu) {
@@ -231,10 +233,8 @@ void sched_start(task_t* first) {
 }
 
 void sched_yield(void) {
-    uint32_t eflags;
-    __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
-    __asm__ volatile("cli");
-    
+    kernel::ScopedIrqDisable irq_guard;
+
     cpu_t* me = cpu_current();
     task_t* prev = me->current_task;
     
@@ -252,16 +252,22 @@ void sched_yield(void) {
         }
         prev->exec_start = 0;
 
-        uint32_t flags = spinlock_acquire_safe(&me->lock);
-        prev->is_queued = 1;
-        enqueue_task(me, prev);
-        spinlock_release_safe(&me->lock, flags);
+        {
+            kernel::SpinLockNativeSafeGuard guard(me->lock);
+
+            prev->is_queued = 1;
+            enqueue_task(me, prev);
+        }
     }
 
     while (1) {
-        uint32_t flags = spinlock_acquire_safe(&me->lock);
-        task_t* next = pick_next_cfs(me);
-        spinlock_release_safe(&me->lock, flags);
+        task_t* next = 0;
+
+        {
+            kernel::SpinLockNativeSafeGuard guard(me->lock);
+
+            next = pick_next_cfs(me);
+        }
 
         if (!next) {
             next = me->idle_task;
@@ -272,7 +278,8 @@ void sched_yield(void) {
                 if (next->pid == 0) {
                     __asm__ volatile("sti; hlt; cli");
                 }
-                if (eflags & 0x200) __asm__ volatile("sti");
+
+                irq_guard.restore();
                 return;
             }
             
@@ -283,7 +290,7 @@ void sched_yield(void) {
 
             fpu_restore(next->fpu_state);
 
-            if (eflags & 0x200) __asm__ volatile("sti");
+            irq_guard.restore();
 
             if (prev) {
                 ctx_switch(&prev->esp, next->esp);
@@ -305,7 +312,7 @@ void sched_remove(task_t* t) {
     
     cpu_t* target = &cpus[cpu_idx];
     
-    uint32_t flags = spinlock_acquire_safe(&target->lock);
+    kernel::SpinLockNativeSafeGuard guard(target->lock);
     
     if (target->total_priority_weight >= (int)t->priority)
         target->total_priority_weight -= t->priority;
@@ -316,18 +323,18 @@ void sched_remove(task_t* t) {
         __sync_fetch_and_sub(&target->total_task_count, 1);
     }
 
-    uint32_t cache_flags = spinlock_acquire_safe(&cpu_cache_lock);
-    if (cached_best_cpu == cpu_idx) {
-        cache_tick = 0;
+    {
+        kernel::SpinLockNativeSafeGuard cache_guard(cpu_cache_lock);
+
+        if (cached_best_cpu == cpu_idx) {
+            cache_tick = 0;
+        }
     }
-    spinlock_release_safe(&cpu_cache_lock, cache_flags);
 
     if (t->is_queued) {
         dequeue_task(target, t);
         t->is_queued = 0;
     }
-    
-    spinlock_release_safe(&target->lock, flags);
 }
 
 void sem_init(semaphore_t* sem, int init_count) {
@@ -337,67 +344,68 @@ void sem_init(semaphore_t* sem, int init_count) {
 }
 
 int sem_try_acquire(semaphore_t* sem) {
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-    if (sem->count > 0) {
-        __sync_fetch_and_sub(&sem->count, 1);
-        spinlock_release_safe(&sem->lock, flags);
-        return 1;
+    kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
+    if (sem->count <= 0) {
+        return 0;
     }
-    spinlock_release_safe(&sem->lock, flags);
-    return 0;
+
+    __sync_fetch_and_sub(&sem->count, 1);
+    return 1;
 }
 
 void sem_wait(semaphore_t* sem) {
     while (1) {
-        uint32_t flags = spinlock_acquire_safe(&sem->lock);
-        
-        if (sem->count > 0) {
-            __sync_fetch_and_sub(&sem->count, 1);
+        {
+            kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
+            if (sem->count > 0) {
+                __sync_fetch_and_sub(&sem->count, 1);
+                task_t* curr = proc_current();
+                curr->blocked_on_sem = 0;
+                return;
+            }
+
             task_t* curr = proc_current();
-            curr->blocked_on_sem = 0;
-            spinlock_release_safe(&sem->lock, flags);
-            return;
+
+            curr->blocked_on_sem = (void*)sem;
+
+            dlist_add_tail(&curr->sem_node, &sem->wait_list);
+
+            curr->state = TASK_WAITING;
         }
-        
-        task_t* curr = proc_current();
-        
-        curr->blocked_on_sem = (void*)sem;
-        
-        dlist_add_tail(&curr->sem_node, &sem->wait_list);
-        
-        curr->state = TASK_WAITING;
-        
-        spinlock_release_safe(&sem->lock, flags);
-        
+
         sched_yield();
     }
 }
 
 void sem_signal(semaphore_t* sem) {
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-    
+    kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
     __sync_fetch_and_add(&sem->count, 1);
-    
-    if (!dlist_empty(&sem->wait_list)) {
-        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
-        
-        dlist_del(&t->sem_node);
-        
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
-        
-        if (t->state != TASK_ZOMBIE) {
-            t->state = TASK_RUNNABLE;
-            sched_add(t);
-        }
+
+    if (dlist_empty(&sem->wait_list)) {
+        return;
     }
-    
-    spinlock_release_safe(&sem->lock, flags);
+
+    task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+
+    dlist_del(&t->sem_node);
+
+    t->sem_node.next = 0;
+    t->sem_node.prev = 0;
+    t->blocked_on_sem = 0;
+
+    if (t->state == TASK_ZOMBIE) {
+        return;
+    }
+
+    t->state = TASK_RUNNABLE;
+    sched_add(t);
 }
 
 void sem_signal_all(semaphore_t* sem) {
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    kernel::SpinLockNativeSafeGuard guard(sem->lock);
 
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
@@ -415,30 +423,28 @@ void sem_signal_all(semaphore_t* sem) {
             sched_add(t);
         }
     }
-
-    spinlock_release_safe(&sem->lock, flags);
 }
 
 void sem_remove_task(task_t* t) {
     if (!t->blocked_on_sem) return;
     
-    semaphore_t* sem = (semaphore_t*)t->blocked_on_sem;
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-    
-    if (t->blocked_on_sem != sem) {
-        spinlock_release_safe(&sem->lock, flags);
-        return;
-    }
+    semaphore_t* sem = static_cast<semaphore_t*>(t->blocked_on_sem);
 
-    if (t->sem_node.next && t->sem_node.prev) {
-        dlist_del(&t->sem_node);
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
+    {
+        kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
+        if (t->blocked_on_sem != sem) {
+            return;
+        }
+
+        if (t->sem_node.next && t->sem_node.prev) {
+            dlist_del(&t->sem_node);
+            t->sem_node.next = 0;
+            t->sem_node.prev = 0;
+        }
+
+        t->blocked_on_sem = 0;
     }
-    
-    t->blocked_on_sem = 0;
-    
-    spinlock_release_safe(&sem->lock, flags);
 }
 
 void rwlock_init(rwlock_t* rw) {

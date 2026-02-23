@@ -7,6 +7,51 @@
 
 namespace kernel {
 
+class ScopedIrqDisable {
+public:
+    ScopedIrqDisable() {
+        uint32_t flags;
+        __asm__ volatile(
+            "pushfl\n\t"
+            "popl %0\n\t"
+            "cli"
+            : "=r"(flags)
+            :
+            : "memory"
+        );
+
+        flags_ = flags;
+    }
+
+    ScopedIrqDisable(const ScopedIrqDisable&) = delete;
+    ScopedIrqDisable& operator=(const ScopedIrqDisable&) = delete;
+
+    ScopedIrqDisable(ScopedIrqDisable&&) = delete;
+    ScopedIrqDisable& operator=(ScopedIrqDisable&&) = delete;
+
+    void restore() {
+        if (!active_) {
+            return;
+        }
+
+        active_ = false;
+
+        if ((flags_ & irq_if_mask) != 0u) {
+            __asm__ volatile("sti");
+        }
+    }
+
+    ~ScopedIrqDisable() {
+        restore();
+    }
+
+private:
+    static constexpr uint32_t irq_if_mask = 0x200u;
+
+    uint32_t flags_ = 0u;
+    bool active_ = true;
+};
+
 class SpinLock {
 public:
     SpinLock() {
