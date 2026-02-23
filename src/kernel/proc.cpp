@@ -400,7 +400,6 @@ void proc_init(void) {
 
     spinlock_init(proc::detail::zombie_lock.native_handle());
 
-
     proc::detail::initial_fpu_state_size = fpu_state_size();
     kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> fpu_state_guard(
         static_cast<uint8_t*>(kmalloc_a(proc::detail::initial_fpu_state_size))
@@ -410,6 +409,7 @@ void proc_init(void) {
     }
 
     __asm__ volatile("fninit");
+
     fpu_save(fpu_state_guard.get());
     proc::detail::initial_fpu_state = fpu_state_guard.release();
 }
@@ -429,6 +429,7 @@ void proc_fd_table_init(task_t* t) {
     }
 
     memset(ft, 0, sizeof(*ft));
+
     ft->refs = 1;
     spinlock_init(&ft->lock);
     
@@ -439,6 +440,7 @@ void proc_fd_table_init(task_t* t) {
         t->fd_table = 0;
         return;
     }
+
     memset(ft->fds, 0, sizeof(file_desc_t*) * ft->max_fds);
     
     ft->fd_next = 0;
@@ -484,6 +486,7 @@ void proc_fd_table_release(fd_table_t* ft) {
                 ft->fds[i] = 0;
             }
         }
+
         kfree(ft->fds);
         ft->fds = 0;
     }
@@ -493,6 +496,7 @@ void proc_fd_table_release(fd_table_t* ft) {
 
 file_desc_t* proc_fd_get(task_t* t, int fd) {
     if (!t || fd < 0) return 0;
+
     fd_table_t* ft = t->fd_table;
     if (!ft) return 0;
 
@@ -512,16 +516,22 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
     
     uint32_t new_cap = ft->max_fds ? ft->max_fds : 32;
     while (new_cap <= required_fd) {
-        if (new_cap >= proc::detail::fd_table_cap_limit) return -1; 
+        if (new_cap >= proc::detail::fd_table_cap_limit) {
+            return -1;
+        }
+
         new_cap *= 2;
     }
     
     file_desc_t** new_fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * new_cap));
-    if (!new_fds) return -1;
+    if (!new_fds) {
+        return -1;
+    }
     
     memset(new_fds, 0, sizeof(file_desc_t*) * new_cap);
     if (ft->fds) {
         memcpy(new_fds, ft->fds, sizeof(file_desc_t*) * ft->max_fds);
+
         kfree(ft->fds);
     }
     
@@ -533,6 +543,7 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
 int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     if (out_desc) *out_desc = 0;
     if (!t || fd < 0) return -1;
+
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
@@ -552,11 +563,15 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     }
 
     memset(d, 0, sizeof(*d));
+
     d->refs = 1;
     spinlock_init(&d->lock);
 
     ft->fds[fd] = d;
-    if (fd >= ft->fd_next) ft->fd_next = fd + 1;
+
+    if (fd >= ft->fd_next) {
+        ft->fd_next = fd + 1;
+    }
     
     if (out_desc) *out_desc = d;
     return fd;
@@ -564,6 +579,7 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
 
 int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     if (!t || fd < 0 || !desc) return -1;
+
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
@@ -580,7 +596,9 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     ft->fds[fd] = desc;
     file_desc_retain(desc);
 
-    if (fd >= ft->fd_next) ft->fd_next = fd + 1;
+    if (fd >= ft->fd_next) {
+        ft->fd_next = fd + 1;
+    }
     
     return fd;
 }
@@ -588,6 +606,7 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
 int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     if (out_desc) *out_desc = 0;
     if (!t) return -1;
+
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
@@ -597,7 +616,9 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
         kernel::SpinLockNativeSafeGuard guard(ft->lock);
 
         int expected = ft->fd_next;
-        if (expected < 0) expected = 0;
+        if (expected < 0) {
+            expected = 0;
+        }
 
         uint32_t limit = ft->max_fds;
         uint32_t start = (uint32_t)expected;
@@ -634,6 +655,7 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
 int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     if (out_desc) *out_desc = 0;
     if (!t || fd < 0) return -1;
+
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
@@ -646,7 +668,9 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     file_desc_t* d = ft->fds[fd];
     ft->fds[fd] = 0;
 
-    if (fd < ft->fd_next) ft->fd_next = fd;
+    if (fd < ft->fd_next) {
+        ft->fd_next = fd;
+    }
 
     if (out_desc) *out_desc = d;
     return 0;
@@ -664,7 +688,7 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     ft.get()->refs = 1;
     spinlock_init(&ft.get()->lock);
 
-    kernel::SpinLockNativeSafeGuard guard(src->lock);
+    kernel::SpinLockNativeSafeGuard src_guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
     ft.get()->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds));
@@ -729,6 +753,7 @@ static void proc_mem_release(proc_mem_t* mem) {
 
     if (mem->leader_pid) {
         fb_release_by_pid(mem->leader_pid);
+
         if (input_focus_get_pid() == mem->leader_pid) {
             input_focus_set_pid(0);
         }
@@ -737,9 +762,11 @@ static void proc_mem_release(proc_mem_t* mem) {
     mmap_area_t* m = mem->mmap_list;
     while (m) {
         mmap_area_t* next = m->next;
+
         if (m->file) {
             vfs_node_release(m->file);
         }
+
         kfree(m);
         m = next;
     }
@@ -770,9 +797,11 @@ static void proc_mem_release(proc_mem_t* mem) {
                         }
                     }
                 }
+
                 pmm_free_block(pt);
             }
         }
+
         pmm_free_block(mem->page_dir);
         mem->page_dir = 0;
     }
@@ -798,6 +827,7 @@ static task_t* alloc_task(void) {
 
     task_t* t = t_guard.get();
     memset(t, 0, sizeof(task_t));
+
     proc_fd_table_init(t);
 
     spinlock_init(&t->poll_lock);
@@ -854,9 +884,9 @@ void proc_free_resources(task_t* t) {
         t->mem = 0;
     }
     
-    if (t->kstack) { 
-        kfree(t->kstack); 
-        t->kstack = 0; 
+    if (t->kstack) {
+        kfree(t->kstack);
+        t->kstack = 0;
     }
 
     if (t->fpu_state) {
@@ -870,11 +900,15 @@ void proc_free_resources(task_t* t) {
     t->pid = 0;
     memset(t->name, 0, sizeof(t->name));
     
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-    dlist_del(&t->all_tasks_node);
-    if (proc::detail::total_tasks > 0) {
-        proc::detail::total_tasks--;
+    {
+        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+
+        dlist_del(&t->all_tasks_node);
+        if (proc::detail::total_tasks > 0) {
+            proc::detail::total_tasks--;
+        }
     }
+
     kfree(t);
 }
 
@@ -930,11 +964,15 @@ void proc_kill(task_t* t) {
 
 static void kthread_trampoline(void) {
     task_t* t = proc_current();
+
     __asm__ volatile("sti");
+
     t->entry(t->arg);       
     
     t->state = TASK_ZOMBIE;
+
     sched_yield();        
+
     for (;;) cpu_hlt();   
 }
 
@@ -946,6 +984,7 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     if (!t) return 0;
 
     strlcpy(t->name, name ? name : "task", sizeof(t->name));
+
     t->entry = entry;
     t->arg = arg;
     t->mem = 0;
@@ -976,9 +1015,12 @@ task_t* proc_get_list_head() {
     if (proc::detail::all_tasks.empty()) {
         return 0;
     }
+
     return &proc::detail::all_tasks.front();
 }
-uint32_t proc_task_count(void) { return proc::detail::total_tasks; }
+uint32_t proc_task_count(void) {
+    return proc::detail::total_tasks;
+}
 
 task_t* proc_task_at(uint32_t idx) {
     kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
@@ -1000,7 +1042,9 @@ static int proc_alloc_kstack(task_t* t) {
     kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> kstack_guard(
         static_cast<uint8_t*>(kmalloc_a(t->kstack_size))
     );
-    if (!kstack_guard) return 0;
+    if (!kstack_guard) {
+        return 0;
+    }
 
     memset(kstack_guard.get(), 0, t->kstack_size);
     t->kstack = kstack_guard.release();
@@ -1049,6 +1093,7 @@ static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32
 
         sp -= 4u;
         *(uint32_t*)sp = arg;
+
         sp -= 4u;
         *(uint32_t*)sp = 0u;
     }
@@ -1205,17 +1250,38 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     kernel::unique_ptr<Elf32_Phdr, proc::detail::KfreeDeleter<Elf32_Phdr>> phdrs;
     uint32_t max_vaddr = 0;
 
-    if (exec_node->ops->read(exec_node.get(), 0, sizeof(Elf32_Ehdr), &header) < (int)sizeof(Elf32_Ehdr)) {
+    int header_read = exec_node->ops->read(
+        exec_node.get(),
+        0,
+        sizeof(Elf32_Ehdr),
+        &header
+    );
+    if (header_read < (int)sizeof(Elf32_Ehdr)) {
         return 0;
     }
     
-    if (header.e_ident[0] != 0x7F || header.e_ident[1] != 'E' || header.e_ident[2] != 'L' || header.e_ident[3] != 'F') {
+    if (
+        header.e_ident[0] != 0x7F
+        || header.e_ident[1] != 'E'
+        || header.e_ident[2] != 'L'
+        || header.e_ident[3] != 'F'
+    ) {
         return 0;
     }
-    if (header.e_ident[EI_CLASS] != ELFCLASS32 || header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_ident[EI_VERSION] != EV_CURRENT) {
+
+    if (
+        header.e_ident[EI_CLASS] != ELFCLASS32
+        || header.e_ident[EI_DATA] != ELFDATA2LSB
+        || header.e_ident[EI_VERSION] != EV_CURRENT
+    ) {
         return 0;
     }
-    if (header.e_type != ET_EXEC || header.e_machine != EM_386 || header.e_version != EV_CURRENT) {
+
+    if (
+        header.e_type != ET_EXEC
+        || header.e_machine != EM_386
+        || header.e_version != EV_CURRENT
+    ) {
         return 0;
     }
     if (header.e_ehsize != sizeof(Elf32_Ehdr) || header.e_phentsize != sizeof(Elf32_Phdr)) {
@@ -1236,7 +1302,14 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     if (!phdrs) {
         return 0;
     }
-    if (exec_node->ops->read(exec_node.get(), header.e_phoff, (uint32_t)phdr_bytes, phdrs.get()) < (int)phdr_bytes) {
+
+    int phdrs_read = exec_node->ops->read(
+        exec_node.get(),
+        header.e_phoff,
+        (uint32_t)phdr_bytes,
+        phdrs.get()
+    );
+    if (phdrs_read < (int)phdr_bytes) {
         return 0;
     }
 
@@ -1250,17 +1323,28 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         uint32_t file_off= phdrs.get()[i].p_offset;
         uint32_t file_sz = phdrs.get()[i].p_filesz;
 
-        if (mem_sz < file_sz) { return 0; }
+        if (mem_sz < file_sz) {
+            return 0;
+        }
 
         uint32_t end_v = start_v + mem_sz;
-        if (end_v < start_v) { return 0; }
-        if (start_v < proc::detail::user_elf_min_vaddr || end_v > proc::detail::user_elf_max_vaddr) { return 0; }
+        if (end_v < start_v) {
+            return 0;
+        }
+
+        if (start_v < proc::detail::user_elf_min_vaddr || end_v > proc::detail::user_elf_max_vaddr) {
+            return 0;
+        }
 
         uint32_t diff = start_v & proc::detail::page_mask;
-        if (file_off < diff) { return 0; }
+        if (file_off < diff) {
+            return 0;
+        }
 
         uint64_t file_end = (uint64_t)file_off + (uint64_t)file_sz;
-        if (file_end > (uint64_t)exec_node->size) { return 0; }
+        if (file_end > (uint64_t)exec_node->size) {
+            return 0;
+        }
 
         have_load = 1;
         if (end_v > max_vaddr) max_vaddr = end_v;
@@ -1299,6 +1383,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         int len = strlen(argv[i]) + 1;
         k_argv[i] = static_cast<char*>(kmalloc(len));
+
         memcpy(k_argv[i], argv[i], len);
     }
     k_argv[argc] = 0;
@@ -1318,19 +1403,19 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     task_t* t = t_guard.get();
 
-    if (proc_current()) {
-        t->cwd_inode = proc_current()->cwd_inode;
-        t->parent_pid = proc_current()->pid;
-        t->terminal = proc_current()->terminal;
-        t->term_mode = proc_current()->term_mode; 
+    task_t* curr = proc_current();
+    if (curr) {
+        t->cwd_inode = curr->cwd_inode;
+        t->parent_pid = curr->pid;
+        t->terminal = curr->terminal;
+        t->term_mode = curr->term_mode;
     } else {
         t->cwd_inode = 1;
         t->parent_pid = 0;
     }
 
-    if (proc_current()) {
-        task_t* parent = proc_current();
-        fd_table_t* cloned = proc_fd_table_clone(parent->fd_table);
+    if (curr) {
+        fd_table_t* cloned = proc_fd_table_clone(curr->fd_table);
         if (!cloned) {
             return 0;
         }
@@ -1375,6 +1460,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     if (!kstack_guard) {
         return 0;
     }
+
     memset(kstack_guard.get(), 0, t->kstack_size);
     t->kstack = kstack_guard.release();
 
@@ -1465,13 +1551,17 @@ void proc_wait(uint32_t pid) {
     if (!target) return;
 
     task_t* waiter = proc_current();
-    if (waiter) waiter->wait_for_pid = pid;
+    if (waiter) {
+        waiter->wait_for_pid = pid;
+    }
 
     __sync_fetch_and_add(&target->exit_waiters, 1);
     
     sem_wait(&target->exit_sem);
 
-    if (waiter) waiter->wait_for_pid = 0;
+    if (waiter) {
+        waiter->wait_for_pid = 0;
+    }
     __sync_fetch_and_sub(&target->exit_waiters, 1);
 }
 
@@ -1480,13 +1570,17 @@ int proc_waitpid(uint32_t pid, int* out_status) {
     if (!target) return -1;
 
     task_t* waiter = proc_current();
-    if (waiter) waiter->wait_for_pid = pid;
+    if (waiter) {
+        waiter->wait_for_pid = pid;
+    }
 
     __sync_fetch_and_add(&target->exit_waiters, 1);
 
     sem_wait(&target->exit_sem);
 
-    if (waiter) waiter->wait_for_pid = 0;
+    if (waiter) {
+        waiter->wait_for_pid = 0;
+    }
 
     if (out_status) {
         *out_status = target->exit_status;
@@ -1496,11 +1590,11 @@ int proc_waitpid(uint32_t pid, int* out_status) {
     return 0;
 }
 
-
 void reaper_task_func(void* arg) {
     (void)arg;
     while (1) {
         int freed = 0;
+
         do {
             freed = 0;
             task_t* victim = 0;
@@ -1571,11 +1665,15 @@ task_t* proc_create_idle(int cpu_index) {
     
     t->esp = sp;
 
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-    dlist_del(&t->all_tasks_node);
-    if (proc::detail::total_tasks > 0) {
-        proc::detail::total_tasks--;
+    {
+        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+
+        dlist_del(&t->all_tasks_node);
+        if (proc::detail::total_tasks > 0) {
+            proc::detail::total_tasks--;
+        }
     }
+
     proc::detail::pid_map_remove(old_pid);
 
     return t;
@@ -1611,7 +1709,9 @@ void proc_usleep(uint32_t us) {
     if (!curr) return;
 
     uint32_t ticks = (uint32_t)(((uint64_t)us * KERNEL_TIMER_HZ) / 1000000ull);
-    if (ticks == 0) ticks = 1;
+    if (ticks == 0) {
+        ticks = 1;
+    }
 
     uint32_t target = timer_ticks + ticks;
     proc_sleep_add(curr, target);
@@ -1619,6 +1719,7 @@ void proc_usleep(uint32_t us) {
 
 void proc_check_sleepers(uint32_t current_tick) {
     kernel::TrySpinLockGuard guard(proc::detail::sleep_lock);
+
     if (guard) {
         while (!proc::detail::sleeping_tree.empty()) {
             task_t& t = *proc::detail::sleeping_tree.begin();
@@ -1627,8 +1728,10 @@ void proc_check_sleepers(uint32_t current_tick) {
             }
 
             proc::detail::sleeping_tree.erase(t);
+            
             t.state = TASK_RUNNABLE;
             t.wake_tick = 0;
+            
             sched_add(&t);
         }
     }
@@ -1639,6 +1742,7 @@ void proc_sleep_remove(task_t* t) {
     
     if (t->wake_tick != 0) {
         proc::detail::sleeping_tree.erase(*t);
+        
         t->wake_tick = 0;
     }
 }
