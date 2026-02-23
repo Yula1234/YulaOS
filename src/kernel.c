@@ -17,6 +17,7 @@
 #include <drivers/uhci.h>
 #include <drivers/acpi.h>
 #include <drivers/vga.h>
+#include <drivers/serial/ns16550.h>
 #include <drivers/virtio_gpu.h>
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
@@ -118,6 +119,8 @@ static void kmain_platform_init(void) {
 static void kmain_devices_init(void) {
     vga_init();
     vga_init_graphics();
+
+    ns16550_init(NS16550_COM1);
 
     clipboard_init();
 
