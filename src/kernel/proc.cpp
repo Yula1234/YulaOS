@@ -693,7 +693,7 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
         return 0;
     }
 
-    return mem_guard.detach();
+    return mem_guard.release();
 }
 
 static void proc_mem_retain(proc_mem_t* mem) {
@@ -800,7 +800,7 @@ static task_t* alloc_task(void) {
     }
 
     memcpy(fpu_state_guard.get(), proc::detail::initial_fpu_state, t->fpu_state_size);
-    t->fpu_state = fpu_state_guard.detach();
+    t->fpu_state = fpu_state_guard.release();
     
     sem_init(&t->exit_sem, 0); 
 
@@ -819,7 +819,7 @@ static task_t* alloc_task(void) {
     proc::detail::all_tasks.push_back(*t);
     proc::detail::total_tasks++;
 
-    return t_guard.detach();
+    return t_guard.release();
 }
 
 void proc_free_resources(task_t* t) {
