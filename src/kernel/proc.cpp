@@ -289,6 +289,36 @@ int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
     return signaled;
 }
 
+int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
+    if (pgid == 0 || sid == 0) {
+        return 0;
+    }
+
+    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+
+    ProcGroup* g = pgroup_find(pgid);
+    if (!g) {
+        return 0;
+    }
+
+    for (dlist_head_t* it = g->members.next; it && it != &g->members; it = it->next) {
+        task_t* m = container_of(it, task_t, pgrp_node);
+        if (!m) {
+            continue;
+        }
+
+        if (m->state == TASK_UNUSED || m->state == TASK_ZOMBIE) {
+            continue;
+        }
+
+        if (m->sid == sid) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 struct SleepKeyLess {
     bool operator()(const SleepKey& a, const SleepKey& b) const noexcept {
         if (a.wake_tick != b.wake_tick) {
@@ -523,6 +553,10 @@ extern "C" uint32_t proc_getpgrp(task_t* t) {
 
 extern "C" int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
     return proc::detail::proc_signal_pgrp(pgid, sig);
+}
+
+extern "C" int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
+    return proc::detail::proc_pgrp_in_session(pgid, sid);
 }
 
 extern "C" void irq_return(void);

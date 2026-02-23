@@ -8,8 +8,9 @@ static const char* state_name(uint32_t st) {
         case 0: return "UNUSED";
         case 1: return "RUNNABLE";
         case 2: return "RUNNING";
-        case 3: return "ZOMBIE";
-        case 4: return "WAITING";
+        case 3: return "STOPPED";
+        case 4: return "ZOMBIE";
+        case 5: return "WAITING";
         default: return "?";
     }
 }

@@ -23,6 +23,7 @@ typedef enum {
     TASK_UNUSED = 0,
     TASK_RUNNABLE,
     TASK_RUNNING,
+    TASK_STOPPED,
     TASK_ZOMBIE,
     TASK_WAITING
 } task_state_t;
@@ -30,9 +31,12 @@ typedef enum {
 #define NSIG 32
 
 #define SIGINT  2
-#define SIGILL  4
 #define SIGQUIT 3
+#define SIGILL  4
+#define SIGCONT 18
 #define SIGTSTP 20
+#define SIGTTIN 21
+#define SIGTTOU 22
 #define SIGSEGV 11
 #define SIGTERM 15
 
@@ -207,6 +211,8 @@ int proc_setpgid(task_t* t, uint32_t pgid);
 uint32_t proc_getpgrp(task_t* t);
 
 int proc_signal_pgrp(uint32_t pgid, uint32_t sig);
+
+int proc_pgrp_in_session(uint32_t pgid, uint32_t sid);
 
 int proc_waitpid(uint32_t pid, int* out_status);
 void reaper_task_func(void* arg);

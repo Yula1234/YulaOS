@@ -456,6 +456,22 @@ static int pty_slave_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
 
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
+
+    task_t* curr = proc_current();
+    if (curr && curr->controlling_tty && curr->controlling_tty->ops == node->ops &&
+        curr->controlling_tty->private_data == node->private_data) {
+
+        uint32_t flags = spinlock_acquire_safe(&p->lock);
+        uint32_t fg = p->fg_pgid;
+        spinlock_release_safe(&p->lock, flags);
+
+        if (fg != 0 && curr->pgid != fg) {
+            (void)proc_signal_pgrp(curr->pgid, SIGTTIN);
+            sched_yield();
+            return -1;
+        }
+    }
+
     return pty_chan_read(p, &p->m2s, size, buffer, &p->master_open);
 }
 
@@ -466,6 +482,25 @@ static int pty_slave_write(vfs_node_t* node, uint32_t offset, uint32_t size, con
 
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
+
+    task_t* curr = proc_current();
+    if (curr && curr->controlling_tty && curr->controlling_tty->ops == node->ops &&
+        curr->controlling_tty->private_data == node->private_data) {
+
+        uint32_t flags = spinlock_acquire_safe(&p->lock);
+        uint32_t fg = p->fg_pgid;
+        yos_termios_t termios = p->termios;
+        spinlock_release_safe(&p->lock, flags);
+
+        const int is_bg = (fg != 0 && curr->pgid != fg);
+        const int tostop = (termios.c_lflag & YOS_LFLAG_TOSTOP) != 0;
+        if (is_bg && tostop) {
+            (void)proc_signal_pgrp(curr->pgid, SIGTTOU);
+            sched_yield();
+            return -1;
+        }
+    }
+
     return pty_chan_write(p, &p->s2m, size, buffer, &p->master_open);
 }
 
@@ -496,6 +531,10 @@ static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             break;
         case YOS_TIOCSWINSZ:
             memcpy(&p->winsz, arg, sizeof(p->winsz));
+            break;
+
+        case YOS_TIOCGSID:
+            *(uint32_t*)arg = p->session_sid;
             break;
 
         case YOS_TIOCSCTTY: {
@@ -549,6 +588,11 @@ static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             }
 
             if (p->session_sid != 0 && p->session_sid != curr->sid) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            if (!proc_pgrp_in_session(pgid, curr->sid)) {
                 spinlock_release_safe(&p->lock, flags);
                 return -1;
             }

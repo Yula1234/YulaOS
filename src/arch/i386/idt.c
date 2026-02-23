@@ -161,6 +161,29 @@ static void maybe_deliver_pending_signal(task_t* curr, registers_t* regs) {
         if (!(curr->pending_signals & (1u << i))) continue;
 
         if (!curr->handlers[i]) {
+            if (i == SIGCONT) {
+                curr->pending_signals &= ~(1u << i);
+
+                if (curr->state == TASK_STOPPED) {
+                    curr->state = TASK_RUNNABLE;
+                    sched_add(curr);
+                }
+
+                return;
+            }
+
+            if (i == SIGTSTP || i == SIGTTIN || i == SIGTTOU) {
+                curr->pending_signals &= ~(1u << i);
+
+                if (curr->state != TASK_ZOMBIE && curr->state != TASK_UNUSED) {
+                    curr->state = TASK_STOPPED;
+                    sched_remove(curr);
+                }
+
+                sched_yield();
+                return;
+            }
+
             if (i == 2 || i == 4 || i == 11 || i == 15) {
                 uint32_t old_esp = regs->useresp;
                 if (old_esp < 16u) {

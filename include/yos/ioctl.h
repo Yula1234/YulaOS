@@ -58,6 +58,7 @@ enum {
     YOS_LFLAG_ISIG = 1u << 0,
     YOS_LFLAG_ICANON = 1u << 1,
     YOS_LFLAG_ECHO = 1u << 2,
+    YOS_LFLAG_TOSTOP = 1u << 3,
 };
 
 typedef struct {
@@ -81,6 +82,11 @@ typedef struct {
 #define YOS_TIOCSCTTY  _YOS_IO('T', 0x17)
 #define YOS_TCGETPGRP  _YOS_IOR('T', 0x18, uint32_t)
 #define YOS_TCSETPGRP  _YOS_IOW('T', 0x1B, uint32_t)
+
+#define YOS_TIOCGPGRP  YOS_TCGETPGRP
+#define YOS_TIOCSPGRP  YOS_TCSETPGRP
+
+#define YOS_TIOCGSID   _YOS_IOR('T', 0x1C, uint32_t)
 
 typedef struct {
     uint8_t mac[6];

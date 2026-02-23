@@ -13,6 +13,7 @@
 
 #include <kernel/proc.h>
 #include <kernel/poll_waitq.h>
+#include <kernel/sched.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -31,6 +32,20 @@ struct TtyProcState {
 };
 
 static TtyProcState g_proc;
+
+static void tty_private_retain(void*) {
+}
+
+static void tty_private_release(void*) {
+}
+
+static bool is_same_tty(const vfs_node_t* a, const vfs_node_t* b) {
+    if (!a || !b) {
+        return false;
+    }
+
+    return a->ops == b->ops && a->private_data == b->private_data;
+}
 
 static kernel::term::Term* active_term(void) {
     tty_handle_t* active = kernel::tty::TtyService::instance().get_active_for_render();
@@ -120,11 +135,25 @@ static void tty_signal_emit(int sig, void*) {
 }
 
 int ttyS0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
-    (void)node;
     (void)offset;
 
     if (!buffer || size == 0) {
         return 0;
+    }
+
+    task_t* curr = proc_current();
+    if (curr && curr->controlling_tty && is_same_tty(curr->controlling_tty, node)) {
+        uint32_t fg = 0;
+        {
+            kernel::SpinLockSafeGuard g(g_proc.lock);
+            fg = g_proc.fg_pgid;
+        }
+
+        if (fg != 0 && curr->pgid != fg) {
+            (void)proc_signal_pgrp(curr->pgid, SIGTTIN);
+            sched_yield();
+            return -1;
+        }
     }
 
     for (;;) {
@@ -142,11 +171,28 @@ int ttyS0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffe
 }
 
 int ttyS0_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {
-    (void)node;
     (void)offset;
 
     if (!buffer || size == 0) {
         return 0;
+    }
+
+    task_t* curr = proc_current();
+    if (curr && curr->controlling_tty && is_same_tty(curr->controlling_tty, node)) {
+        uint32_t fg = 0;
+        {
+            kernel::SpinLockSafeGuard g(g_proc.lock);
+            fg = g_proc.fg_pgid;
+        }
+
+        const int is_bg = (fg != 0 && curr->pgid != fg);
+        const int tostop = (g_termios.c_lflag & YOS_LFLAG_TOSTOP) != 0;
+
+        if (is_bg && tostop) {
+            (void)proc_signal_pgrp(curr->pgid, SIGTTOU);
+            sched_yield();
+            return -1;
+        }
     }
 
     serial_core_poll();
@@ -248,6 +294,10 @@ int ttyS0_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
                 return -1;
             }
 
+            if (!proc_pgrp_in_session(pgid, curr->sid)) {
+                return -1;
+            }
+
             g_proc.fg_pgid = pgid;
         }
 
@@ -272,9 +322,9 @@ vfs_node_t ttyS0_node = {
     0,
     0,
     &ttyS0_ops,
-    0,
-    0,
-    0,
+    &g_proc,
+    tty_private_retain,
+    tty_private_release,
 };
 
 }
