@@ -1,9 +1,14 @@
 #include <kernel/tty/line_discipline.h>
 
+#include <hal/apic.h>
+#include <kernel/proc.h>
+
 #include <stddef.h>
 #include <stdint.h>
 
 namespace kernel::tty {
+
+extern volatile uint32_t timer_ticks;
 
 static bool is_backspace(uint8_t b) {
     return b == 0x08u || b == 0x7Fu;
@@ -208,6 +213,16 @@ bool LineDiscipline::try_isig_locked(uint8_t b) {
 }
 
 void LineDiscipline::receive_byte_locked(uint8_t b) {
+    if (cfg_.igncr && b == '\r') {
+        return;
+    }
+
+    if (cfg_.icrnl && b == '\r') {
+        b = '\n';
+    } else if (cfg_.inlcr && b == '\n') {
+        b = '\r';
+    }
+
     if (try_isig_locked(b)) {
         return;
     }
@@ -225,10 +240,6 @@ void LineDiscipline::receive_byte_locked(uint8_t b) {
             echo_erase_locked();
         }
         return;
-    }
-
-    if (b == '\r') {
-        b = '\n';
     }
 
     if (line_len_ < line_cap) {
@@ -288,24 +299,81 @@ size_t LineDiscipline::read(void* out, size_t size) {
         return 0;
     }
 
-    for (;;) {
-        {
-            kernel::SpinLockSafeGuard g(lock_);
+    const auto is_readable_now = [&]() {
+        kernel::SpinLockSafeGuard g(lock_);
+        return has_readable_locked();
+    };
 
-            if (has_readable_locked()) {
-                break;
+    const auto available_noncanon = [&]() -> size_t {
+        kernel::SpinLockSafeGuard g(lock_);
+        return cooked_.count;
+    };
+
+    const auto wait_until_ticks = [&](uint32_t deadline_tick) -> bool {
+        for (;;) {
+            if (is_readable_now()) {
+                return true;
             }
-        }
 
-        sem_.wait();
-    }
+            if (timer_ticks >= deadline_tick) {
+                return false;
+            }
+
+            proc_usleep(1000);
+        }
+    };
+
+    const auto wait_forever = [&]() {
+        for (;;) {
+            if (is_readable_now()) {
+                return;
+            }
+
+            sem_.wait();
+        }
+    };
 
     uint8_t* dst = static_cast<uint8_t*>(out);
 
-    kernel::SpinLockSafeGuard g(lock_);
-
     size_t n = 0;
     if (!cfg_.canonical) {
+        const uint8_t vmin = cfg_.vmin;
+        const uint8_t vtime = cfg_.vtime;
+
+        if (vmin == 0u && vtime == 0u) {
+            if (!is_readable_now()) {
+                return 0;
+            }
+        } else if (vmin > 0u && vtime == 0u) {
+            while (available_noncanon() < vmin) {
+                sem_.wait();
+            }
+        } else {
+            uint32_t timeout_ticks = (uint32_t)(((uint64_t)vtime * (uint64_t)KERNEL_TIMER_HZ) / 10ull);
+            if (timeout_ticks == 0u) {
+                timeout_ticks = 1u;
+            }
+
+            const uint32_t start = timer_ticks;
+            const uint32_t first_deadline = start + timeout_ticks;
+
+            if (!wait_until_ticks(first_deadline)) {
+                return 0;
+            }
+
+            if (vmin > 0u) {
+                while (available_noncanon() < vmin) {
+                    const uint32_t now = timer_ticks;
+                    const uint32_t deadline = now + timeout_ticks;
+                    if (!wait_until_ticks(deadline)) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        kernel::SpinLockSafeGuard g(lock_);
+
         while (n < size) {
             uint8_t b = 0;
             if (!cooked_.pop(b)) {
@@ -317,6 +385,10 @@ size_t LineDiscipline::read(void* out, size_t size) {
 
         return n;
     }
+
+    wait_forever();
+
+    kernel::SpinLockSafeGuard g(lock_);
 
     bool done = false;
     while (n < size) {
@@ -356,7 +428,7 @@ size_t LineDiscipline::write_transform(
     for (size_t i = 0; i < size; i++) {
         uint8_t b = src[i];
 
-        if (cfg_.onlcr && b == '\n') {
+        if (cfg_.opost && cfg_.onlcr && b == '\n') {
             const uint8_t seq[2] = { '\r', '\n' };
             size_t w = emit(seq, sizeof(seq), ctx);
             produced += w;

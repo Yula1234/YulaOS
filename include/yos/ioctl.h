@@ -52,6 +52,22 @@ enum {
     YOS_VINTR = 0,
     YOS_VQUIT = 1,
     YOS_VSUSP = 2,
+    YOS_VMIN  = 16,
+    YOS_VTIME = 17,
+};
+
+enum {
+    YOS_IFLAG_IGNCR = 1u << 0,
+    YOS_IFLAG_ICRNL = 1u << 1,
+    YOS_IFLAG_INLCR = 1u << 2,
+
+    YOS_IFLAG_IXON  = 1u << 3,
+    YOS_IFLAG_IXOFF = 1u << 4,
+};
+
+enum {
+    YOS_OFLAG_OPOST = 1u << 0,
+    YOS_OFLAG_ONLCR = 1u << 1,
 };
 
 enum {

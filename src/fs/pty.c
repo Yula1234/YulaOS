@@ -195,6 +195,17 @@ static pty_pair_t* pty_pair_create(void) {
 
     memset(p, 0, sizeof(*p));
 
+    p->termios.c_iflag = YOS_IFLAG_ICRNL;
+    p->termios.c_oflag = YOS_OFLAG_OPOST | YOS_OFLAG_ONLCR;
+    p->termios.c_lflag = YOS_LFLAG_ECHO | YOS_LFLAG_ISIG | YOS_LFLAG_ICANON;
+
+    p->termios.c_cc[YOS_VINTR] = 0x03u;
+    p->termios.c_cc[YOS_VQUIT] = 0x1Cu;
+    p->termios.c_cc[YOS_VSUSP] = 0x1Au;
+
+    p->termios.c_cc[YOS_VMIN] = 1u;
+    p->termios.c_cc[YOS_VTIME] = 0u;
+
     p->refs = 1;
     spinlock_init(&p->lock);
     poll_waitq_init(&p->poll_waitq);

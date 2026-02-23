@@ -94,6 +94,16 @@ static kernel::tty::LineDisciplineConfig config_from_termios(const yos_termios_t
     cfg.echo = (t.c_lflag & YOS_LFLAG_ECHO) != 0;
     cfg.isig = (t.c_lflag & YOS_LFLAG_ISIG) != 0;
 
+    cfg.igncr = (t.c_iflag & YOS_IFLAG_IGNCR) != 0;
+    cfg.icrnl = (t.c_iflag & YOS_IFLAG_ICRNL) != 0;
+    cfg.inlcr = (t.c_iflag & YOS_IFLAG_INLCR) != 0;
+
+    cfg.opost = (t.c_oflag & YOS_OFLAG_OPOST) != 0;
+    cfg.onlcr = (t.c_oflag & YOS_OFLAG_ONLCR) != 0;
+
+    cfg.vmin = t.c_cc[YOS_VMIN];
+    cfg.vtime = t.c_cc[YOS_VTIME];
+
     cfg.vintr = t.c_cc[YOS_VINTR];
     cfg.vquit = t.c_cc[YOS_VQUIT];
     cfg.vsusp = t.c_cc[YOS_VSUSP];
@@ -103,9 +113,18 @@ static kernel::tty::LineDisciplineConfig config_from_termios(const yos_termios_t
 
 static kernel::tty::LineDisciplineConfig default_config(void) {
     kernel::tty::LineDisciplineConfig cfg;
-    cfg.canonical = false;
+    cfg.canonical = true;
     cfg.echo = true;
+    cfg.igncr = false;
+    cfg.icrnl = true;
+    cfg.inlcr = false;
+
+    cfg.opost = true;
     cfg.onlcr = true;
+
+    cfg.vmin = 1u;
+    cfg.vtime = 0u;
+
     cfg.isig = true;
     cfg.vintr = 0x03u;
     cfg.vquit = 0x1Cu;
@@ -332,14 +351,20 @@ vfs_node_t ttyS0_node = {
 extern "C" void ttyS0_init(void) {
     memset(&g_termios, 0, sizeof(g_termios));
 
-    g_termios.c_lflag = YOS_LFLAG_ECHO | YOS_LFLAG_ISIG;
+    g_termios.c_iflag = YOS_IFLAG_ICRNL;
+    g_termios.c_oflag = YOS_OFLAG_OPOST | YOS_OFLAG_ONLCR;
+    g_termios.c_lflag = YOS_LFLAG_ECHO | YOS_LFLAG_ISIG | YOS_LFLAG_ICANON;
+
     g_termios.c_cc[YOS_VINTR] = 0x03u;
     g_termios.c_cc[YOS_VQUIT] = 0x1Cu;
     g_termios.c_cc[YOS_VSUSP] = 0x1Au;
 
+    g_termios.c_cc[YOS_VMIN] = 1u;
+    g_termios.c_cc[YOS_VTIME] = 0u;
+
     g_ld.set_echo_emitter(echo_emit, 0);
     g_ld.set_signal_emitter(tty_signal_emit, 0);
-    g_ld.set_config(default_config());
+    g_ld.set_config(config_from_termios(g_termios));
 
     poll_waitq_init(&g_poll_waitq);
 

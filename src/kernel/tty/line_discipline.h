@@ -13,6 +13,15 @@ struct LineDisciplineConfig {
     bool echo = true;
     bool onlcr = true;
 
+    bool igncr = false;
+    bool icrnl = true;
+    bool inlcr = false;
+
+    bool opost = true;
+
+    uint8_t vmin = 1u;
+    uint8_t vtime = 0u;
+
     bool isig = false;
     uint8_t vintr = 0x03u;
     uint8_t vquit = 0x1Cu;

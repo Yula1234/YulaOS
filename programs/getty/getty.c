@@ -51,6 +51,24 @@ static getty_status_t run_getty_once(const char* tty_path, const char* prog_name
         return GETTY_FATAL;
     }
 
+    {
+        yos_termios_t t;
+        memset(&t, 0, sizeof(t));
+
+        t.c_iflag = YOS_IFLAG_ICRNL;
+        t.c_oflag = YOS_OFLAG_OPOST | YOS_OFLAG_ONLCR;
+        t.c_lflag = YOS_LFLAG_ECHO | YOS_LFLAG_ISIG | YOS_LFLAG_ICANON;
+
+        t.c_cc[YOS_VINTR] = 0x03u;
+        t.c_cc[YOS_VQUIT] = 0x1Cu;
+        t.c_cc[YOS_VSUSP] = 0x1Au;
+
+        t.c_cc[YOS_VMIN] = 1u;
+        t.c_cc[YOS_VTIME] = 0u;
+
+        (void)ioctl(fd, YOS_TCSETS, &t);
+    }
+
     if (setsid() < 0) {
         (void)close(fd);
         write_str_fd(2, "getty: setsid failed\n");
