@@ -18,6 +18,8 @@
 #include <drivers/acpi.h>
 #include <drivers/vga.h>
 #include <drivers/serial/ns16550.h>
+#include <drivers/serial/serial_core.h>
+#include <drivers/serial/ttyS0.h>
 #include <drivers/virtio_gpu.h>
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
@@ -29,6 +31,8 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
+
+#include <kernel/output/console.h>
 
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
@@ -122,6 +126,9 @@ static void kmain_devices_init(void) {
 
     ns16550_init(NS16550_COM1);
 
+    serial_core_init(NS16550_COM1);
+    console_set_writer(serial_core_console_write, 0);
+
     clipboard_init();
 
     kbd_init();
@@ -134,6 +141,7 @@ static void kmain_devices_init(void) {
 
     kbd_vfs_init();
     console_init();
+    ttyS0_init();
     mouse_vfs_init();
     fb_vfs_init();
     gpu0_vfs_init();

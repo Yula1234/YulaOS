@@ -1,4 +1,5 @@
 #include <kernel/output/kprintf.h>
+#include <kernel/output/console.h>
 
 #include <lib/cpp/lock_guard.h>
 
@@ -10,16 +11,19 @@ namespace kernel::output {
 namespace {
 
 static kernel::SpinLock g_kprintf_lock;
-static NS16550::Port g_serial_port = NS16550::Port::COM1;
 
-class SerialSink {
+class ConsoleSink {
 public:
-    explicit SerialSink(NS16550::Port port)
-        : port_(port) {
-    }
+    ConsoleSink() = default;
+
+    ConsoleSink(const ConsoleSink&) = delete;
+    ConsoleSink& operator=(const ConsoleSink&) = delete;
+
+    ConsoleSink(ConsoleSink&&) = delete;
+    ConsoleSink& operator=(ConsoleSink&&) = delete;
 
     void putc(char c) {
-        NS16550::putc(port_, c);
+        console_putc(c);
         written_++;
     }
 
@@ -40,7 +44,6 @@ public:
     }
 
 private:
-    NS16550::Port port_;
     int written_ = 0;
 };
 
@@ -263,7 +266,7 @@ static int cstr_len(const char* s) {
     return n;
 }
 
-static void emit_str(SerialSink& out, const Spec& s, const char* str) {
+static void emit_str(ConsoleSink& out, const Spec& s, const char* str) {
     if (!str) {
         str = "(null)";
     }
@@ -289,7 +292,7 @@ static void emit_str(SerialSink& out, const Spec& s, const char* str) {
     }
 }
 
-static void emit_char(SerialSink& out, const Spec& s, char c) {
+static void emit_char(ConsoleSink& out, const Spec& s, char c) {
     int pad = 0;
     if (s.width > 1) {
         pad = s.width - 1;
@@ -307,7 +310,7 @@ static void emit_char(SerialSink& out, const Spec& s, char c) {
 }
 
 static void emit_u(
-    SerialSink& out,
+    ConsoleSink& out,
     const Spec& s,
     uint64_t v,
     unsigned base,
@@ -360,7 +363,7 @@ static void emit_u(
     }
 }
 
-static void emit_i(SerialSink& out, const Spec& s, int64_t v) {
+static void emit_i(ConsoleSink& out, const Spec& s, int64_t v) {
     char sign_ch = '\0';
     uint64_t mag = 0;
 
@@ -390,24 +393,14 @@ static void emit_i(SerialSink& out, const Spec& s, int64_t v) {
     emit_u(out, s, mag, 10u, false, prefix, prefix_len);
 }
 
-static int kvprintf_locked(SerialSink& out, const char* fmt, va_list ap);
+static int kvprintf_locked(ConsoleSink& out, const char* fmt, va_list ap);
 
-}
-
-void set_serial_port(SerialPort port) {
-    kernel::SpinLockSafeGuard guard(g_kprintf_lock);
-    g_serial_port = port;
-}
-
-SerialPort serial_port(void) {
-    kernel::SpinLockSafeGuard guard(g_kprintf_lock);
-    return g_serial_port;
 }
 
 int kvprintf(const char* fmt, va_list ap) {
     kernel::SpinLockSafeGuard guard(g_kprintf_lock);
 
-    SerialSink out(g_serial_port);
+    ConsoleSink out;
     return kvprintf_locked(out, fmt, ap);
 }
 
@@ -436,7 +429,7 @@ extern "C" int kprintf(const char* fmt, ...) {
 namespace kernel::output {
 namespace {
 
-static int kvprintf_locked(SerialSink& out, const char* fmt, va_list ap) {
+static int kvprintf_locked(ConsoleSink& out, const char* fmt, va_list ap) {
     if (!fmt) {
         return 0;
     }
