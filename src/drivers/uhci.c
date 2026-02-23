@@ -23,8 +23,8 @@
 
 extern volatile uint32_t timer_ticks;
 
-#define UHCI_KBD_REPEAT_DELAY_TICKS  1900u
-#define UHCI_KBD_REPEAT_RATE_TICKS    180u
+#define UHCI_KBD_REPEAT_DELAY_TICKS  380u
+#define UHCI_KBD_REPEAT_RATE_TICKS    31u
 
 #define UHCI_PCI_CLASS_SERIAL_BUS 0x0Cu
 #define UHCI_PCI_SUBCLASS_USB     0x03u
