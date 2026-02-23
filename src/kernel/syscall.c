@@ -7,10 +7,10 @@
 #include <hal/simd.h>
 #include <hal/apic.h>
 
-#include <drivers/vga.h>
+#include <drivers/fbdev.h>
 #include <drivers/keyboard.h>
 #include <drivers/mouse.h>
-#include <drivers/fbdev.h>
+#include <drivers/serial/ttyS0.h>
 #include <drivers/virtio_gpu.h>
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
@@ -2420,6 +2420,8 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                             if (kbd_poll_ready(curr)) rev |= POLLIN;
                         } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
                             if (mouse_poll_ready(curr)) rev |= POLLIN;
+                        } else if (node->name[0] == 't' && strcmp(node->name, "ttyS0") == 0) {
+                            if (ttyS0_poll_ready()) rev |= POLLIN;
                         }
                     }
                 }
@@ -2477,6 +2479,8 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                     (void)kbd_poll_waitq_register(&waiters[i], curr);
                 } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
                     (void)mouse_poll_waitq_register(&waiters[i], curr);
+                } else if (node->name[0] == 't' && strcmp(node->name, "ttyS0") == 0) {
+                    (void)ttyS0_poll_waitq_register(&waiters[i], curr);
                 }
             }
 
