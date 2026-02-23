@@ -128,7 +128,7 @@ static void enqueue_task(cpu_t* cpu, task_t* p) {
     if (leftmost)
         cpu->runq_leftmost = p;
         
-    cpu->runq_count++;
+    __sync_fetch_and_add(&cpu->runq_count, 1);
 }
 
 static void dequeue_task(cpu_t* cpu, task_t* p) {
@@ -138,7 +138,7 @@ static void dequeue_task(cpu_t* cpu, task_t* p) {
     }
 
     rb_erase(&p->rb_node, &cpu->runq_root);
-    cpu->runq_count--;
+    __sync_fetch_and_sub(&cpu->runq_count, 1);
 }
 
 void sched_add(task_t* t) {
@@ -185,7 +185,7 @@ void sched_add(task_t* t) {
     t->exec_start = 0;
     
     target->total_priority_weight += t->priority;
-    target->total_task_count++;
+    __sync_fetch_and_add(&target->total_task_count, 1);
 
     enqueue_task(target, t);
     
@@ -312,8 +312,9 @@ void sched_remove(task_t* t) {
     else 
         target->total_priority_weight = 0;
 
-    if (target->total_task_count > 0)
-        target->total_task_count--;
+    if (target->total_task_count > 0) {
+        __sync_fetch_and_sub(&target->total_task_count, 1);
+    }
 
     uint32_t cache_flags = spinlock_acquire_safe(&cpu_cache_lock);
     if (cached_best_cpu == cpu_idx) {
@@ -338,7 +339,7 @@ void sem_init(semaphore_t* sem, int init_count) {
 int sem_try_acquire(semaphore_t* sem) {
     uint32_t flags = spinlock_acquire_safe(&sem->lock);
     if (sem->count > 0) {
-        sem->count--;
+        __sync_fetch_and_sub(&sem->count, 1);
         spinlock_release_safe(&sem->lock, flags);
         return 1;
     }
@@ -351,7 +352,7 @@ void sem_wait(semaphore_t* sem) {
         uint32_t flags = spinlock_acquire_safe(&sem->lock);
         
         if (sem->count > 0) {
-            sem->count--;
+            __sync_fetch_and_sub(&sem->count, 1);
             task_t* curr = proc_current();
             curr->blocked_on_sem = 0;
             spinlock_release_safe(&sem->lock, flags);
@@ -375,7 +376,7 @@ void sem_wait(semaphore_t* sem) {
 void sem_signal(semaphore_t* sem) {
     uint32_t flags = spinlock_acquire_safe(&sem->lock);
     
-    sem->count++;
+    __sync_fetch_and_add(&sem->count, 1);
     
     if (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
@@ -407,7 +408,7 @@ void sem_signal_all(semaphore_t* sem) {
         t->sem_node.prev = 0;
         t->blocked_on_sem = 0;
 
-        sem->count++;
+        __sync_fetch_and_add(&sem->count, 1);
 
         if (t->state != TASK_ZOMBIE) {
             t->state = TASK_RUNNABLE;

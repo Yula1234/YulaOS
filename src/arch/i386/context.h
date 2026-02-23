@@ -7,8 +7,16 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void ctx_switch(uint32_t** old_esp_store, uint32_t* new_esp);
 void ctx_start(uint32_t* new_esp);
 void irq_return(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -26,8 +26,16 @@ struct tss_entry_struct {
 
 extern struct tss_entry_struct tss_entries[MAX_CPUS];
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void gdt_init(void);
 void gdt_load(void);
 void tss_set_stack(int cpu_id, uint32_t kernel_esp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
