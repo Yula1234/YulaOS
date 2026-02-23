@@ -20,6 +20,7 @@
 #include <kernel/input_focus.h>
 
 #include <lib/hash_map.h>
+#include <lib/cpp/dlist.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/rbtree.h>
 #include <lib/cpp/unique_ptr.h>
@@ -47,8 +48,9 @@
 namespace proc {
 namespace detail {
 
-static task_t* tasks_head = 0;
-static task_t* tasks_tail = 0;
+using AllTasksList = kernel::CDBLinkedList<task_t, &task_t::all_tasks_node>;
+
+static AllTasksList all_tasks;
 
 static uint32_t total_tasks = 0;
 static uint32_t next_pid = 1;
@@ -331,30 +333,34 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
     uint32_t count = 0;
     kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
 
-    task_t* t = proc::detail::tasks_head;
-    while (t && count < cap) {
-        if (t->state != TASK_UNUSED) {
-            yos_proc_info_t* e = &out[count++];
-            e->pid = t->pid;
-            e->parent_pid = t->parent_pid;
-            e->state = (uint32_t)t->state;
-            e->priority = (uint32_t)t->priority;
-            e->mem_pages = (t->mem) ? t->mem->mem_pages : 0;
-            e->term_mode = (uint32_t)t->term_mode;
-            strlcpy(e->name, t->name, sizeof(e->name));
+    for (task_t& t : proc::detail::all_tasks) {
+        if (count >= cap) {
+            break;
         }
-        t = t->next;
+
+        if (t.state == TASK_UNUSED) {
+            continue;
+        }
+
+        yos_proc_info_t* e = &out[count++];
+        e->pid = t.pid;
+        e->parent_pid = t.parent_pid;
+        e->state = (uint32_t)t.state;
+        e->priority = (uint32_t)t.priority;
+        e->mem_pages = (t.mem) ? t.mem->mem_pages : 0;
+        e->term_mode = (uint32_t)t.term_mode;
+        strlcpy(e->name, t.name, sizeof(e->name));
     }
     return count;
 }
 
 void proc_init(void) {
-    proc::detail::tasks_head = 0;
-    proc::detail::tasks_tail = 0;
     proc::detail::total_tasks = 0;
     proc::detail::next_pid = 1;
 
     spinlock_init(proc::detail::proc_lock.native_handle());
+
+    proc::detail::all_tasks.clear_links_unsafe();
 
     proc::detail::sleeping_tree.clear();
 
@@ -646,34 +652,6 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     return ft.detach();
 }
 
-static void list_append(task_t* t) {
-    t->next = 0;
-    t->prev = 0;
-    
-    if (!proc::detail::tasks_head) {
-        proc::detail::tasks_head = t;
-        proc::detail::tasks_tail = t;
-    } else {
-        proc::detail::tasks_tail->next = t;
-        t->prev = proc::detail::tasks_tail;
-        proc::detail::tasks_tail = t;
-    }
-    proc::detail::total_tasks++;
-}
-
-static void list_remove(task_t* t) {
-    if (t->prev) t->prev->next = t->next;
-    else proc::detail::tasks_head = t->next;
-
-    if (t->next) t->next->prev = t->prev;
-    else proc::detail::tasks_tail = t->prev;
-
-    t->next = 0;
-    t->prev = 0;
-    
-    if (proc::detail::total_tasks > 0) proc::detail::total_tasks--;
-}
-
 task_t* proc_find_by_pid(uint32_t pid) {
     task_t* t = 0;
     if (!proc::detail::pid_map.try_get(pid, t)) {
@@ -814,8 +792,9 @@ static task_t* alloc_task(void) {
     t->exec_start = 0;
 
     proc::detail::pid_map_insert(t->pid, t);
-    
-    list_append(t);
+
+    proc::detail::all_tasks.push_back(*t);
+    proc::detail::total_tasks++;
 
     return t;
 }
@@ -853,7 +832,10 @@ void proc_free_resources(task_t* t) {
     memset(t->name, 0, sizeof(t->name));
     
     kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-    list_remove(t);
+    dlist_del(&t->all_tasks_node);
+    if (proc::detail::total_tasks > 0) {
+        proc::detail::total_tasks--;
+    }
     kfree(t);
 }
 
@@ -875,12 +857,17 @@ void proc_kill(task_t* t) {
     {
         kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
         uint32_t pid_to_clean = (uint32_t)t->pid;
-        task_t* child = proc::detail::tasks_head;
-        while (child) {
-            if (child->parent_pid == pid_to_clean && child->state != TASK_UNUSED) {
-                child->parent_pid = 0;
+
+        for (task_t& child : proc::detail::all_tasks) {
+            if (child.parent_pid != pid_to_clean) {
+                continue;
             }
-            child = child->next;
+
+            if (child.state == TASK_UNUSED) {
+                continue;
+            }
+
+            child.parent_pid = 0;
         }
     }
 
@@ -946,18 +933,22 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     return t;
 }
 
-task_t* proc_get_list_head() { return proc::detail::tasks_head; }
+task_t* proc_get_list_head() {
+    if (proc::detail::all_tasks.empty()) {
+        return 0;
+    }
+    return &proc::detail::all_tasks.front();
+}
 uint32_t proc_task_count(void) { return proc::detail::total_tasks; }
 
 task_t* proc_task_at(uint32_t idx) {
     kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-    task_t* curr = proc::detail::tasks_head;
+
     uint32_t i = 0;
-    while (curr) {
+    for (task_t& curr : proc::detail::all_tasks) {
         if (i == idx) {
-             return curr;
+            return &curr;
         }
-        curr = curr->next;
         i++;
     }
     return 0;
@@ -1536,7 +1527,10 @@ task_t* proc_create_idle(int cpu_index) {
     t->esp = sp;
 
     kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-    list_remove(t);
+    dlist_del(&t->all_tasks_node);
+    if (proc::detail::total_tasks > 0) {
+        proc::detail::total_tasks--;
+    }
     proc::detail::pid_map_remove(old_pid);
 
     return t;

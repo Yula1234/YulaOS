@@ -103,8 +103,7 @@ typedef struct task {
     task_state_t state;
     char name[32];
 
-    struct task* next;
-    struct task* prev;
+    dlist_head_t all_tasks_node;
     
     struct rb_node rb_node;
 
