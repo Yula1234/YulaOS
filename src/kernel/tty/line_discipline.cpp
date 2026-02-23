@@ -6,9 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-namespace kernel::tty {
-
 extern volatile uint32_t timer_ticks;
+
+namespace kernel::tty {
 
 static bool is_backspace(uint8_t b) {
     return b == 0x08u || b == 0x7Fu;
@@ -304,6 +304,11 @@ size_t LineDiscipline::read(void* out, size_t size) {
         return has_readable_locked();
     };
 
+    const auto is_interrupted = [&]() {
+        task_t* curr = proc_current();
+        return curr && curr->pending_signals != 0;
+    };
+
     const auto available_noncanon = [&]() -> size_t {
         kernel::SpinLockSafeGuard g(lock_);
         return cooked_.count;
@@ -313,6 +318,10 @@ size_t LineDiscipline::read(void* out, size_t size) {
         for (;;) {
             if (is_readable_now()) {
                 return true;
+            }
+
+            if (is_interrupted()) {
+                return false;
             }
 
             if (timer_ticks >= deadline_tick) {
@@ -329,7 +338,11 @@ size_t LineDiscipline::read(void* out, size_t size) {
                 return;
             }
 
-            sem_.wait();
+            if (is_interrupted()) {
+                return;
+            }
+
+            proc_usleep(1000);
         }
     };
 
@@ -346,7 +359,11 @@ size_t LineDiscipline::read(void* out, size_t size) {
             }
         } else if (vmin > 0u && vtime == 0u) {
             while (available_noncanon() < vmin) {
-                sem_.wait();
+                if (is_interrupted()) {
+                    return (size_t)-2;
+                }
+
+                proc_usleep(1000);
             }
         } else {
             uint32_t timeout_ticks = (uint32_t)(((uint64_t)vtime * (uint64_t)KERNEL_TIMER_HZ) / 10ull);
@@ -358,6 +375,10 @@ size_t LineDiscipline::read(void* out, size_t size) {
             const uint32_t first_deadline = start + timeout_ticks;
 
             if (!wait_until_ticks(first_deadline)) {
+                if (is_interrupted()) {
+                    return (size_t)-2;
+                }
+
                 return 0;
             }
 
@@ -366,6 +387,10 @@ size_t LineDiscipline::read(void* out, size_t size) {
                     const uint32_t now = timer_ticks;
                     const uint32_t deadline = now + timeout_ticks;
                     if (!wait_until_ticks(deadline)) {
+                        if (is_interrupted()) {
+                            return (size_t)-2;
+                        }
+
                         break;
                     }
                 }
@@ -387,6 +412,10 @@ size_t LineDiscipline::read(void* out, size_t size) {
     }
 
     wait_forever();
+
+    if (is_interrupted()) {
+        return (size_t)-2;
+    }
 
     kernel::SpinLockSafeGuard g(lock_);
 

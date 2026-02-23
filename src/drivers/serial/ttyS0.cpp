@@ -111,27 +111,6 @@ static kernel::tty::LineDisciplineConfig config_from_termios(const yos_termios_t
     return cfg;
 }
 
-static kernel::tty::LineDisciplineConfig default_config(void) {
-    kernel::tty::LineDisciplineConfig cfg;
-    cfg.canonical = true;
-    cfg.echo = true;
-    cfg.igncr = false;
-    cfg.icrnl = true;
-    cfg.inlcr = false;
-
-    cfg.opost = true;
-    cfg.onlcr = true;
-
-    cfg.vmin = 1u;
-    cfg.vtime = 0u;
-
-    cfg.isig = true;
-    cfg.vintr = 0x03u;
-    cfg.vquit = 0x1Cu;
-    cfg.vsusp = 0x1Au;
-    return cfg;
-}
-
 static void tty_signal_emit(int sig, void*) {
     task_t* curr = proc_current();
     if (!curr) {

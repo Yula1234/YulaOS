@@ -2355,8 +2355,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
 
     int result = 0;
     for (;;) {
-        if (curr->pending_signals & (1u << 2)) {
-            curr->pending_signals &= ~(1u << 2);
+        if (curr->pending_signals != 0) {
             result = -2;
             break;
         }
