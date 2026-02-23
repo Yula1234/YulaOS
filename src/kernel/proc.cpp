@@ -422,7 +422,7 @@ task_t* proc_current() {
 void proc_fd_table_init(task_t* t) {
     if (!t) return;
 
-    fd_table_t* ft = (fd_table_t*)kmalloc(sizeof(*ft));
+    fd_table_t* ft = static_cast<fd_table_t*>(kmalloc(sizeof(*ft)));
     if (!ft) {
         t->fd_table = 0;
         return;
@@ -433,7 +433,7 @@ void proc_fd_table_init(task_t* t) {
     spinlock_init(&ft->lock);
     
     ft->max_fds = 32;
-    ft->fds = (file_desc_t**)kmalloc(sizeof(file_desc_t*) * ft->max_fds);
+    ft->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft->max_fds));
     if (!ft->fds) {
         kfree(ft);
         t->fd_table = 0;
@@ -516,7 +516,7 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
         new_cap *= 2;
     }
     
-    file_desc_t** new_fds = (file_desc_t**)kmalloc(sizeof(file_desc_t*) * new_cap);
+    file_desc_t** new_fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * new_cap));
     if (!new_fds) return -1;
     
     memset(new_fds, 0, sizeof(file_desc_t*) * new_cap);
@@ -546,7 +546,7 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
         return -1;
     }
 
-    file_desc_t* d = (file_desc_t*)kmalloc(sizeof(*d));
+    file_desc_t* d = static_cast<file_desc_t*>(kmalloc(sizeof(*d)));
     if (!d) {
         return -1;
     }
@@ -655,7 +655,7 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
 static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     if (!src) return 0;
 
-    fd_table_t* ft_raw = (fd_table_t*)kmalloc(sizeof(*ft_raw));
+    fd_table_t* ft_raw = static_cast<fd_table_t*>(kmalloc(sizeof(*ft_raw)));
     if (!ft_raw) return 0;
 
     proc::detail::FdTableRef ft = proc::detail::FdTableRef::adopt(ft_raw);
@@ -667,7 +667,7 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     kernel::SpinLockNativeSafeGuard guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
-    ft.get()->fds = (file_desc_t**)kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds);
+    ft.get()->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds));
     if (!ft.get()->fds) {
         return 0;
     }
@@ -997,10 +997,13 @@ static int proc_alloc_kstack(task_t* t) {
     if (!t) return 0;
 
     t->kstack_size = KSTACK_SIZE;
-    t->kstack = kmalloc_a(t->kstack_size);
-    if (!t->kstack) return 0;
+    kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> kstack_guard(
+        static_cast<uint8_t*>(kmalloc_a(t->kstack_size))
+    );
+    if (!kstack_guard) return 0;
 
-    memset(t->kstack, 0, t->kstack_size);
+    memset(kstack_guard.get(), 0, t->kstack_size);
+    t->kstack = kstack_guard.release();
     return 1;
 }
 
@@ -1111,7 +1114,7 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
 }
 
 static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, uint32_t size, uint32_t file_size, uint32_t offset) {
-    mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
+    mmap_area_t* area = static_cast<mmap_area_t*>(kmalloc(sizeof(mmap_area_t)));
     if (!area) return;
 
     uint32_t aligned_vaddr = vaddr & ~proc::detail::page_mask;
@@ -1176,7 +1179,7 @@ static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom
         return 1;
     }
 
-    mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(*area));
+    mmap_area_t* area = static_cast<mmap_area_t*>(kmalloc(sizeof(*area)));
     if (!area) return 0;
 
     memset(area, 0, sizeof(*area));
@@ -1229,7 +1232,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     }
 
     size_t phdr_bytes = (size_t)header.e_phnum * sizeof(Elf32_Phdr);
-    phdrs.reset((Elf32_Phdr*)kmalloc(phdr_bytes));
+    phdrs.reset(static_cast<Elf32_Phdr*>(kmalloc(phdr_bytes)));
     if (!phdrs) {
         return 0;
     }
@@ -1267,7 +1270,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         return 0;
     }
 
-    char** k_argv = (char**)kmalloc((argc + 1) * sizeof(char*));
+    char** k_argv = static_cast<char**>(kmalloc((argc + 1) * sizeof(char*)));
     if (!k_argv) {
         return 0;
     }
@@ -1295,7 +1298,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     
     for (int i = 0; i < argc; i++) {
         int len = strlen(argv[i]) + 1;
-        k_argv[i] = (char*)kmalloc(len);
+        k_argv[i] = static_cast<char*>(kmalloc(len));
         memcpy(k_argv[i], argv[i], len);
     }
     k_argv[argc] = 0;
@@ -1366,11 +1369,14 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     }
 
     t->kstack_size = KSTACK_SIZE;
-    t->kstack = kmalloc_a(t->kstack_size);
-    if (!t->kstack) {
+    kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> kstack_guard(
+        static_cast<uint8_t*>(kmalloc_a(t->kstack_size))
+    );
+    if (!kstack_guard) {
         return 0;
     }
-    memset(t->kstack, 0, t->kstack_size);
+    memset(kstack_guard.get(), 0, t->kstack_size);
+    t->kstack = kstack_guard.release();
 
     for (int i = 0; i < header.e_phnum; i++) {
         if (phdrs.get()[i].p_type == 1) {
