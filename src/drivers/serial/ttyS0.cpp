@@ -24,6 +24,14 @@ static yos_termios_t g_termios;
 
 static poll_waitq_t g_poll_waitq;
 
+struct TtyProcState {
+    kernel::SpinLock lock;
+    uint32_t session_sid = 0;
+    uint32_t fg_pgid = 0;
+};
+
+static TtyProcState g_proc;
+
 static kernel::term::Term* active_term(void) {
     tty_handle_t* active = kernel::tty::TtyService::instance().get_active_for_render();
     return tty_term_ptr(active);
@@ -67,7 +75,13 @@ static void drain_rx(void) {
 static kernel::tty::LineDisciplineConfig config_from_termios(const yos_termios_t& t) {
     kernel::tty::LineDisciplineConfig cfg;
 
-    (void)t;
+    cfg.canonical = (t.c_lflag & YOS_LFLAG_ICANON) != 0;
+    cfg.echo = (t.c_lflag & YOS_LFLAG_ECHO) != 0;
+    cfg.isig = (t.c_lflag & YOS_LFLAG_ISIG) != 0;
+
+    cfg.vintr = t.c_cc[YOS_VINTR];
+    cfg.vquit = t.c_cc[YOS_VQUIT];
+    cfg.vsusp = t.c_cc[YOS_VSUSP];
 
     return cfg;
 }
@@ -77,7 +91,32 @@ static kernel::tty::LineDisciplineConfig default_config(void) {
     cfg.canonical = false;
     cfg.echo = true;
     cfg.onlcr = true;
+    cfg.isig = true;
+    cfg.vintr = 0x03u;
+    cfg.vquit = 0x1Cu;
+    cfg.vsusp = 0x1Au;
     return cfg;
+}
+
+static void tty_signal_emit(int sig, void*) {
+    task_t* curr = proc_current();
+    if (!curr) {
+        return;
+    }
+
+    uint32_t pgid = 0;
+    {
+        kernel::SpinLockSafeGuard g(g_proc.lock);
+        pgid = g_proc.fg_pgid;
+    }
+
+    if (pgid == 0) {
+        pgid = curr->pgid;
+    }
+
+    if (pgid != 0) {
+        (void)proc_signal_pgrp(pgid, (uint32_t)sig);
+    }
 }
 
 int ttyS0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
@@ -126,6 +165,8 @@ int ttyS0_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void
 int ttyS0_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
     (void)node;
 
+    task_t* curr = proc_current();
+
     if (req == YOS_TCGETS) {
         if (!arg) {
             return -1;
@@ -145,6 +186,70 @@ int ttyS0_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
 
         kernel::tty::LineDisciplineConfig cfg = config_from_termios(g_termios);
         g_ld.set_config(cfg);
+
+        return 0;
+    }
+
+    if (req == YOS_TIOCSCTTY) {
+        if (!curr) {
+            return -1;
+        }
+
+        if (curr->pid != curr->sid) {
+            return -1;
+        }
+
+        if (curr->controlling_tty) {
+            return -1;
+        }
+
+        vfs_node_retain(node);
+        curr->controlling_tty = node;
+
+        {
+            kernel::SpinLockSafeGuard g(g_proc.lock);
+            g_proc.session_sid = curr->sid;
+            if (g_proc.fg_pgid == 0) {
+                g_proc.fg_pgid = curr->pgid;
+            }
+        }
+
+        return 0;
+    }
+
+    if (req == YOS_TCGETPGRP) {
+        if (!arg) {
+            return -1;
+        }
+
+        uint32_t pgid = 0;
+        {
+            kernel::SpinLockSafeGuard g(g_proc.lock);
+            pgid = g_proc.fg_pgid;
+        }
+
+        *(uint32_t*)arg = pgid;
+        return 0;
+    }
+
+    if (req == YOS_TCSETPGRP) {
+        if (!arg || !curr) {
+            return -1;
+        }
+
+        uint32_t pgid = *(uint32_t*)arg;
+        if (pgid == 0) {
+            return -1;
+        }
+
+        {
+            kernel::SpinLockSafeGuard g(g_proc.lock);
+            if (g_proc.session_sid != 0 && g_proc.session_sid != curr->sid) {
+                return -1;
+            }
+
+            g_proc.fg_pgid = pgid;
+        }
 
         return 0;
     }
@@ -176,7 +281,14 @@ vfs_node_t ttyS0_node = {
 
 extern "C" void ttyS0_init(void) {
     memset(&g_termios, 0, sizeof(g_termios));
+
+    g_termios.c_lflag = YOS_LFLAG_ECHO | YOS_LFLAG_ISIG;
+    g_termios.c_cc[YOS_VINTR] = 0x03u;
+    g_termios.c_cc[YOS_VQUIT] = 0x1Cu;
+    g_termios.c_cc[YOS_VSUSP] = 0x1Au;
+
     g_ld.set_echo_emitter(echo_emit, 0);
+    g_ld.set_signal_emitter(tty_signal_emit, 0);
     g_ld.set_config(default_config());
 
     poll_waitq_init(&g_poll_waitq);

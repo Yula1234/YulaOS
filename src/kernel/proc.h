@@ -31,6 +31,8 @@ typedef enum {
 
 #define SIGINT  2
 #define SIGILL  4
+#define SIGQUIT 3
+#define SIGTSTP 20
 #define SIGSEGV 11
 #define SIGTERM 15
 
@@ -131,6 +133,13 @@ typedef struct task {
 
     void* terminal;
 
+    uint32_t sid;
+    uint32_t pgid;
+
+    vfs_node_t* controlling_tty;
+
+    dlist_head_t pgrp_node;
+
     uint32_t pending_signals;
     sig_handler_t handlers[NSIG];
     registers_t signal_context; 
@@ -193,6 +202,12 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv);
 
 void proc_kill(task_t* t);
 void proc_wait(uint32_t pid);
+int proc_setsid(task_t* t);
+int proc_setpgid(task_t* t, uint32_t pgid);
+uint32_t proc_getpgrp(task_t* t);
+
+int proc_signal_pgrp(uint32_t pgid, uint32_t sig);
+
 int proc_waitpid(uint32_t pid, int* out_status);
 void reaper_task_func(void* arg);
 

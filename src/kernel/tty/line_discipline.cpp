@@ -20,7 +20,9 @@ LineDiscipline::LineDiscipline()
     , line_{}
     , line_len_(0)
     , echo_emit_(nullptr)
-    , echo_emit_ctx_(nullptr) {
+    , echo_emit_ctx_(nullptr)
+    , signal_emit_(nullptr)
+    , signal_emit_ctx_(nullptr) {
 }
 
 void LineDiscipline::set_config(LineDisciplineConfig cfg) {
@@ -41,6 +43,16 @@ void LineDiscipline::set_echo_emitter(
 
     echo_emit_ = emit;
     echo_emit_ctx_ = ctx;
+}
+
+void LineDiscipline::set_signal_emitter(
+    signal_fn emit,
+    void* ctx
+) {
+    kernel::SpinLockSafeGuard g(lock_);
+
+    signal_emit_ = emit;
+    signal_emit_ctx_ = ctx;
 }
 
 bool LineDiscipline::Ring::push(uint8_t b) {
@@ -140,7 +152,66 @@ void LineDiscipline::echo_erase_locked() {
     (void)echo_emit_(seq, sizeof(seq), echo_emit_ctx_);
 }
 
+void LineDiscipline::echo_signal_locked(int sig) {
+    if (!cfg_.echo) {
+        return;
+    }
+
+    if (!echo_emit_) {
+        return;
+    }
+
+    uint8_t seq[4];
+    size_t n = 0;
+
+    seq[n++] = '^';
+
+    if (sig == 2) {
+        seq[n++] = 'C';
+    } else if (sig == 3) {
+        seq[n++] = '\\';
+    } else if (sig == 20) {
+        seq[n++] = 'Z';
+    } else {
+        seq[n++] = '?';
+    }
+
+    seq[n++] = '\n';
+    (void)echo_emit_(seq, n, echo_emit_ctx_);
+}
+
+bool LineDiscipline::try_isig_locked(uint8_t b) {
+    if (!cfg_.isig) {
+        return false;
+    }
+
+    if (!signal_emit_) {
+        return false;
+    }
+
+    int sig = 0;
+    if (b == cfg_.vintr) {
+        sig = 2;
+    } else if (b == cfg_.vquit) {
+        sig = 3;
+    } else if (b == cfg_.vsusp) {
+        sig = 20;
+    }
+
+    if (sig == 0) {
+        return false;
+    }
+
+    echo_signal_locked(sig);
+    signal_emit_(sig, signal_emit_ctx_);
+    return true;
+}
+
 void LineDiscipline::receive_byte_locked(uint8_t b) {
+    if (try_isig_locked(b)) {
+        return;
+    }
+
     if (!cfg_.canonical) {
         cooked_push_locked(b);
         echo_byte_locked(b);

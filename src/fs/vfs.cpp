@@ -46,6 +46,35 @@ private:
     file_desc_t* desc_;
 };
 
+static vfs_node_t* vfs_node_clone_existing(const vfs_node_t* src) noexcept {
+    if (!src) {
+        return nullptr;
+    }
+
+    vfs_node_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+
+    memcpy(&snapshot, src, sizeof(snapshot));
+
+    if (snapshot.private_retain && snapshot.private_data) {
+        snapshot.private_retain(snapshot.private_data);
+    }
+
+    auto* node = static_cast<vfs_node_t*>(kmalloc(sizeof(vfs_node_t)));
+    if (!node) {
+        if (snapshot.private_release && snapshot.private_data) {
+            snapshot.private_release(snapshot.private_data);
+        }
+
+        return nullptr;
+    }
+
+    memcpy(node, &snapshot, sizeof(*node));
+    node->refs = 1;
+    node->flags |= VFS_FLAG_DEVFS_ALLOC;
+    return node;
+}
+
 class DevFSRegistry {
 public:
     void register_node(vfs_node_t* node) noexcept;
@@ -338,7 +367,12 @@ int vfs_open(const char* path, int flags) {
     }
 
     if (strncmp(target_path, "dev/", 4) == 0) {
-        node = devfs_clone(target_path + 4);
+        const char* dev_name = target_path + 4;
+        if (strcmp(dev_name, "tty") == 0) {
+            node = vfs_node_clone_existing(curr->controlling_tty);
+        } else {
+            node = devfs_clone(dev_name);
+        }
     } else {
         int inode = yulafs_lookup(path);
 

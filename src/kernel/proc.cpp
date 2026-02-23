@@ -87,6 +87,128 @@ static uint32_t next_pid = 1;
 
 static kernel::SpinLock proc_lock;
 
+struct ProcGroup {
+    uint32_t pgid = 0;
+    dlist_head_t members{};
+};
+
+static HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS> pgroups;
+
+static ProcGroup* pgroup_get_or_create(uint32_t pgid) {
+    if (pgid == 0) {
+        return nullptr;
+    }
+
+    {
+        auto locked = pgroups.find_ptr(pgid);
+        if (locked) {
+            auto* v = locked.value_ptr();
+            if (v && *v) {
+                return *v;
+            }
+        }
+    }
+
+    auto* group = static_cast<ProcGroup*>(kmalloc(sizeof(ProcGroup)));
+    if (!group) {
+        return nullptr;
+    }
+
+    memset(group, 0, sizeof(*group));
+    group->pgid = pgid;
+    dlist_init(&group->members);
+
+    pgroups.insert(pgid, group);
+    return group;
+}
+
+static ProcGroup* pgroup_find(uint32_t pgid) {
+    auto locked = pgroups.find_ptr(pgid);
+    if (!locked) {
+        return nullptr;
+    }
+
+    auto* v = locked.value_ptr();
+    return (v && *v) ? *v : nullptr;
+}
+
+static void pgroup_remove_if_empty_locked(ProcGroup* g) {
+    if (!g) {
+        return;
+    }
+
+    if (!dlist_empty(&g->members)) {
+        return;
+    }
+
+    (void)pgroups.remove(g->pgid);
+    kfree(g);
+}
+
+static void task_pgroup_detach_locked(task_t* t) {
+    if (!t) {
+        return;
+    }
+
+    if (!t->pgrp_node.next || !t->pgrp_node.prev) {
+        return;
+    }
+
+    if (t->pgid != 0) {
+        ProcGroup* g = pgroup_find(t->pgid);
+        dlist_del(&t->pgrp_node);
+        t->pgrp_node.next = nullptr;
+        t->pgrp_node.prev = nullptr;
+
+        pgroup_remove_if_empty_locked(g);
+        return;
+    }
+
+    dlist_del(&t->pgrp_node);
+    t->pgrp_node.next = nullptr;
+    t->pgrp_node.prev = nullptr;
+}
+
+static int task_set_pgid_locked(task_t* t, uint32_t pgid) {
+    if (!t || pgid == 0) {
+        return -1;
+    }
+
+    if (t->pgid == pgid) {
+        return 0;
+    }
+
+    task_pgroup_detach_locked(t);
+
+    ProcGroup* g = pgroup_get_or_create(pgid);
+    if (!g) {
+        return -1;
+    }
+
+    dlist_add_tail(&t->pgrp_node, &g->members);
+    t->pgid = pgid;
+    return 0;
+}
+
+static void task_inherit_process_context_locked(task_t* child, const task_t* parent) {
+    if (!child || !parent) {
+        return;
+    }
+
+    child->sid = parent->sid;
+    (void)task_set_pgid_locked(child, parent->pgid);
+
+    if (child->controlling_tty) {
+        vfs_node_release(child->controlling_tty);
+        child->controlling_tty = nullptr;
+    }
+
+    if (parent->controlling_tty) {
+        vfs_node_retain(parent->controlling_tty);
+        child->controlling_tty = parent->controlling_tty;
+    }
+}
+
 struct SleepKey {
     uint32_t wake_tick = 0;
     uintptr_t tie = 0;
@@ -99,7 +221,73 @@ struct SleepKeyOfValue {
             reinterpret_cast<uintptr_t>(&t),
         };
     }
+
 };
+
+int proc_setsid(task_t* t) {
+    if (!t) {
+        return -1;
+    }
+
+    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+
+    if (t->pid == t->pgid) {
+        return -1;
+    }
+
+    t->sid = t->pid;
+    (void)task_set_pgid_locked(t, t->pid);
+
+    if (t->controlling_tty) {
+        vfs_node_release(t->controlling_tty);
+        t->controlling_tty = nullptr;
+    }
+
+    return (int)t->sid;
+}
+
+int proc_setpgid(task_t* t, uint32_t pgid) {
+    if (!t || pgid == 0) {
+        return -1;
+    }
+
+    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    return task_set_pgid_locked(t, pgid);
+}
+
+uint32_t proc_getpgrp(task_t* t) {
+    if (!t) {
+        return 0;
+    }
+
+    return t->pgid;
+}
+
+int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
+    if (pgid == 0 || sig >= 32u) {
+        return -1;
+    }
+
+    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    ProcGroup* g = pgroup_find(pgid);
+    if (!g) {
+        return -1;
+    }
+
+    int signaled = 0;
+    for (dlist_head_t* it = g->members.next; it && it != &g->members; it = it->next) {
+        task_t* m = container_of(it, task_t, pgrp_node);
+        if (!m || m->state == TASK_UNUSED || m->state == TASK_ZOMBIE) {
+            continue;
+        }
+
+        __sync_fetch_and_or(&m->pending_signals, 1u << sig);
+        proc_wake(m);
+        signaled++;
+    }
+
+    return signaled;
+}
 
 struct SleepKeyLess {
     bool operator()(const SleepKey& a, const SleepKey& b) const noexcept {
@@ -319,6 +507,22 @@ static void pid_map_remove(uint32_t pid) {
 }
 
 }
+}
+
+extern "C" int proc_setsid(task_t* t) {
+    return proc::detail::proc_setsid(t);
+}
+
+extern "C" int proc_setpgid(task_t* t, uint32_t pgid) {
+    return proc::detail::proc_setpgid(t, pgid);
+}
+
+extern "C" uint32_t proc_getpgrp(task_t* t) {
+    return proc::detail::proc_getpgrp(t);
+}
+
+extern "C" int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
+    return proc::detail::proc_signal_pgrp(pgid, sig);
 }
 
 extern "C" void irq_return(void);
@@ -801,6 +1005,8 @@ static task_t* alloc_task(void) {
     spinlock_init(&t->poll_lock);
     dlist_init(&t->poll_waiters);
 
+    dlist_init(&t->pgrp_node);
+
     if (!proc::detail::initial_fpu_state) {
         return 0;
     }
@@ -830,6 +1036,9 @@ static task_t* alloc_task(void) {
 
     proc::detail::pid_map_insert(t->pid, t);
 
+    t->sid = t->pid;
+    (void)proc::detail::task_set_pgid_locked(t, t->pid);
+
     proc::detail::all_tasks.push_back(*t);
     proc::detail::total_tasks++;
 
@@ -845,6 +1054,17 @@ void proc_free_resources(task_t* t) {
     if (t->fd_table) {
         proc_fd_table_release(t->fd_table);
         t->fd_table = 0;
+    }
+
+    {
+        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+
+        proc::detail::task_pgroup_detach_locked(t);
+    }
+
+    if (t->controlling_tty) {
+        vfs_node_release(t->controlling_tty);
+        t->controlling_tty = nullptr;
     }
 
     if (t->mem) {
@@ -1088,6 +1308,11 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     t->priority = parent->priority;
     t->stack_bottom = stack_bottom;
     t->stack_top = stack_top;
+
+    {
+        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+        proc::detail::task_inherit_process_context_locked(t, parent);
+    }
 
     t->mem = parent->mem;
     proc_mem_retain(t->mem);
@@ -1377,6 +1602,11 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         t->parent_pid = curr->pid;
         t->terminal = curr->terminal;
         t->term_mode = curr->term_mode;
+
+        {
+            kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+            proc::detail::task_inherit_process_context_locked(t, curr);
+        }
     } else {
         t->cwd_inode = 1;
         t->parent_pid = 0;

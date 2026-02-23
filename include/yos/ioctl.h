@@ -48,6 +48,18 @@ typedef struct {
     yos_cc_t     c_cc[32];
 } yos_termios_t;
 
+enum {
+    YOS_VINTR = 0,
+    YOS_VQUIT = 1,
+    YOS_VSUSP = 2,
+};
+
+enum {
+    YOS_LFLAG_ISIG = 1u << 0,
+    YOS_LFLAG_ICANON = 1u << 1,
+    YOS_LFLAG_ECHO = 1u << 2,
+};
+
 typedef struct {
     uint16_t ws_row;
     uint16_t ws_col;
@@ -65,6 +77,10 @@ typedef struct {
 #define YOS_TIOCSWINSZ _YOS_IOW('T', 0x14, yos_winsize_t)
 #define YOS_TIOCGPTN   _YOS_IOR('T', 0x15, uint32_t)
 #define YOS_TTY_SCROLL _YOS_IOW('T', 0x16, yos_tty_scroll_t)
+
+#define YOS_TIOCSCTTY  _YOS_IO('T', 0x17)
+#define YOS_TCGETPGRP  _YOS_IOR('T', 0x18, uint32_t)
+#define YOS_TCSETPGRP  _YOS_IOW('T', 0x1B, uint32_t)
 
 typedef struct {
     uint8_t mac[6];

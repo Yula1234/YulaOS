@@ -4,6 +4,7 @@
 #include <hal/lock.h>
 #include <kernel/sched.h>
 #include <kernel/poll_waitq.h>
+#include <kernel/proc.h>
 #include <lib/string.h>
 #include <mm/heap.h>
 #include <yos/ioctl.h>
@@ -41,6 +42,9 @@ typedef struct {
 
     yos_termios_t termios;
     yos_winsize_t winsz;
+
+    uint32_t session_sid;
+    uint32_t fg_pgid;
 } pty_pair_t;
 
 static spinlock_t pty_id_lock;
@@ -466,11 +470,15 @@ static int pty_slave_write(vfs_node_t* node, uint32_t offset, uint32_t size, con
 }
 
 static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
-    if (!node || !arg) return -1;
+    if (!node) return -1;
     if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) return -1;
 
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
+
+    if (!arg && req != YOS_TIOCSCTTY) {
+        return -1;
+    }
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     switch (req) {
@@ -489,6 +497,65 @@ static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
         case YOS_TIOCSWINSZ:
             memcpy(&p->winsz, arg, sizeof(p->winsz));
             break;
+
+        case YOS_TIOCSCTTY: {
+            if ((node->flags & VFS_FLAG_PTY_SLAVE) == 0) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            task_t* curr = proc_current();
+            if (!curr) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            if (curr->pid != curr->sid) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            if (curr->controlling_tty) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            vfs_node_retain(node);
+            curr->controlling_tty = node;
+
+            p->session_sid = curr->sid;
+            if (p->fg_pgid == 0) {
+                p->fg_pgid = curr->pgid;
+            }
+
+            break;
+        }
+
+        case YOS_TCGETPGRP:
+            *(uint32_t*)arg = p->fg_pgid;
+            break;
+
+        case YOS_TCSETPGRP: {
+            task_t* curr = proc_current();
+            if (!curr) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            uint32_t pgid = *(uint32_t*)arg;
+            if (pgid == 0) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            if (p->session_sid != 0 && p->session_sid != curr->sid) {
+                spinlock_release_safe(&p->lock, flags);
+                return -1;
+            }
+
+            p->fg_pgid = pgid;
+            break;
+        }
         default:
             spinlock_release_safe(&p->lock, flags);
             return -1;

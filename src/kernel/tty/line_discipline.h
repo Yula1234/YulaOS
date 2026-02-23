@@ -12,11 +12,17 @@ struct LineDisciplineConfig {
     bool canonical = true;
     bool echo = true;
     bool onlcr = true;
+
+    bool isig = false;
+    uint8_t vintr = 0x03u;
+    uint8_t vquit = 0x1Cu;
+    uint8_t vsusp = 0x1Au;
 };
 
 class LineDiscipline {
 public:
     using emit_fn = size_t (*)(const uint8_t* data, size_t size, void* ctx);
+    using signal_fn = void (*)(int sig, void* ctx);
 
     LineDiscipline();
 
@@ -31,6 +37,11 @@ public:
 
     void set_echo_emitter(
         emit_fn emit,
+        void* ctx
+    );
+
+    void set_signal_emitter(
+        signal_fn emit,
         void* ctx
     );
 
@@ -69,6 +80,9 @@ private:
     void echo_byte_locked(uint8_t b);
     void echo_erase_locked();
 
+    void echo_signal_locked(int sig);
+    bool try_isig_locked(uint8_t b);
+
     static bool pred_always(uint8_t, void*);
     static bool pred_until_newline(uint8_t b, void*);
 
@@ -86,6 +100,9 @@ private:
 
     emit_fn echo_emit_ = nullptr;
     void* echo_emit_ctx_ = nullptr;
+
+    signal_fn signal_emit_ = nullptr;
+    void* signal_emit_ctx_ = nullptr;
 };
 
 }

@@ -51,6 +51,31 @@ static getty_status_t run_getty_once(const char* tty_path, const char* prog_name
         return GETTY_FATAL;
     }
 
+    if (setsid() < 0) {
+        (void)close(fd);
+        write_str_fd(2, "getty: setsid failed\n");
+        return GETTY_TRANSIENT;
+    }
+
+    uint32_t pgid = (uint32_t)getpid();
+    if (setpgid(pgid) < 0) {
+        (void)close(fd);
+        write_str_fd(2, "getty: setpgid failed\n");
+        return GETTY_TRANSIENT;
+    }
+
+    if (ioctl(fd, YOS_TIOCSCTTY, 0) < 0) {
+        (void)close(fd);
+        write_str_fd(2, "getty: TIOCSCTTY failed\n");
+        return GETTY_TRANSIENT;
+    }
+
+    if (ioctl(fd, YOS_TCSETPGRP, &pgid) < 0) {
+        (void)close(fd);
+        write_str_fd(2, "getty: TCSETPGRP failed\n");
+        return GETTY_TRANSIENT;
+    }
+
     if (dup2_stdio_from(fd) != 0) {
         (void)close(fd);
         write_str_fd(2, "getty: dup2 failed\n");

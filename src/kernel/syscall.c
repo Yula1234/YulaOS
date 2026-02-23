@@ -2073,6 +2073,19 @@ static void syscall_getcwd(registers_t* regs, task_t* curr) {
     regs->eax = (int)len;
 }
 
+static void syscall_setsid(registers_t* regs, task_t* curr) {
+    regs->eax = (uint32_t)proc_setsid(curr);
+}
+
+static void syscall_setpgid(registers_t* regs, task_t* curr) {
+    uint32_t pgid = regs->ebx;
+    regs->eax = (uint32_t)proc_setpgid(curr, pgid);
+}
+
+static void syscall_getpgrp(registers_t* regs, task_t* curr) {
+    regs->eax = (uint32_t)proc_getpgrp(curr);
+}
+
 static void syscall_fb_present(registers_t* regs, task_t* curr) {
     const fb_present_req_t* u_req = (const fb_present_req_t*)regs->ebx;
 
@@ -2585,6 +2598,9 @@ static const syscall_fn_t syscall_table[] = {
     [59] = syscall_getcwd,
     [60] = syscall_uptime_ms,
     [61] = syscall_proc_list,
+    [62] = syscall_setsid,
+    [63] = syscall_setpgid,
+    [64] = syscall_getpgrp,
 };
 
 void syscall_handler(registers_t* regs) {

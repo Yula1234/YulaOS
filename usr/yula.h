@@ -201,6 +201,18 @@ static inline int proc_list(yos_proc_info_t* buf, uint32_t cap) {
     return syscall(61, (int)(uintptr_t)buf, (int)cap, 0);
 }
 
+static inline int setsid(void) {
+    return syscall(62, 0, 0, 0);
+}
+
+static inline int setpgid(uint32_t pgid) {
+    return syscall(63, (int)pgid, 0, 0);
+}
+
+static inline uint32_t getpgrp(void) {
+    return (uint32_t)syscall(64, 0, 0, 0);
+}
+
 #define MAP_SHARED  1
 #define MAP_PRIVATE 2
 
