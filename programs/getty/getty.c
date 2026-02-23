@@ -70,9 +70,13 @@ static getty_status_t run_getty_once(const char* tty_path, const char* prog_name
     }
 
     if (setsid() < 0) {
-        (void)close(fd);
-        write_str_fd(2, "getty: setsid failed\n");
-        return GETTY_TRANSIENT;
+        uint32_t pid = (uint32_t)getpid();
+        (void)setpgid(pid + 1u);
+        if (setsid() < 0) {
+            (void)close(fd);
+            write_str_fd(2, "getty: setsid failed\n");
+            return GETTY_TRANSIENT;
+        }
     }
 
     uint32_t pgid = (uint32_t)getpid();

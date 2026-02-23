@@ -24,6 +24,21 @@ static int write_str(int fd, const char* s) {
     return write_all(fd, s, (uint32_t)strlen(s));
 }
 
+static void ush_setup_editor_termios(int fd) {
+    yos_termios_t t;
+    if (ioctl(fd, YOS_TCGETS, &t) != 0) {
+        return;
+    }
+
+    t.c_lflag &= (uint32_t)~(YOS_LFLAG_ICANON | YOS_LFLAG_ECHO);
+    t.c_lflag |= YOS_LFLAG_ISIG;
+
+    t.c_cc[YOS_VMIN] = 1u;
+    t.c_cc[YOS_VTIME] = 0u;
+
+    (void)ioctl(fd, YOS_TCSETS, &t);
+}
+
 static void write_int(int fd, int v) {
     char buf[16];
     uint32_t u = (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
@@ -1303,6 +1318,8 @@ int main(int argc, char** argv) {
     }
 
     set_term_mode(1);
+
+    ush_setup_editor_termios(0);
 
     ush_history_t hist;
     hist_init(&hist);
