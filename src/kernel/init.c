@@ -16,6 +16,7 @@
 #include <kernel/sched.h>
 #include <kernel/input_focus.h>
 #include <kernel/cpu.h>
+#include <kernel/output/kprintf.h>
 
 #include <mm/heap.h>
 
@@ -126,6 +127,8 @@ static void init_task_spawn_shell_loop(task_t* self, tty_handle_t* tty) {
 
 void init_task(void* arg) {
     (void)arg;
+
+    kprintf("Booted\n");
 
     init_task_prepare_dirs();
     task_t* self = proc_current();
