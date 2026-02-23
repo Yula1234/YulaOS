@@ -42,11 +42,28 @@
 #define ET_EXEC 2
 #define EM_386 3
 #define PT_LOAD 1
-#define USER_ELF_MIN_VADDR 0x08000000u
-#define USER_ELF_MAX_VADDR 0xB0000000u
 
 namespace proc {
 namespace detail {
+
+static constexpr uint32_t irq_if_mask = 0x200u;
+
+static constexpr uint32_t user_elf_min_vaddr = 0x08000000u;
+static constexpr uint32_t user_elf_max_vaddr = 0xB0000000u;
+
+static constexpr uint32_t user_stack_addr_min = 0x08000000u;
+static constexpr uint32_t user_stack_addr_max = 0xC0000000u;
+
+static constexpr uint32_t default_mmap_top = 0x80001000u;
+
+static constexpr uint32_t max_elf_phdrs = 64u;
+
+static constexpr int max_user_stack_argc = 16;
+
+static constexpr uint32_t user_stack_size_bytes = 4u * 1024u * 1024u;
+static constexpr uint32_t user_stack_top_limit = 0xB0400000u;
+
+static constexpr uint32_t fd_table_cap_limit = 0x7FFFFFFFu;
 
 using AllTasksList = kernel::CDBLinkedList<task_t, &task_t::all_tasks_node>;
 
@@ -118,7 +135,7 @@ public:
     ScopedIrqDisable& operator=(ScopedIrqDisable&&) = delete;
 
     ~ScopedIrqDisable() {
-        if ((flags_ & 0x200u) != 0u) {
+        if ((flags_ & irq_if_mask) != 0u) {
             __asm__ volatile("sti");
         }
     }
@@ -479,7 +496,7 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
     
     uint32_t new_cap = ft->max_fds ? ft->max_fds : 32;
     while (new_cap <= required_fd) {
-        if (new_cap >= 0x7FFFFFFF) return -1; 
+        if (new_cap >= proc::detail::fd_table_cap_limit) return -1; 
         new_cap *= 2;
     }
     
@@ -661,20 +678,22 @@ task_t* proc_find_by_pid(uint32_t pid) {
 }
 
 static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
-    proc_mem_t* mem = (proc_mem_t*)kmalloc_a(sizeof(proc_mem_t));
-    if (!mem) return 0;
+    kernel::unique_ptr<proc_mem_t, proc::detail::KfreeDeleter<proc_mem_t>> mem_guard(
+        static_cast<proc_mem_t*>(kmalloc_a(sizeof(proc_mem_t)))
+    );
+    if (!mem_guard) return 0;
 
+    proc_mem_t* mem = mem_guard.get();
     memset(mem, 0, sizeof(*mem));
     mem->leader_pid = leader_pid;
     mem->refcount = 1;
-    mem->mmap_top = 0x80001000u;
+    mem->mmap_top = proc::detail::default_mmap_top;
     mem->page_dir = paging_clone_directory();
     if (!mem->page_dir) {
-        kfree(mem);
         return 0;
     }
 
-    return mem;
+    return mem_guard.detach();
 }
 
 static void proc_mem_retain(proc_mem_t* mem) {
@@ -754,11 +773,14 @@ static void proc_mem_release(proc_mem_t* mem) {
 static task_t* alloc_task(void) {
     kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
     
-    task_t* t = (task_t*)kmalloc_a(sizeof(task_t));
-    if (!t) {
+    kernel::unique_ptr<task_t, proc::detail::KfreeDeleter<task_t>> t_guard(
+        static_cast<task_t*>(kmalloc_a(sizeof(task_t)))
+    );
+    if (!t_guard) {
         return 0;
     }
-    
+
+    task_t* t = t_guard.get();
     memset(t, 0, sizeof(task_t));
     proc_fd_table_init(t);
 
@@ -766,18 +788,19 @@ static task_t* alloc_task(void) {
     dlist_init(&t->poll_waiters);
 
     if (!proc::detail::initial_fpu_state) {
-        kfree(t);
         return 0;
     }
 
     t->fpu_state_size = proc::detail::initial_fpu_state_size;
-    t->fpu_state = (uint8_t*)kmalloc_a(t->fpu_state_size);
-    if (!t->fpu_state) {
-        kfree(t);
+    kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> fpu_state_guard(
+        static_cast<uint8_t*>(kmalloc_a(t->fpu_state_size))
+    );
+    if (!fpu_state_guard) {
         return 0;
     }
 
-    memcpy(t->fpu_state, proc::detail::initial_fpu_state, t->fpu_state_size);
+    memcpy(fpu_state_guard.get(), proc::detail::initial_fpu_state, t->fpu_state_size);
+    t->fpu_state = fpu_state_guard.detach();
     
     sem_init(&t->exit_sem, 0); 
 
@@ -796,7 +819,7 @@ static task_t* alloc_task(void) {
     proc::detail::all_tasks.push_back(*t);
     proc::detail::total_tasks++;
 
-    return t;
+    return t_guard.detach();
 }
 
 void proc_free_resources(task_t* t) {
@@ -1131,7 +1154,7 @@ static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom
     uint32_t end_excl = (stack_top + 0xFFFu) & ~0xFFFu;
 
     if (end_excl <= start) return 0;
-    if (start < 0x08000000u || end_excl > 0xC0000000u) return 0;
+    if (start < proc::detail::user_stack_addr_min || end_excl > proc::detail::user_stack_addr_max) return 0;
 
     if (proc_mem_has_mmap_overlap(mem, start, end_excl)) {
         return 1;
@@ -1179,7 +1202,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     if (header.e_ehsize != sizeof(Elf32_Ehdr) || header.e_phentsize != sizeof(Elf32_Phdr)) {
         return 0;
     }
-    if (header.e_phnum == 0 || header.e_phnum > 64) {
+    if (header.e_phnum == 0 || header.e_phnum > proc::detail::max_elf_phdrs) {
         return 0;
     }
     {
@@ -1212,7 +1235,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
         uint32_t end_v = start_v + mem_sz;
         if (end_v < start_v) { return 0; }
-        if (start_v < USER_ELF_MIN_VADDR || end_v > USER_ELF_MAX_VADDR) { return 0; }
+        if (start_v < proc::detail::user_elf_min_vaddr || end_v > proc::detail::user_elf_max_vaddr) { return 0; }
 
         uint32_t diff = start_v & 0xFFFu;
         if (file_off < diff) { return 0; }
@@ -1356,8 +1379,8 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     if (t->mem->mmap_top < t->mem->prog_break) t->mem->mmap_top = t->mem->prog_break + 0x100000;
 
-    uint32_t stack_size = 4 * 1024 * 1024; 
-    uint32_t ustack_top_limit = 0xB0400000;
+    uint32_t stack_size = proc::detail::user_stack_size_bytes;
+    uint32_t ustack_top_limit = proc::detail::user_stack_top_limit;
     uint32_t ustack_bottom = ustack_top_limit - stack_size;
 
     t->stack_bottom = ustack_bottom;
@@ -1382,8 +1405,8 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
         uint32_t ustack_top = ustack_top_limit;
 
-        uint32_t arg_ptrs[16];
-        int actual_argc = (argc > 16) ? 16 : argc;
+        uint32_t arg_ptrs[proc::detail::max_user_stack_argc];
+        int actual_argc = (argc > proc::detail::max_user_stack_argc) ? proc::detail::max_user_stack_argc : argc;
 
         for (int i = actual_argc - 1; i >= 0; i--) {
             size_t len = strlen(k_argv[i]) + 1;
