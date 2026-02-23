@@ -6,7 +6,7 @@
 
 #include <kernel/poll_waitq.h>
 
-#include "vfs.h"
+#include <fs/vfs.h>
 
 struct task;
 

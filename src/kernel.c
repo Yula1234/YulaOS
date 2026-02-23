@@ -5,7 +5,7 @@
 
 #include <fs/yulafs.h>
 #include <fs/bcache.h>
-#include <fs/pty.h>
+#include <fs/pty/pty.h>
 #include <fs/vfs.h>
 
 #include <drivers/pc_speaker.h>

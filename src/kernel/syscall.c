@@ -24,7 +24,7 @@
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
 #include <fs/pipe.h>
-#include <fs/pty.h>
+#include <fs/pty/pty.h>
 
 #include <mm/pmm.h>
 #include <mm/heap.h>
@@ -2078,8 +2078,39 @@ static void syscall_setsid(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_setpgid(registers_t* regs, task_t* curr) {
-    uint32_t pgid = regs->ebx;
-    regs->eax = (uint32_t)proc_setpgid(curr, pgid);
+    uint32_t arg0 = regs->ebx;
+    uint32_t arg1 = regs->ecx;
+
+    if (arg1 == 0u) {
+        regs->eax = (uint32_t)proc_setpgid(curr, arg0);
+        return;
+    }
+
+    uint32_t pid = arg0;
+    uint32_t pgid = arg1;
+
+    if (pid == 0u || pgid == 0u) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    task_t* target = proc_find_by_pid(pid);
+    if (!target) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (target->sid != curr->sid) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (target != curr && target->parent_pid != curr->pid) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    regs->eax = (uint32_t)proc_setpgid(target, pgid);
 }
 
 static void syscall_getpgrp(registers_t* regs, task_t* curr) {

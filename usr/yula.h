@@ -209,6 +209,10 @@ static inline int setpgid(uint32_t pgid) {
     return syscall(63, (int)pgid, 0, 0);
 }
 
+static inline int setpgid_pid(uint32_t pid, uint32_t pgid) {
+    return syscall(63, (int)pid, (int)pgid, 0);
+}
+
 static inline uint32_t getpgrp(void) {
     return (uint32_t)syscall(64, 0, 0, 0);
 }

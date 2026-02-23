@@ -1235,6 +1235,13 @@ static int term_run(void) {
         (void)ioctl(slave_fd, YOS_TIOCSWINSZ, &ws);
     }
 
+    if (setsid() >= 0) {
+        uint32_t pgid = (uint32_t)getpid();
+        (void)setpgid(pgid);
+        (void)ioctl(slave_fd, YOS_TIOCSCTTY, 0);
+        (void)ioctl(slave_fd, YOS_TCSETPGRP, &pgid);
+    }
+
     if (dup2(slave_fd, 0) < 0 || dup2(slave_fd, 1) < 0 || dup2(slave_fd, 2) < 0) {
         close(slave_fd);
         rc = 1;
@@ -1246,6 +1253,12 @@ static int term_run(void) {
         char* sh_argv[1];
         sh_argv[0] = (char*)"ush";
         child_pid = spawn_process_resolved("ush", 1, sh_argv);
+    }
+
+    if (child_pid > 0) {
+        uint32_t child_pgid = (uint32_t)child_pid;
+        (void)setpgid_pid(child_pgid, child_pgid);
+        (void)ioctl(0, YOS_TCSETPGRP, &child_pgid);
     }
 
     int running = 1;

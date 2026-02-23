@@ -502,17 +502,24 @@ static void ush_restore_stdio(int save0, int save1, int save2) {
     (void)dup2(save2, 2);
 }
 
+static int ush_save_stdio(int save0, int save1, int save2) {
+    if (dup2(0, save0) < 0) {
+        return -1;
+    }
+    if (dup2(1, save1) < 0) {
+        return -1;
+    }
+    if (dup2(2, save2) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
 static void ush_close_fd(int* fd) {
     if (!fd) return;
     if (*fd >= 0) (void)close(*fd);
     *fd = -1;
-}
-
-static int ush_save_stdio(int save0, int save1, int save2) {
-    if (dup2(0, save0) < 0) return -1;
-    if (dup2(1, save1) < 0) { (void)close(save0); return -1; }
-    if (dup2(2, save2) < 0) { (void)close(save0); (void)close(save1); return -1; }
-    return 0;
 }
 
 static int ush_apply_single_redirs(const ush_cmd_t* c, int save0, int save1, int save2, int* io_in_fd, int* io_out_fd) {
@@ -546,6 +553,9 @@ static int ush_apply_single_redirs(const ush_cmd_t* c, int save0, int save1, int
 
 static int ush_exec_pipeline(const ush_pipeline_t* pl) {
     if (!pl || pl->count <= 0) return 0;
+
+    uint32_t shell_pgid = getpgrp();
+    uint32_t job_pgid = 0;
 
     const int save0 = 60;
     const int save1 = 61;
@@ -633,6 +643,12 @@ static int ush_exec_pipeline(const ush_pipeline_t* pl) {
             write_str(save2, "ush: spawn failed\n");
             goto fail;
         }
+
+        if (job_pgid == 0u) {
+            job_pgid = (uint32_t)pid;
+        }
+        (void)setpgid_pid((uint32_t)pid, job_pgid);
+
         pids[spawned++] = pid;
 
         ush_close_fd(&pipe_fds[1]);
@@ -657,9 +673,17 @@ static int ush_exec_pipeline(const ush_pipeline_t* pl) {
     (void)close(save2);
 
     if (!pl->background) {
+        if (job_pgid != 0u) {
+            (void)ioctl(0, YOS_TCSETPGRP, &job_pgid);
+        }
+
         for (int i = 0; i < spawned; i++) {
             int st = 0;
             (void)waitpid(pids[i], &st);
+        }
+
+        if (shell_pgid != 0u) {
+            (void)ioctl(0, YOS_TCSETPGRP, &shell_pgid);
         }
     } else {
         if (spawned > 0) {

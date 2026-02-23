@@ -10,6 +10,7 @@
 #include <yos/ioctl.h>
 
 #include "pty.h"
+#include "pty_ld_bridge.h"
 
 #define PTY_BUF_SIZE 4096u
 #define PTY_BATCH    1024u
@@ -43,9 +44,18 @@ typedef struct {
     yos_termios_t termios;
     yos_winsize_t winsz;
 
+    pty_ld_handle_t* ld;
+
     uint32_t session_sid;
     uint32_t fg_pgid;
 } pty_pair_t;
+
+static size_t pty_echo_to_master(const uint8_t* data, size_t size, void* ctx);
+static void pty_isig_to_fg_pgrp(int sig, void* ctx);
+
+static void pty_pair_destroy(pty_pair_t* p);
+
+static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n);
 
 static spinlock_t pty_id_lock;
 static uint32_t pty_next_id = 1u;
@@ -185,6 +195,19 @@ static void pty_pair_release(void* private_data) {
         return;
     }
 
+    pty_pair_destroy(p);
+}
+
+static void pty_pair_destroy(pty_pair_t* p) {
+    if (!p) {
+        return;
+    }
+
+    if (p->ld) {
+        pty_ld_destroy(p->ld);
+        p->ld = 0;
+    }
+
     poll_waitq_detach_all(&p->poll_waitq);
     kfree(p);
 }
@@ -206,6 +229,12 @@ static pty_pair_t* pty_pair_create(void) {
     p->termios.c_cc[YOS_VMIN] = 1u;
     p->termios.c_cc[YOS_VTIME] = 0u;
 
+    p->ld = pty_ld_create(&p->termios, pty_echo_to_master, p, pty_isig_to_fg_pgrp, p);
+    if (!p->ld) {
+        kfree(p);
+        return 0;
+    }
+
     p->refs = 1;
     spinlock_init(&p->lock);
     poll_waitq_init(&p->poll_waitq);
@@ -222,6 +251,59 @@ static pty_pair_t* pty_pair_create(void) {
     p->winsz.ws_ypixel = 0;
 
     return p;
+}
+
+static size_t pty_echo_to_master(const uint8_t* data, size_t size, void* ctx) {
+    if (!data || size == 0 || !ctx) {
+        return 0;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)ctx;
+
+    uint32_t flags = spinlock_acquire_safe(&p->lock);
+
+    if (!p->devfs_registered) {
+        spinlock_release_safe(&p->lock, flags);
+        return 0;
+    }
+
+    pty_chan_t* ch = &p->s2m;
+    const uint32_t space = PTY_BUF_SIZE - (ch->write_ptr - ch->read_ptr);
+
+    uint32_t n = (uint32_t)size;
+    if (n > space) {
+        n = space;
+    }
+
+    if (n != 0) {
+        (void)pty_chan_write_locked(ch, (const char*)data, n);
+    }
+
+    spinlock_release_safe(&p->lock, flags);
+
+    if (n != 0) {
+        sem_signal_n(&ch->sem_read, n);
+        poll_waitq_wake_all(&p->poll_waitq);
+    }
+
+    return (size_t)n;
+}
+
+static void pty_isig_to_fg_pgrp(int sig, void* ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)ctx;
+
+    uint32_t pgid = 0;
+    uint32_t flags = spinlock_acquire_safe(&p->lock);
+    pgid = p->fg_pgid;
+    spinlock_release_safe(&p->lock, flags);
+
+    if (pgid != 0) {
+        (void)proc_signal_pgrp(pgid, (uint32_t)sig);
+    }
 }
 
 static uint32_t pty_chan_read_locked(pty_chan_t* ch, char* dst, uint32_t n) {
@@ -397,7 +479,7 @@ __attribute__((unused)) static int pty_chan_write_nonblock(pty_pair_t* p, pty_ch
     return (int)size;
 }
 
-static int pty_chan_write(pty_pair_t* p, pty_chan_t* ch, uint32_t size, const void* buffer, const int* peer_open_field) {
+__attribute__((unused)) static int pty_chan_write(pty_pair_t* p, pty_chan_t* ch, uint32_t size, const void* buffer, const int* peer_open_field) {
     if (!p || !ch || !buffer || size == 0) return 0;
 
     const char* buf = (const char*)buffer;
@@ -447,6 +529,10 @@ static int pty_master_read(vfs_node_t* node, uint32_t offset, uint32_t size, voi
 
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
+
+    if (!p->ld) {
+        return -1;
+    }
     return pty_chan_read(p, &p->s2m, size, buffer, &p->devfs_registered);
 }
 
@@ -457,7 +543,14 @@ static int pty_master_write(vfs_node_t* node, uint32_t offset, uint32_t size, co
 
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
-    return pty_chan_write(p, &p->m2s, size, buffer, &p->devfs_registered);
+
+    if (!p->ld) {
+        return -1;
+    }
+
+    pty_ld_receive(p->ld, (const uint8_t*)buffer, (size_t)size);
+    poll_waitq_wake_all(&p->poll_waitq);
+    return (int)size;
 }
 
 static int pty_slave_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
@@ -483,7 +576,12 @@ static int pty_slave_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
         }
     }
 
-    return pty_chan_read(p, &p->m2s, size, buffer, &p->master_open);
+    size_t n = pty_ld_read(p->ld, buffer, (size_t)size);
+    if (n == (size_t)-2) {
+        return -2;
+    }
+
+    return (int)n;
 }
 
 static int pty_slave_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {
@@ -512,7 +610,8 @@ static int pty_slave_write(vfs_node_t* node, uint32_t offset, uint32_t size, con
         }
     }
 
-    return pty_chan_write(p, &p->s2m, size, buffer, &p->master_open);
+    size_t n = pty_ld_write(p->ld, buffer, (size_t)size);
+    return (int)n;
 }
 
 static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
@@ -536,6 +635,10 @@ static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             break;
         case YOS_TCSETS:
             memcpy(&p->termios, arg, sizeof(p->termios));
+
+            if (p->ld) {
+                (void)pty_ld_set_termios(p->ld, &p->termios);
+            }
             break;
         case YOS_TIOCGWINSZ:
             memcpy(arg, &p->winsz, sizeof(p->winsz));
@@ -833,7 +936,11 @@ int pty_poll_info(vfs_node_t* node, uint32_t* out_available, uint32_t* out_space
         space = PTY_BUF_SIZE - (p->m2s.write_ptr - p->m2s.read_ptr);
         peer_open = p->devfs_registered;
     } else {
-        avail = p->m2s.write_ptr - p->m2s.read_ptr;
+        if (p->ld) {
+            avail = pty_ld_has_readable(p->ld) ? 1u : 0u;
+        } else {
+            avail = 0;
+        }
         space = PTY_BUF_SIZE - (p->s2m.write_ptr - p->s2m.read_ptr);
         peer_open = p->master_open;
     }
