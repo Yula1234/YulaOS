@@ -65,6 +65,19 @@ static constexpr uint32_t user_stack_top_limit = 0xB0400000u;
 
 static constexpr uint32_t fd_table_cap_limit = 0x7FFFFFFFu;
 
+static constexpr uint32_t page_size = 4096u;
+static constexpr uint32_t page_mask = page_size - 1u;
+
+static constexpr uint32_t stack_align_bytes = 16u;
+static constexpr uint32_t stack_align_mask = stack_align_bytes - 1u;
+static constexpr uint32_t user_stack_min_slack = 8u;
+
+static constexpr uint32_t user_ds_selector = 0x23u;
+static constexpr uint32_t user_cs_selector = 0x1Bu;
+static constexpr uint32_t user_initial_eflags = 0x202u;
+
+static constexpr uint32_t heap_mmap_bump = 0x100000u;
+
 using AllTasksList = kernel::CDBLinkedList<task_t, &task_t::all_tasks_node>;
 
 static AllTasksList all_tasks;
@@ -389,13 +402,16 @@ void proc_init(void) {
 
 
     proc::detail::initial_fpu_state_size = fpu_state_size();
-    proc::detail::initial_fpu_state = (uint8_t*)kmalloc_a(proc::detail::initial_fpu_state_size);
-    if (!proc::detail::initial_fpu_state) {
+    kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> fpu_state_guard(
+        static_cast<uint8_t*>(kmalloc_a(proc::detail::initial_fpu_state_size))
+    );
+    if (!fpu_state_guard) {
         return;
     }
 
     __asm__ volatile("fninit");
-    fpu_save(proc::detail::initial_fpu_state);
+    fpu_save(fpu_state_guard.get());
+    proc::detail::initial_fpu_state = fpu_state_guard.release();
 }
 
 task_t* proc_current() { 
@@ -992,7 +1008,7 @@ static uint32_t* proc_kstack_top(task_t* t) {
     if (!t || !t->kstack) return 0;
 
     uint32_t stack_top = (uint32_t)t->kstack + t->kstack_size;
-    stack_top &= ~0xF;
+    stack_top &= ~proc::detail::stack_align_mask;
     return (uint32_t*)stack_top;
 }
 
@@ -1000,10 +1016,10 @@ static void proc_init_user_context(task_t* t, uint32_t user_eip, uint32_t user_e
     if (!t || !t->kstack) return;
 
     uint32_t* sp = proc_kstack_top(t);
-    *--sp = 0x23;
+    *--sp = proc::detail::user_ds_selector;
     *--sp = user_esp;
-    *--sp = 0x202;
-    *--sp = 0x1B;
+    *--sp = proc::detail::user_initial_eflags;
+    *--sp = proc::detail::user_cs_selector;
     *--sp = user_eip;
 
     *--sp = (uint32_t)irq_return;
@@ -1019,8 +1035,8 @@ static void proc_init_user_context(task_t* t, uint32_t user_eip, uint32_t user_e
 static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32_t stack_top, uint32_t arg, uint32_t* out_user_esp) {
     if (!t || !t->mem || !t->mem->page_dir || !out_user_esp) return 0;
 
-    uint32_t user_sp = stack_top & ~0xFu;
-    if (user_sp < stack_bottom + 8u) return 0;
+    uint32_t user_sp = stack_top & ~proc::detail::stack_align_mask;
+    if (user_sp < stack_bottom + proc::detail::user_stack_min_slack) return 0;
 
     uint32_t sp = user_sp;
 
@@ -1098,13 +1114,13 @@ static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, ui
     mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
     if (!area) return;
 
-    uint32_t aligned_vaddr = vaddr & ~0xFFF;
+    uint32_t aligned_vaddr = vaddr & ~proc::detail::page_mask;
     
     uint32_t diff = vaddr - aligned_vaddr;
     
     uint32_t aligned_offset = offset - diff;
     
-    uint32_t aligned_size = (size + diff + 4095) & ~4095;
+    uint32_t aligned_size = (size + diff + proc::detail::page_mask) & ~proc::detail::page_mask;
 
     uint32_t aligned_file_size = file_size;
     if (aligned_file_size > 0xFFFFFFFFu - diff) aligned_file_size = 0xFFFFFFFFu;
@@ -1150,8 +1166,8 @@ static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom
     if (!mem || !mem->page_dir) return 0;
     if (stack_top <= stack_bottom) return 0;
 
-    uint32_t start = stack_bottom & ~0xFFFu;
-    uint32_t end_excl = (stack_top + 0xFFFu) & ~0xFFFu;
+    uint32_t start = stack_bottom & ~proc::detail::page_mask;
+    uint32_t end_excl = (stack_top + proc::detail::page_mask) & ~proc::detail::page_mask;
 
     if (end_excl <= start) return 0;
     if (start < proc::detail::user_stack_addr_min || end_excl > proc::detail::user_stack_addr_max) return 0;
@@ -1237,7 +1253,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         if (end_v < start_v) { return 0; }
         if (start_v < proc::detail::user_elf_min_vaddr || end_v > proc::detail::user_elf_max_vaddr) { return 0; }
 
-        uint32_t diff = start_v & 0xFFFu;
+        uint32_t diff = start_v & proc::detail::page_mask;
         if (file_off < diff) { return 0; }
 
         uint64_t file_end = (uint64_t)file_off + (uint64_t)file_sz;
@@ -1367,17 +1383,17 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         }
     }
 
-    uint32_t start_pde_idx = 0x08000000 >> 22;
+    uint32_t start_pde_idx = proc::detail::user_elf_min_vaddr >> 22;
     uint32_t end_pde_idx   = (max_vaddr - 1) >> 22;
 
     for (uint32_t i = start_pde_idx; i <= end_pde_idx; i++) {
         t->mem->page_dir[i] = 0;
     }
 
-    t->mem->prog_break = (max_vaddr + 0xFFF) & ~0xFFF;
+    t->mem->prog_break = (max_vaddr + proc::detail::page_mask) & ~proc::detail::page_mask;
     t->mem->heap_start = t->mem->prog_break;
 
-    if (t->mem->mmap_top < t->mem->prog_break) t->mem->mmap_top = t->mem->prog_break + 0x100000;
+    if (t->mem->mmap_top < t->mem->prog_break) t->mem->mmap_top = t->mem->prog_break + proc::detail::heap_mmap_bump;
 
     uint32_t stack_size = proc::detail::user_stack_size_bytes;
     uint32_t ustack_top_limit = proc::detail::user_stack_top_limit;
@@ -1389,7 +1405,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     (void)proc_mem_register_stack_region(t->mem, t->stack_bottom, t->stack_top);
 
     for (int i = 1; i <= 4; i++) {
-        uint32_t addr = ustack_top_limit - i * 4096;
+        uint32_t addr = ustack_top_limit - (uint32_t)i * proc::detail::page_size;
         void* p = pmm_alloc_block();
         if (p) {
             paging_map(t->mem->page_dir, addr, (uint32_t)p, 7);
@@ -1415,7 +1431,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
             arg_ptrs[i] = ustack_top;
         }
 
-        ustack_top &= ~0xF;
+        ustack_top &= ~proc::detail::stack_align_mask;
         uint32_t* us = (uint32_t*)ustack_top;
 
         *--us = 0;
