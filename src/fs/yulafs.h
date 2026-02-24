@@ -6,6 +6,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define YFS_MAGIC       0x59554C41  // 'YULA'
 #define YFS_VERSION     2
 #define YFS_BLOCK_SIZE  4096    
@@ -90,5 +94,9 @@ int yulafs_getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t
 
 void yulafs_get_filesystem_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
 int yulafs_rename(const char* old_path, const char* new_path);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

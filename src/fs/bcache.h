@@ -6,6 +6,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void bcache_init(void);
 
 int bcache_read(uint32_t block_idx, uint8_t* buf);
@@ -15,5 +19,9 @@ void bcache_sync(void);
 void bcache_flush_block(uint32_t block_idx);
 
 void bcache_readahead(uint32_t start_block, uint32_t count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

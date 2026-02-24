@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <hal/lock.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     FIS_TYPE_REG_H2D    = 0x27,
     FIS_TYPE_REG_D2H    = 0x34,
@@ -138,5 +142,9 @@ uint32_t ahci_get_capacity(void);
 void ahci_set_async_mode(int enable);
 
 int ahci_msi_configure_cpu(int cpu_index);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
