@@ -14,72 +14,147 @@
 #define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4) 
 #define INODE_LOCK_BUCKETS  128
 
-static yfs_superblock_t sb;
-static int fs_mounted = 0;
+namespace yfs {
 
-static uint32_t last_free_blk_hint = 0;
-static uint32_t last_free_ino_hint = 1;
-
-static rwlock_t inode_locks[INODE_LOCK_BUCKETS];
-
-static uint8_t  bmap_cache_data[YFS_BLOCK_SIZE];
-static uint32_t bmap_cache_lba = 0; 
-static int      bmap_cache_dirty = 0;
-
-typedef struct {
+struct DcacheEntry {
     struct rb_node node;
     yfs_ino_t parent_ino;
     char name[YFS_NAME_MAX];
     yfs_ino_t target_ino;
-} yfs_dcache_entry_t;
+};
 
-static struct rb_root dcache_root = RB_ROOT;
-static spinlock_t dcache_lock;
+class FileSystem {
+public:
+    struct State {
+        static constexpr int inode_table_cache_slots = 4;
+        static constexpr int scratch_slots = 4;
 
-#define INODE_TABLE_CACHE_SLOTS 4
+        struct InodeTableCacheSlot {
+            uint32_t lba;
+            uint32_t stamp;
+            uint8_t  valid;
+            uint8_t  data[YFS_BLOCK_SIZE];
+        };
 
-typedef struct {
-    uint32_t lba;
-    uint32_t stamp;
-    uint8_t  valid;
-    uint8_t  data[YFS_BLOCK_SIZE];
-} inode_table_cache_slot_t;
+        yfs_superblock_t sb;
+        int mounted;
 
-static inode_table_cache_slot_t inode_table_cache[INODE_TABLE_CACHE_SLOTS];
-static spinlock_t inode_table_cache_lock;
-static uint32_t inode_table_cache_stamp;
+        uint32_t last_free_blk_hint;
+        uint32_t last_free_ino_hint;
 
-#define YFS_SCRATCH_SLOTS 4
+        rwlock_t inode_locks[INODE_LOCK_BUCKETS];
 
-static uint8_t yfs_scratch[YFS_SCRATCH_SLOTS][YFS_BLOCK_SIZE];
-static uint8_t yfs_scratch_used[YFS_SCRATCH_SLOTS];
-static spinlock_t yfs_scratch_lock;
+        uint8_t  bmap_cache_data[YFS_BLOCK_SIZE];
+        uint32_t bmap_cache_lba;
+        int      bmap_cache_dirty;
 
-static uint8_t* yfs_scratch_acquire(int* out_slot) {
-    if (out_slot) *out_slot = -1;
+        struct rb_root dcache_root;
+        spinlock_t dcache_lock;
 
-    spinlock_acquire(&yfs_scratch_lock);
-    for (int i = 0; i < YFS_SCRATCH_SLOTS; i++) {
-        if (!yfs_scratch_used[i]) {
-            yfs_scratch_used[i] = 1;
-            spinlock_release(&yfs_scratch_lock);
-            if (out_slot) *out_slot = i;
-            return yfs_scratch[i];
-        }
+        InodeTableCacheSlot inode_table_cache[inode_table_cache_slots];
+        spinlock_t inode_table_cache_lock;
+        uint32_t inode_table_cache_stamp;
+
+        uint8_t yfs_scratch[scratch_slots][YFS_BLOCK_SIZE];
+        uint8_t yfs_scratch_used[scratch_slots];
+        spinlock_t yfs_scratch_lock;
+    };
+
+    void init();
+    void format(uint32_t disk_blocks_4k);
+
+    int read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size);
+    int write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size);
+    int append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off);
+
+    int mkdir(const char* path);
+    int create(const char* path);
+    int unlink(const char* path);
+    int lookup(const char* path);
+    int lookup_in_dir(yfs_ino_t dir_ino, const char* name);
+    int getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
+
+    int stat(yfs_ino_t ino, yfs_inode_t* out);
+    void resize(yfs_ino_t ino, uint32_t new_size);
+
+    void get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size);
+    int rename(const char* old_path, const char* new_path);
+
+    uint8_t* scratch_acquire(int* out_slot);
+    void scratch_release(int slot);
+
+    rwlock_t* inode_lock(yfs_ino_t ino);
+
+    void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target);
+    yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name);
+    void dcache_invalidate_entry(yfs_ino_t parent, const char* name);
+
+    State& state() {
+        return state_;
     }
-    spinlock_release(&yfs_scratch_lock);
-    return 0;
-}
 
-static void yfs_scratch_release(int slot) {
-    if (slot < 0 || slot >= YFS_SCRATCH_SLOTS) return;
-    spinlock_acquire(&yfs_scratch_lock);
-    yfs_scratch_used[slot] = 0;
-    spinlock_release(&yfs_scratch_lock);
+    const State& state() const {
+        return state_;
+    }
+
+private:
+    State state_{};
+};
+
+static FileSystem g_fs;
+
 }
 
 static inline rwlock_t* get_inode_lock(yfs_ino_t ino) {
-    return &inode_locks[ino % INODE_LOCK_BUCKETS];
+    return &yfs::g_fs.state().inode_locks[ino % INODE_LOCK_BUCKETS];
+}
+
+static yfs::FileSystem::State& yfs_state = yfs::g_fs.state();
+
+static yfs_superblock_t& sb = yfs_state.sb;
+static int& fs_mounted = yfs_state.mounted;
+
+static uint32_t& last_free_blk_hint = yfs_state.last_free_blk_hint;
+static uint32_t& last_free_ino_hint = yfs_state.last_free_ino_hint;
+
+static rwlock_t (&inode_locks)[INODE_LOCK_BUCKETS] = yfs_state.inode_locks;
+
+static uint8_t (&bmap_cache_data)[YFS_BLOCK_SIZE] = yfs_state.bmap_cache_data;
+static uint32_t& bmap_cache_lba = yfs_state.bmap_cache_lba;
+static int& bmap_cache_dirty = yfs_state.bmap_cache_dirty;
+
+static struct rb_root& dcache_root = yfs_state.dcache_root;
+static spinlock_t& dcache_lock = yfs_state.dcache_lock;
+
+static yfs::FileSystem::State::InodeTableCacheSlot (&inode_table_cache)[yfs::FileSystem::State::inode_table_cache_slots] = yfs_state.inode_table_cache;
+static spinlock_t& inode_table_cache_lock = yfs_state.inode_table_cache_lock;
+static uint32_t& inode_table_cache_stamp = yfs_state.inode_table_cache_stamp;
+
+#define INODE_TABLE_CACHE_SLOTS (yfs::FileSystem::State::inode_table_cache_slots)
+
+#define YFS_SCRATCH_SLOTS (yfs::FileSystem::State::scratch_slots)
+
+static uint8_t (&yfs_scratch_used)[yfs::FileSystem::State::scratch_slots] = yfs_state.yfs_scratch_used;
+static spinlock_t& yfs_scratch_lock = yfs_state.yfs_scratch_lock;
+
+static uint8_t* yfs_scratch_acquire(int* out_slot) {
+    return yfs::g_fs.scratch_acquire(out_slot);
+}
+
+static void yfs_scratch_release(int slot) {
+    yfs::g_fs.scratch_release(slot);
+}
+
+static void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
+    yfs::g_fs.dcache_insert(parent, name, target);
+}
+
+static yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name) {
+    return yfs::g_fs.dcache_lookup(parent, name);
+}
+
+static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
+    yfs::g_fs.dcache_invalidate_entry(parent, name);
 }
 
 static inline void set_bit(uint8_t* map, int i) { map[i/8] |= (1 << (i%8)); }
@@ -92,45 +167,83 @@ static int rb_compare(yfs_ino_t p1, const char* n1, yfs_ino_t p2, const char* n2
     return strcmp(n1, n2);
 }
 
-static void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
-    spinlock_acquire(&dcache_lock);
+rwlock_t* yfs::FileSystem::inode_lock(yfs_ino_t ino) {
+    return &state_.inode_locks[ino % INODE_LOCK_BUCKETS];
+}
 
-    struct rb_node **new_node = &(dcache_root.rb_node), *parent_node = 0;
+uint8_t* yfs::FileSystem::scratch_acquire(int* out_slot) {
+    if (out_slot) {
+        *out_slot = -1;
+    }
+
+    spinlock_acquire(&state_.yfs_scratch_lock);
+
+    for (int i = 0; i < State::scratch_slots; i++) {
+        if (!state_.yfs_scratch_used[i]) {
+            state_.yfs_scratch_used[i] = 1;
+            spinlock_release(&state_.yfs_scratch_lock);
+
+            if (out_slot) {
+                *out_slot = i;
+            }
+
+            return state_.yfs_scratch[i];
+        }
+    }
+
+    spinlock_release(&state_.yfs_scratch_lock);
+    return 0;
+}
+
+void yfs::FileSystem::scratch_release(int slot) {
+    if (slot < 0 || slot >= State::scratch_slots) {
+        return;
+    }
+
+    spinlock_acquire(&state_.yfs_scratch_lock);
+    state_.yfs_scratch_used[slot] = 0;
+    spinlock_release(&state_.yfs_scratch_lock);
+}
+
+void yfs::FileSystem::dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
+    spinlock_acquire(&state_.dcache_lock);
+
+    struct rb_node **new_node = &(state_.dcache_root.rb_node), *parent_node = 0;
 
     while (*new_node) {
-        yfs_dcache_entry_t *this_entry = rb_entry(*new_node, yfs_dcache_entry_t, node);
+        DcacheEntry *this_entry = rb_entry(*new_node, DcacheEntry, node);
         parent_node = *new_node;
         int cmp = rb_compare(parent, name, this_entry->parent_ino, this_entry->name);
         if (cmp == 0) {
             this_entry->target_ino = target;
-            spinlock_release(&dcache_lock);
+            spinlock_release(&state_.dcache_lock);
             return;
         }
         if (cmp < 0) new_node = &((*new_node)->rb_left);
         else new_node = &((*new_node)->rb_right);
     }
 
-    spinlock_release(&dcache_lock);
+    spinlock_release(&state_.dcache_lock);
 
-    yfs_dcache_entry_t* entry = (yfs_dcache_entry_t*)kmalloc(sizeof(yfs_dcache_entry_t));
+    DcacheEntry* entry = (DcacheEntry*)kmalloc(sizeof(DcacheEntry));
     if (!entry) return;
 
     entry->parent_ino = parent;
     strlcpy(entry->name, name, YFS_NAME_MAX);
     entry->target_ino = target;
 
-    spinlock_acquire(&dcache_lock);
+    spinlock_acquire(&state_.dcache_lock);
 
-    new_node = &(dcache_root.rb_node);
+    new_node = &(state_.dcache_root.rb_node);
     parent_node = 0;
 
     while (*new_node) {
-        yfs_dcache_entry_t *this_entry = rb_entry(*new_node, yfs_dcache_entry_t, node);
+        DcacheEntry *this_entry = rb_entry(*new_node, DcacheEntry, node);
         parent_node = *new_node;
         int cmp = rb_compare(parent, name, this_entry->parent_ino, this_entry->name);
         if (cmp == 0) {
             this_entry->target_ino = target;
-            spinlock_release(&dcache_lock);
+            spinlock_release(&state_.dcache_lock);
             kfree(entry);
             return;
         }
@@ -139,23 +252,23 @@ static void dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) 
     }
 
     rb_link_node(&entry->node, parent_node, new_node);
-    rb_insert_color(&entry->node, &dcache_root);
+    rb_insert_color(&entry->node, &state_.dcache_root);
 
-    spinlock_release(&dcache_lock);
+    spinlock_release(&state_.dcache_lock);
 }
 
-static yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name)
+ yfs_ino_t yfs::FileSystem::dcache_lookup(yfs_ino_t parent, const char* name)
 {
-    spinlock_acquire(&dcache_lock);
+    spinlock_acquire(&state_.dcache_lock);
 
-    struct rb_node* node = dcache_root.rb_node;
+    struct rb_node* node = state_.dcache_root.rb_node;
     while (node) {
-        yfs_dcache_entry_t* entry = rb_entry(node, yfs_dcache_entry_t, node);
+        DcacheEntry* entry = rb_entry(node, DcacheEntry, node);
         int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
 
         if (cmp == 0) {
             yfs_ino_t res = entry->target_ino;
-            spinlock_release(&dcache_lock);
+            spinlock_release(&state_.dcache_lock);
             return res;
         }
 
@@ -166,27 +279,19 @@ static yfs_ino_t dcache_lookup(yfs_ino_t parent, const char* name)
         }
     }
 
-    spinlock_release(&dcache_lock);
+    spinlock_release(&state_.dcache_lock);
     return 0;
 }
 
-static void rb_free_tree(struct rb_node* node) {
-    if (!node) return;
-    rb_free_tree(node->rb_left);
-    rb_free_tree(node->rb_right);
-    yfs_dcache_entry_t *entry = rb_entry(node, yfs_dcache_entry_t, node);
-    kfree(entry);
-}
-
-static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
-    spinlock_acquire(&dcache_lock);
+void yfs::FileSystem::dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
+    spinlock_acquire(&state_.dcache_lock);
     
-    struct rb_node *node = dcache_root.rb_node;
+    struct rb_node *node = state_.dcache_root.rb_node;
     while (node) {
-        yfs_dcache_entry_t *entry = rb_entry(node, yfs_dcache_entry_t, node);
+        DcacheEntry *entry = rb_entry(node, DcacheEntry, node);
         int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
         if (cmp == 0) {
-            rb_erase(&entry->node, &dcache_root);
+            rb_erase(&entry->node, &state_.dcache_root);
             kfree(entry);
             break;
         }
@@ -194,7 +299,15 @@ static void dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
         else node = node->rb_right;
     }
     
-    spinlock_release(&dcache_lock);
+    spinlock_release(&state_.dcache_lock);
+}
+
+static void rb_free_tree(struct rb_node* node) {
+    if (!node) return;
+    rb_free_tree(node->rb_left);
+    rb_free_tree(node->rb_right);
+    yfs::DcacheEntry *entry = rb_entry(node, yfs::DcacheEntry, node);
+    kfree(entry);
 }
 
 static void flush_sb(void) {
@@ -809,7 +922,7 @@ static yfs_ino_t path_to_inode(const char* path, char* last_element) {
     return curr;
 }
 
-void yulafs_format(uint32_t disk_blocks_4k) {
+void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     uint8_t* zero = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     uint8_t* map = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     yfs_dirent_t* dots = (yfs_dirent_t*)kmalloc(YFS_BLOCK_SIZE);
@@ -909,7 +1022,11 @@ void yulafs_format(uint32_t disk_blocks_4k) {
     kfree(dots);
 }
 
-void yulafs_init(void) {
+void yulafs_format(uint32_t disk_blocks_4k) {
+    yfs::g_fs.format(disk_blocks_4k);
+}
+
+void yfs::FileSystem::init() {
     bcache_init();
     spinlock_init(&dcache_lock);
     spinlock_init(&inode_table_cache_lock);
@@ -955,7 +1072,11 @@ void yulafs_init(void) {
     }
 }
 
-int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
+void yulafs_init(void) {
+    yfs::g_fs.init();
+}
+
+int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     if (!fs_mounted || !buf) {
         return -1;
     }
@@ -1089,9 +1210,13 @@ int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
     return read_count;
 }
 
+int yulafs_read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size) {
+    return yfs::g_fs.read(ino, buf, offset, size);
+}
+
 static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf, yfs_off_t offset, uint32_t size);
 
-int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size) {
+int yfs::FileSystem::write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size) {
     if (!fs_mounted || !buf) {
         return -1;
     }
@@ -1117,6 +1242,10 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
     rwlock_release_write(lock);
 
     return rc;
+}
+
+int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size) {
+    return yfs::g_fs.write(ino, buf, offset, size);
 }
 
 static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf, yfs_off_t offset, uint32_t size)
@@ -1220,7 +1349,7 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
     return (int)written;
 }
 
-int yulafs_append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off)
+int yfs::FileSystem::append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off)
 {
     if (!fs_mounted || !buf) {
         return -1;
@@ -1307,15 +1436,25 @@ int yulafs_create_obj(const char* path, int type)
     return new_ino;
 }
 
-int yulafs_mkdir(const char* path)
+int yfs::FileSystem::mkdir(const char* path)
 {
     return yulafs_create_obj(path, YFS_TYPE_DIR);
 }
-int yulafs_create(const char* path)
+
+int yulafs_mkdir(const char* path) {
+    return yfs::g_fs.mkdir(path);
+}
+
+int yfs::FileSystem::create(const char* path)
 {
     return yulafs_create_obj(path, YFS_TYPE_FILE);
 }
-int yulafs_unlink(const char* path)
+
+int yulafs_create(const char* path) {
+    return yfs::g_fs.create(path);
+}
+
+int yfs::FileSystem::unlink(const char* path)
 {
     char name[YFS_NAME_MAX];
     yfs_ino_t dir_ino = path_to_inode(path, name);
@@ -1327,7 +1466,11 @@ int yulafs_unlink(const char* path)
     return dir_unlink(dir_ino, name);
 }
 
-int yulafs_lookup(const char* path)
+int yulafs_unlink(const char* path) {
+    return yfs::g_fs.unlink(path);
+}
+
+int yfs::FileSystem::lookup(const char* path)
 {
     if (!path || !*path) {
         return (int)proc_current()->cwd_inode;
@@ -1355,7 +1498,11 @@ int yulafs_lookup(const char* path)
     return (int)target;
 }
 
-int yulafs_lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
+int yulafs_lookup(const char* path) {
+    return yfs::g_fs.lookup(path);
+}
+
+int yfs::FileSystem::lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
     if (!name || !*name) return -1;
 
     rwlock_t* lock = get_inode_lock(dir_ino);
@@ -1378,7 +1525,11 @@ int yulafs_lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
     return ino ? (int)ino : -1;
 }
 
-int yulafs_getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size) {
+int yulafs_lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
+    return yfs::g_fs.lookup_in_dir(dir_ino, name);
+}
+
+int yfs::FileSystem::getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size) {
     if (!inout_offset || !out) return -1;
     if (out_size < sizeof(yfs_dirent_info_t)) return -1;
 
@@ -1457,12 +1608,20 @@ int yulafs_getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t
     return (int)(out_count * (uint32_t)sizeof(yfs_dirent_info_t));
 }
 
-int yulafs_stat(yfs_ino_t ino, yfs_inode_t* out) {
+int yulafs_getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size) {
+    return yfs::g_fs.getdents(dir_ino, inout_offset, out, out_size);
+}
+
+int yfs::FileSystem::stat(yfs_ino_t ino, yfs_inode_t* out) {
     sync_inode(ino, out, 0);
     return 0;
 }
 
-void yulafs_resize(yfs_ino_t ino, uint32_t new_size)
+int yulafs_stat(yfs_ino_t ino, yfs_inode_t* out) {
+    return yfs::g_fs.stat(ino, out);
+}
+
+void yfs::FileSystem::resize(yfs_ino_t ino, uint32_t new_size)
 {
     rwlock_t* lock = get_inode_lock(ino);
     rwlock_acquire_write(lock);
@@ -1482,7 +1641,11 @@ void yulafs_resize(yfs_ino_t ino, uint32_t new_size)
     rwlock_release_write(lock);
 }
 
-void yulafs_get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size)
+void yulafs_resize(yfs_ino_t ino, uint32_t new_size) {
+    yfs::g_fs.resize(ino, new_size);
+}
+
+void yfs::FileSystem::get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size)
 {
     if (fs_mounted) {
         *total = sb.total_blocks;
@@ -1495,7 +1658,11 @@ void yulafs_get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size)
     }
 }
 
-int yulafs_rename(const char* old_path, const char* new_path)
+void yulafs_get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size) {
+    yfs::g_fs.get_filesystem_info(total, free, size);
+}
+
+int yfs::FileSystem::rename(const char* old_path, const char* new_path)
 {
     char old_name[YFS_NAME_MAX];
     char new_name[YFS_NAME_MAX];
@@ -1527,4 +1694,12 @@ int yulafs_rename(const char* old_path, const char* new_path)
     flush_sb();
 
     return 0;
+}
+
+extern "C" int yulafs_append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off) {
+    return yfs::g_fs.append(ino, buf, size, out_start_off);
+}
+
+extern "C" int yulafs_rename(const char* old_path, const char* new_path) {
+    return yfs::g_fs.rename(old_path, new_path);
 }
