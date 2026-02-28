@@ -8,7 +8,82 @@
 
 #include "pmm.h"
 
+#include <kernel/boot.h>
+
 namespace kernel {
+
+static inline uint32_t align_down_4k_u32(uint32_t v) noexcept {
+    return v & ~0xFFFu;
+}
+
+static inline uint32_t align_up_4k_u32(uint32_t v) noexcept {
+    if ((v & 0xFFFu) == 0u) {
+        return v;
+    }
+
+    return (v & ~0xFFFu) + 0x1000u;
+}
+
+static inline uint32_t clamp_end_u32(uint64_t end) noexcept {
+    if (end > 0xFFFFFFFFull) {
+        return 0xFFFFFFFFu;
+    }
+
+    return (uint32_t)end;
+}
+
+static uint32_t multiboot_detect_max_usable_end(const multiboot_info_t* mb_info) noexcept {
+    uint64_t memory_end_addr64 = 0;
+
+    constexpr uint64_t k_low_4g_excl = 0x100000000ull;
+
+    if ((mb_info->flags & (1u << 6)) != 0u) {
+        uint32_t mmap_base = mb_info->mmap_addr;
+        uint32_t mmap_len = mb_info->mmap_length;
+
+        uint32_t off = 0;
+        while (off + sizeof(uint32_t) <= mmap_len) {
+            multiboot_memory_map_t* e = (multiboot_memory_map_t*)(mmap_base + off);
+            if (e->size == 0) {
+                break;
+            }
+
+            const uint32_t step = e->size + sizeof(uint32_t);
+            if (step > mmap_len - off) {
+                break;
+            }
+
+            if (e->type == 1) {
+                const uint64_t start = e->addr;
+
+                uint64_t end = start + e->len;
+                if (end < start) {
+                    end = k_low_4g_excl;
+                }
+
+                if (start < k_low_4g_excl) {
+                    if (end > k_low_4g_excl) {
+                        end = k_low_4g_excl;
+                    }
+
+                    if (end > memory_end_addr64) {
+                        memory_end_addr64 = end;
+                    }
+                }
+            }
+
+            off += step;
+        }
+    } else if ((mb_info->flags & (1u << 0)) != 0u) {
+        memory_end_addr64 = (uint64_t)(mb_info->mem_upper * 1024u) + 0x100000ull;
+    }
+
+    if (memory_end_addr64 == 0) {
+        memory_end_addr64 = 1024ull * 1024ull * 64ull;
+    }
+
+    return clamp_end_u32(memory_end_addr64);
+}
 
 alignas(PmmState) static unsigned char g_pmm_storage[sizeof(PmmState)];
 static PmmState* g_pmm = nullptr;
@@ -86,6 +161,162 @@ void PmmState::init(uint32_t mem_size, uint32_t kernel_end_addr) noexcept {
         free_pages_unlocked(reinterpret_cast<void*>(i * PAGE_SIZE), 0u);
 
         i++;
+    }
+}
+
+void PmmState::init_multiboot(const struct multiboot_info* mb_info_opaque, uint32_t kernel_end_addr) noexcept {
+    const multiboot_info_t* mb_info = (const multiboot_info_t*)mb_info_opaque;
+    const uint32_t mem_end = multiboot_detect_max_usable_end(mb_info);
+
+    constexpr uint64_t k_low_4g_excl = 0x100000000ull;
+
+    total_pages_ = mem_end / PAGE_SIZE;
+    used_pages_count_ = 0u;
+
+    for (uint32_t i = 0; i <= PMM_MAX_ORDER; i++) {
+        free_areas_[i] = {};
+    }
+
+    const uint32_t mem_map_phys = align_up(kernel_end_addr);
+    mem_map_ = reinterpret_cast<page_t*>(mem_map_phys);
+
+    const uint32_t mem_map_size = total_pages_ * static_cast<uint32_t>(sizeof(page_t));
+    memset(mem_map_, 0, mem_map_size);
+
+    const uint32_t phys_alloc_start = align_up(mem_map_phys + mem_map_size);
+    const uint32_t first_free_idx = phys_alloc_start / PAGE_SIZE;
+
+    used_pages_count_ = total_pages_;
+
+    for (uint32_t p = 0; p < total_pages_; p++) {
+        mem_map_[p].flags = PMM_FLAG_USED;
+        mem_map_[p].ref_count = 1;
+        mem_map_[p].order = 0;
+    }
+
+    auto is_reserved_page = [&](uint32_t phys_addr) noexcept {
+        if (phys_addr < phys_alloc_start) {
+            return true;
+        }
+
+        uint32_t mb_info_addr = (uint32_t)(uintptr_t)mb_info;
+        if (phys_addr >= align_down_4k_u32(mb_info_addr) && phys_addr < align_up_4k_u32(mb_info_addr + (uint32_t)sizeof(*mb_info))) {
+            return true;
+        }
+
+        if ((mb_info->flags & (1u << 6)) != 0u) {
+            if (phys_addr >= align_down_4k_u32(mb_info->mmap_addr) && phys_addr < align_up_4k_u32(mb_info->mmap_addr + mb_info->mmap_length)) {
+                return true;
+            }
+        }
+
+        if ((mb_info->flags & (1u << 12)) != 0u) {
+            uint64_t fb_size64 = (uint64_t)mb_info->framebuffer_pitch * (uint64_t)mb_info->framebuffer_height;
+            if (fb_size64 != 0 && fb_size64 <= 0xFFFFFFFFull) {
+                uint32_t fb_base = (uint32_t)mb_info->framebuffer_addr;
+                uint32_t fb_size = (uint32_t)fb_size64;
+
+                if (fb_base + fb_size >= fb_base) {
+                    if (phys_addr >= align_down_4k_u32(fb_base) && phys_addr < align_up_4k_u32(fb_base + fb_size)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    };
+
+    const uint32_t pmm_end = total_pages_ * PAGE_SIZE;
+
+    if ((mb_info->flags & (1u << 6)) != 0u) {
+        uint32_t mmap_base = mb_info->mmap_addr;
+        uint32_t mmap_len = mb_info->mmap_length;
+
+        uint32_t off = 0;
+        while (off + sizeof(uint32_t) <= mmap_len) {
+            multiboot_memory_map_t* e = (multiboot_memory_map_t*)(mmap_base + off);
+            if (e->size == 0) {
+                break;
+            }
+
+            uint32_t step = e->size + sizeof(uint32_t);
+            if (step > mmap_len - off) {
+                break;
+            }
+
+            off += step;
+
+            if (e->type != 1) {
+                continue;
+            }
+
+            uint64_t start64 = e->addr;
+            uint64_t end64 = start64 + e->len;
+            if (end64 < start64) {
+                end64 = k_low_4g_excl;
+            }
+
+            if (start64 >= k_low_4g_excl) {
+                continue;
+            }
+
+            if (end64 > k_low_4g_excl) {
+                end64 = k_low_4g_excl;
+            }
+
+            uint32_t start = (uint32_t)start64;
+            uint32_t end_excl = (uint32_t)end64;
+            if (end_excl > pmm_end) {
+                end_excl = pmm_end;
+            }
+
+            start = align_up_4k_u32(start);
+            end_excl = align_down_4k_u32(end_excl);
+
+            for (uint32_t addr = start; addr < end_excl; addr += PAGE_SIZE) {
+                if (is_reserved_page(addr)) {
+                    continue;
+                }
+
+                if (addr / PAGE_SIZE >= total_pages_) {
+                    break;
+                }
+
+                page_t* page = &mem_map_[addr / PAGE_SIZE];
+                page->flags = PMM_FLAG_USED;
+                page->ref_count = 0;
+                page->order = 0;
+
+                free_pages_unlocked((void*)addr, 0u);
+            }
+        }
+    } else {
+        uint32_t start = align_up_4k_u32(phys_alloc_start);
+        uint32_t end_excl = align_down_4k_u32(mem_end);
+
+        if (end_excl > pmm_end) {
+            end_excl = pmm_end;
+        }
+
+        for (uint32_t addr = start; addr < end_excl; addr += PAGE_SIZE) {
+            if (is_reserved_page(addr)) {
+                continue;
+            }
+
+            page_t* page = &mem_map_[addr / PAGE_SIZE];
+            page->flags = PMM_FLAG_USED;
+            page->ref_count = 0;
+            page->order = 0;
+
+            free_pages_unlocked((void*)addr, 0u);
+        }
+    }
+
+    for (uint32_t i = 0; i < first_free_idx; i++) {
+        mem_map_[i].flags = PMM_FLAG_USED | PMM_FLAG_KERNEL;
+        mem_map_[i].ref_count = 1;
+        mem_map_[i].order = 0;
     }
 }
 
@@ -294,6 +525,12 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
     kernel::PmmState& pmm = kernel::pmm_state_init_once();
 
     pmm.init(mem_size, kernel_end_addr);
+}
+
+void pmm_init_multiboot(const struct multiboot_info* mb_info, uint32_t kernel_end_addr) {
+    kernel::PmmState& pmm = kernel::pmm_state_init_once();
+
+    pmm.init_multiboot(mb_info, kernel_end_addr);
 }
 
 void* pmm_alloc_pages(uint32_t order) {

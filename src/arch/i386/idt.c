@@ -144,6 +144,8 @@ static int ensure_user_stack_writable(task_t* curr, uint32_t addr) {
     void* new_page = pmm_alloc_block();
     if (!new_page) return 0;
 
+    paging_zero_phys_page((uint32_t)new_page);
+
     paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
     curr->mem->mem_pages++;
     __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
@@ -282,9 +284,13 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     void* new_page = pmm_alloc_block();
     if (!new_page) return -1;
 
-    memset(new_page, 0, 4096);
+    paging_zero_phys_page((uint32_t)new_page);
 
     uint32_t rel = vaddr - m->vaddr_start;
+
+    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+    curr->mem->mem_pages++;
+    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 
     if ((m->map_flags & MAP_STACK) == 0 &&
         m->file &&
@@ -296,20 +302,23 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         if (bytes > 4096) bytes = 4096;
 
         if (m->file_offset > 0xFFFFFFFFu - rel) {
+            paging_map(curr->mem->page_dir, vaddr, 0, 0);
+            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+            if (curr->mem->mem_pages > 0) curr->mem->mem_pages--;
             pmm_free_block(new_page);
             return -1;
         }
 
-        int r = m->file->ops->read(m->file, m->file_offset + rel, bytes, new_page);
+        int r = m->file->ops->read(m->file, m->file_offset + rel, bytes, (void*)(uintptr_t)vaddr);
 
         if (r < 0) {
+            paging_map(curr->mem->page_dir, vaddr, 0, 0);
+            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+            if (curr->mem->mem_pages > 0) curr->mem->mem_pages--;
             pmm_free_block(new_page);
             return -1;
         }
     }
-
-    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
-    curr->mem->mem_pages++;
     return 1;
 }
 
@@ -448,125 +457,139 @@ void isr_handler(registers_t* regs) {
             early_exception_halt("Double Fault", regs, 0);
         }
 
-        uint32_t cr2;
-        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        if (regs->int_no == 14) {
 
-        int handled = 0;
+            uint32_t cr2;
+            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 
-        if (cr2 >= 0xC0000000) {
-            uint32_t pd_idx = cr2 >> 22;
-            uint32_t* current_dir = (uint32_t*)get_cr3();
-            if ((kernel_page_directory[pd_idx] & 1) && !(current_dir[pd_idx] & 1)) {
-                current_dir[pd_idx] = kernel_page_directory[pd_idx];
-                __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
-                goto out;
-            }
-        }
+            int handled = 0;
 
-        const int is_user_access = (regs->cs == 0x1B);
-        const int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
+            if (cr2 >= 0xC0000000) {
+                uint32_t pd_idx = cr2 >> 22;
 
-        if (!handled && (is_user_access || is_kernel_access_to_user) && !(regs->err_code & 1) && curr && curr->mem && curr->mem->page_dir) {
-            if (!handled && cr2 >= curr->stack_bottom && cr2 < curr->stack_top) {
-                void* new_page = pmm_alloc_block();
-                if (new_page) {
-                    uint32_t vaddr = cr2 & ~0xFFF;
-                    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
-                    curr->mem->mem_pages++;
-                    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
-                    handled = 1;
-                } else {
-                    curr->pending_signals |= (1u << SIGSEGV);
-                    if (regs->cs == 0x1B) {
-                        maybe_deliver_pending_signal(curr, regs);
-                        goto out;
-                    }
-                    proc_kill(curr);
-                    sched_yield();
+                uint32_t cr3_phys = get_cr3() & ~0xFFFu;
+
+                uint32_t kpde = kernel_page_directory[pd_idx];
+                uint32_t upde = paging_read_pde((uint32_t*)(uintptr_t)cr3_phys, pd_idx);
+
+                if ((kpde & 1u) != 0u && (upde & 1u) == 0u) {
+                    paging_write_pde((uint32_t*)(uintptr_t)cr3_phys, pd_idx, kpde);
+                    __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
                     goto out;
                 }
             }
 
-            if (!handled && cr2 >= curr->mem->heap_start && cr2 < curr->mem->prog_break) {
-                void* new_page = pmm_alloc_block();
-                if (new_page) {
-                    uint32_t vaddr = cr2 & ~0xFFF;
-                    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
-                    curr->mem->mem_pages++;
-                    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
-                    handled = 1;
-                } else {
-                    curr->pending_signals |= (1u << SIGSEGV);
-                    if (regs->cs == 0x1B) {
-                        maybe_deliver_pending_signal(curr, regs);
+            const int is_user_access = (regs->cs == 0x1B);
+            const int is_kernel_access_to_user = (regs->cs == 0x08 && cr2 < 0xC0000000);
+
+            if (!handled && (is_user_access || is_kernel_access_to_user) && !(regs->err_code & 1) && curr && curr->mem && curr->mem->page_dir) {
+                if (!handled && cr2 >= curr->stack_bottom && cr2 < curr->stack_top) {
+                    void* new_page = pmm_alloc_block();
+                    if (new_page) {
+                        uint32_t vaddr = cr2 & ~0xFFF;
+                        paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                        curr->mem->mem_pages++;
+                        __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                        handled = 1;
+                    } else {
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                            goto out;
+                        }
+                        proc_kill(curr);
+                        sched_yield();
                         goto out;
                     }
-                    proc_kill(curr);
-                    sched_yield();
+                }
+
+                if (!handled && cr2 >= curr->mem->heap_start && cr2 < curr->mem->prog_break) {
+                    void* new_page = pmm_alloc_block();
+                    if (new_page) {
+                        uint32_t vaddr = cr2 & ~0xFFF;
+                        paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                        curr->mem->mem_pages++;
+                        __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                        handled = 1;
+                    } else {
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                            goto out;
+                        }
+                        proc_kill(curr);
+                        sched_yield();
+                        goto out;
+                    }
+                }
+
+                if (!handled) {
+                    int r = handle_mmap_demand_fault(curr, cr2);
+                    if (r == 1) {
+                        handled = 1;
+                    } else if (r < 0) {
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                            goto out;
+                        }
+                        proc_kill(curr);
+                        sched_yield();
+                        goto out;
+                    }
+                }
+            }
+
+            if (!handled && regs->cs == 0x08) {
+                uint32_t cr3_phys = get_cr3() & ~0xFFFu;
+                uint32_t pd_idx = cr2 >> 22;
+                uint32_t pt_idx = (cr2 >> 12) & 0x3FF;
+
+                (void)pd_idx;
+                (void)pt_idx;
+
+                uint32_t pte;
+                if (paging_get_present_pte_safe((uint32_t*)(uintptr_t)cr3_phys, cr2, &pte)) {
+                    __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
                     goto out;
                 }
             }
 
             if (!handled) {
-                int r = handle_mmap_demand_fault(curr, cr2);
-                if (r == 1) {
-                    handled = 1;
-                } else if (r < 0) {
-                    curr->pending_signals |= (1u << SIGSEGV);
-                    if (regs->cs == 0x1B) {
-                        maybe_deliver_pending_signal(curr, regs);
-                        goto out;
-                    }
-                    proc_kill(curr);
-                    sched_yield();
-                    goto out;
-                }
-            }
-        }
+                int is_kernel_access_to_user2 = (regs->cs == 0x08 && cr2 < 0xC0000000);
 
-        if (!handled && regs->cs == 0x08) {
-            uint32_t* dir = (uint32_t*)get_cr3();
-            uint32_t pd_idx = cr2 >> 22;
-            uint32_t pt_idx = (cr2 >> 12) & 0x3FF;
-
-            if (dir[pd_idx] & 1) {
-                uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
-                if (pt[pt_idx] & 1) {
-                    __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
-                    goto out;
-                }
-            }
-        }
-
-        if (!handled) {
-            int is_kernel_access_to_user2 = (regs->cs == 0x08 && cr2 < 0xC0000000);
-
-            if (regs->cs != 0x1B && !is_kernel_access_to_user2) {
-                if (!g_fb_mapped) {
-                    early_exception_halt("Kernel Page Fault", regs, cr2);
-                }
-                kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
-            } else {
-                if (curr) {
-                    curr->last_fault_cr2 = cr2;
-                    curr->last_fault_eip = regs->eip;
-                    curr->last_fault_err = regs->err_code;
-                    curr->last_fault_int = (uint8_t)regs->int_no;
-
-                    curr->pending_signals |= (1u << SIGSEGV);
-                    if (regs->cs == 0x1B) {
-                        maybe_deliver_pending_signal(curr, regs);
-                    } else {
-                        proc_kill(curr);
-                        sched_yield();
-                    }
-                } else {
+                if (regs->cs != 0x1B && !is_kernel_access_to_user2) {
                     if (!g_fb_mapped) {
-                        early_exception_halt("Page Fault in Kernel", regs, cr2);
+                        early_exception_halt("Kernel Page Fault", regs, cr2);
                     }
-                    kernel_panic("Page Fault in Kernel", "idt.c", regs->int_no, regs);
+                    kernel_panic("Kernel Page Fault", "idt.c", regs->int_no, regs);
+                } else {
+                    if (curr) {
+                        curr->last_fault_cr2 = cr2;
+                        curr->last_fault_eip = regs->eip;
+                        curr->last_fault_err = regs->err_code;
+                        curr->last_fault_int = (uint8_t)regs->int_no;
+
+                        curr->pending_signals |= (1u << SIGSEGV);
+                        if (regs->cs == 0x1B) {
+                            maybe_deliver_pending_signal(curr, regs);
+                        } else {
+                            proc_kill(curr);
+                            sched_yield();
+                        }
+                    } else {
+                        if (!g_fb_mapped) {
+                            early_exception_halt("Page Fault in Kernel", regs, cr2);
+                        }
+                        kernel_panic("Page Fault in Kernel", "idt.c", regs->int_no, regs);
+                    }
                 }
             }
+        } else {
+            if (!g_fb_mapped) {
+                early_exception_halt("Kernel Exception", regs, 0);
+            }
+            kernel_panic("Kernel Exception", "idt.c", regs->int_no, regs);
         }
 
         goto out;

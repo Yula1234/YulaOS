@@ -6,14 +6,14 @@
 
 #include <stdint.h>
 
-typedef struct {
+typedef struct multiboot_memory_map {
     uint32_t size;
     uint64_t addr;
     uint64_t len;
     uint32_t type;
 } __attribute__((packed)) multiboot_memory_map_t;
 
-typedef struct {
+typedef struct multiboot_info {
     uint32_t flags;
 
     uint32_t mem_lower;
@@ -74,6 +74,7 @@ typedef struct {
 void validate_multiboot(uint32_t magic, const multiboot_info_t* mb_info);
 void init_fb_info(const multiboot_info_t* mb_info);
 uint32_t detect_memory_end(const multiboot_info_t* mb_info);
+uint32_t multiboot_identity_map_end(const multiboot_info_t* mb_info);
 void map_framebuffer(uint32_t memory_end_addr);
 void ensure_bsp_cpu_index_zero(void);
 void init_ioapic_legacy(void);

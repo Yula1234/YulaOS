@@ -12,6 +12,7 @@
 #include <drivers/virtio_gpu.h>
 
 uint32_t* fb_ptr = 0;
+uint32_t  fb_phys = 0;
 uint32_t  fb_width = 0;
 uint32_t  fb_height = 0;
 uint32_t  fb_pitch = 0;

@@ -30,6 +30,17 @@ void paging_zero_phys_page(uint32_t phys);
 int paging_is_user_accessible(uint32_t* dir, uint32_t virt);
 uint32_t paging_get_phys(uint32_t* dir, uint32_t virt);
 
+uint32_t paging_read_pde(uint32_t* dir, uint32_t pd_idx);
+void paging_write_pde(uint32_t* dir, uint32_t pd_idx, uint32_t pde);
+
+uint32_t paging_read_pt_entry(uint32_t pt_phys, uint32_t pt_idx);
+void paging_write_pt_entry(uint32_t pt_phys, uint32_t pt_idx, uint32_t pte);
+
+int paging_get_present_pte_safe(uint32_t* dir, uint32_t virt, uint32_t* out_pte);
+
+uint32_t paging_fixmap_map(uint32_t phys);
+void paging_fixmap_unmap(uint32_t virt);
+
 extern uint32_t* kernel_page_directory;
 
 #ifdef __cplusplus

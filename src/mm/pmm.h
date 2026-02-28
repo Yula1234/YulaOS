@@ -37,11 +37,15 @@ typedef struct page {
 
 #include <lib/cpp/lock_guard.h>
 
+struct multiboot_info;
+
 namespace kernel {
 
 class PmmState {
 public:
     void init(uint32_t mem_size, uint32_t kernel_end_addr) noexcept;
+
+    void init_multiboot(const struct multiboot_info* mb_info, uint32_t kernel_end_addr) noexcept;
 
     [[nodiscard]] void* alloc_pages(uint32_t order) noexcept;
     void free_pages(void* addr, uint32_t order) noexcept;
@@ -86,6 +90,9 @@ extern "C" {
 #endif
 
 void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr);
+
+struct multiboot_info;
+void pmm_init_multiboot(const struct multiboot_info* mb_info, uint32_t kernel_end_addr);
 
 void* pmm_alloc_block(void);
 void pmm_free_block(void* addr);

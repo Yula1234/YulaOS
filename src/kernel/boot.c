@@ -16,7 +16,16 @@
 
 #include <kernel/cpu.h>
 
+
 #include "boot.h"
+
+static inline uint32_t align_up_4k_u32(uint32_t v) {
+    return (v + 0xFFFu) & ~0xFFFu;
+}
+
+static inline uint32_t max_u32(uint32_t a, uint32_t b) {
+    return (a > b) ? a : b;
+}
 
 static void halt_forever(void) {
     __asm__ volatile("cli");
@@ -43,7 +52,8 @@ void validate_multiboot(uint32_t magic, const multiboot_info_t* mb_info) {
 }
 
 void init_fb_info(const multiboot_info_t* mb_info) {
-    fb_ptr = (uint32_t*)(uint32_t)mb_info->framebuffer_addr;
+    fb_phys = (uint32_t)mb_info->framebuffer_addr;
+    fb_ptr = (uint32_t*)(uintptr_t)(FB_VIRT_BASE + (fb_phys & 0xFFFu));
     fb_width = mb_info->framebuffer_width;
     fb_height = mb_info->framebuffer_height;
     fb_pitch = mb_info->framebuffer_pitch;
@@ -51,6 +61,8 @@ void init_fb_info(const multiboot_info_t* mb_info) {
 
 uint32_t detect_memory_end(const multiboot_info_t* mb_info) {
     uint64_t memory_end_addr64 = 0;
+
+    const uint64_t low_4g_excl = 0x100000000ull;
 
     if (mb_info->flags & (1u << 6)) {
         uint32_t mmap_base = mb_info->mmap_addr;
@@ -63,18 +75,29 @@ uint32_t detect_memory_end(const multiboot_info_t* mb_info) {
                 break;
             }
 
-            if (e->type == 1) {
-                uint64_t end = e->addr + e->len;
-                if (end > 0xFFFFFFFFull) end = 0xFFFFFFFFull;
-                if (end > memory_end_addr64) {
-                    memory_end_addr64 = end;
-                }
-            }
-
-            uint32_t step = e->size + sizeof(uint32_t);
+            const uint32_t step = e->size + sizeof(uint32_t);
             if (step > mmap_len - off) {
                 break;
             }
+
+            if (e->type == 1) {
+                const uint64_t start = e->addr;
+                uint64_t end = start + e->len;
+                if (end < start) {
+                    end = low_4g_excl;
+                }
+
+                if (start < low_4g_excl) {
+                    if (end > low_4g_excl) {
+                        end = low_4g_excl;
+                    }
+
+                    if (end > memory_end_addr64) {
+                        memory_end_addr64 = end;
+                    }
+                }
+            }
+
             off += step;
         }
     } else if (mb_info->flags & (1u << 0)) {
@@ -85,7 +108,51 @@ uint32_t detect_memory_end(const multiboot_info_t* mb_info) {
         memory_end_addr64 = 1024ull * 1024ull * 64ull;
     }
 
+    if (memory_end_addr64 > 0xFFFFFFFFull) {
+        memory_end_addr64 = 0xFFFFFFFFull;
+    }
+
     return (uint32_t)memory_end_addr64;
+}
+
+uint32_t multiboot_identity_map_end(const multiboot_info_t* mb_info) {
+    if (!mb_info) {
+        return 0;
+    }
+
+    uint32_t end = 0;
+
+    {
+        uint32_t mb = (uint32_t)(uintptr_t)mb_info;
+        end = max_u32(end, mb + (uint32_t)sizeof(*mb_info));
+    }
+
+    if ((mb_info->flags & (1u << 6)) != 0u) {
+        uint32_t mmap_base = mb_info->mmap_addr;
+        uint32_t mmap_len = mb_info->mmap_length;
+        if (mmap_base != 0 && mmap_len != 0 && mmap_base + mmap_len >= mmap_base) {
+            end = max_u32(end, mmap_base + mmap_len);
+        }
+    }
+
+    if ((mb_info->flags & (1u << 11)) != 0u) {
+        uint32_t elf_base = mb_info->elf_addr;
+        uint32_t elf_num = mb_info->elf_num;
+        uint32_t elf_entsz = mb_info->elf_size;
+
+        if (elf_base != 0 && elf_num != 0 && elf_entsz != 0) {
+            uint32_t table_size = 0;
+            if (elf_num <= 0xFFFFFFFFu / elf_entsz) {
+                table_size = elf_num * elf_entsz;
+            }
+
+            if (table_size != 0 && elf_base + table_size >= elf_base) {
+                end = max_u32(end, elf_base + table_size);
+            }
+        }
+    }
+
+    return align_up_4k_u32(end);
 }
 
 void map_framebuffer(uint32_t memory_end_addr) {
@@ -95,22 +162,26 @@ void map_framebuffer(uint32_t memory_end_addr) {
     }
 
     uint32_t fb_size = (uint32_t)fb_size64;
-    uint32_t fb_flags = PTE_PRESENT | PTE_RW;
-    if (paging_pat_is_supported()) {
-        fb_flags |= PTE_PAT;
-    }
+    uint32_t fb_flags = PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
 
-    uint32_t fb_base = (uint32_t)fb_ptr;
-    if (fb_base >= memory_end_addr) {
-        paging_init_mtrr_wc(fb_base, fb_size);
-    }
+    (void)memory_end_addr;
+    (void)fb_size;
 
-    uint32_t fb_page = fb_base & ~0xFFFu;
-    uint32_t fb_end = fb_base + fb_size;
-    if (fb_end >= fb_base) {
-        uint32_t fb_map_size = (fb_end - fb_page + 0xFFFu) & ~0xFFFu;
-        for (uint32_t i = 0; i < fb_map_size; i += 4096u) {
-            paging_map(kernel_page_directory, fb_page + i, fb_page + i, fb_flags);
+    const uint32_t phys_page = fb_phys & ~0xFFFu;
+
+    const uint32_t existing_phys = paging_get_phys(kernel_page_directory, FB_VIRT_BASE);
+    if ((existing_phys & ~0xFFFu) == phys_page) {
+        return;
+    }
+    const uint32_t virt_page = FB_VIRT_BASE;
+
+    const uint32_t fb_end = fb_phys + fb_size;
+    if (fb_end >= fb_phys) {
+        const uint32_t phys_end_page = (fb_end + 0xFFFu) & ~0xFFFu;
+        const uint32_t map_size = phys_end_page - phys_page;
+
+        for (uint32_t off = 0; off < map_size; off += 4096u) {
+            paging_map(kernel_page_directory, virt_page + off, phys_page + off, fb_flags);
         }
     }
 }
@@ -199,7 +270,9 @@ void fb_select_active(void) {
     if (!virtio_gpu_is_active()) return;
     const virtio_gpu_fb_t* fb = virtio_gpu_get_fb();
     if (!fb || !fb->fb_ptr || fb->width == 0 || fb->height == 0 || fb->pitch == 0) return;
-    fb_ptr = fb->fb_ptr;
+
+    fb_phys = fb->fb_phys;
+    fb_ptr = (uint32_t*)(uintptr_t)(FB_VIRT_BASE + (fb_phys & 0xFFFu));
     fb_width = fb->width;
     fb_height = fb->height;
     fb_pitch = fb->pitch;

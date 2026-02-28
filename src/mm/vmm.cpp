@@ -108,6 +108,91 @@ static void tree_erase(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTree& 
     size_tree.erase(block);
 }
 
+static void reserve_range_locked(
+    uintptr_t start,
+    uintptr_t end,
+    VmmAddrTree& addr_tree,
+    VmmSizeTree& size_tree,
+    VmFreeBlock*& free_head
+) noexcept {
+    if (start >= end) {
+        return;
+    }
+
+    auto it = addr_tree.lower_bound_key(start);
+    if (it != addr_tree.begin()) {
+        auto prev = it;
+        --prev;
+
+        VmFreeBlock* b = &(*prev);
+        const uintptr_t b_end = b->start + b->size;
+
+        if (b_end > start) {
+            it = prev;
+        }
+    }
+
+    while (it != addr_tree.end()) {
+        VmFreeBlock* block = &(*it);
+
+        const uintptr_t b_start = block->start;
+        const uintptr_t b_end = block->start + block->size;
+
+        if (b_start >= end) {
+            break;
+        }
+
+        ++it;
+
+        if (b_end <= start) {
+            continue;
+        }
+
+        const uintptr_t cut_start = (b_start > start) ? b_start : start;
+        const uintptr_t cut_end = (b_end < end) ? b_end : end;
+
+        if (cut_start >= cut_end) {
+            continue;
+        }
+
+        const size_t left_size = (cut_start > b_start) ? (size_t)(cut_start - b_start) : 0u;
+        const size_t right_size = (cut_end < b_end) ? (size_t)(b_end - cut_end) : 0u;
+
+        tree_erase(*block, addr_tree, size_tree);
+
+        if (left_size != 0u) {
+            block->start = b_start;
+            block->size = left_size;
+
+            tree_insert(*block, addr_tree, size_tree);
+
+            if (right_size != 0u) {
+                VmFreeBlock* right = alloc_node(free_head);
+                if (kernel::unlikely(!right)) {
+                    panic("VMM: Out of metadata nodes during reserve_range!");
+                }
+
+                right->start = cut_end;
+                right->size = right_size;
+
+                tree_insert(*right, addr_tree, size_tree);
+            }
+
+            continue;
+        }
+
+        if (right_size != 0u) {
+            block->start = cut_end;
+            block->size = right_size;
+
+            tree_insert(*block, addr_tree, size_tree);
+            continue;
+        }
+
+        free_node(*block, free_head);
+    }
+}
+
 static void size_tree_reinsert_after_size_change(VmFreeBlock& block, VmmSizeTree& size_tree) noexcept {
     size_tree.erase(block);
 
@@ -247,6 +332,21 @@ void VmmState::init() noexcept {
     initial->size = static_cast<size_t>(KERNEL_HEAP_SIZE);
 
     tree_insert(*initial, addr_tree_, size_tree_);
+}
+
+void VmmState::reserve_range(uintptr_t start, size_t size) noexcept {
+    if (kernel::unlikely(size == 0u)) {
+        return;
+    }
+
+    if (kernel::unlikely(start > UINTPTR_MAX - size)) {
+        return;
+    }
+
+    const uintptr_t end = start + size;
+
+    kernel::SpinLockSafeGuard guard(lock_);
+    reserve_range_locked(start, end, addr_tree_, size_tree_, free_nodes_head_);
 }
 
 void* VmmState::alloc_pages(size_t count) noexcept {
@@ -423,6 +523,16 @@ void vmm_free_pages(void* virt, size_t pages) {
     }
 
     vmm->free_pages(virt, pages);
+}
+
+void vmm_reserve_range(uint32_t virt, size_t size) {
+    kernel::VmmState* vmm = kernel::vmm_state();
+
+    if (kernel::unlikely(!vmm)) {
+        return;
+    }
+
+    vmm->reserve_range((uintptr_t)virt, size);
 }
 
 int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {

@@ -136,20 +136,7 @@ static int ensure_user_buffer_writable_mappable(task_t* task, void* buf, uint32_
 }
 
 static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
-    if (!dir) return 0;
-
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FF;
-
-    uint32_t pde = dir[pd_idx];
-    if (!(pde & 1)) return 0;
-
-    uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
-    uint32_t pte = pt[pt_idx];
-    if (!(pte & 1)) return 0;
-
-    if (out_pte) *out_pte = pte;
-    return 1;
+    return paging_get_present_pte_safe(dir, virt, out_pte);
 }
 
 static int check_user_buffer_present(task_t* task, const void* buf, uint32_t size) {
@@ -1389,7 +1376,7 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
         curr->mem->fbmap_size_bytes = fb_size;
         curr->mem->fbmap_is_virtio = 1;
 
-        __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
+        paging_switch(paging_get_dir());
         regs->eax = user_vaddr_start + page_off;
         return;
     }
@@ -1399,7 +1386,7 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
         return;
     }
 
-    uint32_t fb_base = (uint32_t)fb_ptr;
+    uint32_t fb_base = fb_phys;
     uint32_t page_off = fb_base & 0xFFFu;
     uint32_t fb_page = fb_base & ~0xFFFu;
 
@@ -1449,7 +1436,7 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
     curr->mem->fbmap_size_bytes = fb_size;
     curr->mem->fbmap_is_virtio = 0;
 
-    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
+    paging_switch(paging_get_dir());
     regs->eax = user_vaddr_start + page_off;
 }
 
@@ -1478,7 +1465,7 @@ static void syscall_fb_release(registers_t* regs, task_t* curr) {
         curr->mem->fbmap_is_virtio = 0;
     }
 
-    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
+    paging_switch(paging_get_dir());
     regs->eax = (uint32_t)fb_release(curr->pid);
 }
 

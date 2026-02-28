@@ -103,7 +103,6 @@ static inline void kernel_init_simd(void) {
     uint32_t a1, b1, c1, d1;
     simd_cpuid(1, 0, &a1, &b1, &c1, &d1);
     int has_xsave = (c1 & (1u << 26)) != 0;
-    int has_osxsave = (c1 & (1u << 27)) != 0;
     int has_avx = (c1 & (1u << 28)) != 0;
 
     kernel_enable_sse();
@@ -111,15 +110,18 @@ static inline void kernel_init_simd(void) {
     uint32_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
 
-    if (has_xsave && has_osxsave) {
+    if (has_xsave) {
         cr4 |= (1u << 18);
     }
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 
+    simd_cpuid(1, 0, &a1, &b1, &c1, &d1);
+    int has_osxsave = (c1 & (1u << 27)) != 0;
+
     kernel_simd_caps = 0;
     kernel_xsave_mask = 0;
 
-    if (has_xsave && has_osxsave && simd_osxsave_enabled()) {
+    if (has_xsave && has_osxsave) {
         uint64_t supported = simd_xcr0_supported_mask();
         uint64_t xcr0 = 0x3;
 
@@ -137,6 +139,7 @@ static inline void kernel_init_simd(void) {
 
         if (((xcr0 & 0x6ull) == 0x6ull) && has_avx) {
             kernel_simd_caps |= SIMD_CAP_AVX;
+            
             uint32_t max_leaf, b0, c0, d0;
             simd_cpuid(0, 0, &max_leaf, &b0, &c0, &d0);
             if (max_leaf >= 7) {

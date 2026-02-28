@@ -68,6 +68,8 @@ public:
     [[nodiscard]] void* alloc_pages(size_t count) noexcept;
     void free_pages(void* ptr, size_t count) noexcept;
 
+    void reserve_range(uintptr_t start, size_t size) noexcept;
+
     [[nodiscard]] int map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept;
 
     [[nodiscard]] size_t get_used_pages() const noexcept;
@@ -102,6 +104,8 @@ void vmm_init(void);
 
 void* vmm_alloc_pages(size_t pages);
 void vmm_free_pages(void* virt, size_t pages);
+
+void vmm_reserve_range(uint32_t virt, size_t size);
 
 int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags);
 

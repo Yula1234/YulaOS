@@ -97,11 +97,66 @@ static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
 
 static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
     uint32_t memory_end_addr = detect_memory_end(mb_info);
+
+    uint32_t mb_identity_end = multiboot_identity_map_end(mb_info);
+
+    if (mb_identity_end > memory_end_addr) {
+        memory_end_addr = mb_identity_end;
+    }
     pic_configure_legacy();
 
-    pmm_init(memory_end_addr, (uint32_t)&kernel_end);
+    pmm_init_multiboot(mb_info, (uint32_t)&kernel_end);
+
+    uint32_t pmm_phys_end = 0u;
+
+    {
+        uint32_t total_blocks = pmm_get_total_blocks();
+
+        uint64_t pmm_phys_end64 = (uint64_t)total_blocks * (uint64_t)PAGE_SIZE;
+
+        if (pmm_phys_end64 > 0xFFFFFFFFull) {
+            pmm_phys_end64 = 0xFFFFFFFFull;
+        }
+
+        pmm_phys_end = (uint32_t)pmm_phys_end64;
+        if (pmm_phys_end & 0xFFFu) {
+            pmm_phys_end &= ~0xFFFu;
+            pmm_phys_end += 0x1000u;
+        }
+
+        if (pmm_phys_end > memory_end_addr) {
+            memory_end_addr = pmm_phys_end;
+        }
+    }
+
+    uint32_t mem_map_phys = 0u;
+    uint32_t mem_map_end = 0u;
+
+    {
+        uint32_t kernel_end_addr = (uint32_t)(uintptr_t)&kernel_end;
+        mem_map_phys = (kernel_end_addr + 0xFFFu) & ~0xFFFu;
+
+        uint32_t total_pages = pmm_get_total_blocks();
+        uint64_t mem_map_size64 = (uint64_t)total_pages * (uint64_t)sizeof(page_t);
+
+        if (mem_map_size64 != 0 && mem_map_size64 <= 0xFFFFFFFFull) {
+            uint32_t mem_map_size = (uint32_t)mem_map_size64;
+            mem_map_end = mem_map_phys + mem_map_size;
+
+            if (mem_map_end >= mem_map_phys) {
+                mem_map_end = (mem_map_end + 0xFFFu) & ~0xFFFu;
+
+                if (mem_map_end > memory_end_addr) {
+                    memory_end_addr = mem_map_end;
+                }
+            }
+        }
+    }
+
     paging_init(memory_end_addr);
+
     vmm_init();
+
     heap_init();
 
     return memory_end_addr;
@@ -111,7 +166,6 @@ static void kmain_video_init(uint32_t memory_end_addr) {
     virtio_gpu_init();
     fb_select_active();
     map_framebuffer(memory_end_addr);
-
     g_fb_mapped = 1;
 }
 
@@ -222,9 +276,10 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
 
     uint32_t memory_end_addr = kmain_memory_init(mb_info);
 
+    kmain_video_init(memory_end_addr);
+    
     cpp_call_global_ctors();
 
-    kmain_video_init(memory_end_addr);
     kmain_platform_init();
     kmain_devices_init();
     kmain_fs_init();

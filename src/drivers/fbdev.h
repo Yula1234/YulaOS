@@ -19,7 +19,10 @@ typedef struct {
     uint32_t size_bytes;
 } fb_info_t;
 
+#define FB_VIRT_BASE 0xF0000000u
+
 extern uint32_t* fb_ptr;
+extern uint32_t  fb_phys;
 extern uint32_t  fb_width;
 extern uint32_t  fb_height;
 extern uint32_t  fb_pitch;

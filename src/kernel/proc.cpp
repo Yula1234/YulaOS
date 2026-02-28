@@ -980,7 +980,7 @@ static void proc_mem_release(proc_mem_t* mem) {
 
     if (mem->page_dir && mem->page_dir != kernel_page_directory) {
         for (int i = 0; i < 1024; i++) {
-            uint32_t pde = mem->page_dir[i];
+            uint32_t pde = paging_read_pde(mem->page_dir, (uint32_t)i);
 
             if (!(pde & 1)) continue;
 
@@ -989,14 +989,14 @@ static void proc_mem_release(proc_mem_t* mem) {
             }
 
             if (pde & 4) {
-                uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
+                uint32_t pt_phys = pde & ~0xFFFu;
 
                 for (int j = 0; j < 1024; j++) {
-                    uint32_t pte = pt[j];
+                    uint32_t pte = paging_read_pt_entry(pt_phys, (uint32_t)j);
 
                     if ((pte & 1)) {
                         if (pte & 0x200) {
-                            pt[j] = 0;
+                            paging_write_pt_entry(pt_phys, (uint32_t)j, 0u);
                         } else if (pte & 4) {
                             void* physical_page = (void*)(pte & ~0xFFF);
                             pmm_free_block(physical_page);
@@ -1004,7 +1004,7 @@ static void proc_mem_release(proc_mem_t* mem) {
                     }
                 }
 
-                pmm_free_block(pt);
+                pmm_free_block((void*)(uintptr_t)pt_phys);
             }
         }
 
@@ -1711,7 +1711,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     uint32_t end_pde_idx   = (max_vaddr - 1) >> 22;
 
     for (uint32_t i = start_pde_idx; i <= end_pde_idx; i++) {
-        t->mem->page_dir[i] = 0;
+        paging_write_pde(t->mem->page_dir, i, 0u);
     }
 
     t->mem->prog_break = (max_vaddr + proc::detail::page_mask) & ~proc::detail::page_mask;

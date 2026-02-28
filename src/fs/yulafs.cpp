@@ -1059,11 +1059,10 @@ void yfs::FileSystem::init() {
     }
 
     if (sb.magic != YFS_MAGIC) {
-        uint32_t capacity = ahci_get_capacity();
-        if (capacity == 0) {
-            capacity = 131072;
-        }
-        yulafs_format(capacity / 8);
+        fs_mounted = 0;
+        last_free_blk_hint = 0;
+        last_free_ino_hint = 0;
+        return;
     }
     else {
         fs_mounted = 1;
