@@ -115,6 +115,7 @@ struct vfs_fs_driver_ops {
     int (*stat)(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
     int (*getdents)(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
     int (*fstatat)(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
+    int (*append)(task_t* curr, vfs_node_t* node, const void* buf, uint32_t size, uint32_t* out_new_offset);
     int (*get_fs_info)(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
     vfs_node_t* (*create_node_from_path)(const char* mountpoint, const char* rel, int is_abs);
 };
@@ -395,6 +396,22 @@ int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
     }
 
     return driver->ops->fstatat(curr, node, name, (vfs_stat_t*)stat_buf);
+}
+
+static int vfs_yulafs_append(task_t* curr, vfs_node_t* node, const void* buf, uint32_t size, uint32_t* out_new_offset) {
+    (void)curr;
+
+    if (!node || !buf || size == 0 || !out_new_offset) {
+        return -1;
+    }
+
+    yfs_off_t start = 0;
+    const int res = yulafs_append(node->inode_idx, buf, size, &start);
+    if (res > 0) {
+        *out_new_offset = (uint32_t)start + (uint32_t)res;
+    }
+
+    return res;
 }
 
 static int yfs_read_wrapper(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
@@ -738,6 +755,7 @@ static const vfs_fs_driver_ops g_yulafs_ops = {
     vfs_yulafs_stat,
     vfs_yulafs_getdents,
     vfs_yulafs_fstatat,
+    vfs_yulafs_append,
     vfs_yulafs_get_fs_info,
     vfs_yulafs_create_node_from_path,
 };
@@ -755,6 +773,7 @@ static const vfs_fs_driver_ops g_devfs_ops = {
     vfs_devfs_stat,
     vfs_devfs_getdents,
     vfs_devfs_fstatat,
+    0,
     0,
     vfs_devfs_create_node_from_path,
 };
@@ -1229,16 +1248,18 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
         off = d.get()->offset;
     }
 
-    if ((fflags & FILE_FLAG_APPEND) != 0 && d.get()->node->fs_driver == &g_yulafs_driver) {
-        yfs_off_t start = 0;
+    if ((fflags & FILE_FLAG_APPEND) != 0) {
+        const vfs_fs_driver* driver = (const vfs_fs_driver*)d.get()->node->fs_driver;
+        if (driver && driver->ops && driver->ops->append) {
+            uint32_t new_offset = 0;
+            const int res = driver->ops->append(curr, d.get()->node, buf, size, &new_offset);
+            if (res > 0) {
+                kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
+                d.get()->offset = new_offset;
+            }
 
-        const int res = yulafs_append(d.get()->node->inode_idx, buf, size, &start);
-        if (res > 0) {
-            kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
-            d.get()->offset = (uint32_t)start + (uint32_t)res;
+            return res;
         }
-
-        return res;
     }
 
     const int res = d.get()->node->ops->write(d.get()->node, off, size, buf);
