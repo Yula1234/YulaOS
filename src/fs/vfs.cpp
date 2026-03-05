@@ -17,6 +17,8 @@ extern "C" {
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/string.h>
 
+struct vfs_fs_instance;
+
 namespace {
 
 class FileDescHandle {
@@ -79,6 +81,7 @@ static vfs_node_t* vfs_node_clone_existing(const vfs_node_t* src) noexcept {
 
 class DevFSRegistry {
 public:
+    void set_instance(vfs_fs_instance* inst) noexcept;
     void register_node(vfs_node_t* node) noexcept;
     int unregister_node(const char* name) noexcept;
     vfs_node_t* fetch_borrowed(const char* name) noexcept;
@@ -89,6 +92,7 @@ public:
 private:
     kernel::SpinLock lock_;
     HashMap<kernel::string, vfs_node_t*, 256> nodes_;
+    vfs_fs_instance* instance_ = nullptr;
 };
 
 static DevFSRegistry g_devfs;
@@ -100,11 +104,14 @@ static DevFSRegistry& devfs_registry() noexcept {
 } // namespace
 
 
-struct vfs_fs_driver_ops {
-    vfs_node_t* (*open)(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
-    int (*mkdir)(const char* mountpoint, const char* rel, int is_abs);
-    int (*unlink)(const char* mountpoint, const char* rel, int is_abs);
+struct vfs_fs_instance;
+
+struct vfs_fs_type_ops {
+    vfs_node_t* (*open)(vfs_fs_instance* inst, task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
+    int (*mkdir)(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
+    int (*unlink)(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
     int (*rename)(
+        vfs_fs_instance* inst,
         const char* old_mountpoint,
         const char* old_rel,
         const char* new_mountpoint,
@@ -112,26 +119,129 @@ struct vfs_fs_driver_ops {
         int old_is_abs,
         int new_is_abs
     );
-    int (*stat)(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
-    int (*getdents)(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
-    int (*fstatat)(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
-    int (*append)(task_t* curr, vfs_node_t* node, const void* buf, uint32_t size, uint32_t* out_new_offset);
-    int (*get_fs_info)(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
-    vfs_node_t* (*create_node_from_path)(const char* mountpoint, const char* rel, int is_abs);
+    int (*stat)(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
+    int (*getdents)(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
+    int (*fstatat)(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
+    int (*append)(vfs_fs_instance* inst, task_t* curr, vfs_node_t* node, const void* buf, uint32_t size, uint32_t* out_new_offset);
+    int (*get_fs_info)(vfs_fs_instance* inst, uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
+    vfs_node_t* (*create_node_from_path)(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
 };
 
-struct vfs_fs_driver {
+struct vfs_fs_type;
+
+struct vfs_fs_instance {
+    const vfs_fs_type* type;
+    void* fs_private;
+    vfs_node_t* root;
+    uint32_t refs;
+};
+
+struct vfs_fs_type {
     const char* name;
-    const vfs_fs_driver_ops* ops;
+    const vfs_fs_type_ops* ops;
+    vfs_fs_instance* (*mount)(const char* source, uint32_t flags);
+    int (*umount)(vfs_fs_instance* inst);
 };
 
 struct vfs_mount_entry {
-    const vfs_fs_driver* driver;
+    vfs_fs_instance* instance;
     char mountpoint[32];
     uint8_t used;
 };
 
+extern const vfs_fs_type g_yulafs_type;
+extern const vfs_fs_type g_devfs_type;
+
+static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append);
+static vfs_node_t* vfs_open_devfs_root_node(void);
+
+static vfs_fs_instance* vfs_yulafs_mount(const char* source, uint32_t flags) {
+    (void)source;
+    (void)flags;
+
+    auto* inst = static_cast<vfs_fs_instance*>(kmalloc(sizeof(vfs_fs_instance)));
+    if (!inst) {
+        return nullptr;
+    }
+
+    memset(inst, 0, sizeof(*inst));
+    inst->type = &g_yulafs_type;
+    inst->refs = 1;
+
+    vfs_node_t* root = vfs_open_yulafs_node("/", 0, 0);
+    if (!root) {
+        kfree(inst);
+        return nullptr;
+    }
+
+    root->fs_driver = inst;
+    inst->root = root;
+
+    return inst;
+}
+
+static int vfs_yulafs_umount(vfs_fs_instance* inst) {
+    if (!inst || inst->type != &g_yulafs_type) {
+        return -1;
+    }
+
+    if (inst->root) {
+        vfs_node_release(inst->root);
+        inst->root = nullptr;
+    }
+
+    kfree(inst);
+    return 0;
+}
+
+static vfs_fs_instance* vfs_devfs_mount(const char* source, uint32_t flags) {
+    (void)source;
+    (void)flags;
+
+    auto* inst = static_cast<vfs_fs_instance*>(kmalloc(sizeof(vfs_fs_instance)));
+    if (!inst) {
+        return nullptr;
+    }
+
+    memset(inst, 0, sizeof(*inst));
+    inst->type = &g_devfs_type;
+    inst->refs = 1;
+
+    vfs_node_t* root = vfs_open_devfs_root_node();
+    if (!root) {
+        kfree(inst);
+        return nullptr;
+    }
+
+    root->fs_driver = inst;
+    inst->root = root;
+
+    devfs_registry().set_instance(inst);
+    return inst;
+}
+
+static int vfs_devfs_umount(vfs_fs_instance* inst) {
+    if (!inst || inst->type != &g_devfs_type) {
+        return -1;
+    }
+
+    devfs_registry().set_instance(nullptr);
+
+    if (inst->root) {
+        vfs_node_release(inst->root);
+        inst->root = nullptr;
+    }
+
+    kfree(inst);
+    return 0;
+}
+
 namespace {
+
+void DevFSRegistry::set_instance(vfs_fs_instance* inst) noexcept {
+    kernel::SpinLockSafeGuard guard(lock_);
+    instance_ = inst;
+}
 
 void DevFSRegistry::register_node(vfs_node_t* node) noexcept {
     if (!node || node->name[0] == '\0') {
@@ -236,6 +346,11 @@ vfs_node_t* DevFSRegistry::clone(const char* name) noexcept {
     node->flags |= VFS_FLAG_DEVFS_NODE;
     node->fs_driver = snapshot.fs_driver;
 
+    if (!node->fs_driver) {
+        kernel::SpinLockSafeGuard guard(lock_);
+        node->fs_driver = instance_;
+    }
+
     return node;
 }
 
@@ -278,25 +393,23 @@ int DevFSRegistry::getdents(uint32_t* inout_offset, yfs_dirent_info_t* out, uint
 
 } // namespace
 
-extern "C" {
-
-void devfs_register(vfs_node_t* node) {
+extern "C" void devfs_register(vfs_node_t* node) {
     devfs_registry().register_node(node);
 }
 
-int devfs_unregister(const char* name) {
+extern "C" int devfs_unregister(const char* name) {
     return devfs_registry().unregister_node(name);
 }
 
-vfs_node_t* devfs_fetch(const char* name) {
+extern "C" vfs_node_t* devfs_fetch(const char* name) {
     return devfs_registry().fetch_borrowed(name);
 }
 
-vfs_node_t* devfs_clone(const char* name) {
+extern "C" vfs_node_t* devfs_clone(const char* name) {
     return devfs_registry().clone(name);
 }
 
-vfs_node_t* devfs_take(const char* name) {
+extern "C" vfs_node_t* devfs_take(const char* name) {
     return devfs_registry().take(name);
 }
 
@@ -304,19 +417,19 @@ static void vfs_init_impl(void);
 static int vfs_mount_impl(const char* mountpoint, const char* fs_name);
 static int vfs_umount_impl(const char* mountpoint);
 
-void vfs_init(void) {
+extern "C" void vfs_init(void) {
     vfs_init_impl();
 }
 
-int vfs_mount(const char* mountpoint, const char* fs_name) {
+extern "C" int vfs_mount(const char* mountpoint, const char* fs_name) {
     return vfs_mount_impl(mountpoint, fs_name);
 }
 
-int vfs_umount(const char* mountpoint) {
+extern "C" int vfs_umount(const char* mountpoint) {
     return vfs_umount_impl(mountpoint);
 }
 
-void vfs_node_retain(vfs_node_t* node) {
+extern "C" void vfs_node_retain(vfs_node_t* node) {
     if (!node) {
         return;
     }
@@ -324,7 +437,7 @@ void vfs_node_retain(vfs_node_t* node) {
     __sync_fetch_and_add(&node->refs, 1);
 }
 
-void vfs_node_release(vfs_node_t* node) {
+extern "C" void vfs_node_release(vfs_node_t* node) {
     if (!node) {
         return;
     }
@@ -345,7 +458,7 @@ void vfs_node_release(vfs_node_t* node) {
     kfree(node);
 }
 
-int vfs_getdents(int fd, void* buf, uint32_t size) {
+extern "C" int vfs_getdents(int fd, void* buf, uint32_t size) {
     task_t* curr = proc_current();
     FileDescHandle d(curr, fd);
 
@@ -362,17 +475,16 @@ int vfs_getdents(int fd, void* buf, uint32_t size) {
         return -1;
     }
 
-    const vfs_fs_driver* driver = (const vfs_fs_driver*)node->fs_driver;
-
-    if (!driver || !driver->ops || !driver->ops->getdents) {
+    vfs_fs_instance* inst = (vfs_fs_instance*)node->fs_driver;
+    if (!inst || !inst->type || !inst->type->ops || !inst->type->ops->getdents) {
         return -1;
     }
 
     kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
-    return driver->ops->getdents(curr, node, &d.get()->offset, (yfs_dirent_info_t*)buf, size);
+    return inst->type->ops->getdents(inst, curr, node, &d.get()->offset, (yfs_dirent_info_t*)buf, size);
 }
 
-int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
+extern "C" int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
     task_t* curr = proc_current();
     FileDescHandle d(curr, dirfd);
 
@@ -389,16 +501,16 @@ int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
         return -1;
     }
 
-    const vfs_fs_driver* driver = (const vfs_fs_driver*)node->fs_driver;
-
-    if (!driver || !driver->ops || !driver->ops->fstatat) {
+    vfs_fs_instance* inst = (vfs_fs_instance*)node->fs_driver;
+    if (!inst || !inst->type || !inst->type->ops || !inst->type->ops->fstatat) {
         return -1;
     }
 
-    return driver->ops->fstatat(curr, node, name, (vfs_stat_t*)stat_buf);
+    return inst->type->ops->fstatat(inst, curr, node, name, (vfs_stat_t*)stat_buf);
 }
 
-static int vfs_yulafs_append(task_t* curr, vfs_node_t* node, const void* buf, uint32_t size, uint32_t* out_new_offset) {
+static int vfs_yulafs_append(vfs_fs_instance* inst, task_t* curr, vfs_node_t* node, const void* buf, uint32_t size, uint32_t* out_new_offset) {
+    (void)inst;
     (void)curr;
 
     if (!node || !buf || size == 0 || !out_new_offset) {
@@ -431,7 +543,7 @@ static vfs_ops_t yfs_vfs_ops = {
 
 static vfs_mount_entry g_mounts[8];
 
-static const vfs_fs_driver* vfs_driver_from_name(const char* fs_name);
+static const vfs_fs_type* vfs_fs_type_from_name(const char* fs_name);
 
 static int vfs_mountpoint_is_valid(const char* mountpoint) {
     if (!mountpoint || mountpoint[0] != '/') {
@@ -526,12 +638,12 @@ static int vfs_build_abs_path(
     return n2 >= out_size ? -1 : 0;
 }
 
-static int vfs_mount_table_insert(const char* mountpoint, const vfs_fs_driver* driver) {
+static int vfs_mount_table_insert(const char* mountpoint, vfs_fs_instance* instance) {
     for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
         if (!g_mounts[i].used) {
             memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
             g_mounts[i].used = 1u;
-            g_mounts[i].driver = driver;
+            g_mounts[i].instance = instance;
             strlcpy(g_mounts[i].mountpoint, mountpoint, sizeof(g_mounts[i].mountpoint));
             return 0;
         }
@@ -593,7 +705,7 @@ static int vfs_resolve_mount(
             }
 
             if (strcmp(g_mounts[i].mountpoint, "/") == 0) {
-                if (!g_mounts[i].driver || !g_mounts[i].driver->ops) {
+                if (!g_mounts[i].instance || !g_mounts[i].instance->type || !g_mounts[i].instance->type->ops) {
                     return -1;
                 }
 
@@ -623,7 +735,7 @@ static int vfs_resolve_mount(
         }
     }
 
-    if (best_len < 0 || !best_mount || !best || !best->driver || !best->driver->ops) {
+    if (best_len < 0 || !best_mount || !best || !best->instance || !best->instance->type || !best->instance->type->ops) {
         return -1;
     }
 
@@ -639,12 +751,14 @@ static int vfs_resolve_mount(
 }
 
 static int vfs_yulafs_getdents(
+    vfs_fs_instance* inst,
     task_t* curr,
     vfs_node_t* dir_node,
     uint32_t* inout_offset,
     yfs_dirent_info_t* out,
     uint32_t out_size
 ) {
+    (void)inst;
     (void)curr;
 
     if (!dir_node || (dir_node->flags & VFS_FLAG_YULAFS) == 0) {
@@ -654,7 +768,8 @@ static int vfs_yulafs_getdents(
     return yulafs_getdents(dir_node->inode_idx, inout_offset, out, out_size);
 }
 
-static int vfs_yulafs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out) {
+static int vfs_yulafs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out) {
+    (void)inst;
     (void)curr;
 
     if (!dir_node || (dir_node->flags & VFS_FLAG_YULAFS) == 0 || !name || !*name || !out) {
@@ -689,12 +804,22 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
         return -1;
     }
 
-    const vfs_fs_driver* driver = vfs_driver_from_name(fs_name);
-    if (!driver || !driver->ops) {
+    const vfs_fs_type* type = vfs_fs_type_from_name(fs_name);
+    if (!type || !type->ops || !type->mount || !type->umount) {
         return -1;
     }
 
-    if (vfs_mount_table_insert(mountpoint, driver) != 0) {
+    vfs_fs_instance* instance = type->mount(nullptr, 0u);
+    if (!instance || instance->type != type || !instance->type || !instance->type->ops) {
+        if (instance && type->umount) {
+            (void)type->umount(instance);
+        }
+
+        return -1;
+    }
+
+    if (vfs_mount_table_insert(mountpoint, instance) != 0) {
+        (void)type->umount(instance);
         return -1;
     }
 
@@ -710,11 +835,33 @@ static int vfs_umount_impl(const char* mountpoint) {
         return -1;
     }
 
-    if (vfs_mount_table_remove(mountpoint) != 0) {
+    if (!mountpoint) {
         return -1;
     }
 
-    return 0;
+    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+        if (!g_mounts[i].used) {
+            continue;
+        }
+
+        if (strcmp(g_mounts[i].mountpoint, mountpoint) != 0) {
+            continue;
+        }
+
+        vfs_fs_instance* inst = g_mounts[i].instance;
+        if (!inst || !inst->type || !inst->type->umount) {
+            return -1;
+        }
+
+        if (inst->type->umount(inst) != 0) {
+            return -1;
+        }
+
+        memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
+        return 0;
+    }
+
+    return -1;
 }
 
 static void vfs_init_impl(void) {
@@ -724,10 +871,11 @@ static void vfs_init_impl(void) {
     (void)vfs_mount_impl("/dev", "devfs");
 }
 
-static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
-static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel, int is_abs);
-static int vfs_yulafs_unlink(const char* mountpoint, const char* rel, int is_abs);
+static vfs_node_t* vfs_yulafs_open(vfs_fs_instance* inst, task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
+static int vfs_yulafs_mkdir(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
+static int vfs_yulafs_unlink(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
 static int vfs_yulafs_rename(
+    vfs_fs_instance* inst,
     const char* old_mountpoint,
     const char* old_rel,
     const char* new_mountpoint,
@@ -735,19 +883,24 @@ static int vfs_yulafs_rename(
     int old_is_abs,
     int new_is_abs
 );
-static int vfs_yulafs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
-static int vfs_yulafs_getdents(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
-static int vfs_yulafs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
-static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
-static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs);
+static int vfs_yulafs_stat(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
+static int vfs_yulafs_getdents(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
+static int vfs_yulafs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
+static int vfs_yulafs_get_fs_info(vfs_fs_instance* inst, uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
+static vfs_node_t* vfs_yulafs_create_node_from_path(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
 
-static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
-static int vfs_devfs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
-static int vfs_devfs_getdents(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
-static int vfs_devfs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
-static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs);
+static vfs_node_t* vfs_devfs_open(vfs_fs_instance* inst, task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
+static int vfs_devfs_stat(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
+static int vfs_devfs_getdents(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
+static int vfs_devfs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
+static vfs_node_t* vfs_devfs_create_node_from_path(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs);
 
-static const vfs_fs_driver_ops g_yulafs_ops = {
+static vfs_fs_instance* vfs_yulafs_mount(const char* source, uint32_t flags);
+static int vfs_yulafs_umount(vfs_fs_instance* inst);
+static vfs_fs_instance* vfs_devfs_mount(const char* source, uint32_t flags);
+static int vfs_devfs_umount(vfs_fs_instance* inst);
+
+static const vfs_fs_type_ops g_yulafs_type_ops = {
     vfs_yulafs_open,
     vfs_yulafs_mkdir,
     vfs_yulafs_unlink,
@@ -760,12 +913,14 @@ static const vfs_fs_driver_ops g_yulafs_ops = {
     vfs_yulafs_create_node_from_path,
 };
 
-const vfs_fs_driver g_yulafs_driver = {
+const vfs_fs_type g_yulafs_type = {
     "yulafs",
-    &g_yulafs_ops,
+    &g_yulafs_type_ops,
+    vfs_yulafs_mount,
+    vfs_yulafs_umount,
 };
 
-static const vfs_fs_driver_ops g_devfs_ops = {
+static const vfs_fs_type_ops g_devfs_type_ops = {
     vfs_devfs_open,
     0,
     0,
@@ -778,22 +933,24 @@ static const vfs_fs_driver_ops g_devfs_ops = {
     vfs_devfs_create_node_from_path,
 };
 
-const vfs_fs_driver g_devfs_driver = {
+const vfs_fs_type g_devfs_type = {
     "devfs",
-    &g_devfs_ops,
+    &g_devfs_type_ops,
+    vfs_devfs_mount,
+    vfs_devfs_umount,
 };
 
-static const vfs_fs_driver* vfs_driver_from_name(const char* fs_name) {
+static const vfs_fs_type* vfs_fs_type_from_name(const char* fs_name) {
     if (!fs_name) {
         return nullptr;
     }
 
-    if (strcmp(fs_name, g_yulafs_driver.name) == 0) {
-        return &g_yulafs_driver;
+    if (strcmp(fs_name, g_yulafs_type.name) == 0) {
+        return &g_yulafs_type;
     }
 
-    if (strcmp(fs_name, g_devfs_driver.name) == 0) {
-        return &g_devfs_driver;
+    if (strcmp(fs_name, g_devfs_type.name) == 0) {
+        return &g_devfs_type;
     }
 
     return nullptr;
@@ -820,21 +977,25 @@ static vfs_node_t* vfs_open_devfs_root_node(void) {
     memset(node, 0, sizeof(vfs_node_t));
     strlcpy(node->name, "/dev", sizeof(node->name));
     node->flags = VFS_FLAG_DEVFS_ROOT;
-    node->fs_driver = &g_devfs_driver;
     node->refs = 1;
     return node;
 }
 
 static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append);
 
-static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
+static vfs_node_t* vfs_yulafs_open(vfs_fs_instance* inst, task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
     (void)curr;
 
     const int open_append = (flags & 2) != 0;
     const int open_write = ((flags & 1) != 0) || open_append;
 
     if (!is_abs) {
-        return vfs_open_yulafs_node(rel, open_write, open_append);
+        vfs_node_t* node = vfs_open_yulafs_node(rel, open_write, open_append);
+        if (node) {
+            node->fs_driver = inst;
+        }
+
+        return node;
     }
 
     char abs_path[128];
@@ -842,10 +1003,16 @@ static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const c
         return nullptr;
     }
 
-    return vfs_open_yulafs_node(abs_path, open_write, open_append);
+    vfs_node_t* node = vfs_open_yulafs_node(abs_path, open_write, open_append);
+    if (node) {
+        node->fs_driver = inst;
+    }
+
+    return node;
 }
 
-static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel, int is_abs) {
+static int vfs_yulafs_mkdir(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs) {
+    (void)inst;
     if (!rel) {
         return -1;
     }
@@ -862,7 +1029,8 @@ static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel, int is_abs)
     return yulafs_mkdir(abs_path);
 }
 
-static int vfs_yulafs_unlink(const char* mountpoint, const char* rel, int is_abs) {
+static int vfs_yulafs_unlink(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs) {
+    (void)inst;
     if (!rel) {
         return -1;
     }
@@ -880,6 +1048,7 @@ static int vfs_yulafs_unlink(const char* mountpoint, const char* rel, int is_abs
 }
 
 static int vfs_yulafs_rename(
+    vfs_fs_instance* inst,
     const char* old_mountpoint,
     const char* old_rel,
     const char* new_mountpoint,
@@ -887,6 +1056,7 @@ static int vfs_yulafs_rename(
     int old_is_abs,
     int new_is_abs
 ) {
+    (void)inst;
     if (!old_rel || !new_rel) {
         return -1;
     }
@@ -927,7 +1097,8 @@ static int vfs_yulafs_rename(
     return yulafs_rename(old_rel, new_abs);
 }
 
-static int vfs_yulafs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out) {
+static int vfs_yulafs_stat(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out) {
+    (void)inst;
     if (!rel || !out) {
         return -1;
     }
@@ -957,7 +1128,8 @@ static int vfs_yulafs_stat(const char* mountpoint, const char* rel, int is_abs, 
     return 0;
 }
 
-static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
+static int vfs_yulafs_get_fs_info(vfs_fs_instance* inst, uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
+    (void)inst;
     if (!total_blocks || !free_blocks || !block_size) {
         return -1;
     }
@@ -966,7 +1138,7 @@ static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks,
     return 0;
 }
 
-static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs) {
+static vfs_node_t* vfs_yulafs_create_node_from_path(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs) {
     if (!rel) {
         return nullptr;
     }
@@ -995,7 +1167,7 @@ static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, cons
     node->inode_idx = inode;
     node->ops = &yfs_vfs_ops;
     node->flags = VFS_FLAG_EXEC_NODE | VFS_FLAG_YULAFS;
-    node->fs_driver = &g_yulafs_driver;
+    node->fs_driver = inst;
 
     yfs_inode_t info;
     if (yulafs_stat(inode, &info) == 0) {
@@ -1008,19 +1180,30 @@ static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, cons
     return node;
 }
 
-static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
+static vfs_node_t* vfs_devfs_open(vfs_fs_instance* inst, task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
+    (void)inst;
     (void)mountpoint;
     (void)is_abs;
     (void)flags;
 
     if (!rel || rel[0] == '\0') {
-        return vfs_open_devfs_root_node();
+        if (!inst || !inst->root) {
+            return nullptr;
+        }
+
+        return vfs_node_clone_existing(inst->root);
     }
 
-    return vfs_open_devfs_node(curr, rel);
+    vfs_node_t* node = vfs_open_devfs_node(curr, rel);
+    if (node) {
+        node->fs_driver = inst;
+    }
+
+    return node;
 }
 
-static int vfs_devfs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out) {
+static int vfs_devfs_stat(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out) {
+    (void)inst;
     (void)mountpoint;
     (void)is_abs;
 
@@ -1045,12 +1228,14 @@ static int vfs_devfs_stat(const char* mountpoint, const char* rel, int is_abs, v
 }
 
 static int vfs_devfs_getdents(
+    vfs_fs_instance* inst,
     task_t* curr,
     vfs_node_t* dir_node,
     uint32_t* inout_offset,
     yfs_dirent_info_t* out,
     uint32_t out_size
 ) {
+    (void)inst;
     (void)curr;
 
     if (!dir_node || (dir_node->flags & VFS_FLAG_DEVFS_ROOT) == 0) {
@@ -1060,7 +1245,8 @@ static int vfs_devfs_getdents(
     return devfs_registry().getdents(inout_offset, out, out_size);
 }
 
-static int vfs_devfs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out) {
+static int vfs_devfs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out) {
+    (void)inst;
     if (!curr || !dir_node || !name || !*name || !out) {
         return -1;
     }
@@ -1090,7 +1276,7 @@ static int vfs_devfs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* nam
     return 0;
 }
 
-static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs) {
+static vfs_node_t* vfs_devfs_create_node_from_path(vfs_fs_instance* inst, const char* mountpoint, const char* rel, int is_abs) {
     (void)mountpoint;
     (void)is_abs;
 
@@ -1100,7 +1286,7 @@ static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const
 
     vfs_node_t* node = devfs_clone(rel);
     if (node) {
-        node->fs_driver = &g_devfs_driver;
+        node->fs_driver = inst;
     }
 
     return node;
@@ -1135,7 +1321,6 @@ static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int op
     node->inode_idx = inode;
     node->ops = &yfs_vfs_ops;
     node->flags = VFS_FLAG_YULAFS;
-    node->fs_driver = &g_yulafs_driver;
 
     yfs_inode_t info;
     if (yulafs_stat(inode, &info) == 0) {
@@ -1148,7 +1333,7 @@ static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int op
     return node;
 }
 
-int vfs_open(const char* path, int flags) {
+extern "C" int vfs_open(const char* path, int flags) {
     task_t* curr = proc_current();
     if (!curr) {
         return -1;
@@ -1163,15 +1348,15 @@ int vfs_open(const char* path, int flags) {
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
     int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->driver->ops->open) {
+    if (!mount->instance->type->ops->open) {
         return -1;
     }
 
-    vfs_node_t* node = mount->driver->ops->open(curr, mount->mountpoint, rel, is_abs, flags);
+    vfs_node_t* node = mount->instance->type->ops->open(mount->instance, curr, mount->mountpoint, rel, is_abs, flags);
 
     if (!node) {
         return -1;
@@ -1201,7 +1386,7 @@ int vfs_open(const char* path, int flags) {
     return fd;
 }
 
-int vfs_read(int fd, void* buf, uint32_t size) {
+extern "C" int vfs_read(int fd, void* buf, uint32_t size) {
     task_t* curr = proc_current();
     FileDescHandle d(curr, fd);
 
@@ -1228,7 +1413,7 @@ int vfs_read(int fd, void* buf, uint32_t size) {
     return res;
 }
 
-int vfs_write(int fd, const void* buf, uint32_t size) {
+extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
     task_t* curr = proc_current();
     FileDescHandle d(curr, fd);
 
@@ -1249,10 +1434,10 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
     }
 
     if ((fflags & FILE_FLAG_APPEND) != 0) {
-        const vfs_fs_driver* driver = (const vfs_fs_driver*)d.get()->node->fs_driver;
-        if (driver && driver->ops && driver->ops->append) {
+        vfs_fs_instance* inst = (vfs_fs_instance*)d.get()->node->fs_driver;
+        if (inst && inst->type && inst->type->ops && inst->type->ops->append) {
             uint32_t new_offset = 0;
-            const int res = driver->ops->append(curr, d.get()->node, buf, size, &new_offset);
+            const int res = inst->type->ops->append(inst, curr, d.get()->node, buf, size, &new_offset);
             if (res > 0) {
                 kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
                 d.get()->offset = new_offset;
@@ -1271,7 +1456,7 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
     return res;
 }
 
-int vfs_ioctl(int fd, uint32_t req, void* arg) {
+extern "C" int vfs_ioctl(int fd, uint32_t req, void* arg) {
     task_t* curr = proc_current();
     FileDescHandle d(curr, fd);
 
@@ -1286,7 +1471,7 @@ int vfs_ioctl(int fd, uint32_t req, void* arg) {
     return d.get()->node->ops->ioctl(d.get()->node, req, arg);
 }
 
-int vfs_close(int fd) {
+extern "C" int vfs_close(int fd) {
     task_t* curr = proc_current();
 
     file_desc_t* d = nullptr;
@@ -1298,7 +1483,7 @@ int vfs_close(int fd) {
     return 0;
 }
 
-vfs_node_t* vfs_create_node_from_path(const char* path) {
+extern "C" vfs_node_t* vfs_create_node_from_path(const char* path) {
     if (!path || path[0] == '\0') {
         return 0;
     }
@@ -1306,18 +1491,18 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
     int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
         return 0;
     }
 
-    if (!mount->driver->ops->create_node_from_path) {
+    if (!mount->instance->type->ops->create_node_from_path) {
         return 0;
     }
 
-    return mount->driver->ops->create_node_from_path(mount->mountpoint, rel, is_abs);
+    return mount->instance->type->ops->create_node_from_path(mount->instance, mount->mountpoint, rel, is_abs);
 }
 
-int vfs_mkdir(const char* path) {
+extern "C" int vfs_mkdir(const char* path) {
     if (!path || path[0] == '\0') {
         return -1;
     }
@@ -1325,18 +1510,18 @@ int vfs_mkdir(const char* path) {
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
     int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->driver->ops->mkdir) {
+    if (!mount->instance->type->ops->mkdir) {
         return -1;
     }
 
-    return mount->driver->ops->mkdir(mount->mountpoint, rel, is_abs);
+    return mount->instance->type->ops->mkdir(mount->instance, mount->mountpoint, rel, is_abs);
 }
 
-int vfs_unlink(const char* path) {
+extern "C" int vfs_unlink(const char* path) {
     if (!path || path[0] == '\0') {
         return -1;
     }
@@ -1344,18 +1529,18 @@ int vfs_unlink(const char* path) {
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
     int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->driver->ops->unlink) {
+    if (!mount->instance->type->ops->unlink) {
         return -1;
     }
 
-    return mount->driver->ops->unlink(mount->mountpoint, rel, is_abs);
+    return mount->instance->type->ops->unlink(mount->instance, mount->mountpoint, rel, is_abs);
 }
 
-int vfs_stat_path(const char* path, vfs_stat_t* out) {
+extern "C" int vfs_stat_path(const char* path, vfs_stat_t* out) {
     if (!path || path[0] == '\0' || !out) {
         return -1;
     }
@@ -1363,18 +1548,18 @@ int vfs_stat_path(const char* path, vfs_stat_t* out) {
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
     int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->driver->ops->stat) {
+    if (!mount->instance->type->ops->stat) {
         return -1;
     }
 
-    return mount->driver->ops->stat(mount->mountpoint, rel, is_abs, out);
+    return mount->instance->type->ops->stat(mount->instance, mount->mountpoint, rel, is_abs, out);
 }
 
-int vfs_rename(const char* old_path, const char* new_path) {
+extern "C" int vfs_rename(const char* old_path, const char* new_path) {
     if (!old_path || old_path[0] == '\0' || !new_path || new_path[0] == '\0') {
         return -1;
     }
@@ -1386,23 +1571,24 @@ int vfs_rename(const char* old_path, const char* new_path) {
     int old_is_abs = 0;
     int new_is_abs = 0;
 
-    if (vfs_resolve_mount(old_path, &old_mount, &old_rel, &old_is_abs) != 0 || !old_mount || !old_mount->driver || !old_mount->driver->ops) {
+    if (vfs_resolve_mount(old_path, &old_mount, &old_rel, &old_is_abs) != 0 || !old_mount || !old_mount->instance || !old_mount->instance->type || !old_mount->instance->type->ops) {
         return -1;
     }
 
-    if (vfs_resolve_mount(new_path, &new_mount, &new_rel, &new_is_abs) != 0 || !new_mount || !new_mount->driver || !new_mount->driver->ops) {
+    if (vfs_resolve_mount(new_path, &new_mount, &new_rel, &new_is_abs) != 0 || !new_mount || !new_mount->instance || !new_mount->instance->type || !new_mount->instance->type->ops) {
         return -1;
     }
 
-    if (old_mount->driver != new_mount->driver) {
+    if (old_mount->instance->type != new_mount->instance->type || old_mount->instance != new_mount->instance) {
         return -1;
     }
 
-    if (!old_mount->driver->ops->rename) {
+    if (!old_mount->instance->type->ops->rename) {
         return -1;
     }
 
-    return old_mount->driver->ops->rename(
+    return old_mount->instance->type->ops->rename(
+        old_mount->instance,
         old_mount->mountpoint,
         old_rel,
         new_mount->mountpoint,
@@ -1412,17 +1598,24 @@ int vfs_rename(const char* old_path, const char* new_path) {
     );
 }
 
-int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
+extern "C" int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
     if (!total_blocks || !free_blocks || !block_size) {
         return -1;
     }
 
-    const vfs_fs_driver* driver = vfs_driver_from_name("yulafs");
-    if (!driver || !driver->ops || !driver->ops->get_fs_info) {
+    const vfs_mount_entry* root = nullptr;
+    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+        if (g_mounts[i].used && strcmp(g_mounts[i].mountpoint, "/") == 0) {
+            root = &g_mounts[i];
+            break;
+        }
+    }
+
+    if (!root || !root->instance || !root->instance->type || !root->instance->type->ops || !root->instance->type->ops->get_fs_info) {
         return -1;
     }
 
-    return driver->ops->get_fs_info(total_blocks, free_blocks, block_size);
+    return root->instance->type->ops->get_fs_info(root->instance, total_blocks, free_blocks, block_size);
 }
 
-} // extern "C"
+
