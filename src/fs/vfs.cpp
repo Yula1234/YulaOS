@@ -379,7 +379,7 @@ int DevFSRegistry::getdents(uint32_t* inout_offset, yfs_dirent_info_t* out, uint
         yfs_dirent_info_t* dst = &out[written];
         memset(dst, 0, sizeof(*dst));
 
-        dst->inode = 0;
+        dst->inode = (uint32_t)(((uintptr_t)tmpl >> 4) | 1u);
         dst->type = YFS_TYPE_FILE;
         dst->size = tmpl->size;
         strlcpy(dst->name, tmpl->name, sizeof(dst->name));
@@ -645,21 +645,6 @@ static int vfs_mount_table_insert(const char* mountpoint, vfs_fs_instance* insta
             g_mounts[i].used = 1u;
             g_mounts[i].instance = instance;
             strlcpy(g_mounts[i].mountpoint, mountpoint, sizeof(g_mounts[i].mountpoint));
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static int vfs_mount_table_remove(const char* mountpoint) {
-    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-        if (!g_mounts[i].used) {
-            continue;
-        }
-
-        if (strcmp(g_mounts[i].mountpoint, mountpoint) == 0) {
-            memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
             return 0;
         }
     }
