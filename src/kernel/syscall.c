@@ -670,7 +670,7 @@ static void syscall_get_mem_stats(registers_t* regs, task_t* curr) {
 
 static void syscall_mkdir(registers_t* regs, task_t* curr) {
     if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
-        regs->eax = (uint32_t)yulafs_mkdir((char*)regs->ebx);
+        regs->eax = (uint32_t)vfs_mkdir((char*)regs->ebx);
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -678,7 +678,7 @@ static void syscall_mkdir(registers_t* regs, task_t* curr) {
 
 static void syscall_unlink(registers_t* regs, task_t* curr) {
     if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
-        regs->eax = (uint32_t)yulafs_unlink((char*)regs->ebx);
+        regs->eax = (uint32_t)vfs_unlink((char*)regs->ebx);
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -1194,16 +1194,14 @@ static void syscall_stat(registers_t* regs, task_t* curr) {
         return;
     }
 
-    int inode_idx = yulafs_lookup(path);
-    if (inode_idx < 0) {
+    vfs_stat_t st;
+    if (vfs_stat_path(path, &st) != 0) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    yfs_inode_t k_inode;
-    yulafs_stat((yfs_ino_t)inode_idx, &k_inode);
-    u_stat->type = k_inode.type;
-    u_stat->size = k_inode.size;
+    u_stat->type = st.type;
+    u_stat->size = st.size;
     regs->eax = 0;
 }
 
@@ -1215,12 +1213,18 @@ static void syscall_get_fs_info(registers_t* regs, task_t* curr) {
         return;
     }
 
-    uint32_t t, f, b;
-    yulafs_get_filesystem_info(&t, &f, &b);
+    uint32_t total_blocks = 0;
+    uint32_t free_blocks = 0;
+    uint32_t block_size = 0;
 
-    u_info->total_blocks = t;
-    u_info->free_blocks = f;
-    u_info->block_size = b;
+    if (vfs_get_fs_info(&total_blocks, &free_blocks, &block_size) != 0) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    u_info->total_blocks = total_blocks;
+    u_info->free_blocks = free_blocks;
+    u_info->block_size = block_size;
 
     regs->eax = 0;
 }
@@ -1230,7 +1234,7 @@ static void syscall_rename(registers_t* regs, task_t* curr) {
     char* newp = (char*)regs->ecx;
 
     if (check_user_buffer(curr, oldp, 1) && check_user_buffer(curr, newp, 1)) {
-        regs->eax = (uint32_t)yulafs_rename(oldp, newp);
+        regs->eax = (uint32_t)vfs_rename(oldp, newp);
     } else {
         regs->eax = (uint32_t)-1;
     }

@@ -285,11 +285,6 @@ int vfs_getdents(int fd, void* buf, uint32_t size) {
     );
 }
 
-typedef struct {
-    uint32_t type;
-    uint32_t size;
-} __attribute__((packed)) vfs_stat_t;
-
 int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
     task_t* curr = proc_current();
     FileDescHandle d(curr, dirfd);
@@ -557,4 +552,86 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
 
     node->refs = 1;
     return node;
+}
+
+static int vfs_is_dev_path(const char* path) {
+    if (!path || path[0] == '\0') {
+        return 0;
+    }
+
+    const char* target_path = path;
+    if (target_path[0] == '/' && target_path[1] != '\0') {
+        target_path++;
+    }
+
+    return strncmp(target_path, "dev/", 4) == 0;
+}
+
+int vfs_mkdir(const char* path) {
+    if (!path || path[0] == '\0') {
+        return -1;
+    }
+
+    if (vfs_is_dev_path(path)) {
+        return -1;
+    }
+
+    return yulafs_mkdir(path);
+}
+
+int vfs_unlink(const char* path) {
+    if (!path || path[0] == '\0') {
+        return -1;
+    }
+
+    if (vfs_is_dev_path(path)) {
+        return -1;
+    }
+
+    return yulafs_unlink(path);
+}
+
+int vfs_stat_path(const char* path, vfs_stat_t* out) {
+    if (!path || path[0] == '\0' || !out) {
+        return -1;
+    }
+
+    if (vfs_is_dev_path(path)) {
+        return -1;
+    }
+
+    const int inode_idx = yulafs_lookup(path);
+    if (inode_idx < 0) {
+        return -1;
+    }
+
+    yfs_inode_t info;
+    if (yulafs_stat((yfs_ino_t)inode_idx, &info) != 0) {
+        return -1;
+    }
+
+    out->type = info.type;
+    out->size = info.size;
+    return 0;
+}
+
+int vfs_rename(const char* old_path, const char* new_path) {
+    if (!old_path || old_path[0] == '\0' || !new_path || new_path[0] == '\0') {
+        return -1;
+    }
+
+    if (vfs_is_dev_path(old_path) || vfs_is_dev_path(new_path)) {
+        return -1;
+    }
+
+    return yulafs_rename(old_path, new_path);
+}
+
+int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
+    if (!total_blocks || !free_blocks || !block_size) {
+        return -1;
+    }
+
+    yulafs_get_filesystem_info(total_blocks, free_blocks, block_size);
+    return 0;
 }

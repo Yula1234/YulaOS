@@ -30,6 +30,11 @@ typedef struct vfs_ops {
     int (*ioctl)(struct vfs_node* node, uint32_t req, void* arg);
 } vfs_ops_t;
 
+typedef struct {
+    uint32_t type;
+    uint32_t size;
+} __attribute__((packed)) vfs_stat_t;
+
 typedef struct vfs_node {
     char name[32];
     uint32_t flags;
@@ -58,6 +63,11 @@ int vfs_close(int fd);
 int vfs_ioctl(int fd, uint32_t req, void* arg);
 int vfs_getdents(int fd, void* buf, uint32_t size);
 int vfs_fstatat(int dirfd, const char* name, void* stat_buf);
+int vfs_mkdir(const char* path);
+int vfs_unlink(const char* path);
+int vfs_stat_path(const char* path, vfs_stat_t* out);
+int vfs_rename(const char* old_path, const char* new_path);
+int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
 
 void vfs_node_retain(vfs_node_t* node);
 void vfs_node_release(vfs_node_t* node);
