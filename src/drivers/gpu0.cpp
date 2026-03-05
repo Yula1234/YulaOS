@@ -1619,6 +1619,7 @@ static vfs_node_t g_gpu0_node = {
     .size = 0u,
     .inode_idx = 0u,
     .refs = 0u,
+    .fs_driver = nullptr,
     .ops = &g_gpu0_ops,
     
     .private_data = nullptr,

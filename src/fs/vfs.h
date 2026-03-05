@@ -43,6 +43,7 @@ typedef struct vfs_node {
     uint32_t size;
     uint32_t inode_idx; 
     uint32_t refs;      
+    const void* fs_driver;
     vfs_ops_t* ops;     
     void* private_data; 
     void (*private_retain)(void* private_data);

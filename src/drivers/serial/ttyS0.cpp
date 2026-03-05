@@ -314,15 +314,16 @@ vfs_ops_t ttyS0_ops = {
 };
 
 vfs_node_t ttyS0_node = {
-    "ttyS0",
-    0,
-    0,
-    0,
-    0,
-    &ttyS0_ops,
-    &g_proc,
-    tty_private_retain,
-    tty_private_release,
+    .name = "ttyS0",
+    .flags = 0u,
+    .size = 0u,
+    .inode_idx = 0u,
+    .refs = 0u,
+    .fs_driver = nullptr,
+    .ops = &ttyS0_ops,
+    .private_data = &g_proc,
+    .private_retain = tty_private_retain,
+    .private_release = tty_private_release,
 };
 
 }

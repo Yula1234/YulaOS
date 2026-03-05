@@ -73,6 +73,7 @@ static vfs_node_t* vfs_node_clone_existing(const vfs_node_t* src) noexcept {
     node->refs = 1;
     node->flags |= VFS_FLAG_DEVFS_ALLOC;
     node->flags |= VFS_FLAG_DEVFS_NODE;
+    node->fs_driver = snapshot.fs_driver;
     return node;
 }
 
@@ -98,7 +99,6 @@ static DevFSRegistry& devfs_registry() noexcept {
 
 } // namespace
 
-struct vfs_fs_driver;
 
 struct vfs_fs_driver_ops {
     vfs_node_t* (*open)(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
@@ -129,11 +129,6 @@ struct vfs_mount_entry {
     char mountpoint[32];
     uint8_t used;
 };
-
-extern "C" {
-extern const vfs_fs_driver g_yulafs_driver;
-extern const vfs_fs_driver g_devfs_driver;
-}
 
 namespace {
 
@@ -238,6 +233,7 @@ vfs_node_t* DevFSRegistry::clone(const char* name) noexcept {
     node->refs = 1;
     node->flags |= VFS_FLAG_DEVFS_ALLOC;
     node->flags |= VFS_FLAG_DEVFS_NODE;
+    node->fs_driver = snapshot.fs_driver;
 
     return node;
 }
@@ -365,12 +361,7 @@ int vfs_getdents(int fd, void* buf, uint32_t size) {
         return -1;
     }
 
-    const vfs_fs_driver* driver = nullptr;
-    if ((node->flags & VFS_FLAG_DEVFS_ROOT) != 0 || (node->flags & VFS_FLAG_DEVFS_NODE) != 0) {
-        driver = &g_devfs_driver;
-    } else if ((node->flags & VFS_FLAG_YULAFS) != 0) {
-        driver = &g_yulafs_driver;
-    }
+    const vfs_fs_driver* driver = (const vfs_fs_driver*)node->fs_driver;
 
     if (!driver || !driver->ops || !driver->ops->getdents) {
         return -1;
@@ -397,12 +388,7 @@ int vfs_fstatat(int dirfd, const char* name, void* stat_buf) {
         return -1;
     }
 
-    const vfs_fs_driver* driver = nullptr;
-    if ((node->flags & VFS_FLAG_DEVFS_ROOT) != 0 || (node->flags & VFS_FLAG_DEVFS_NODE) != 0) {
-        driver = &g_devfs_driver;
-    } else if ((node->flags & VFS_FLAG_YULAFS) != 0) {
-        driver = &g_yulafs_driver;
-    }
+    const vfs_fs_driver* driver = (const vfs_fs_driver*)node->fs_driver;
 
     if (!driver || !driver->ops || !driver->ops->fstatat) {
         return -1;
@@ -815,6 +801,7 @@ static vfs_node_t* vfs_open_devfs_root_node(void) {
     memset(node, 0, sizeof(vfs_node_t));
     strlcpy(node->name, "/dev", sizeof(node->name));
     node->flags = VFS_FLAG_DEVFS_ROOT;
+    node->fs_driver = &g_devfs_driver;
     node->refs = 1;
     return node;
 }
@@ -989,6 +976,7 @@ static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, cons
     node->inode_idx = inode;
     node->ops = &yfs_vfs_ops;
     node->flags = VFS_FLAG_EXEC_NODE | VFS_FLAG_YULAFS;
+    node->fs_driver = &g_yulafs_driver;
 
     yfs_inode_t info;
     if (yulafs_stat(inode, &info) == 0) {
@@ -1091,7 +1079,12 @@ static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const
         return nullptr;
     }
 
-    return devfs_clone(rel);
+    vfs_node_t* node = devfs_clone(rel);
+    if (node) {
+        node->fs_driver = &g_devfs_driver;
+    }
+
+    return node;
 }
 
 static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append) {
@@ -1123,6 +1116,7 @@ static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int op
     node->inode_idx = inode;
     node->ops = &yfs_vfs_ops;
     node->flags = VFS_FLAG_YULAFS;
+    node->fs_driver = &g_yulafs_driver;
 
     yfs_inode_t info;
     if (yulafs_stat(inode, &info) == 0) {

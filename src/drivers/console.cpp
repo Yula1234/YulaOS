@@ -139,15 +139,16 @@ vfs_ops_t console_ops = {
 };
 
 vfs_node_t console_node = {
-    "console",
-    0,
-    0,
-    0,
-    0,
-    &console_ops,
-    0,
-    0,
-    0,
+    .name = "console",
+    .flags = 0u,
+    .size = 0u,
+    .inode_idx = 0u,
+    .refs = 0u,
+    .fs_driver = nullptr,
+    .ops = &console_ops,
+    .private_data = nullptr,
+    .private_retain = nullptr,
+    .private_release = nullptr,
 };
 
 }
