@@ -101,20 +101,22 @@ static DevFSRegistry& devfs_registry() noexcept {
 struct vfs_fs_driver;
 
 struct vfs_fs_driver_ops {
-    vfs_node_t* (*open)(task_t* curr, const char* mountpoint, const char* rel, int flags);
-    int (*mkdir)(const char* mountpoint, const char* rel);
-    int (*unlink)(const char* mountpoint, const char* rel);
+    vfs_node_t* (*open)(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
+    int (*mkdir)(const char* mountpoint, const char* rel, int is_abs);
+    int (*unlink)(const char* mountpoint, const char* rel, int is_abs);
     int (*rename)(
         const char* old_mountpoint,
         const char* old_rel,
         const char* new_mountpoint,
-        const char* new_rel
+        const char* new_rel,
+        int old_is_abs,
+        int new_is_abs
     );
-    int (*stat)(const char* mountpoint, const char* rel, vfs_stat_t* out);
+    int (*stat)(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
     int (*getdents)(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
     int (*fstatat)(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
     int (*get_fs_info)(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
-    vfs_node_t* (*create_node_from_path)(const char* mountpoint, const char* rel);
+    vfs_node_t* (*create_node_from_path)(const char* mountpoint, const char* rel, int is_abs);
 };
 
 struct vfs_fs_driver {
@@ -568,12 +570,36 @@ static int vfs_mount_table_has(const char* mountpoint) {
     return -1;
 }
 
-static int vfs_resolve_mount(const char* path, const vfs_mount_entry** out_mount, const char** out_rel) {
-    if (!path || path[0] == '\0' || !out_mount || !out_rel) {
+static int vfs_resolve_mount(
+    const char* path,
+    const vfs_mount_entry** out_mount,
+    const char** out_rel,
+    int* out_is_abs
+) {
+    if (!path || path[0] == '\0' || !out_mount || !out_rel || !out_is_abs) {
         return -1;
     }
 
-    if (!vfs_path_is_abs(path)) {
+    const int is_abs = vfs_path_is_abs(path);
+    *out_is_abs = is_abs;
+
+    if (!is_abs) {
+        for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+            if (!g_mounts[i].used) {
+                continue;
+            }
+
+            if (strcmp(g_mounts[i].mountpoint, "/") == 0) {
+                if (!g_mounts[i].driver || !g_mounts[i].driver->ops) {
+                    return -1;
+                }
+
+                *out_mount = &g_mounts[i];
+                *out_rel = path;
+                return 0;
+            }
+        }
+
         return -1;
     }
 
@@ -695,26 +721,28 @@ static void vfs_init_impl(void) {
     (void)vfs_mount_impl("/dev", "devfs");
 }
 
-static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int flags);
-static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel);
-static int vfs_yulafs_unlink(const char* mountpoint, const char* rel);
+static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
+static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel, int is_abs);
+static int vfs_yulafs_unlink(const char* mountpoint, const char* rel, int is_abs);
 static int vfs_yulafs_rename(
     const char* old_mountpoint,
     const char* old_rel,
     const char* new_mountpoint,
-    const char* new_rel
+    const char* new_rel,
+    int old_is_abs,
+    int new_is_abs
 );
-static int vfs_yulafs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out);
+static int vfs_yulafs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
 static int vfs_yulafs_getdents(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
 static int vfs_yulafs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
 static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
-static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel);
+static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs);
 
-static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int flags);
-static int vfs_devfs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out);
+static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags);
+static int vfs_devfs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out);
 static int vfs_devfs_getdents(task_t* curr, vfs_node_t* dir_node, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
 static int vfs_devfs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out);
-static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel);
+static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs);
 
 static const vfs_fs_driver_ops g_yulafs_ops = {
     vfs_yulafs_open,
@@ -793,11 +821,15 @@ static vfs_node_t* vfs_open_devfs_root_node(void) {
 
 static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append);
 
-static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int flags) {
+static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
     (void)curr;
 
     const int open_append = (flags & 2) != 0;
     const int open_write = ((flags & 1) != 0) || open_append;
+
+    if (!is_abs) {
+        return vfs_open_yulafs_node(rel, open_write, open_append);
+    }
 
     char abs_path[128];
     if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
@@ -807,7 +839,15 @@ static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const c
     return vfs_open_yulafs_node(abs_path, open_write, open_append);
 }
 
-static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel) {
+static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel, int is_abs) {
+    if (!rel) {
+        return -1;
+    }
+
+    if (!is_abs) {
+        return yulafs_mkdir(rel);
+    }
+
     char abs_path[128];
     if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
         return -1;
@@ -816,7 +856,15 @@ static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel) {
     return yulafs_mkdir(abs_path);
 }
 
-static int vfs_yulafs_unlink(const char* mountpoint, const char* rel) {
+static int vfs_yulafs_unlink(const char* mountpoint, const char* rel, int is_abs) {
+    if (!rel) {
+        return -1;
+    }
+
+    if (!is_abs) {
+        return yulafs_unlink(rel);
+    }
+
     char abs_path[128];
     if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
         return -1;
@@ -829,33 +877,66 @@ static int vfs_yulafs_rename(
     const char* old_mountpoint,
     const char* old_rel,
     const char* new_mountpoint,
-    const char* new_rel
+    const char* new_rel,
+    int old_is_abs,
+    int new_is_abs
 ) {
-    char old_abs[128];
-    char new_abs[128];
-
-    if (vfs_build_abs_path(old_mountpoint, old_rel, old_abs, sizeof(old_abs)) != 0) {
+    if (!old_rel || !new_rel) {
         return -1;
     }
 
+    if (!old_is_abs && !new_is_abs) {
+        return yulafs_rename(old_rel, new_rel);
+    }
+
+    if (old_is_abs && new_is_abs) {
+        char old_abs[128];
+        char new_abs[128];
+
+        if (vfs_build_abs_path(old_mountpoint, old_rel, old_abs, sizeof(old_abs)) != 0) {
+            return -1;
+        }
+
+        if (vfs_build_abs_path(new_mountpoint, new_rel, new_abs, sizeof(new_abs)) != 0) {
+            return -1;
+        }
+
+        return yulafs_rename(old_abs, new_abs);
+    }
+
+    if (old_is_abs) {
+        char old_abs[128];
+        if (vfs_build_abs_path(old_mountpoint, old_rel, old_abs, sizeof(old_abs)) != 0) {
+            return -1;
+        }
+
+        return yulafs_rename(old_abs, new_rel);
+    }
+
+    char new_abs[128];
     if (vfs_build_abs_path(new_mountpoint, new_rel, new_abs, sizeof(new_abs)) != 0) {
         return -1;
     }
 
-    return yulafs_rename(old_abs, new_abs);
+    return yulafs_rename(old_rel, new_abs);
 }
 
-static int vfs_yulafs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out) {
-    if (!out) {
+static int vfs_yulafs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out) {
+    if (!rel || !out) {
         return -1;
     }
 
+    const char* path = rel;
     char abs_path[128];
-    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
-        return -1;
+    if (is_abs) {
+        if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+            return -1;
+        }
+
+        path = abs_path;
     }
 
-    const int inode_idx = yulafs_lookup(abs_path);
+    const int inode_idx = yulafs_lookup(path);
     if (inode_idx < 0) {
         return -1;
     }
@@ -867,7 +948,6 @@ static int vfs_yulafs_stat(const char* mountpoint, const char* rel, vfs_stat_t* 
 
     out->type = info.type;
     out->size = info.size;
-
     return 0;
 }
 
@@ -880,13 +960,22 @@ static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks,
     return 0;
 }
 
-static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel) {
-    char abs_path[128];
-    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs) {
+    if (!rel) {
         return nullptr;
     }
 
-    const int inode = yulafs_lookup(abs_path);
+    const char* path = rel;
+    char abs_path[128];
+    if (is_abs) {
+        if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+            return nullptr;
+        }
+
+        path = abs_path;
+    }
+
+    const int inode = yulafs_lookup(path);
     if (inode == -1) {
         return nullptr;
     }
@@ -906,14 +995,15 @@ static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, cons
         node->size = info.size;
     }
 
-    strlcpy(node->name, abs_path, sizeof(node->name));
+    strlcpy(node->name, path, sizeof(node->name));
 
     node->refs = 1;
     return node;
 }
 
-static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int flags) {
+static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
     (void)mountpoint;
+    (void)is_abs;
     (void)flags;
 
     if (!rel || rel[0] == '\0') {
@@ -923,11 +1013,18 @@ static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const ch
     return vfs_open_devfs_node(curr, rel);
 }
 
-static int vfs_devfs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out) {
+static int vfs_devfs_stat(const char* mountpoint, const char* rel, int is_abs, vfs_stat_t* out) {
     (void)mountpoint;
+    (void)is_abs;
 
-    if (!rel || rel[0] == '\0' || !out) {
+    if (!out) {
         return -1;
+    }
+
+    if (!rel || rel[0] == '\0') {
+        out->type = YFS_TYPE_DIR;
+        out->size = 0;
+        return 0;
     }
 
     vfs_node_t* tmpl = devfs_fetch(rel);
@@ -986,8 +1083,9 @@ static int vfs_devfs_fstatat(task_t* curr, vfs_node_t* dir_node, const char* nam
     return 0;
 }
 
-static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel) {
+static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel, int is_abs) {
     (void)mountpoint;
+    (void)is_abs;
 
     if (!rel || rel[0] == '\0') {
         return nullptr;
@@ -1051,7 +1149,8 @@ int vfs_open(const char* path, int flags) {
 
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    int is_abs = 0;
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
@@ -1059,7 +1158,7 @@ int vfs_open(const char* path, int flags) {
         return -1;
     }
 
-    vfs_node_t* node = mount->driver->ops->open(curr, mount->mountpoint, rel, flags);
+    vfs_node_t* node = mount->driver->ops->open(curr, mount->mountpoint, rel, is_abs, flags);
 
     if (!node) {
         return -1;
@@ -1191,7 +1290,8 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
 
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    int is_abs = 0;
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return 0;
     }
 
@@ -1199,7 +1299,7 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
         return 0;
     }
 
-    return mount->driver->ops->create_node_from_path(mount->mountpoint, rel);
+    return mount->driver->ops->create_node_from_path(mount->mountpoint, rel, is_abs);
 }
 
 int vfs_mkdir(const char* path) {
@@ -1209,7 +1309,8 @@ int vfs_mkdir(const char* path) {
 
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    int is_abs = 0;
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
@@ -1217,7 +1318,7 @@ int vfs_mkdir(const char* path) {
         return -1;
     }
 
-    return mount->driver->ops->mkdir(mount->mountpoint, rel);
+    return mount->driver->ops->mkdir(mount->mountpoint, rel, is_abs);
 }
 
 int vfs_unlink(const char* path) {
@@ -1227,7 +1328,8 @@ int vfs_unlink(const char* path) {
 
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    int is_abs = 0;
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
@@ -1235,7 +1337,7 @@ int vfs_unlink(const char* path) {
         return -1;
     }
 
-    return mount->driver->ops->unlink(mount->mountpoint, rel);
+    return mount->driver->ops->unlink(mount->mountpoint, rel, is_abs);
 }
 
 int vfs_stat_path(const char* path, vfs_stat_t* out) {
@@ -1245,7 +1347,8 @@ int vfs_stat_path(const char* path, vfs_stat_t* out) {
 
     const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
+    int is_abs = 0;
+    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
@@ -1253,7 +1356,7 @@ int vfs_stat_path(const char* path, vfs_stat_t* out) {
         return -1;
     }
 
-    return mount->driver->ops->stat(mount->mountpoint, rel, out);
+    return mount->driver->ops->stat(mount->mountpoint, rel, is_abs, out);
 }
 
 int vfs_rename(const char* old_path, const char* new_path) {
@@ -1265,12 +1368,14 @@ int vfs_rename(const char* old_path, const char* new_path) {
     const vfs_mount_entry* new_mount = nullptr;
     const char* old_rel = nullptr;
     const char* new_rel = nullptr;
+    int old_is_abs = 0;
+    int new_is_abs = 0;
 
-    if (vfs_resolve_mount(old_path, &old_mount, &old_rel) != 0 || !old_mount || !old_mount->driver || !old_mount->driver->ops) {
+    if (vfs_resolve_mount(old_path, &old_mount, &old_rel, &old_is_abs) != 0 || !old_mount || !old_mount->driver || !old_mount->driver->ops) {
         return -1;
     }
 
-    if (vfs_resolve_mount(new_path, &new_mount, &new_rel) != 0 || !new_mount || !new_mount->driver || !new_mount->driver->ops) {
+    if (vfs_resolve_mount(new_path, &new_mount, &new_rel, &new_is_abs) != 0 || !new_mount || !new_mount->driver || !new_mount->driver->ops) {
         return -1;
     }
 
@@ -1286,7 +1391,9 @@ int vfs_rename(const char* old_path, const char* new_path) {
         old_mount->mountpoint,
         old_rel,
         new_mount->mountpoint,
-        new_rel
+        new_rel,
+        old_is_abs,
+        new_is_abs
     );
 }
 
