@@ -266,6 +266,22 @@ vfs_node_t* devfs_take(const char* name) {
     return devfs_registry().take(name);
 }
 
+static void vfs_init_impl(void);
+static int vfs_mount_impl(const char* mountpoint, const char* fs_name);
+static int vfs_umount_impl(const char* mountpoint);
+
+void vfs_init(void) {
+    vfs_init_impl();
+}
+
+int vfs_mount(const char* mountpoint, const char* fs_name) {
+    return vfs_mount_impl(mountpoint, fs_name);
+}
+
+int vfs_umount(const char* mountpoint) {
+    return vfs_umount_impl(mountpoint);
+}
+
 void vfs_node_retain(vfs_node_t* node) {
     if (!node) {
         return;
@@ -431,28 +447,221 @@ enum class vfs_mount_kind {
     devfs,
 };
 
+struct vfs_mount_entry {
+    vfs_mount_kind kind;
+    char mountpoint[32];
+    uint8_t used;
+};
+
+static vfs_mount_entry g_mounts[8];
+
+static int vfs_mountpoint_is_valid(const char* mountpoint) {
+    if (!mountpoint || mountpoint[0] != '/') {
+        return 0;
+    }
+
+    if (mountpoint[1] == '\0') {
+        return 1;
+    }
+
+    const size_t n = strlen(mountpoint);
+    if (n == 0 || n >= sizeof(g_mounts[0].mountpoint)) {
+        return 0;
+    }
+
+    if (mountpoint[n - 1] == '/') {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int vfs_path_is_abs(const char* path) {
+    return path && path[0] == '/';
+}
+
+static int vfs_mount_match_len(const char* path, const char* mountpoint) {
+    if (!path || !mountpoint) {
+        return -1;
+    }
+
+    if (mountpoint[0] != '/') {
+        return -1;
+    }
+
+    if (mountpoint[1] == '\0') {
+        return 1;
+    }
+
+    const size_t mlen = strlen(mountpoint);
+    if (strncmp(path, mountpoint, mlen) != 0) {
+        return -1;
+    }
+
+    const char next = path[mlen];
+    if (next == '\0' || next == '/') {
+        return (int)mlen;
+    }
+
+    return -1;
+}
+
+static int vfs_mount_kind_from_name(const char* fs_name, vfs_mount_kind* out) {
+    if (!fs_name || !out) {
+        return -1;
+    }
+
+    if (strcmp(fs_name, "yulafs") == 0) {
+        *out = vfs_mount_kind::yulafs;
+        return 0;
+    }
+
+    if (strcmp(fs_name, "devfs") == 0) {
+        *out = vfs_mount_kind::devfs;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int vfs_mount_table_insert(const char* mountpoint, vfs_mount_kind kind) {
+    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+        if (!g_mounts[i].used) {
+            memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
+            g_mounts[i].used = 1u;
+            g_mounts[i].kind = kind;
+            strlcpy(g_mounts[i].mountpoint, mountpoint, sizeof(g_mounts[i].mountpoint));
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int vfs_mount_table_remove(const char* mountpoint) {
+    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+        if (!g_mounts[i].used) {
+            continue;
+        }
+
+        if (strcmp(g_mounts[i].mountpoint, mountpoint) == 0) {
+            memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int vfs_mount_table_find(const char* mountpoint, vfs_mount_kind* out_kind) {
+    if (!mountpoint) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+        if (!g_mounts[i].used) {
+            continue;
+        }
+
+        if (strcmp(g_mounts[i].mountpoint, mountpoint) == 0) {
+            if (out_kind) {
+                *out_kind = g_mounts[i].kind;
+            }
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 static int vfs_resolve_mount(const char* path, vfs_mount_kind* out_kind, const char** out_rel) {
     if (!path || path[0] == '\0' || !out_kind || !out_rel) {
         return -1;
     }
 
-    const char* normalized = vfs_normalize_abs_path(path);
-
-    if (strncmp(normalized, "dev/", 4) == 0) {
-        *out_kind = vfs_mount_kind::devfs;
-        *out_rel = normalized + 4;
-        return 0;
+    if (!vfs_path_is_abs(path)) {
+        return -1;
     }
 
-    if (strcmp(normalized, "dev") == 0) {
-        *out_kind = vfs_mount_kind::devfs;
-        *out_rel = "";
-        return 0;
+    int best_len = -1;
+    vfs_mount_kind best_kind = vfs_mount_kind::yulafs;
+    const char* best_mount = "/";
+
+    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
+        if (!g_mounts[i].used) {
+            continue;
+        }
+
+        const int mlen = vfs_mount_match_len(path, g_mounts[i].mountpoint);
+        if (mlen > best_len) {
+            best_len = mlen;
+            best_kind = g_mounts[i].kind;
+            best_mount = g_mounts[i].mountpoint;
+        }
     }
 
-    *out_kind = vfs_mount_kind::yulafs;
-    *out_rel = normalized;
+    if (best_len < 0 || !best_mount) {
+        return -1;
+    }
+
+    const size_t mlen = strlen(best_mount);
+    const char* rel = path + mlen;
+    if (rel[0] == '/') {
+        rel++;
+    }
+
+    *out_kind = best_kind;
+    *out_rel = rel;
     return 0;
+}
+
+static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
+    if (!mountpoint || !fs_name) {
+        return -1;
+    }
+
+    if (!vfs_mountpoint_is_valid(mountpoint)) {
+        return -1;
+    }
+
+    vfs_mount_kind existing;
+    if (vfs_mount_table_find(mountpoint, &existing) == 0) {
+        return -1;
+    }
+
+    vfs_mount_kind kind;
+    if (vfs_mount_kind_from_name(fs_name, &kind) != 0) {
+        return -1;
+    }
+
+    if (vfs_mount_table_insert(mountpoint, kind) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int vfs_umount_impl(const char* mountpoint) {
+    if (!mountpoint) {
+        return -1;
+    }
+
+    if (!vfs_mountpoint_is_valid(mountpoint)) {
+        return -1;
+    }
+
+    if (vfs_mount_table_remove(mountpoint) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void vfs_init_impl(void) {
+    memset(g_mounts, 0, sizeof(g_mounts));
+
+    (void)vfs_mount_impl("/", "yulafs");
+    (void)vfs_mount_impl("/dev", "devfs");
 }
 
 static vfs_node_t* vfs_open_devfs_node(task_t* curr, const char* dev_name) {

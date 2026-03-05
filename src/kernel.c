@@ -148,6 +148,7 @@ static void kmain_devices_init(void) {
 }
 
 static void kmain_fs_init(void) {
+    vfs_init();
     yulafs_init();
     yulafs_lookup("/");
 

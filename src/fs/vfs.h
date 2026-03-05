@@ -58,6 +58,11 @@ typedef struct {
 
 #define FILE_FLAG_APPEND 1u
 
+void vfs_init(void);
+
+int vfs_mount(const char* mountpoint, const char* fs_name);
+int vfs_umount(const char* mountpoint);
+
 int vfs_open(const char* path, int flags);
 int vfs_read(int fd, void* buf, uint32_t size);
 int vfs_write(int fd, const void* buf, uint32_t size);
