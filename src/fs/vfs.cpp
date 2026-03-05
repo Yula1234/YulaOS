@@ -1229,7 +1229,7 @@ int vfs_write(int fd, const void* buf, uint32_t size) {
         off = d.get()->offset;
     }
 
-    if ((fflags & FILE_FLAG_APPEND) != 0 && (d.get()->node->flags & VFS_FLAG_YULAFS) != 0) {
+    if ((fflags & FILE_FLAG_APPEND) != 0 && d.get()->node->fs_driver == &g_yulafs_driver) {
         yfs_off_t start = 0;
 
         const int res = yulafs_append(d.get()->node->inode_idx, buf, size, &start);
