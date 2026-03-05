@@ -14,6 +14,8 @@
 #define VFS_FLAG_DEVFS_ALLOC 32u
 #define VFS_FLAG_PTY_MASTER  64u
 #define VFS_FLAG_PTY_SLAVE   128u
+#define VFS_FLAG_DEVFS_NODE  256u
+#define VFS_FLAG_DEVFS_ROOT  512u
 #define VFS_FLAG_EXEC_NODE   0x80000000u
 
 struct vfs_node;
