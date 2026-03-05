@@ -426,34 +426,37 @@ static vfs_ops_t yfs_vfs_ops = {
     0,
 };
 
-static const char* vfs_normalize_abs_path(const char* path) {
-    if (!path || path[0] == '\0') {
-        return "";
-    }
+struct vfs_fs_driver;
 
-    if (path[0] == '/' && path[1] != '\0') {
-        return path + 1;
-    }
+struct vfs_fs_driver_ops {
+    vfs_node_t* (*open)(task_t* curr, const char* mountpoint, const char* rel, int flags);
+    int (*mkdir)(const char* mountpoint, const char* rel);
+    int (*unlink)(const char* mountpoint, const char* rel);
+    int (*rename)(
+        const char* old_mountpoint,
+        const char* old_rel,
+        const char* new_mountpoint,
+        const char* new_rel
+    );
+    int (*stat)(const char* mountpoint, const char* rel, vfs_stat_t* out);
+    int (*get_fs_info)(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
+    vfs_node_t* (*create_node_from_path)(const char* mountpoint, const char* rel);
+};
 
-    if (path[0] == '/' && path[1] == '\0') {
-        return "";
-    }
-
-    return path;
-}
-
-enum class vfs_mount_kind {
-    yulafs,
-    devfs,
+struct vfs_fs_driver {
+    const char* name;
+    const vfs_fs_driver_ops* ops;
 };
 
 struct vfs_mount_entry {
-    vfs_mount_kind kind;
+    const vfs_fs_driver* driver;
     char mountpoint[32];
     uint8_t used;
 };
 
 static vfs_mount_entry g_mounts[8];
+
+static const vfs_fs_driver* vfs_driver_from_name(const char* fs_name);
 
 static int vfs_mountpoint_is_valid(const char* mountpoint) {
     if (!mountpoint || mountpoint[0] != '/') {
@@ -506,30 +509,54 @@ static int vfs_mount_match_len(const char* path, const char* mountpoint) {
     return -1;
 }
 
-static int vfs_mount_kind_from_name(const char* fs_name, vfs_mount_kind* out) {
-    if (!fs_name || !out) {
+static int vfs_build_abs_path(
+    const char* mountpoint,
+    const char* rel,
+    char* out,
+    size_t out_size
+) {
+    if (!mountpoint || mountpoint[0] != '/' || !out || out_size == 0) {
         return -1;
     }
 
-    if (strcmp(fs_name, "yulafs") == 0) {
-        *out = vfs_mount_kind::yulafs;
-        return 0;
+    if (!rel || rel[0] == '\0') {
+        return strlcpy(out, mountpoint, out_size) >= out_size ? -1 : 0;
     }
 
-    if (strcmp(fs_name, "devfs") == 0) {
-        *out = vfs_mount_kind::devfs;
-        return 0;
+    if (strcmp(mountpoint, "/") == 0) {
+        if (out_size < 2) {
+            return -1;
+        }
+
+        out[0] = '/';
+        out[1] = '\0';
+
+        const size_t n = strlcat(out, rel, out_size);
+        return n >= out_size ? -1 : 0;
     }
 
-    return -1;
+    const size_t n0 = strlcpy(out, mountpoint, out_size);
+    if (n0 >= out_size) {
+        return -1;
+    }
+
+    if (out[n0 - 1] != '/') {
+        const size_t n1 = strlcat(out, "/", out_size);
+        if (n1 >= out_size) {
+            return -1;
+        }
+    }
+
+    const size_t n2 = strlcat(out, rel, out_size);
+    return n2 >= out_size ? -1 : 0;
 }
 
-static int vfs_mount_table_insert(const char* mountpoint, vfs_mount_kind kind) {
+static int vfs_mount_table_insert(const char* mountpoint, const vfs_fs_driver* driver) {
     for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
         if (!g_mounts[i].used) {
             memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
             g_mounts[i].used = 1u;
-            g_mounts[i].kind = kind;
+            g_mounts[i].driver = driver;
             strlcpy(g_mounts[i].mountpoint, mountpoint, sizeof(g_mounts[i].mountpoint));
             return 0;
         }
@@ -553,7 +580,7 @@ static int vfs_mount_table_remove(const char* mountpoint) {
     return -1;
 }
 
-static int vfs_mount_table_find(const char* mountpoint, vfs_mount_kind* out_kind) {
+static int vfs_mount_table_has(const char* mountpoint) {
     if (!mountpoint) {
         return -1;
     }
@@ -564,9 +591,6 @@ static int vfs_mount_table_find(const char* mountpoint, vfs_mount_kind* out_kind
         }
 
         if (strcmp(g_mounts[i].mountpoint, mountpoint) == 0) {
-            if (out_kind) {
-                *out_kind = g_mounts[i].kind;
-            }
             return 0;
         }
     }
@@ -574,8 +598,8 @@ static int vfs_mount_table_find(const char* mountpoint, vfs_mount_kind* out_kind
     return -1;
 }
 
-static int vfs_resolve_mount(const char* path, vfs_mount_kind* out_kind, const char** out_rel) {
-    if (!path || path[0] == '\0' || !out_kind || !out_rel) {
+static int vfs_resolve_mount(const char* path, const vfs_mount_entry** out_mount, const char** out_rel) {
+    if (!path || path[0] == '\0' || !out_mount || !out_rel) {
         return -1;
     }
 
@@ -584,8 +608,8 @@ static int vfs_resolve_mount(const char* path, vfs_mount_kind* out_kind, const c
     }
 
     int best_len = -1;
-    vfs_mount_kind best_kind = vfs_mount_kind::yulafs;
-    const char* best_mount = "/";
+    const vfs_mount_entry* best = nullptr;
+    const char* best_mount = nullptr;
 
     for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
         if (!g_mounts[i].used) {
@@ -595,12 +619,12 @@ static int vfs_resolve_mount(const char* path, vfs_mount_kind* out_kind, const c
         const int mlen = vfs_mount_match_len(path, g_mounts[i].mountpoint);
         if (mlen > best_len) {
             best_len = mlen;
-            best_kind = g_mounts[i].kind;
+            best = &g_mounts[i];
             best_mount = g_mounts[i].mountpoint;
         }
     }
 
-    if (best_len < 0 || !best_mount) {
+    if (best_len < 0 || !best_mount || !best || !best->driver || !best->driver->ops) {
         return -1;
     }
 
@@ -610,7 +634,7 @@ static int vfs_resolve_mount(const char* path, vfs_mount_kind* out_kind, const c
         rel++;
     }
 
-    *out_kind = best_kind;
+    *out_mount = best;
     *out_rel = rel;
     return 0;
 }
@@ -624,17 +648,16 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
         return -1;
     }
 
-    vfs_mount_kind existing;
-    if (vfs_mount_table_find(mountpoint, &existing) == 0) {
+    if (vfs_mount_table_has(mountpoint) == 0) {
         return -1;
     }
 
-    vfs_mount_kind kind;
-    if (vfs_mount_kind_from_name(fs_name, &kind) != 0) {
+    const vfs_fs_driver* driver = vfs_driver_from_name(fs_name);
+    if (!driver || !driver->ops) {
         return -1;
     }
 
-    if (vfs_mount_table_insert(mountpoint, kind) != 0) {
+    if (vfs_mount_table_insert(mountpoint, driver) != 0) {
         return -1;
     }
 
@@ -664,6 +687,69 @@ static void vfs_init_impl(void) {
     (void)vfs_mount_impl("/dev", "devfs");
 }
 
+static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int flags);
+static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel);
+static int vfs_yulafs_unlink(const char* mountpoint, const char* rel);
+static int vfs_yulafs_rename(
+    const char* old_mountpoint,
+    const char* old_rel,
+    const char* new_mountpoint,
+    const char* new_rel
+);
+static int vfs_yulafs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out);
+static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
+static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel);
+
+static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int flags);
+static int vfs_devfs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out);
+static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel);
+
+static const vfs_fs_driver_ops g_yulafs_ops = {
+    vfs_yulafs_open,
+    vfs_yulafs_mkdir,
+    vfs_yulafs_unlink,
+    vfs_yulafs_rename,
+    vfs_yulafs_stat,
+    vfs_yulafs_get_fs_info,
+    vfs_yulafs_create_node_from_path,
+};
+
+static const vfs_fs_driver g_yulafs_driver = {
+    "yulafs",
+    &g_yulafs_ops,
+};
+
+static const vfs_fs_driver_ops g_devfs_ops = {
+    vfs_devfs_open,
+    0,
+    0,
+    0,
+    vfs_devfs_stat,
+    0,
+    vfs_devfs_create_node_from_path,
+};
+
+static const vfs_fs_driver g_devfs_driver = {
+    "devfs",
+    &g_devfs_ops,
+};
+
+static const vfs_fs_driver* vfs_driver_from_name(const char* fs_name) {
+    if (!fs_name) {
+        return nullptr;
+    }
+
+    if (strcmp(fs_name, g_yulafs_driver.name) == 0) {
+        return &g_yulafs_driver;
+    }
+
+    if (strcmp(fs_name, g_devfs_driver.name) == 0) {
+        return &g_devfs_driver;
+    }
+
+    return nullptr;
+}
+
 static vfs_node_t* vfs_open_devfs_node(task_t* curr, const char* dev_name) {
     if (!curr || !dev_name || dev_name[0] == '\0') {
         return nullptr;
@@ -687,6 +773,165 @@ static vfs_node_t* vfs_open_devfs_root_node(void) {
     node->flags = VFS_FLAG_DEVFS_ROOT;
     node->refs = 1;
     return node;
+}
+
+static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append);
+
+static vfs_node_t* vfs_yulafs_open(task_t* curr, const char* mountpoint, const char* rel, int flags) {
+    (void)curr;
+
+    const int open_append = (flags & 2) != 0;
+    const int open_write = ((flags & 1) != 0) || open_append;
+
+    char abs_path[128];
+    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+        return nullptr;
+    }
+
+    return vfs_open_yulafs_node(abs_path, open_write, open_append);
+}
+
+static int vfs_yulafs_mkdir(const char* mountpoint, const char* rel) {
+    char abs_path[128];
+    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+        return -1;
+    }
+
+    return yulafs_mkdir(abs_path);
+}
+
+static int vfs_yulafs_unlink(const char* mountpoint, const char* rel) {
+    char abs_path[128];
+    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+        return -1;
+    }
+
+    return yulafs_unlink(abs_path);
+}
+
+static int vfs_yulafs_rename(
+    const char* old_mountpoint,
+    const char* old_rel,
+    const char* new_mountpoint,
+    const char* new_rel
+) {
+    char old_abs[128];
+    char new_abs[128];
+
+    if (vfs_build_abs_path(old_mountpoint, old_rel, old_abs, sizeof(old_abs)) != 0) {
+        return -1;
+    }
+
+    if (vfs_build_abs_path(new_mountpoint, new_rel, new_abs, sizeof(new_abs)) != 0) {
+        return -1;
+    }
+
+    return yulafs_rename(old_abs, new_abs);
+}
+
+static int vfs_yulafs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out) {
+    if (!out) {
+        return -1;
+    }
+
+    char abs_path[128];
+    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+        return -1;
+    }
+
+    const int inode_idx = yulafs_lookup(abs_path);
+    if (inode_idx < 0) {
+        return -1;
+    }
+
+    yfs_inode_t info;
+    if (yulafs_stat((yfs_ino_t)inode_idx, &info) != 0) {
+        return -1;
+    }
+
+    out->type = info.type;
+    out->size = info.size;
+
+    return 0;
+}
+
+static int vfs_yulafs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
+    if (!total_blocks || !free_blocks || !block_size) {
+        return -1;
+    }
+
+    yulafs_get_filesystem_info(total_blocks, free_blocks, block_size);
+    return 0;
+}
+
+static vfs_node_t* vfs_yulafs_create_node_from_path(const char* mountpoint, const char* rel) {
+    char abs_path[128];
+    if (vfs_build_abs_path(mountpoint, rel, abs_path, sizeof(abs_path)) != 0) {
+        return nullptr;
+    }
+
+    const int inode = yulafs_lookup(abs_path);
+    if (inode == -1) {
+        return nullptr;
+    }
+
+    vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (!node) {
+        return nullptr;
+    }
+
+    memset(node, 0, sizeof(vfs_node_t));
+    node->inode_idx = inode;
+    node->ops = &yfs_vfs_ops;
+    node->flags = VFS_FLAG_EXEC_NODE | VFS_FLAG_YULAFS;
+
+    yfs_inode_t info;
+    if (yulafs_stat(inode, &info) == 0) {
+        node->size = info.size;
+    }
+
+    strlcpy(node->name, abs_path, sizeof(node->name));
+
+    node->refs = 1;
+    return node;
+}
+
+static vfs_node_t* vfs_devfs_open(task_t* curr, const char* mountpoint, const char* rel, int flags) {
+    (void)mountpoint;
+    (void)flags;
+
+    if (!rel || rel[0] == '\0') {
+        return vfs_open_devfs_root_node();
+    }
+
+    return vfs_open_devfs_node(curr, rel);
+}
+
+static int vfs_devfs_stat(const char* mountpoint, const char* rel, vfs_stat_t* out) {
+    (void)mountpoint;
+
+    if (!rel || rel[0] == '\0' || !out) {
+        return -1;
+    }
+
+    vfs_node_t* tmpl = devfs_fetch(rel);
+    if (!tmpl) {
+        return -1;
+    }
+
+    out->type = YFS_TYPE_FILE;
+    out->size = tmpl->size;
+    return 0;
+}
+
+static vfs_node_t* vfs_devfs_create_node_from_path(const char* mountpoint, const char* rel) {
+    (void)mountpoint;
+
+    if (!rel || rel[0] == '\0') {
+        return nullptr;
+    }
+
+    return devfs_clone(rel);
 }
 
 static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append) {
@@ -741,25 +986,18 @@ int vfs_open(const char* path, int flags) {
     }
 
     const int open_append = (flags & 2) != 0;
-    const int open_write = ((flags & 1) != 0) || open_append;
 
-    vfs_node_t* node = nullptr;
-
-    vfs_mount_kind kind;
+    const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &kind, &rel) != 0) {
+    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
-    if (kind == vfs_mount_kind::devfs) {
-        if (!rel || rel[0] == '\0') {
-            node = vfs_open_devfs_root_node();
-        } else {
-            node = vfs_open_devfs_node(curr, rel);
-        }
-    } else {
-        node = vfs_open_yulafs_node(path, open_write, open_append);
+    if (!mount->driver->ops->open) {
+        return -1;
     }
+
+    vfs_node_t* node = mount->driver->ops->open(curr, mount->mountpoint, rel, flags);
 
     if (!node) {
         return -1;
@@ -889,54 +1127,17 @@ vfs_node_t* vfs_create_node_from_path(const char* path) {
         return 0;
     }
 
-    vfs_mount_kind kind;
+    const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &kind, &rel) != 0) {
+    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return 0;
     }
 
-    if (kind == vfs_mount_kind::devfs) {
-        if (!rel || rel[0] == '\0') {
-            return 0;
-        }
-
-        return devfs_clone(rel);
-    }
-
-    const int inode = yulafs_lookup(path);
-    if (inode == -1) {
+    if (!mount->driver->ops->create_node_from_path) {
         return 0;
     }
 
-    vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-    if (!node) {
-        return 0;
-    }
-
-    memset(node, 0, sizeof(vfs_node_t));
-    node->inode_idx = inode;
-    node->ops = &yfs_vfs_ops;
-    node->flags = VFS_FLAG_EXEC_NODE | VFS_FLAG_YULAFS;
-
-    yfs_inode_t info;
-    if (yulafs_stat(inode, &info) == 0) {
-        node->size = info.size;
-    }
-
-    strlcpy(node->name, path, sizeof(node->name));
-
-    node->refs = 1;
-    return node;
-}
-
-static int vfs_is_dev_path(const char* path) {
-    vfs_mount_kind kind;
-    const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &kind, &rel) != 0) {
-        return 0;
-    }
-
-    return kind == vfs_mount_kind::devfs;
+    return mount->driver->ops->create_node_from_path(mount->mountpoint, rel);
 }
 
 int vfs_mkdir(const char* path) {
@@ -944,11 +1145,17 @@ int vfs_mkdir(const char* path) {
         return -1;
     }
 
-    if (vfs_is_dev_path(path)) {
+    const vfs_mount_entry* mount = nullptr;
+    const char* rel = nullptr;
+    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
-    return yulafs_mkdir(path);
+    if (!mount->driver->ops->mkdir) {
+        return -1;
+    }
+
+    return mount->driver->ops->mkdir(mount->mountpoint, rel);
 }
 
 int vfs_unlink(const char* path) {
@@ -956,11 +1163,17 @@ int vfs_unlink(const char* path) {
         return -1;
     }
 
-    if (vfs_is_dev_path(path)) {
+    const vfs_mount_entry* mount = nullptr;
+    const char* rel = nullptr;
+    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
-    return yulafs_unlink(path);
+    if (!mount->driver->ops->unlink) {
+        return -1;
+    }
+
+    return mount->driver->ops->unlink(mount->mountpoint, rel);
 }
 
 int vfs_stat_path(const char* path, vfs_stat_t* out) {
@@ -968,40 +1181,17 @@ int vfs_stat_path(const char* path, vfs_stat_t* out) {
         return -1;
     }
 
-    vfs_mount_kind kind;
+    const vfs_mount_entry* mount = nullptr;
     const char* rel = nullptr;
-    if (vfs_resolve_mount(path, &kind, &rel) != 0) {
+    if (vfs_resolve_mount(path, &mount, &rel) != 0 || !mount || !mount->driver || !mount->driver->ops) {
         return -1;
     }
 
-    if (kind == vfs_mount_kind::devfs) {
-        if (!rel || rel[0] == '\0') {
-            return -1;
-        }
-
-        vfs_node_t* tmpl = devfs_fetch(rel);
-        if (!tmpl) {
-            return -1;
-        }
-
-        out->type = YFS_TYPE_FILE;
-        out->size = tmpl->size;
-        return 0;
-    }
-
-    const int inode_idx = yulafs_lookup(path);
-    if (inode_idx < 0) {
+    if (!mount->driver->ops->stat) {
         return -1;
     }
 
-    yfs_inode_t info;
-    if (yulafs_stat((yfs_ino_t)inode_idx, &info) != 0) {
-        return -1;
-    }
-
-    out->type = info.type;
-    out->size = info.size;
-    return 0;
+    return mount->driver->ops->stat(mount->mountpoint, rel, out);
 }
 
 int vfs_rename(const char* old_path, const char* new_path) {
@@ -1009,11 +1199,33 @@ int vfs_rename(const char* old_path, const char* new_path) {
         return -1;
     }
 
-    if (vfs_is_dev_path(old_path) || vfs_is_dev_path(new_path)) {
+    const vfs_mount_entry* old_mount = nullptr;
+    const vfs_mount_entry* new_mount = nullptr;
+    const char* old_rel = nullptr;
+    const char* new_rel = nullptr;
+
+    if (vfs_resolve_mount(old_path, &old_mount, &old_rel) != 0 || !old_mount || !old_mount->driver || !old_mount->driver->ops) {
         return -1;
     }
 
-    return yulafs_rename(old_path, new_path);
+    if (vfs_resolve_mount(new_path, &new_mount, &new_rel) != 0 || !new_mount || !new_mount->driver || !new_mount->driver->ops) {
+        return -1;
+    }
+
+    if (old_mount->driver != new_mount->driver) {
+        return -1;
+    }
+
+    if (!old_mount->driver->ops->rename) {
+        return -1;
+    }
+
+    return old_mount->driver->ops->rename(
+        old_mount->mountpoint,
+        old_rel,
+        new_mount->mountpoint,
+        new_rel
+    );
 }
 
 int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size) {
@@ -1021,8 +1233,12 @@ int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* blo
         return -1;
     }
 
-    yulafs_get_filesystem_info(total_blocks, free_blocks, block_size);
-    return 0;
+    const vfs_fs_driver* driver = vfs_driver_from_name("yulafs");
+    if (!driver || !driver->ops || !driver->ops->get_fs_info) {
+        return -1;
+    }
+
+    return driver->ops->get_fs_info(total_blocks, free_blocks, block_size);
 }
 
 } // extern "C"
