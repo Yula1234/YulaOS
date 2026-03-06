@@ -1,11 +1,21 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #ifndef MM_VMM_H
 #define MM_VMM_H
 
 #include <stdint.h>
 #include <stddef.h>
+
+/*
+ * Virtual Memory Manager (kernel heap address-space allocator).
+ *
+ * This module manages a virtual address range and backs it with physical pages
+ * from PMM on demand.
+ *
+ * alloc_pages() returns a virtual base address; free_pages() unmaps and returns
+ * the physical pages back to PMM.
+ */
 
 #define KERNEL_HEAP_START 0xC0000000u
 #define KERNEL_HEAP_SIZE  0x40000000u
@@ -19,6 +29,15 @@
 
 namespace kernel {
 
+class PmmState;
+
+/*
+ * A free region inside the managed virtual range.
+ *
+ * The same node is indexed in two intrusive rb-trees:
+ *  - by address, used for adjacency checks and merge
+ *  - by (size,start), used for best-fit selection
+ */
 struct VmFreeBlock {
     rb_node node_addr;
     rb_node node_size;
@@ -29,6 +48,7 @@ struct VmFreeBlock {
     VmFreeBlock* next_free;
 };
 
+/* Key extractor for address-ordered tree. */
 struct VmFreeBlockAddrKeyOfValue {
     const uintptr_t& operator()(const VmFreeBlock& block) const noexcept;
 };
@@ -38,10 +58,15 @@ struct VmFreeBlockSizeKey {
     uintptr_t start;
 };
 
+/* Key extractor for size-ordered tree. */
 struct VmFreeBlockSizeKeyOfValue {
     VmFreeBlockSizeKey operator()(const VmFreeBlock& block) const noexcept;
 };
 
+/*
+ * Strict weak ordering for size-tree.
+ * Ties are resolved by address to keep keys unique.
+ */
 struct VmFreeBlockSizeKeyCompare {
     bool operator()(const VmFreeBlockSizeKey& a, const VmFreeBlockSizeKey& b) const noexcept;
 };
@@ -63,13 +88,31 @@ using VmmSizeTree = IntrusiveRbTree<
 
 class VmmState {
 public:
+    /*
+     * Initialize kernel heap allocator state.
+     * Expects PMM and paging to be ready.
+     */
     void init() noexcept;
 
+    /*
+     * Allocate `count` pages of virtual space and map fresh physical pages.
+     * Returns a virtual base address or nullptr on failure.
+     */
     [[nodiscard]] void* alloc_pages(size_t count) noexcept;
+
+    /*
+     * Free/unmap `count` pages previously returned by alloc_pages().
+     * `ptr` must match the original base address.
+     */
     void free_pages(void* ptr, size_t count) noexcept;
 
+    /*
+     * Map a single page into the kernel page directory.
+     * Returns 1 on success, 0 on invalid alignment.
+     */
     [[nodiscard]] int map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept;
 
+    /* Number of pages currently allocated from the kernel heap range. */
     [[nodiscard]] size_t get_used_pages() const noexcept;
 
 private:
@@ -90,7 +133,7 @@ private:
 
 [[nodiscard]] VmmState* vmm_state() noexcept;
 
-} // namespace kernel
+} /* namespace kernel */
 
 #endif
 

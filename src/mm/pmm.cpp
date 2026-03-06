@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #include <lib/cpp/new.h>
 
@@ -10,8 +10,17 @@
 
 namespace kernel {
 
+/*
+ * Single instance is enough: PMM is a global resource, and keeping it in a
+ * fixed storage avoids boot-time dynamic allocation dependencies.
+ */
 alignas(PmmState) static unsigned char g_pmm_storage[sizeof(PmmState)];
 static PmmState* g_pmm = nullptr;
+
+/*
+ * Conventional ISA DMA ceiling.
+ * Anything below is treated as the DMA zone for alloc_pages_zone().
+ */
 static constexpr uint32_t k_dma_limit = 16u * 1024u * 1024u;
 
 PmmState* pmm_state() noexcept {
@@ -34,6 +43,13 @@ void PmmState::init_regions(
     uint32_t reserved_count,
     uint32_t kernel_end_addr
 ) noexcept {
+    /*
+     * Initialization is split in two phases:
+     *  1) pessimistically mark every page used
+     *  2) free pages that fall into AVAILABLE regions and are not reserved
+     *
+     * This makes it hard to accidentally hand out memory we never meant to.
+     */
     total_pages_ = 0u;
     used_pages_count_ = 0u;
     mem_map_ = nullptr;
@@ -48,6 +64,10 @@ void PmmState::init_regions(
         return;
     }
 
+    /*
+     * Find the highest available address to size `mem_map_`.
+     * We intentionally ignore reserved/non-available regions here.
+     */
     uint32_t max_end = 0u;
     for (uint32_t i = 0u; i < region_count; i++) {
         if (regions[i].type != PMM_REGION_AVAILABLE) {
@@ -60,6 +80,7 @@ void PmmState::init_regions(
             continue;
         }
 
+        /* Guard against 32-bit overflow in base+size. */
         uint32_t end = base + size;
         if (end < base) {
             end = 0xFFFFFFFFu;
@@ -76,6 +97,10 @@ void PmmState::init_regions(
         return;
     }
 
+    /*
+     * The page metadata lives in physical memory right after the kernel.
+     * This assumes the kernel has already reserved that range.
+     */
     const uint32_t mem_map_phys = align_up(kernel_end_addr);
     mem_map_ = reinterpret_cast<page_t*>(mem_map_phys);
 
@@ -91,6 +116,10 @@ void PmmState::init_regions(
 
     init_used_pages(total_pages_, mem_map_end);
 
+    /*
+     * Free all usable ranges.
+     * We clamp against mem_map_end so metadata itself is never freed.
+     */
     for (uint32_t i = 0u; i < region_count; i++) {
         if (regions[i].type != PMM_REGION_AVAILABLE) {
             continue;
@@ -134,6 +163,12 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
     }
 
     SpinLockSafeGuard guard(lock_);
+
+    /*
+     * Buddy allocation:
+     * pick the smallest order that has a free block, then split down to the
+     * requested order while putting the spare buddies back on freelists.
+     */
 
     uint32_t current_order = order;
     while (current_order <= PMM_MAX_ORDER) {
@@ -240,6 +275,10 @@ uint32_t PmmState::align_down(uint32_t addr) noexcept {
 }
 
 void PmmState::init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) noexcept {
+    /*
+     * Start with everything marked used.
+     * Later we selectively free the ranges we're willing to allocate from.
+     */
     used_pages_count_ = total_pages;
 
     const uint32_t kernel_end = align_up(kernel_end_addr);
@@ -284,6 +323,10 @@ void PmmState::free_range(
         cur = k_dma_limit;
     }
 
+    /*
+     * Free the range using the largest blocks that fit and do not cross zone
+     * boundaries. This builds initial freelists in near-optimal shape.
+     */
     while (cur < end_aligned) {
         if (zone_flags != 0u && (zone_flags & PMM_FLAG_DMA) != 0u && cur >= k_dma_limit) {
             break;
@@ -421,10 +464,17 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
         return;
     }
 
+    /*
+     * We silently ignore invalid frees.
+     * At this layer we don't have a general-purpose reporting channel.
+     */
     if ((page->flags & PMM_FLAG_USED) == 0u) {
         return;
     }
 
+    /*
+     * Kernel image and PMM metadata are pinned for the whole system lifetime.
+     */
     if ((page->flags & PMM_FLAG_KERNEL) != 0u) {
         return;
     }
@@ -434,6 +484,11 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
     uint32_t pfn = static_cast<uint32_t>(page - mem_map_);
     const pmm_zone_t zone = zone_for_flags(page->flags);
 
+    /*
+     * Buddy merge:
+     * repeatedly check if the buddy is free and of the same order and zone.
+     * If yes, remove it from freelist and grow the block.
+     */
     while (order < PMM_MAX_ORDER) {
         const uint32_t buddy_pfn = pfn ^ (1u << order);
 
@@ -481,6 +536,10 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
 }
 
 static inline PmmState& pmm_state_init_once() noexcept {
+    /*
+     * Construct on first use.
+     * Boot code is expected to call init once; this is defensive.
+     */
     if (!g_pmm) {
         g_pmm = new (g_pmm_storage) PmmState();
     }
@@ -488,7 +547,7 @@ static inline PmmState& pmm_state_init_once() noexcept {
     return *g_pmm;
 }
 
-} // namespace kernel
+} /* namespace kernel */
 
 extern "C" {
 

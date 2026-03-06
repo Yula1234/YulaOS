@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #include <lib/compiler.h>
 
@@ -41,6 +41,10 @@ bool VmFreeBlockSizeKeyCompare::operator()(const VmFreeBlockSizeKey& a, const Vm
 
 namespace {
 
+/*
+ * VmFreeBlock objects are stored in an intrusive rb-tree, so the rb_node hooks
+ * must be explicitly reset before reuse.
+ */
 static void init_block(VmFreeBlock& block) noexcept {
     block.node_addr.__parent_color = 0;
     block.node_addr.rb_left = nullptr;
@@ -56,6 +60,10 @@ static void init_block(VmFreeBlock& block) noexcept {
 }
 
 static void init_node_pool(VmFreeBlock* pool, size_t count, VmFreeBlock*& head) noexcept {
+    /*
+     * Node pool is a fixed-size metadata allocator.
+     * We use it to avoid allocating heap memory while managing the heap.
+     */
     for (size_t i = 0; i < count; i++) {
         init_block(pool[i]);
     }
@@ -87,6 +95,10 @@ static void free_node(VmFreeBlock& node, VmFreeBlock*& head) noexcept {
 }
 
 static void tree_insert(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTree& size_tree) noexcept {
+    /*
+     * Every free range must exist in both trees.
+     * If insertion fails, we treat it as an invariant violation.
+     */
     const bool inserted_addr = addr_tree.insert_unique(block);
     const bool inserted_size = size_tree.insert_unique(block);
 
@@ -119,6 +131,10 @@ static void size_tree_reinsert_after_size_change(VmFreeBlock& block, VmmSizeTree
 }
 
 static VmFreeBlock* find_best_fit(size_t size, VmmSizeTree& size_tree) noexcept {
+    /*
+     * Best-fit policy: smallest block that can satisfy `size`.
+     * Ordered by (size,start), so lower_bound gives the candidate directly.
+     */
     const VmFreeBlockSizeKey key{size, 0u};
 
     auto it = size_tree.lower_bound_key(key);
@@ -131,10 +147,18 @@ static VmFreeBlock* find_best_fit(size_t size, VmmSizeTree& size_tree) noexcept 
 }
 
 static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noexcept {
+    /*
+     * Map and populate the kernel heap pages.
+     * On failure this attempts to undo whatever was mapped so far.
+     */
     if (kernel::unlikely(!pmm)) {
         return false;
     }
 
+    /*
+     * Allocate one physical page per virtual page and map it into the kernel
+     * page directory.
+     */
     for (size_t i = 0; i < count; i++) {
         const uintptr_t virt = virt_base + (i * PAGE_SIZE);
 
@@ -163,6 +187,10 @@ static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noex
 }
 
 static void merge_adjacent(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTree& size_tree, VmFreeBlock*& free_head) noexcept {
+    /*
+     * Coalesce adjacent free ranges.
+     * We only ever merge exact neighbors found through the address-ordered tree.
+     */
     VmFreeBlock* curr = &block;
 
     bool merged = true;
@@ -225,9 +253,13 @@ static void merge_adjacent(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTr
     }
 }
 
-} // namespace
+} /* namespace */
 
 void VmmState::init() noexcept {
+    /*
+     * At init time the heap is a single free block.
+     * Actual mapping happens lazily in alloc_pages().
+     */
     pmm_ = kernel::pmm_state();
 
     init_node_pool(node_pool_, k_max_nodes, free_nodes_head_);
@@ -286,6 +318,10 @@ void* VmmState::alloc_pages(size_t count) noexcept {
         used_pages_count_.fetch_add(count, kernel::memory_order::relaxed);
     }
 
+    /*
+     * Mapping is performed outside the allocator lock.
+     * If it fails, we roll the virtual range back into the free trees.
+     */
     if (kernel::unlikely(!map_new_pages(virt_base, count, pmm_))) {
         const size_t rollback_count = count;
         const size_t rollback_size = rollback_count * PAGE_SIZE;
@@ -361,6 +397,10 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
 }
 
 int VmmState::map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {
+    /*
+     * Low-level helper for paging_map().
+     * Caller is responsible for choosing flags (e.g. PTE_PRESENT/PTE_RW).
+     */
     if (kernel::unlikely((virt & (PAGE_SIZE - 1u)) != 0u)) {
         return 0;
     }
@@ -388,6 +428,7 @@ VmmState* vmm_state() noexcept {
 }
 
 static inline VmmState& vmm_state_init_once() noexcept {
+    /* Construct on first use to avoid init-order constraints during boot. */
     if (!g_vmm) {
         g_vmm = new (g_vmm_storage) VmmState();
     }
@@ -395,7 +436,7 @@ static inline VmmState& vmm_state_init_once() noexcept {
     return *g_vmm;
 }
 
-} // namespace kernel
+} /* namespace kernel */
 
 extern "C" {
 

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #include <lib/string.h>
 #include <mm/pmm.h>
@@ -27,6 +27,13 @@
 #include "paging.h"
 #include "idt.h"
 
+/*
+ * IDT gate descriptor (32-bit interrupt/trap gate).
+ *
+ * base_{low,high} form the 32-bit handler address.
+ * sel is the code segment selector.
+ * flags encodes type, DPL and present bit.
+ */
 struct idt_entry {
     uint16_t base_low; 
     uint16_t sel; 
@@ -35,6 +42,7 @@ struct idt_entry {
     uint16_t base_high;
 } __attribute__((packed));
 
+/* IDTR operand for lidt: size is (bytes-1) by CPU convention. */
 struct idt_ptr { 
     uint16_t limit; 
     uint32_t base; 
@@ -77,6 +85,10 @@ __attribute__((noreturn)) static void early_exception_halt(const char* msg, regi
     }
 }
 
+/*
+ * Install an IDT gate.
+ * Caller passes fully formed flags (type/DPL/present).
+ */
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_low = base & 0xFFFF;
     idt[num].base_high = (base >> 16) & 0xFFFF;
@@ -86,6 +98,7 @@ static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags
 }
 
 void idt_load(void) {
+    /* Load IDTR with the current descriptor. */
     __asm__ volatile ("lidt %0" : : "m"(idtp));
 }
 
@@ -317,6 +330,13 @@ extern void proc_check_sleepers(uint32_t current_tick);
 
 __attribute__((no_instrument_function))
 void isr_handler(registers_t* regs) {
+    /*
+     * Central interrupt/exception dispatch.
+     *
+     * The stubs build registers_t and call into here.
+     * Interrupts >= 32 are external IRQs (PIC/APIC vectors).
+     * 0x80 is reserved for syscalls.
+     */
     cpu_t* cpu = 0;
     task_t* curr = 0;
 
@@ -588,6 +608,12 @@ irq_handler_t irq_get_handler(int irq_no) {
 }
 
 void idt_init(void) {
+    /*
+     * Install CPU exception stubs and IRQ vectors.
+     * Gate flags used here:
+     *  0x8E: present, DPL=0, 32-bit interrupt gate
+     *  0xEF: present, DPL=3, 32-bit trap gate (syscall)
+     */
     idtp.limit = sizeof(struct idt_entry) * 256 - 1;
     idtp.base = (uint32_t)&idt;
     memset(&idt, 0, sizeof(idt));
@@ -604,24 +630,22 @@ void idt_init(void) {
     outb(0x20, 0x11); io_wait();
     outb(0xA0, 0x11); io_wait();
     
-    // ICW2 (Remap Offset: 32 / 40)
+    /* ICW2: remap master/slave IRQ vectors to 0x20..0x2F. */
     outb(0x21, 0x20); io_wait();
     outb(0xA1, 0x28); io_wait();
     
-    // ICW3 (Cascade)
+    /* ICW3: tell master about slave on IRQ2, and slave identity. */
     outb(0x21, 0x04); io_wait();
     outb(0xA1, 0x02); io_wait();
     
-    // ICW4 (8086 mode)
+    /* ICW4: 8086/88 mode. */
     outb(0x21, 0x01); io_wait();
     outb(0xA1, 0x01); io_wait();
     
-    // Master: MASK ALL except IRQ 1 (bit 1) and IRQ 2 (Cascade, bit 2). 
-    // 1111 1001 = 0xF9
+    /* Master: mask all except IRQ1 (keyboard) and IRQ2 (cascade). */
     outb(0x21, 0xF9); 
     
-    // Slave: MASK ALL except IRQ 12 (Mouse, bit 4).
-    // 1110 1111 = 0xEF
+    /* Slave: mask all except IRQ12 (mouse). */
     outb(0xA1, 0xEF);
 
     idt_load();

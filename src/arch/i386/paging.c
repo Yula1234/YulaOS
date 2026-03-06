@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #include <lib/string.h>
 #include <mm/pmm.h>
@@ -14,10 +14,26 @@ extern void smp_tlb_shootdown(uint32_t virt);
 extern void load_page_directory(uint32_t*);
 extern void enable_paging(void);
 
+/*
+ * Kernel page directory template.
+ *
+ * Early boot builds an identity map of RAM into this directory and installs it
+ * in CR3 before enabling paging.
+ *
+ * Later on, process directories clone PDEs from this template to share the
+ * kernel half.
+ */
 uint32_t* kernel_page_directory = 0;
 
 uint32_t page_dir[1024] __attribute__((aligned(4096)));
 
+/*
+ * Paging updates are serialized.
+ *
+ * The kernel page tables are shared globally and can be modified concurrently
+ * (e.g. VMM heap mappings, fixmap, AP startup). We keep the implementation
+ * simple by guarding all table walks/updates with one lock.
+ */
 static spinlock_t paging_lock;
 
 static uint32_t paging_ram_size_bytes = 0;
@@ -29,15 +45,40 @@ static spinlock_t paging_fixmap_lock;
 
 __attribute__((noreturn)) static void paging_halt(const char* msg);
 
+/*
+ * Fixmap.
+ *
+ * Once paging is enabled, the kernel cannot blindly dereference a physical
+ * address. For early boot helpers (zeroing page tables, etc.) we reserve a
+ * small per-CPU virtual window (PAGING_FIXMAP_SLOTS) and map one physical page
+ * there on demand.
+ *
+ * The fixmap is backed by the kernel page directory, so it is available
+ * regardless of the currently active user directory.
+ */
+
 static inline uint32_t* paging_pt_virt(uint32_t* dir, uint32_t virt) {
     uint32_t pd_idx = virt >> 22;
     if ((dir[pd_idx] & 1u) == 0u) {
         return 0;
     }
+
+    /*
+     * PDE points to a page table.
+     *
+     * This implementation assumes page tables are identity-mapped, so the
+     * physical address can be treated as a usable pointer.
+     */
     return (uint32_t*)(dir[pd_idx] & ~0xFFFu);
 }
 
 static inline int paging_pde_pt_phys_valid(uint32_t pde) {
+    /*
+     * Defensive validation for pointers coming from page tables.
+     *
+     * We only expect 4KiB page tables here (no PSE), and we reject obviously
+     * bogus PT addresses.
+     */
     if ((pde & 1u) == 0u) return 0;
     if ((pde & (1u << 7)) != 0u) return 0;
 
@@ -54,6 +95,11 @@ static inline uint32_t paging_fixmap_virt(void) {
     uint32_t idx = 0;
 
     if (cpu && cpu->index >= 0 && (uint32_t)cpu->index < PAGING_FIXMAP_SLOTS) {
+        /*
+         * Per-CPU slot selection keeps fixmap usage contention-free for the
+         * common case (each CPU clears/initializes its own freshly allocated
+         * tables).
+         */
         idx = (uint32_t)cpu->index;
     }
 
@@ -73,6 +119,11 @@ static void paging_fixmap_set(uint32_t virt, uint32_t phys) {
     pt[pt_idx] = (phys & ~0xFFFu) | PTE_PRESENT | PTE_RW;
 
     spinlock_release_safe(&paging_fixmap_lock, int_flags);
+
+    /*
+     * Fixmap updates are immediately consumed by the current CPU.
+     * invlpg is sufficient because we only touch one PTE.
+     */
     __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
 }
 
@@ -99,6 +150,13 @@ static inline int paging_is_enabled(void) {
 }
 
 void paging_zero_phys_page(uint32_t phys) {
+    /*
+     * This is used for freshly allocated page tables/directories.
+     *
+     * Before paging is enabled, the kernel still runs with a trivial physical
+     * identity map, so phys is directly writable. After paging, we bounce
+     * through the fixmap.
+     */
     if ((phys & 0xFFFu) != 0u) {
         paging_halt("paging_zero_phys_page: unaligned phys");
     }
@@ -165,6 +223,12 @@ int paging_pat_is_supported(void) {
 }
 
 void paging_init_pat(void) {
+    /*
+     * Keep PAT programming local and idempotent.
+     *
+     * APs call paging_init_pat() as part of their bring-up. The code patches one
+     * PAT entry to WC and leaves the rest intact.
+     */
     if (!paging_pat_is_supported()) {
         return;
     }
@@ -172,6 +236,12 @@ void paging_init_pat(void) {
     uint64_t pat = paging_rdmsr_u64(IA32_PAT_MSR);
     uint64_t new_pat = pat;
 
+    /*
+     * Replace one PAT entry with WC.
+     *
+     * The exact entry index is part of the kernel ABI with itself; mapping code
+     * is expected to set the corresponding PTE bits when WC is desired.
+     */
     new_pat &= ~(0xFFull << 32);
     new_pat |= ((uint64_t)PAT_MEMTYPE_WC) << 32;
 
@@ -191,6 +261,7 @@ static inline void paging_write_cr0(uint32_t v) {
 }
 
 static inline void paging_wbinvd(void) {
+    /* Write back + invalidate caches. Required by the MTRR programming rules. */
     __asm__ volatile("wbinvd" : : : "memory");
 }
 
@@ -216,6 +287,17 @@ static inline uint32_t paging_phys_addr_bits(void) {
 }
 
 void paging_init_mtrr_wc(uint32_t phys_base, uint32_t size) {
+    /*
+     * Variable MTRRs are global CPU state.
+     *
+     * The code follows the standard sequence:
+     *  - disable caching (CR0.CD=1, CR0.NW=0) + wbinvd
+     *  - disable MTRRs via IA32_MTRR_DEF_TYPE
+     *  - program one or more free variable MTRRs
+     *  - restore IA32_MTRR_DEF_TYPE and caching state
+     *
+     * If the system has no free variable MTRRs, we silently do nothing.
+     */
     if (size == 0) return;
 
     uint32_t a, b, c, d;
@@ -264,6 +346,8 @@ void paging_init_mtrr_wc(uint32_t phys_base, uint32_t size) {
         }
 
         uint32_t chunk = paging_largest_pow2_le(remaining);
+
+        /* Variable MTRRs require a power-of-two size aligned to its size. */
         while (chunk >= 4096u && (curr & (chunk - 1u)) != 0u) {
             chunk >>= 1;
         }
@@ -302,6 +386,12 @@ static inline uint32_t* read_cr3(void) {
 }
 
 void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
+    /*
+     * Map a single 4KiB page.
+     *
+     * The implementation allocates page tables on demand. Page directories and
+     * page tables are assumed to live in identity-mapped memory at this stage.
+     */
     uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
 
     uint32_t pd_idx = virt >> 22;
@@ -316,15 +406,23 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
 
         paging_zero_phys_page((uint32_t)new_pt_phys);
 
+        /* Present + RW + USER: kernel and userspace can share PDEs policy-wise. */
         dir[pd_idx] = ((uint32_t)new_pt_phys) | 7;
     }
 
+    /* PT address comes from the PDE. This assumes identity-mapped tables. */
     uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
     pt[pt_idx] = (phys & ~0xFFF) | flags;
 
     spinlock_release_safe(&paging_lock, int_flags);
 
     if (dir == kernel_page_directory) {
+        /*
+         * Kernel mappings are global: other CPUs may have this address cached.
+         *
+         * The shootdown handler is expected to invalidate the mapping on the
+         * remote CPUs, and also take care of the local invalidation.
+         */
         smp_tlb_shootdown(virt);
         return;
     }
@@ -333,6 +431,12 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
 }
 
 static void paging_allocate_table(uint32_t virt) {
+    /*
+     * Ensure the kernel directory has a page table for `virt`.
+     *
+     * This is used to pre-create the fixmap tables and a kernel window used by
+     * higher-level allocators.
+     */
     uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
     
     uint32_t pd_idx = virt >> 22;
@@ -348,6 +452,13 @@ static void paging_allocate_table(uint32_t virt) {
 }
 
 void paging_init(uint32_t ram_size_bytes) {
+    /*
+     * Early identity map.
+     *
+     * Boot code expects RAM to be reachable by physical addresses while we are
+     * still bringing the memory management up. We map [0..ram_size_bytes) as
+     * supervisor RW, then switch to this directory and enable paging.
+     */
     paging_init_pat();
     spinlock_init(&paging_lock);
     spinlock_init(&paging_fixmap_lock);
@@ -360,6 +471,12 @@ void paging_init(uint32_t ram_size_bytes) {
     kernel_page_directory = page_dir;
 
     for(int i = 0; i < 1024; i++) {
+        /*
+         * Default to supervisor, read-only, not-present (bit1=RW).
+         *
+         * This keeps the directory clean while still allowing a cheap
+         * non-zero sentinel for debugging.
+         */
         page_dir[i] = 2; 
     }
 
@@ -373,24 +490,39 @@ void paging_init(uint32_t ram_size_bytes) {
                 paging_halt("pmm_alloc_block failed in paging_init");
             }
             paging_zero_phys_page((uint32_t)pt_phys);
-            page_dir[pd_idx] = ((uint32_t)pt_phys) | 3; // Supervisor | RW | Present
+
+            /*
+             * PDE flags here mirror the basic kernel mapping policy:
+             * present + RW, supervisor-only.
+             */
+            page_dir[pd_idx] = ((uint32_t)pt_phys) | 3; /* Supervisor | RW | Present */
         }
         
+        /*
+         * Populate identity mapping at 4KiB granularity.
+         *
+         * This intentionally does not use 4MiB pages (PSE) to keep the
+         * implementation uniform with later fine-grained mappings.
+         */
         uint32_t* pt = (uint32_t*)(page_dir[pd_idx] & ~0xFFF);
-        pt[pt_idx] = i | 3; // Supervisor | RW | Present
+        pt[pt_idx] = i | 3; /* Supervisor | RW | Present */
         
         if (i + 4096 < i) break;
     }
 
+    /* Local APIC MMIO is accessed via a fixed physical address on x86. */
     paging_map(page_dir, 0xFEE00000, 0xFEE00000, 3);
 
     for (uint32_t i = 0; i < PAGING_FIXMAP_SLOTS; i++) {
         uint32_t virt = PAGING_FIXMAP_BASE - i * 4096u;
+
+        /* Ensure fixmap slots have PTs pre-allocated before paging turns on. */
         paging_allocate_table(virt);
         paging_fixmap_clear(virt);
     }
     
     for(uint32_t addr = 0xC0000000; addr < 0xC1000000; addr += 0x400000) {
+        /* Pre-allocate kernel PTs for the heap / early dynamic mappings. */
         paging_allocate_table(addr);
     }
 
@@ -399,6 +531,7 @@ void paging_init(uint32_t ram_size_bytes) {
 }
 
 void paging_switch(uint32_t* dir_phys) {
+    /* CR3 expects a physical address aligned to 4KiB. */
     load_page_directory(dir_phys);
 }
 
@@ -407,6 +540,12 @@ uint32_t* paging_get_dir(void) {
 }
 
 uint32_t* paging_clone_directory(void) {
+    /*
+     * Clone only present PDEs from the kernel template.
+     *
+     * This creates a new address space that shares the kernel half with the
+     * global directory.
+     */
     uint32_t* new_dir = (uint32_t*)pmm_alloc_block();
     if (!new_dir) return 0;
 
@@ -421,6 +560,10 @@ uint32_t* paging_clone_directory(void) {
 }
 
 int paging_is_user_accessible(uint32_t* dir, uint32_t virt) {
+    /*
+     * A mapping is considered user-accessible only if both PDE and PTE have the
+     * user bit set.
+     */
     uint32_t pd_idx = virt >> 22;
     uint32_t pt_idx = (virt >> 12) & 0x3FF;
 
@@ -428,6 +571,7 @@ int paging_is_user_accessible(uint32_t* dir, uint32_t virt) {
     if (!(dir[pd_idx] & 4)) return 0;
 
     if ((dir[pd_idx] & (1u << 7)) != 0u) {
+        /* 4MiB PDE (PSE): user bit is checked at the PDE level. */
         return 1;
     }
 
@@ -442,6 +586,7 @@ int paging_is_user_accessible(uint32_t* dir, uint32_t virt) {
 }
 
 uint32_t paging_get_phys(uint32_t* dir, uint32_t virt) {
+    /* Translate a virtual address under a specific directory. */
     uint32_t pd_idx = virt >> 22;
     uint32_t pt_idx = (virt >> 12) & 0x3FF;
 
@@ -449,6 +594,7 @@ uint32_t paging_get_phys(uint32_t* dir, uint32_t virt) {
     if ((pde & 1u) == 0u) return 0;
 
     if ((pde & (1u << 7)) != 0u) {
+        /* 4MiB page: physical base is in 4MiB units; offset is low 22 bits. */
         uint32_t base = pde & 0xFFC00000u;
         return base + (virt & 0x003FFFFFu);
     }

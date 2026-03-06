@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #include <lib/compiler.h>
 
@@ -23,6 +23,19 @@ extern "C" {
 }
 
 namespace {
+
+/*
+ * Kernel heap implementation.
+ *
+ * This is a hybrid allocator:
+ *  - small allocations come from size-segregated caches (SLUB-like)
+ *  - large allocations are backed by whole pages from VMM
+ *
+ * Ownership and size tracking are stored in per-page metadata:
+ *  - for slab objects: page->slab_cache points to the owning cache
+ *  - for page-backed allocations: page->slab_cache is null and page->objects
+ *    stores the page count
+ */
 
 struct KmemCache {
     char name[16];
@@ -57,6 +70,10 @@ static constexpr uint32_t k_align_default = 0u;
 class HeapState {
 public:
     void init() noexcept {
+        /*
+         * Heap sits on top of VMM (virtual range management) and PMM (page
+         * metadata + backing page allocator).
+         */
         vmm_ = kernel::vmm_state();
         pmm_ = kernel::pmm_state();
 
@@ -81,6 +98,11 @@ public:
     }
 
     [[nodiscard]] void* cache_alloc(KmemCache& cache) noexcept {
+        /*
+         * Fast path uses cpu_slab if it still has free objects.
+         * When cpu_slab is exhausted we pull from partial, otherwise we grow
+         * the cache by allocating a new backing page.
+         */
         while (true) {
             page_t* page = nullptr;
             void* obj = nullptr;
@@ -193,6 +215,10 @@ public:
             panic("SLUB: invalid object address");
         }
 
+        /*
+         * If the last object is freed and the page is not cpu_slab, we return
+         * the whole page back to VMM.
+         */
         bool need_free_page = false;
 
         {
@@ -240,6 +266,11 @@ public:
             return nullptr;
         }
 
+        /*
+         * Requests up to k_malloc_max_size use caches.
+         * Above that we switch to page-backed allocations to avoid cache
+         * blowups and excessive internal fragmentation.
+         */
         if (kernel::likely(size <= k_malloc_max_size)) {
             const int idx = get_cache_index(size);
 
@@ -272,12 +303,20 @@ public:
             return;
         }
 
+        /*
+         * Aligned allocations for sub-page alignments carry a small header
+         * in-band. Try to detect and free those first.
+         */
         if (try_free_aligned(ptr)) {
             return;
         }
 
         const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
 
+        /*
+         * Heap API is only defined for addresses from the kernel heap range.
+         * Foreign pointers are ignored.
+         */
         if (kernel::unlikely(!heap_range_contains(addr))) {
             return;
         }
@@ -518,6 +557,10 @@ private:
     }
 
     void* malloc_aligned_small(size_t size, uint32_t align) noexcept {
+        /*
+         * Implement sub-page alignment via over-allocation and a small header
+         * right before the aligned return address.
+         */
         const size_t header_size = sizeof(AlignedAllocHeader);
 
         if (kernel::unlikely(size > SIZE_MAX - header_size - align)) {
@@ -547,6 +590,10 @@ private:
     }
 
     bool try_free_aligned(void* ptr) noexcept {
+        /*
+         * The aligned pointer is expected to be inside the heap range, but not
+         * page-aligned (page-aligned allocations are handled by kmalloc_a()).
+         */
         const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
         if (kernel::unlikely(addr < sizeof(AlignedAllocHeader))) {
             return false;
@@ -606,6 +653,10 @@ private:
         return true;
     }
 
+    /*
+     * Slab page lists are doubly-linked through page_t::prev/next.
+     * cpu_slab is not part of these lists.
+     */
     static void slab_list_add(page_t*& head, page_t& page) noexcept {
         page.next = head;
         page.prev = nullptr;
@@ -633,6 +684,10 @@ private:
     }
 
     void slub_init_page(KmemCache& cache, page_t& page, void* virt_addr) noexcept {
+        /*
+         * Build a freelist inside the page.
+         * Each free object stores the tagged pointer to the next free object.
+         */
         if (kernel::unlikely(cache.object_size == 0u || cache.object_size > PAGE_SIZE)) {
             panic("SLUB: invalid object_size in slub_init_page");
         }
@@ -662,6 +717,11 @@ private:
     }
 
     void* slub_alloc_from_page(page_t& page) noexcept {
+        /*
+         * Freelist pointers are tagged with bit0 set.
+         * This gives a cheap corruption detector since objects are naturally
+         * aligned at least to sizeof(uintptr_t).
+         */
         void* obj = page.freelist;
         if (!obj) {
             return nullptr;
@@ -691,6 +751,10 @@ private:
     }
 
     static int get_cache_index(size_t size) noexcept {
+        /*
+         * Round size up to the next power-of-two bucket.
+         * Implemented via bsr on (size - 1).
+         */
         if (size <= k_malloc_min_size) {
             return 0;
         }
@@ -728,6 +792,10 @@ private:
     }
 
     void init_dynamic_caches() noexcept {
+        /*
+         * Dynamic caches are taken from a fixed pool.
+         * This limits metadata usage and avoids recursion into the heap.
+         */
         for (size_t i = 0; i < k_dynamic_cache_capacity; i++) {
             dynamic_caches_[i].next_dyn = dynamic_free_head_;
             dynamic_free_head_ = &dynamic_caches_[i];
@@ -784,6 +852,7 @@ private:
     }
 
     KmemCache* cache_create_locked(const char* name, size_t size, uint32_t align, uint32_t flags) noexcept {
+        /* Caller is expected to hold dynamic_caches_lock_. */
         if (kernel::unlikely(!dynamic_free_head_)) {
             return nullptr;
         }
@@ -829,6 +898,11 @@ private:
     }
 
     size_t get_allocated_size(void* ptr, size_t requested_size) const noexcept {
+        /*
+         * Used by kzalloc() to determine how much memory can safely be zeroed.
+         * For slab objects we return cache->object_size.
+         * For page-backed allocations we return page_count * PAGE_SIZE.
+         */
         const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
 
         if (kernel::unlikely(!heap_range_contains(addr))) {
@@ -888,7 +962,7 @@ static inline HeapState* heap_state_if_inited() noexcept {
     return g_heap;
 }
 
-} // namespace
+} /* namespace */
 
 extern "C" {
 

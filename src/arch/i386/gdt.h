@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #ifndef ARCH_I386_GDT_H
 #define ARCH_I386_GDT_H
@@ -7,8 +7,24 @@
 #include <stdint.h>
 #include <kernel/cpu.h>
 
+/*
+ * Global Descriptor Table layout.
+ *
+ * The GDT contains the flat kernel/user code+data segments and a per-CPU TSS.
+ * GDT_ENTRIES accounts for the fixed descriptors plus one TSS descriptor per
+ * CPU.
+ */
 #define GDT_ENTRIES (5 + MAX_CPUS) 
 
+/*
+ * i386 TSS.
+ *
+ * Only a small subset is actively used by the kernel:
+ *  - esp0/ss0: ring transition stack (userspace -> kernel)
+ *  - iomap_base: set past the structure to disable the I/O bitmap
+ *
+ * The layout is ABI with the CPU; keep packed.
+ */
 struct tss_entry_struct {
     uint32_t prev_tss;
     uint32_t esp0; 
@@ -30,8 +46,13 @@ extern struct tss_entry_struct tss_entries[MAX_CPUS];
 extern "C" {
 #endif
 
+/* Build and load GDT, and install/load initial TSS selector. */
 void gdt_init(void);
+
+/* Load GDTR and reload segment registers. */
 void gdt_load(void);
+
+/* Update esp0 for a given CPU's TSS. */
 void tss_set_stack(int cpu_id, uint32_t kernel_esp);
 
 #ifdef __cplusplus
