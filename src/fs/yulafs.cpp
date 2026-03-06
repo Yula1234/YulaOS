@@ -886,7 +886,7 @@ static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
     return -1;
 }
 
-static yfs_ino_t path_to_inode(const char* path, char* last_element) {
+static yfs_ino_t path_to_inode_impl(const char* path, char* last_element, int allow_special_last) {
     if (!path || !*path) {
         if (last_element) {
             last_element[0] = '\0';
@@ -937,6 +937,15 @@ static yfs_ino_t path_to_inode(const char* path, char* last_element) {
 
         const int is_last = (*next == '\0');
         if (is_last) {
+            if (!allow_special_last) {
+                if (len == 1 && name[0] == '.') {
+                    return 0;
+                }
+                if (len == 2 && name[0] == '.' && name[1] == '.') {
+                    return 0;
+                }
+            }
+
             if (last_element) {
                 strlcpy(last_element, name, YFS_NAME_MAX);
             }
@@ -971,6 +980,14 @@ static yfs_ino_t path_to_inode(const char* path, char* last_element) {
         curr = next_ino;
         p = next;
     }
+}
+
+static yfs_ino_t path_to_inode(const char* path, char* last_element) {
+    return path_to_inode_impl(path, last_element, 1);
+}
+
+static yfs_ino_t path_to_inode_for_modify(const char* path, char* last_element) {
+    return path_to_inode_impl(path, last_element, 0);
 }
 
 static int yulafs_find_child_name_in_dir(yfs_ino_t dir_ino, yfs_ino_t child_ino, char* out_name, uint32_t out_cap) {
@@ -1553,7 +1570,7 @@ int yfs::FileSystem::append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_o
 int yulafs_create_obj(const char* path, int type)
 {
     char name[YFS_NAME_MAX];
-    yfs_ino_t dir_ino = path_to_inode(path, name);
+    yfs_ino_t dir_ino = path_to_inode_for_modify(path, name);
     if (!dir_ino) {
         return -1;
     }
@@ -1625,7 +1642,7 @@ int yulafs_create(const char* path) {
 int yfs::FileSystem::unlink(const char* path)
 {
     char name[YFS_NAME_MAX];
-    yfs_ino_t dir_ino = path_to_inode(path, name);
+    yfs_ino_t dir_ino = path_to_inode_for_modify(path, name);
     
     if (!dir_ino) {
         return -1;
@@ -1835,7 +1852,7 @@ int yfs::FileSystem::rename(const char* old_path, const char* new_path)
     char old_name[YFS_NAME_MAX];
     char new_name[YFS_NAME_MAX];
 
-    yfs_ino_t old_dir = path_to_inode(old_path, old_name);
+    yfs_ino_t old_dir = path_to_inode_for_modify(old_path, old_name);
     if (!old_dir) {
         return -1;
     }
@@ -1848,7 +1865,7 @@ int yfs::FileSystem::rename(const char* old_path, const char* new_path)
         return -1;
     }
 
-    yfs_ino_t new_dir = path_to_inode(new_path, new_name);
+    yfs_ino_t new_dir = path_to_inode_for_modify(new_path, new_name);
     if (!new_dir) {
         return -1;
     }
