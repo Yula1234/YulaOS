@@ -232,6 +232,14 @@ The layout is defined by <yos/proc.h>.
   59  getcwd
   60  uptime_ms
   61  proc_list
+  62  setsid
+  63  setpgid
+  64  getpgrp
+  65  openat
+  66  mkdirat
+  67  unlinkat
+  68  statat
+  69  renameat
 
 
 3.1. Notes on selected interfaces
@@ -1567,3 +1575,105 @@ ERRORS
     Invalid arguments or buf not writable/present.
 
 
+4.62. setsid (syscall 62)
+-------------------------
+
+NAME
+  setsid - create a new session
+
+SYNOPSIS
+  int setsid(void);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.63. setpgid (syscall 63)
+--------------------------
+
+NAME
+  setpgid - set process group id
+
+SYNOPSIS
+  int setpgid(uint32_t pid, uint32_t pgid);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.64. getpgrp (syscall 64)
+--------------------------
+
+NAME
+  getpgrp - get process group id
+
+SYNOPSIS
+  uint32_t getpgrp(void);
+
+RETURN VALUE
+  Process group id.
+
+
+4.65. openat (syscall 65)
+-------------------------
+
+NAME
+  openat - open a file relative to a directory fd
+
+SYNOPSIS
+  int openat(int dirfd, const char* path, int flags);
+
+RETURN VALUE
+  >= 0 file descriptor on success, -1 on error.
+
+
+4.66. mkdirat (syscall 66)
+--------------------------
+
+NAME
+  mkdirat - create a directory relative to a directory fd
+
+SYNOPSIS
+  int mkdirat(int dirfd, const char* path);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.67. unlinkat (syscall 67)
+---------------------------
+
+NAME
+  unlinkat - remove a name relative to a directory fd
+
+SYNOPSIS
+  int unlinkat(int dirfd, const char* path);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.68. statat (syscall 68)
+-------------------------
+
+NAME
+  statat - get file status relative to a directory fd
+
+SYNOPSIS
+  int statat(int dirfd, const char* path, struct user_stat* st);
+
+RETURN VALUE
+  0 on success, -1 on error.
+
+
+4.69. renameat (syscall 69)
+---------------------------
+
+NAME
+  renameat - rename a filesystem object relative to directory fds
+
+SYNOPSIS
+  int renameat(int old_dirfd, const char* oldpath, int new_dirfd, const char* newpath);
+
+RETURN VALUE
+  0 on success, -1 on error.

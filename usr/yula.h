@@ -189,8 +189,16 @@ static inline int mkdir(const char* path) {
     return syscall(13, (int)(uintptr_t)path, 0, 0);
 }
 
+static inline int mkdirat(int dirfd, const char* path) {
+    return syscall(66, dirfd, (int)(uintptr_t)path, 0);
+}
+
 static inline int unlink(const char* path) {
     return syscall(14, (int)(uintptr_t)path, 0, 0);
+}
+
+static inline int unlinkat(int dirfd, const char* path) {
+    return syscall(67, dirfd, (int)(uintptr_t)path, 0);
 }
 
 static inline uint32_t uptime_ms(void) {
@@ -274,6 +282,10 @@ static inline int stat(const char* path, stat_t* buf) {
     return syscall(33, (int)path, (int)buf, 0);
 }
 
+static inline int statat(int dirfd, const char* path, stat_t* buf) {
+    return syscall(68, dirfd, (int)path, (int)buf);
+}
+
 static inline int getdents(int fd, void* buf, uint32_t size) {
     return syscall(38, fd, (int)buf, (int)size);
 }
@@ -284,6 +296,14 @@ static inline int fstatat(int dirfd, const char* name, stat_t* buf) {
 
 static inline int get_fs_info(fs_info_t* buf) {
     return syscall(34, (int)buf, 0, 0);
+}
+
+static inline int openat(int dirfd, const char* path, int flags) {
+    return syscall(65, dirfd, (int)path, flags);
+}
+
+static inline int renameat(int old_dirfd, const char* oldpath, int new_dirfd, const char* newpath) {
+    return syscall4(69, old_dirfd, (int)oldpath, new_dirfd, (int)newpath);
 }
 
 static inline int spawn_process(const char* path, int argc, char** argv) {

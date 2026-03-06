@@ -647,9 +647,31 @@ static void syscall_mkdir(registers_t* regs, task_t* curr) {
     }
 }
 
+static void syscall_mkdirat(registers_t* regs, task_t* curr) {
+    int dirfd = (int)regs->ebx;
+    char* path = (char*)regs->ecx;
+
+    if (check_user_buffer(curr, path, 1)) {
+        regs->eax = (uint32_t)vfs_mkdirat(dirfd, path);
+    } else {
+        regs->eax = (uint32_t)-1;
+    }
+}
+
 static void syscall_unlink(registers_t* regs, task_t* curr) {
     if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
         regs->eax = (uint32_t)vfs_unlink((char*)regs->ebx);
+    } else {
+        regs->eax = (uint32_t)-1;
+    }
+}
+
+static void syscall_unlinkat(registers_t* regs, task_t* curr) {
+    int dirfd = (int)regs->ebx;
+    char* path = (char*)regs->ecx;
+
+    if (check_user_buffer(curr, path, 1)) {
+        regs->eax = (uint32_t)vfs_unlinkat(dirfd, path);
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -1176,6 +1198,27 @@ static void syscall_stat(registers_t* regs, task_t* curr) {
     regs->eax = 0;
 }
 
+static void syscall_statat(registers_t* regs, task_t* curr) {
+    int dirfd = (int)regs->ebx;
+    char* path = (char*)regs->ecx;
+    user_stat_t* u_stat = (user_stat_t*)regs->edx;
+
+    if (!check_user_buffer(curr, path, 1) || !check_user_buffer(curr, u_stat, sizeof(user_stat_t))) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    vfs_stat_t st;
+    if (vfs_statat_path(dirfd, path, &st) != 0) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    u_stat->type = st.type;
+    u_stat->size = st.size;
+    regs->eax = 0;
+}
+
 static void syscall_get_fs_info(registers_t* regs, task_t* curr) {
     user_fs_info_t* u_info = (user_fs_info_t*)regs->ebx;
 
@@ -1206,6 +1249,19 @@ static void syscall_rename(registers_t* regs, task_t* curr) {
 
     if (check_user_buffer(curr, oldp, 1) && check_user_buffer(curr, newp, 1)) {
         regs->eax = (uint32_t)vfs_rename(oldp, newp);
+    } else {
+        regs->eax = (uint32_t)-1;
+    }
+}
+
+static void syscall_renameat(registers_t* regs, task_t* curr) {
+    int old_dirfd = (int)regs->ebx;
+    char* oldp = (char*)regs->ecx;
+    int new_dirfd = (int)regs->edx;
+    char* newp = (char*)regs->esi;
+
+    if (check_user_buffer(curr, oldp, 1) && check_user_buffer(curr, newp, 1)) {
+        regs->eax = (uint32_t)vfs_renameat(old_dirfd, oldp, new_dirfd, newp);
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -1273,6 +1329,18 @@ static void syscall_getdents(registers_t* regs, task_t* curr) {
     }
 
     regs->eax = (uint32_t)vfs_getdents(fd, buf, size);
+}
+
+static void syscall_openat(registers_t* regs, task_t* curr) {
+    int dirfd = (int)regs->ebx;
+    char* path = (char*)regs->ecx;
+    int flags = (int)regs->edx;
+
+    if (check_user_buffer(curr, path, 1)) {
+        regs->eax = (uint32_t)vfs_openat(dirfd, path, flags);
+    } else {
+        regs->eax = (uint32_t)-1;
+    }
 }
 
 static void syscall_fstatat(registers_t* regs, task_t* curr) {
@@ -2542,6 +2610,11 @@ static const syscall_fn_t syscall_table[] = {
     [62] = syscall_setsid,
     [63] = syscall_setpgid,
     [64] = syscall_getpgrp,
+    [65] = syscall_openat,
+    [66] = syscall_mkdirat,
+    [67] = syscall_unlinkat,
+    [68] = syscall_statat,
+    [69] = syscall_renameat,
 };
 
 void syscall_handler(registers_t* regs) {
