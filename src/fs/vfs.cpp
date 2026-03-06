@@ -75,6 +75,7 @@ static vfs_node_t* vfs_node_clone_existing(const vfs_node_t* src) noexcept {
     node->refs = 1;
     node->flags |= VFS_FLAG_DEVFS_ALLOC;
     node->flags |= VFS_FLAG_DEVFS_NODE;
+    node->flags &= ~VFS_FLAG_INSTANCE_REF;
     node->fs_driver = snapshot.fs_driver;
     return node;
 }
@@ -135,6 +136,35 @@ struct vfs_fs_instance {
     vfs_node_t* root;
     uint32_t refs;
 };
+
+static void vfs_instance_retain(vfs_fs_instance* inst) noexcept {
+    if (!inst) {
+        return;
+    }
+
+    __sync_fetch_and_add(&inst->refs, 1);
+}
+
+static void vfs_instance_release(vfs_fs_instance* inst) noexcept {
+    if (!inst) {
+        return;
+    }
+
+    __sync_sub_and_fetch(&inst->refs, 1);
+}
+
+static void vfs_node_bind_instance(vfs_node_t* node, vfs_fs_instance* inst) noexcept {
+    if (!node || !inst) {
+        return;
+    }
+
+    node->fs_driver = inst;
+
+    if ((node->flags & VFS_FLAG_INSTANCE_REF) == 0u) {
+        vfs_instance_retain(inst);
+        node->flags |= VFS_FLAG_INSTANCE_REF;
+    }
+}
 
 struct vfs_fs_type {
     const char* name;
@@ -344,6 +374,7 @@ vfs_node_t* DevFSRegistry::clone(const char* name) noexcept {
     node->refs = 1;
     node->flags |= VFS_FLAG_DEVFS_ALLOC;
     node->flags |= VFS_FLAG_DEVFS_NODE;
+    node->flags &= ~VFS_FLAG_INSTANCE_REF;
     node->fs_driver = snapshot.fs_driver;
 
     if (!node->fs_driver) {
@@ -453,6 +484,11 @@ extern "C" void vfs_node_release(vfs_node_t* node) {
     if (node->private_release && node->private_data) {
         node->private_release(node->private_data);
         node->private_data = 0;
+    }
+
+    if ((node->flags & VFS_FLAG_INSTANCE_REF) != 0u) {
+        vfs_instance_release((vfs_fs_instance*)node->fs_driver);
+        node->flags &= ~VFS_FLAG_INSTANCE_REF;
     }
 
     kfree(node);
@@ -985,6 +1021,11 @@ static int vfs_umount_impl(const char* mountpoint) {
         return -1;
     }
 
+    if (inst->refs > 1u) {
+        kfree(entry);
+        return -1;
+    }
+
     const int rc = inst->type->umount(inst);
     kfree(entry);
     return rc;
@@ -1496,6 +1537,8 @@ extern "C" int vfs_open(const char* path, int flags) {
         return -1;
     }
 
+    vfs_node_bind_instance(node, resolved.mount->instance);
+
     node->refs = 1;
 
     if (node->ops && node->ops->open) {
@@ -1632,12 +1675,18 @@ extern "C" vfs_node_t* vfs_create_node_from_path(const char* path) {
         return 0;
     }
 
-    return resolved.mount->instance->type->ops->create_node_from_path(
+    vfs_node_t* node = resolved.mount->instance->type->ops->create_node_from_path(
         resolved.mount->instance,
         resolved.mount->mountpoint,
         resolved.rel,
         resolved.is_abs
     );
+
+    if (node) {
+        vfs_node_bind_instance(node, resolved.mount->instance);
+    }
+
+    return node;
 }
 
 extern "C" int vfs_mkdir(const char* path) {
