@@ -887,39 +887,207 @@ static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
 }
 
 static yfs_ino_t path_to_inode(const char* path, char* last_element) {
-    yfs_ino_t curr = (path[0] == '/') ? 1 : proc_current()->cwd_inode;
-    const char* p = (path[0] == '/') ? path + 1 : path;
-    
-    char buffer[256]; strlcpy(buffer, p, 256);
-    char* token = buffer;
-    char* next_token = NULL;
+    if (!path || !*path) {
+        if (last_element) {
+            last_element[0] = '\0';
+        }
+        return 0;
+    }
 
-    while (*token) {
-        char* slash = token;
-        while (*slash && *slash != '/') slash++;
-        
-        if (*slash == '/') {
-            *slash = 0;
-            next_token = slash + 1;
-        } else {
-            next_token = NULL;
+    yfs_ino_t curr = (path[0] == '/') ? 1 : proc_current()->cwd_inode;
+    if (curr == 0) {
+        curr = 1;
+    }
+
+    const char* p = path;
+    while (*p == '/') {
+        p++;
+    }
+
+    char name[YFS_NAME_MAX];
+
+    for (;;) {
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            if (last_element) {
+                last_element[0] = '\0';
+            }
+            return 0;
         }
 
-        if (next_token == NULL) {
-            if (last_element) strlcpy(last_element, token, YFS_NAME_MAX);
+        const char* start = p;
+        while (*p && *p != '/') {
+            p++;
+        }
+
+        const size_t len = (size_t)(p - start);
+        if (len == 0 || len >= YFS_NAME_MAX) {
+            return 0;
+        }
+
+        memcpy(name, start, len);
+        name[len] = '\0';
+
+        const char* next = p;
+        while (*next == '/') {
+            next++;
+        }
+
+        const int is_last = (*next == '\0');
+        if (is_last) {
+            if (last_element) {
+                strlcpy(last_element, name, YFS_NAME_MAX);
+            }
             return curr;
         }
 
+        if (len == 1 && name[0] == '.') {
+            p = next;
+            continue;
+        }
+
+        if (len == 2 && name[0] == '.' && name[1] == '.') {
+            int parent_i = yulafs_lookup_in_dir(curr, "..");
+            if (parent_i <= 0) {
+                return 0;
+            }
+            curr = (yfs_ino_t)parent_i;
+            p = next;
+            continue;
+        }
+
         yfs_inode_t dir_node;
-        sync_inode(curr, &dir_node, 0);
-        
-        yfs_ino_t next_ino = dir_find(&dir_node, token);
-        if (next_ino == 0) return 0;
+        if (!sync_inode(curr, &dir_node, 0)) {
+            return 0;
+        }
+
+        yfs_ino_t next_ino = dir_find(&dir_node, name);
+        if (next_ino == 0) {
+            return 0;
+        }
 
         curr = next_ino;
-        token = next_token;
+        p = next;
     }
-    return curr;
+}
+
+static int yulafs_find_child_name_in_dir(yfs_ino_t dir_ino, yfs_ino_t child_ino, char* out_name, uint32_t out_cap) {
+    if (!out_name || out_cap == 0) {
+        return -1;
+    }
+    out_name[0] = '\0';
+
+    if (dir_ino == 0 || child_ino == 0) {
+        return -1;
+    }
+
+    yfs_dirent_t entries[8];
+    uint32_t offset = 0;
+    for (;;) {
+        int bytes = yulafs_read(dir_ino, (uint8_t*)entries, (yfs_off_t)offset, (uint32_t)sizeof(entries));
+        if (bytes <= 0) {
+            break;
+        }
+
+        int count = bytes / (int)sizeof(yfs_dirent_t);
+        if (count <= 0) {
+            break;
+        }
+
+        for (int i = 0; i < count; i++) {
+            if (entries[i].inode != child_ino) {
+                continue;
+            }
+            if (strcmp(entries[i].name, ".") == 0) {
+                continue;
+            }
+            if (strcmp(entries[i].name, "..") == 0) {
+                continue;
+            }
+            strlcpy(out_name, entries[i].name, (size_t)out_cap);
+            return 0;
+        }
+
+        offset += (uint32_t)bytes;
+    }
+
+    return -1;
+}
+
+int yulafs_inode_to_path(yfs_ino_t inode, char* out, uint32_t out_size) {
+    if (!out || out_size == 0) {
+        return -1;
+    }
+
+    yfs_ino_t cur = inode ? inode : 1u;
+    if (cur == 1u) {
+        if (out_size < 2u) {
+            return -1;
+        }
+        out[0] = '/';
+        out[1] = '\0';
+        return 1;
+    }
+
+    char parts[64][YFS_NAME_MAX];
+    uint32_t depth = 0;
+
+    while (cur != 1u) {
+        if (depth >= (uint32_t)(sizeof(parts) / sizeof(parts[0]))) {
+            return -1;
+        }
+
+        int parent_i = yulafs_lookup_in_dir(cur, "..");
+        if (parent_i <= 0) {
+            return -1;
+        }
+
+        yfs_ino_t parent = (yfs_ino_t)parent_i;
+
+        if (yulafs_find_child_name_in_dir(parent, cur, parts[depth], (uint32_t)sizeof(parts[depth])) != 0) {
+            return -1;
+        }
+
+        depth++;
+        if (parent == cur) {
+            return -1;
+        }
+        cur = parent;
+    }
+
+    if (out_size < 2u) {
+        return -1;
+    }
+
+    uint32_t len = 1;
+    out[0] = '/';
+
+    for (uint32_t i = depth; i > 0; i--) {
+        const char* part = parts[i - 1];
+        const size_t plen = strlen(part);
+        if (plen == 0) {
+            continue;
+        }
+
+        if (len > 1) {
+            if (len + 1 >= out_size) {
+                return -1;
+            }
+            out[len++] = '/';
+        }
+
+        if (len + plen >= out_size) {
+            return -1;
+        }
+
+        memcpy(out + len, part, plen);
+        len += (uint32_t)plen;
+    }
+
+    out[len] = '\0';
+    return (int)len;
 }
 
 void yfs::FileSystem::format(uint32_t disk_blocks_4k) {

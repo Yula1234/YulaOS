@@ -210,35 +210,6 @@ static int copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, con
     return -1;
 }
 
-static int yulafs_find_child_name_in_dir(yfs_ino_t dir_ino, yfs_ino_t child_ino, char* out_name, uint32_t out_cap) {
-    if (!out_name || out_cap == 0) return -1;
-    out_name[0] = '\0';
-
-    if (dir_ino == 0 || child_ino == 0) return -1;
-
-    yfs_dirent_t entries[8];
-    uint32_t offset = 0;
-    for (;;) {
-        int bytes = yulafs_read(dir_ino, (uint8_t*)entries, (yfs_off_t)offset, (uint32_t)sizeof(entries));
-        if (bytes <= 0) break;
-
-        int count = bytes / (int)sizeof(yfs_dirent_t);
-        if (count <= 0) break;
-
-        for (int i = 0; i < count; i++) {
-            if (entries[i].inode != child_ino) continue;
-            if (strcmp(entries[i].name, ".") == 0) continue;
-            if (strcmp(entries[i].name, "..") == 0) continue;
-            strlcpy(out_name, entries[i].name, (size_t)out_cap);
-            return 0;
-        }
-
-        offset += (uint32_t)bytes;
-    }
-
-    return -1;
-}
-
 static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
     if (!t || !t->mem) return 0;
     mmap_area_t* m = t->mem->mmap_list;
@@ -2004,77 +1975,13 @@ static void syscall_getcwd(registers_t* regs, task_t* curr) {
     }
 
     yfs_ino_t cur = (yfs_ino_t)(curr->cwd_inode ? curr->cwd_inode : 1u);
-    if (cur == 1u) {
-        if (size < 2u) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-        u_buf[0] = '/';
-        u_buf[1] = '\0';
-        regs->eax = 1;
-        return;
-    }
-
-    char parts[64][YFS_NAME_MAX];
-    uint32_t depth = 0;
-
-    while (cur != 1u) {
-        if (depth >= (uint32_t)(sizeof(parts) / sizeof(parts[0]))) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-
-        int parent_i = yulafs_lookup_in_dir(cur, "..");
-        if (parent_i <= 0) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-
-        yfs_ino_t parent = (yfs_ino_t)parent_i;
-
-        if (yulafs_find_child_name_in_dir(parent, cur, parts[depth], (uint32_t)sizeof(parts[depth])) != 0) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-
-        depth++;
-        if (parent == cur) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-        cur = parent;
-    }
-
-    char kbuf[1024];
-    uint32_t len = 0;
-    kbuf[len++] = '/';
-
-    for (uint32_t i = depth; i > 0; i--) {
-        const char* name = parts[i - 1u];
-        uint32_t name_len = (uint32_t)strlen(name);
-        if (name_len == 0) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-        if (len + name_len + 1u >= (uint32_t)sizeof(kbuf)) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-        memcpy(&kbuf[len], name, name_len);
-        len += name_len;
-        if (i > 1u) {
-            kbuf[len++] = '/';
-        }
-    }
-
-    if (len + 1u > size) {
+    int len = yulafs_inode_to_path(cur, u_buf, size);
+    if (len < 0) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    kbuf[len] = '\0';
-    memcpy(u_buf, kbuf, len + 1u);
-    regs->eax = (int)len;
+    regs->eax = (uint32_t)len;
 }
 
 static void syscall_setsid(registers_t* regs, task_t* curr) {

@@ -571,19 +571,106 @@ static int vfs_path_is_abs(const char* path) {
     return path && path[0] == '/';
 }
 
-static char* vfs_find_last_slash(char* s) {
-    if (!s) {
-        return nullptr;
+static constexpr size_t VFS_PATH_MAX = 256;
+static constexpr uint32_t VFS_PATH_SEG_MAX = 128;
+
+struct VfsPathSegment {
+    const char* ptr;
+    uint16_t len;
+};
+
+static int vfs_collect_segments(const char* path, VfsPathSegment* segments, uint32_t* count, uint32_t cap) {
+    if (!path || !segments || !count) {
+        return -1;
     }
 
-    char* last = nullptr;
-    for (char* p = s; *p; ++p) {
-        if (*p == '/') {
-            last = p;
+    const char* p = path;
+    while (*p) {
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+
+        const char* start = p;
+        while (*p && *p != '/') {
+            p++;
+        }
+
+        const size_t len = (size_t)(p - start);
+        if (len == 0) {
+            continue;
+        }
+
+        if (len == 1 && start[0] == '.') {
+            continue;
+        }
+
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            if (*count > 0) {
+                (*count)--;
+            }
+            continue;
+        }
+
+        if (*count >= cap) {
+            return -1;
+        }
+
+        segments[*count].ptr = start;
+        segments[*count].len = (uint16_t)len;
+        (*count)++;
+    }
+
+    return 0;
+}
+
+static int vfs_normalize_path(task_t* curr, const char* path, char* out, size_t out_size) {
+    if (!curr || !path || path[0] == '\0' || !out || out_size < 2u) {
+        return -1;
+    }
+
+    VfsPathSegment segments[VFS_PATH_SEG_MAX];
+    uint32_t count = 0;
+
+    if (path[0] != '/') {
+        char cwd[VFS_PATH_MAX];
+        const yfs_ino_t cwd_ino = (yfs_ino_t)(curr->cwd_inode ? curr->cwd_inode : 1u);
+        if (yulafs_inode_to_path(cwd_ino, cwd, (uint32_t)sizeof(cwd)) < 0) {
+            return -1;
+        }
+
+        if (vfs_collect_segments(cwd, segments, &count, VFS_PATH_SEG_MAX) != 0) {
+            return -1;
         }
     }
 
-    return last;
+    if (vfs_collect_segments(path, segments, &count, VFS_PATH_SEG_MAX) != 0) {
+        return -1;
+    }
+
+    size_t pos = 0;
+    out[pos++] = '/';
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (pos > 1) {
+            if (pos + 1 >= out_size) {
+                return -1;
+            }
+            out[pos++] = '/';
+        }
+
+        if (pos + segments[i].len >= out_size) {
+            return -1;
+        }
+
+        memcpy(out + pos, segments[i].ptr, segments[i].len);
+        pos += segments[i].len;
+    }
+
+    out[pos] = '\0';
+    return 0;
 }
 
 static int vfs_build_abs_path(
@@ -712,45 +799,85 @@ static int vfs_resolve_mount(
         return 0;
     }
 
-    char prefix[sizeof(((vfs_mount_entry*)nullptr)->mountpoint)];
+    const size_t max_mount_len = sizeof(((vfs_mount_entry*)nullptr)->mountpoint) - 1u;
+    vfs_mount_entry* best = vfs_mount_table_find_locked("/");
+    size_t best_len = best ? 1u : 0u;
+
     const size_t path_len = strlen(path);
-    if (path_len >= sizeof(prefix)) {
+    char prefix[sizeof(((vfs_mount_entry*)nullptr)->mountpoint)];
+
+    for (size_t i = 1u; i < path_len; i++) {
+        if (path[i] != '/') {
+            continue;
+        }
+
+        const size_t len = i;
+        if (len > max_mount_len) {
+            break;
+        }
+
+        memcpy(prefix, path, len);
+        prefix[len] = '\0';
+
+        vfs_mount_entry* entry = vfs_mount_table_find_locked(prefix);
+        if (entry && entry->instance && entry->instance->type && entry->instance->type->ops) {
+            best = entry;
+            best_len = len;
+        }
+    }
+
+    if (path_len <= max_mount_len) {
+        memcpy(prefix, path, path_len);
+        prefix[path_len] = '\0';
+
+        vfs_mount_entry* entry = vfs_mount_table_find_locked(prefix);
+        if (entry && entry->instance && entry->instance->type && entry->instance->type->ops) {
+            best = entry;
+            best_len = path_len;
+        }
+    }
+
+    if (!best || best_len == 0u) {
         return -1;
     }
 
-    memcpy(prefix, path, path_len + 1);
-
-    for (;;) {
-        vfs_mount_entry* entry = vfs_mount_table_find_locked(prefix);
-        if (entry && entry->instance && entry->instance->type && entry->instance->type->ops) {
-            const size_t mlen = strlen(entry->mountpoint);
-            const char* rel = path + mlen;
-            if (rel[0] == '/') {
-                rel++;
-            }
-
-            *out_mount = entry;
-            *out_rel = rel;
-            return 0;
-        }
-
-        if (strcmp(prefix, "/") == 0) {
-            break;
-        }
-
-        char* last = vfs_find_last_slash(prefix);
-        if (!last) {
-            break;
-        }
-
-        if (last == prefix) {
-            prefix[1] = '\0';
-        } else {
-            *last = '\0';
-        }
+    const char* rel = path + best_len;
+    if (rel[0] == '/') {
+        rel++;
     }
 
-    return -1;
+    *out_mount = best;
+    *out_rel = rel;
+    return 0;
+}
+
+struct VfsResolvedPath {
+    const vfs_mount_entry* mount;
+    const char* rel;
+    int is_abs;
+    char abs[VFS_PATH_MAX];
+};
+
+static int vfs_resolve_path(task_t* curr, const char* path, VfsResolvedPath* out) {
+    if (!curr || !path || !out) {
+        return -1;
+    }
+
+    if (vfs_normalize_path(curr, path, out->abs, sizeof(out->abs)) != 0) {
+        return -1;
+    }
+
+    const vfs_mount_entry* mount = nullptr;
+    const char* rel = nullptr;
+    int is_abs = 0;
+    if (vfs_resolve_mount(out->abs, &mount, &rel, &is_abs) != 0) {
+        return -1;
+    }
+
+    out->mount = mount;
+    out->rel = rel;
+    out->is_abs = is_abs;
+    return 0;
 }
 
 static int vfs_yulafs_getdents(
@@ -1347,18 +1474,23 @@ extern "C" int vfs_open(const char* path, int flags) {
 
     const int open_append = (flags & 2) != 0;
 
-    const vfs_mount_entry* mount = nullptr;
-    const char* rel = nullptr;
-    int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->instance->type->ops->open) {
+    if (!resolved.mount->instance->type->ops->open) {
         return -1;
     }
 
-    vfs_node_t* node = mount->instance->type->ops->open(mount->instance, curr, mount->mountpoint, rel, is_abs, flags);
+    vfs_node_t* node = resolved.mount->instance->type->ops->open(
+        resolved.mount->instance,
+        curr,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs,
+        flags
+    );
 
     if (!node) {
         return -1;
@@ -1490,18 +1622,22 @@ extern "C" vfs_node_t* vfs_create_node_from_path(const char* path) {
         return 0;
     }
 
-    const vfs_mount_entry* mount = nullptr;
-    const char* rel = nullptr;
-    int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
+    task_t* curr = proc_current();
+    VfsResolvedPath resolved;
+    if (!curr || vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return 0;
     }
 
-    if (!mount->instance->type->ops->create_node_from_path) {
+    if (!resolved.mount->instance->type->ops->create_node_from_path) {
         return 0;
     }
 
-    return mount->instance->type->ops->create_node_from_path(mount->instance, mount->mountpoint, rel, is_abs);
+    return resolved.mount->instance->type->ops->create_node_from_path(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs
+    );
 }
 
 extern "C" int vfs_mkdir(const char* path) {
@@ -1509,18 +1645,22 @@ extern "C" int vfs_mkdir(const char* path) {
         return -1;
     }
 
-    const vfs_mount_entry* mount = nullptr;
-    const char* rel = nullptr;
-    int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
+    task_t* curr = proc_current();
+    VfsResolvedPath resolved;
+    if (!curr || vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->instance->type->ops->mkdir) {
+    if (!resolved.mount->instance->type->ops->mkdir) {
         return -1;
     }
 
-    return mount->instance->type->ops->mkdir(mount->instance, mount->mountpoint, rel, is_abs);
+    return resolved.mount->instance->type->ops->mkdir(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs
+    );
 }
 
 extern "C" int vfs_unlink(const char* path) {
@@ -1528,18 +1668,22 @@ extern "C" int vfs_unlink(const char* path) {
         return -1;
     }
 
-    const vfs_mount_entry* mount = nullptr;
-    const char* rel = nullptr;
-    int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
+    task_t* curr = proc_current();
+    VfsResolvedPath resolved;
+    if (!curr || vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->instance->type->ops->unlink) {
+    if (!resolved.mount->instance->type->ops->unlink) {
         return -1;
     }
 
-    return mount->instance->type->ops->unlink(mount->instance, mount->mountpoint, rel, is_abs);
+    return resolved.mount->instance->type->ops->unlink(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs
+    );
 }
 
 extern "C" int vfs_stat_path(const char* path, vfs_stat_t* out) {
@@ -1547,18 +1691,23 @@ extern "C" int vfs_stat_path(const char* path, vfs_stat_t* out) {
         return -1;
     }
 
-    const vfs_mount_entry* mount = nullptr;
-    const char* rel = nullptr;
-    int is_abs = 0;
-    if (vfs_resolve_mount(path, &mount, &rel, &is_abs) != 0 || !mount || !mount->instance || !mount->instance->type || !mount->instance->type->ops) {
+    task_t* curr = proc_current();
+    VfsResolvedPath resolved;
+    if (!curr || vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return -1;
     }
 
-    if (!mount->instance->type->ops->stat) {
+    if (!resolved.mount->instance->type->ops->stat) {
         return -1;
     }
 
-    return mount->instance->type->ops->stat(mount->instance, mount->mountpoint, rel, is_abs, out);
+    return resolved.mount->instance->type->ops->stat(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs,
+        out
+    );
 }
 
 extern "C" int vfs_rename(const char* old_path, const char* new_path) {
@@ -1566,37 +1715,33 @@ extern "C" int vfs_rename(const char* old_path, const char* new_path) {
         return -1;
     }
 
-    const vfs_mount_entry* old_mount = nullptr;
-    const vfs_mount_entry* new_mount = nullptr;
-    const char* old_rel = nullptr;
-    const char* new_rel = nullptr;
-    int old_is_abs = 0;
-    int new_is_abs = 0;
-
-    if (vfs_resolve_mount(old_path, &old_mount, &old_rel, &old_is_abs) != 0 || !old_mount || !old_mount->instance || !old_mount->instance->type || !old_mount->instance->type->ops) {
+    task_t* curr = proc_current();
+    VfsResolvedPath old_resolved;
+    VfsResolvedPath new_resolved;
+    if (!curr || vfs_resolve_path(curr, old_path, &old_resolved) != 0 || !old_resolved.mount || !old_resolved.mount->instance || !old_resolved.mount->instance->type || !old_resolved.mount->instance->type->ops) {
         return -1;
     }
 
-    if (vfs_resolve_mount(new_path, &new_mount, &new_rel, &new_is_abs) != 0 || !new_mount || !new_mount->instance || !new_mount->instance->type || !new_mount->instance->type->ops) {
+    if (vfs_resolve_path(curr, new_path, &new_resolved) != 0 || !new_resolved.mount || !new_resolved.mount->instance || !new_resolved.mount->instance->type || !new_resolved.mount->instance->type->ops) {
         return -1;
     }
 
-    if (old_mount->instance->type != new_mount->instance->type || old_mount->instance != new_mount->instance) {
+    if (old_resolved.mount->instance->type != new_resolved.mount->instance->type || old_resolved.mount->instance != new_resolved.mount->instance) {
         return -1;
     }
 
-    if (!old_mount->instance->type->ops->rename) {
+    if (!old_resolved.mount->instance->type->ops->rename) {
         return -1;
     }
 
-    return old_mount->instance->type->ops->rename(
-        old_mount->instance,
-        old_mount->mountpoint,
-        old_rel,
-        new_mount->mountpoint,
-        new_rel,
-        old_is_abs,
-        new_is_abs
+    return old_resolved.mount->instance->type->ops->rename(
+        old_resolved.mount->instance,
+        old_resolved.mount->mountpoint,
+        old_resolved.rel,
+        new_resolved.mount->mountpoint,
+        new_resolved.rel,
+        old_resolved.is_abs,
+        new_resolved.is_abs
     );
 }
 
@@ -1617,5 +1762,3 @@ extern "C" int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, ui
 
     return root->instance->type->ops->get_fs_info(root->instance, total_blocks, free_blocks, block_size);
 }
-
-
