@@ -12,85 +12,124 @@ namespace kernel {
 
 alignas(PmmState) static unsigned char g_pmm_storage[sizeof(PmmState)];
 static PmmState* g_pmm = nullptr;
+static constexpr uint32_t k_dma_limit = 16u * 1024u * 1024u;
 
 PmmState* pmm_state() noexcept {
     return g_pmm;
 }
 
 void PmmState::init(uint32_t mem_size, uint32_t kernel_end_addr) noexcept {
-    total_pages_ = mem_size / PAGE_SIZE;
-    used_pages_count_ = 0u;
+    pmm_region_t region = {};
+    region.base = 0u;
+    region.size = mem_size;
+    region.type = PMM_REGION_AVAILABLE;
 
-    for (uint32_t i = 0; i <= PMM_MAX_ORDER; i++) {
-        free_areas_[i] = {};
+    init_regions(&region, 1u, nullptr, 0u, kernel_end_addr);
+}
+
+void PmmState::init_regions(
+    const pmm_region_t* regions,
+    uint32_t region_count,
+    const pmm_reserved_region_t* reserved,
+    uint32_t reserved_count,
+    uint32_t kernel_end_addr
+) noexcept {
+    total_pages_ = 0u;
+    used_pages_count_ = 0u;
+    mem_map_ = nullptr;
+
+    for (uint32_t zone = 0u; zone < PMM_ZONE_COUNT; zone++) {
+        for (uint32_t order = 0u; order <= PMM_MAX_ORDER; order++) {
+            free_areas_[zone][order] = {};
+        }
+    }
+
+    if (!regions || region_count == 0u) {
+        return;
+    }
+
+    uint32_t max_end = 0u;
+    for (uint32_t i = 0u; i < region_count; i++) {
+        if (regions[i].type != PMM_REGION_AVAILABLE) {
+            continue;
+        }
+
+        const uint32_t base = regions[i].base;
+        const uint32_t size = regions[i].size;
+        if (size == 0u) {
+            continue;
+        }
+
+        uint32_t end = base + size;
+        if (end < base) {
+            end = 0xFFFFFFFFu;
+        }
+
+        if (end > max_end) {
+            max_end = end;
+        }
+    }
+
+    const uint32_t max_addr = align_down(max_end);
+    total_pages_ = max_addr / PAGE_SIZE;
+    if (total_pages_ == 0u) {
+        return;
     }
 
     const uint32_t mem_map_phys = align_up(kernel_end_addr);
     mem_map_ = reinterpret_cast<page_t*>(mem_map_phys);
 
     const uint32_t mem_map_size = total_pages_ * static_cast<uint32_t>(sizeof(page_t));
+    const uint32_t mem_map_end = align_up(mem_map_phys + mem_map_size);
+    if (mem_map_end < mem_map_phys) {
+        mem_map_ = nullptr;
+        total_pages_ = 0u;
+        return;
+    }
+
     memset(mem_map_, 0, mem_map_size);
 
-    const uint32_t phys_alloc_start = align_up(mem_map_phys + mem_map_size);
-    const uint32_t first_free_idx = phys_alloc_start / PAGE_SIZE;
+    init_used_pages(total_pages_, mem_map_end);
 
-    used_pages_count_ = total_pages_;
-
-    for (uint32_t p = first_free_idx; p < total_pages_; p++) {
-        mem_map_[p].flags = PMM_FLAG_USED;
-        mem_map_[p].ref_count = 0;
-        mem_map_[p].order = 0;
-    }
-
-    for (uint32_t i = 0; i < first_free_idx; i++) {
-        mem_map_[i].flags = PMM_FLAG_USED | PMM_FLAG_KERNEL;
-        mem_map_[i].ref_count = 1;
-        mem_map_[i].order = 0;
-    }
-
-    uint32_t i = first_free_idx;
-    const uint32_t max_block_size = 1u << PMM_MAX_ORDER;
-
-    while (i < total_pages_ && (i & (max_block_size - 1u)) != 0u) {
-        mem_map_[i].flags = PMM_FLAG_USED;
-
-        free_pages_unlocked(reinterpret_cast<void*>(i * PAGE_SIZE), 0u);
-
-        i++;
-    }
-
-    while (i + max_block_size <= total_pages_) {
-        page_t* page = &mem_map_[i];
-
-        for (uint32_t j = 0; j < max_block_size; j++) {
-            mem_map_[i + j].flags = PMM_FLAG_USED;
-            mem_map_[i + j].order = 0;
-            mem_map_[i + j].ref_count = 0;
+    for (uint32_t i = 0u; i < region_count; i++) {
+        if (regions[i].type != PMM_REGION_AVAILABLE) {
+            continue;
         }
 
-        page->flags = PMM_FLAG_FREE;
-        page->order = PMM_MAX_ORDER;
-        page->ref_count = 0;
+        uint32_t start = align_up(regions[i].base);
+        uint32_t end = align_down(regions[i].base + regions[i].size);
 
-        list_add(&free_areas_[PMM_MAX_ORDER].head, page);
-        free_areas_[PMM_MAX_ORDER].count++;
+        if (end <= start) {
+            continue;
+        }
 
-        used_pages_count_ -= max_block_size;
+        if (start < mem_map_end) {
+            start = mem_map_end;
+        }
 
-        i += max_block_size;
-    }
+        if (end <= start) {
+            continue;
+        }
 
-    while (i < total_pages_) {
-        mem_map_[i].flags = PMM_FLAG_USED;
-
-        free_pages_unlocked(reinterpret_cast<void*>(i * PAGE_SIZE), 0u);
-
-        i++;
+        free_range(start, end, 0u, reserved, reserved_count);
     }
 }
 
 void* PmmState::alloc_pages(uint32_t order) noexcept {
+    void* ptr = alloc_pages_zone(order, PMM_ZONE_NORMAL);
+    if (ptr) {
+        return ptr;
+    }
+
+    return alloc_pages_zone(order, PMM_ZONE_DMA);
+}
+
+void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
     if (order > PMM_MAX_ORDER) {
+        return nullptr;
+    }
+
+    if (zone >= PMM_ZONE_COUNT) {
         return nullptr;
     }
 
@@ -98,7 +137,7 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
 
     uint32_t current_order = order;
     while (current_order <= PMM_MAX_ORDER) {
-        if (free_areas_[current_order].head) {
+        if (free_areas_[zone][current_order].head) {
             break;
         }
 
@@ -109,9 +148,9 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
         return nullptr;
     }
 
-    page_t* page = free_areas_[current_order].head;
-    list_remove(&free_areas_[current_order].head, page);
-    free_areas_[current_order].count--;
+    page_t* page = free_areas_[zone][current_order].head;
+    list_remove(&free_areas_[zone][current_order].head, page);
+    free_areas_[zone][current_order].count--;
 
     page->flags |= PMM_FLAG_USED;
     page->flags &= ~PMM_FLAG_FREE;
@@ -131,12 +170,12 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
 
         page_t* buddy = &mem_map_[buddy_pfn];
 
-        buddy->flags = PMM_FLAG_FREE;
+        buddy->flags = (buddy->flags | PMM_FLAG_FREE) & ~PMM_FLAG_USED;
         buddy->order = current_order;
         buddy->ref_count = 0;
 
-        list_add(&free_areas_[current_order].head, buddy);
-        free_areas_[current_order].count++;
+        list_add(&free_areas_[zone][current_order].head, buddy);
+        free_areas_[zone][current_order].count++;
     }
 
     page->order = order;
@@ -196,6 +235,160 @@ uint32_t PmmState::align_up(uint32_t addr) noexcept {
     return PAGE_ALIGN(addr);
 }
 
+uint32_t PmmState::align_down(uint32_t addr) noexcept {
+    return addr & ~(PAGE_SIZE - 1u);
+}
+
+void PmmState::init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) noexcept {
+    used_pages_count_ = total_pages;
+
+    const uint32_t kernel_end = align_up(kernel_end_addr);
+
+    for (uint32_t i = 0u; i < total_pages; i++) {
+        const uint32_t addr = i * PAGE_SIZE;
+        page_t& page = mem_map_[i];
+
+        page.flags = PMM_FLAG_USED | zone_flags_for_addr(addr);
+        if (addr < kernel_end) {
+            page.flags |= PMM_FLAG_KERNEL;
+        }
+
+        page.ref_count = 1;
+        page.order = 0;
+        page.slab_cache = nullptr;
+        page.freelist = nullptr;
+        page.objects = 0;
+        page.prev = nullptr;
+        page.next = nullptr;
+    }
+}
+
+void PmmState::free_range(
+    uint32_t start,
+    uint32_t end,
+    uint32_t zone_flags,
+    const pmm_reserved_region_t* reserved,
+    uint32_t reserved_count
+) noexcept {
+    if (end <= start) {
+        return;
+    }
+
+    uint32_t cur = align_up(start);
+    const uint32_t end_aligned = align_down(end);
+    if (end_aligned <= cur) {
+        return;
+    }
+
+    if (zone_flags != 0u && (zone_flags & PMM_FLAG_DMA) == 0u && cur < k_dma_limit) {
+        cur = k_dma_limit;
+    }
+
+    while (cur < end_aligned) {
+        if (zone_flags != 0u && (zone_flags & PMM_FLAG_DMA) != 0u && cur >= k_dma_limit) {
+            break;
+        }
+
+        uint32_t max_order = PMM_MAX_ORDER;
+        while (max_order > 0u) {
+            const uint32_t block_size = PAGE_SIZE << max_order;
+            const uint32_t block_end = cur + block_size;
+
+            if (block_end < cur || block_end > end_aligned) {
+                max_order--;
+                continue;
+            }
+
+            const uint32_t cur_zone_flags = zone_flags != 0u ? zone_flags : zone_flags_for_addr(cur);
+            if ((cur_zone_flags & PMM_FLAG_DMA) != 0u) {
+                if (block_end > k_dma_limit) {
+                    max_order--;
+                    continue;
+                }
+            } else if (cur < k_dma_limit && block_end > k_dma_limit) {
+                max_order--;
+                continue;
+            }
+
+            if (range_is_reserved(cur, block_end, reserved, reserved_count)) {
+                max_order--;
+                continue;
+            }
+
+            break;
+        }
+
+        const uint32_t block_size = PAGE_SIZE << max_order;
+        const uint32_t block_end = cur + block_size;
+
+        if (block_end <= cur || block_end > end_aligned) {
+            break;
+        }
+
+        if (range_is_reserved(cur, block_end, reserved, reserved_count)) {
+            cur += PAGE_SIZE;
+            continue;
+        }
+
+        free_pages_unlocked(reinterpret_cast<void*>(cur), max_order);
+        cur = block_end;
+    }
+}
+
+bool PmmState::range_is_reserved(
+    uint32_t start,
+    uint32_t end,
+    const pmm_reserved_region_t* reserved,
+    uint32_t reserved_count
+) const noexcept {
+    if (!reserved || reserved_count == 0u) {
+        return false;
+    }
+
+    for (uint32_t i = 0u; i < reserved_count; i++) {
+        const uint32_t base = reserved[i].base;
+        const uint32_t size = reserved[i].size;
+        if (size == 0u) {
+            continue;
+        }
+
+        const uint32_t r_start = align_down(base);
+        uint32_t r_end = base + size;
+        if (r_end < base) {
+            r_end = 0xFFFFFFFFu;
+        }
+        r_end = align_up(r_end);
+
+        if (r_end <= start) {
+            continue;
+        }
+
+        if (r_start >= end) {
+            continue;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+uint32_t PmmState::zone_flags_for_addr(uint32_t addr) noexcept {
+    if (addr < k_dma_limit) {
+        return PMM_FLAG_DMA;
+    }
+
+    return 0u;
+}
+
+pmm_zone_t PmmState::zone_for_flags(uint32_t flags) noexcept {
+    if ((flags & PMM_FLAG_DMA) != 0u) {
+        return PMM_ZONE_DMA;
+    }
+
+    return PMM_ZONE_NORMAL;
+}
+
 void PmmState::list_add(page_t** head, page_t* page) noexcept {
     page->next = *head;
     page->prev = nullptr;
@@ -232,9 +425,14 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
         return;
     }
 
+    if ((page->flags & PMM_FLAG_KERNEL) != 0u) {
+        return;
+    }
+
     used_pages_count_ -= 1u << order;
 
     uint32_t pfn = static_cast<uint32_t>(page - mem_map_);
+    const pmm_zone_t zone = zone_for_flags(page->flags);
 
     while (order < PMM_MAX_ORDER) {
         const uint32_t buddy_pfn = pfn ^ (1u << order);
@@ -253,8 +451,12 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
             break;
         }
 
-        list_remove(&free_areas_[order].head, buddy);
-        free_areas_[order].count--;
+        if (zone_for_flags(buddy->flags) != zone) {
+            break;
+        }
+
+        list_remove(&free_areas_[zone][order].head, buddy);
+        free_areas_[zone][order].count--;
 
         buddy->order = 0;
 
@@ -270,12 +472,12 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
     page->prev = nullptr;
     page->next = nullptr;
 
-    page->flags = PMM_FLAG_FREE;
+    page->flags = (page->flags | PMM_FLAG_FREE) & ~PMM_FLAG_USED;
     page->order = order;
     page->ref_count = 0;
 
-    list_add(&free_areas_[order].head, page);
-    free_areas_[order].count++;
+    list_add(&free_areas_[zone][order].head, page);
+    free_areas_[zone][order].count++;
 }
 
 static inline PmmState& pmm_state_init_once() noexcept {
@@ -296,6 +498,18 @@ void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
     pmm.init(mem_size, kernel_end_addr);
 }
 
+void pmm_init_regions(
+    const pmm_region_t* regions,
+    uint32_t region_count,
+    const pmm_reserved_region_t* reserved,
+    uint32_t reserved_count,
+    uint32_t kernel_end_addr
+) {
+    kernel::PmmState& pmm = kernel::pmm_state_init_once();
+
+    pmm.init_regions(regions, region_count, reserved, reserved_count, kernel_end_addr);
+}
+
 void* pmm_alloc_pages(uint32_t order) {
     kernel::PmmState* pmm = kernel::pmm_state();
 
@@ -304,6 +518,16 @@ void* pmm_alloc_pages(uint32_t order) {
     }
 
     return pmm->alloc_pages(order);
+}
+
+void* pmm_alloc_pages_zone(uint32_t order, pmm_zone_t zone) {
+    kernel::PmmState* pmm = kernel::pmm_state();
+
+    if (kernel::unlikely(!pmm)) {
+        return nullptr;
+    }
+
+    return pmm->alloc_pages_zone(order, zone);
 }
 
 void pmm_free_pages(void* addr, uint32_t order) {

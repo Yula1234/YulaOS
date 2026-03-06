@@ -72,6 +72,63 @@ extern void smp_boot_aps(void);
 
 static int g_enable_uhci = ENABLE_UHCI;
 
+typedef struct {
+    uint32_t mod_start;
+    uint32_t mod_end;
+    uint32_t string;
+    uint32_t reserved;
+} multiboot_module_t;
+
+static uint32_t clamp_u64_to_u32(uint64_t value) {
+    if (value > 0xFFFFFFFFull) {
+        return 0xFFFFFFFFu;
+    }
+
+    return (uint32_t)value;
+}
+
+static void add_region(
+    pmm_region_t* regions,
+    uint32_t* count,
+    uint32_t max_count,
+    uint32_t base,
+    uint32_t size,
+    uint32_t type
+) {
+    if (!regions || !count || size == 0u) {
+        return;
+    }
+
+    if (*count >= max_count) {
+        return;
+    }
+
+    regions[*count].base = base;
+    regions[*count].size = size;
+    regions[*count].type = type;
+    (*count)++;
+}
+
+static void add_reserved(
+    pmm_reserved_region_t* reserved,
+    uint32_t* count,
+    uint32_t max_count,
+    uint32_t base,
+    uint32_t size
+) {
+    if (!reserved || !count || size == 0u) {
+        return;
+    }
+
+    if (*count >= max_count) {
+        return;
+    }
+
+    reserved[*count].base = base;
+    reserved[*count].size = size;
+    (*count)++;
+}
+
 static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
     validate_multiboot(magic, mb_info);
 
@@ -99,7 +156,100 @@ static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
     uint32_t memory_end_addr = detect_memory_end(mb_info);
     pic_configure_legacy();
 
-    pmm_init(memory_end_addr, (uint32_t)&kernel_end);
+    const uint32_t kernel_end_addr = (uint32_t)&kernel_end;
+
+    const uint32_t max_regions = 128u;
+    const uint32_t max_reserved = 128u;
+
+    pmm_region_t regions[max_regions];
+    pmm_reserved_region_t reserved[max_reserved];
+
+    uint32_t region_count = 0u;
+    uint32_t reserved_count = 0u;
+
+    if (mb_info && (mb_info->flags & (1u << 6))) {
+        uint32_t mmap_base = mb_info->mmap_addr;
+        uint32_t mmap_len = mb_info->mmap_length;
+
+        uint32_t off = 0u;
+        while (off + sizeof(uint32_t) <= mmap_len) {
+            multiboot_memory_map_t* e = (multiboot_memory_map_t*)(mmap_base + off);
+            if (e->size == 0u) {
+                break;
+            }
+
+            uint64_t addr64 = e->addr;
+            uint64_t len64 = e->len;
+            if (len64 != 0u) {
+                uint32_t base = clamp_u64_to_u32(addr64);
+                uint32_t end = clamp_u64_to_u32(addr64 + len64);
+                if (end > base) {
+                    uint32_t type = e->type == 1u ? PMM_REGION_AVAILABLE : PMM_REGION_RESERVED;
+                    add_region(regions, &region_count, max_regions, base, end - base, type);
+                }
+            }
+
+            uint32_t step = e->size + sizeof(uint32_t);
+            if (step > mmap_len - off) {
+                break;
+            }
+            off += step;
+        }
+    } else {
+        add_region(regions, &region_count, max_regions, 0u, memory_end_addr, PMM_REGION_AVAILABLE);
+    }
+
+    add_reserved(reserved, &reserved_count, max_reserved, 0u, kernel_end_addr);
+
+    if (mb_info) {
+        add_reserved(
+            reserved,
+            &reserved_count,
+            max_reserved,
+            (uint32_t)mb_info,
+            (uint32_t)sizeof(multiboot_info_t)
+        );
+
+        if (mb_info->flags & (1u << 6)) {
+            add_reserved(reserved, &reserved_count, max_reserved, mb_info->mmap_addr, mb_info->mmap_length);
+        }
+
+        if (mb_info->flags & (1u << 11)) {
+            if (mb_info->elf_num != 0u && mb_info->elf_size != 0u && mb_info->elf_addr != 0u) {
+                uint64_t bytes64 = (uint64_t)mb_info->elf_num * (uint64_t)mb_info->elf_size;
+                uint32_t bytes = clamp_u64_to_u32(bytes64);
+                add_reserved(reserved, &reserved_count, max_reserved, mb_info->elf_addr, bytes);
+            }
+        }
+
+        if (mb_info->flags & (1u << 3)) {
+            if (mb_info->mods_count != 0u && mb_info->mods_addr != 0u) {
+                uint32_t mods_bytes = mb_info->mods_count * (uint32_t)sizeof(multiboot_module_t);
+                add_reserved(reserved, &reserved_count, max_reserved, mb_info->mods_addr, mods_bytes);
+
+                multiboot_module_t* mods = (multiboot_module_t*)mb_info->mods_addr;
+                for (uint32_t i = 0u; i < mb_info->mods_count; i++) {
+                    uint32_t start = mods[i].mod_start;
+                    uint32_t end = mods[i].mod_end;
+                    if (end > start) {
+                        add_reserved(reserved, &reserved_count, max_reserved, start, end - start);
+                    }
+                }
+            }
+        }
+
+        if (mb_info->flags & (1u << 12)) {
+            uint64_t fb_addr64 = mb_info->framebuffer_addr;
+            uint64_t fb_size64 = (uint64_t)mb_info->framebuffer_pitch * (uint64_t)mb_info->framebuffer_height;
+            if (fb_addr64 <= 0xFFFFFFFFull && fb_size64 != 0u && fb_size64 <= 0xFFFFFFFFull) {
+                uint32_t fb_base = (uint32_t)fb_addr64;
+                uint32_t fb_size = (uint32_t)fb_size64;
+                add_reserved(reserved, &reserved_count, max_reserved, fb_base, fb_size);
+            }
+        }
+    }
+
+    pmm_init_regions(regions, region_count, reserved, reserved_count, kernel_end_addr);
     paging_init(memory_end_addr);
     vmm_init();
     heap_init();
