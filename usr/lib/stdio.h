@@ -28,6 +28,11 @@ extern "C" {
 #define _IOLBF 1
 #define _IOFBF 2
 
+#define VFS_OPEN_WRITE  1u
+#define VFS_OPEN_APPEND 2u
+#define VFS_OPEN_CREATE 4u
+#define VFS_OPEN_TRUNC  8u
+
 typedef struct _iobuf {
     int  fd;
     int  flags;

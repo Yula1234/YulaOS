@@ -261,8 +261,12 @@ static inline int munmap(void* addr, uint32_t length) {
 }
 
 typedef struct {
-    uint32_t type; // 1=FILE, 2=DIR
+    uint32_t type;
     uint32_t size;
+    uint32_t inode;
+    uint32_t flags;
+    uint32_t created_at;
+    uint32_t modified_at;
 } __attribute__((packed)) stat_t;
 
 typedef struct {

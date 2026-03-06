@@ -374,8 +374,12 @@ static int futex_sem_wake(semaphore_t* sem, uint32_t max_wake) {
 #define MAX_TASKS 32
 
 typedef struct {
-    uint32_t type;  // 1=FILE, 2=DIR
+    uint32_t type;
     uint32_t size;
+    uint32_t inode;
+    uint32_t flags;
+    uint32_t created_at;
+    uint32_t modified_at;
 } __attribute__((packed)) user_stat_t;
 
 typedef struct {
@@ -1195,6 +1199,10 @@ static void syscall_stat(registers_t* regs, task_t* curr) {
 
     u_stat->type = st.type;
     u_stat->size = st.size;
+    u_stat->inode = st.inode;
+    u_stat->flags = st.flags;
+    u_stat->created_at = st.created_at;
+    u_stat->modified_at = st.modified_at;
     regs->eax = 0;
 }
 
@@ -1216,6 +1224,10 @@ static void syscall_statat(registers_t* regs, task_t* curr) {
 
     u_stat->type = st.type;
     u_stat->size = st.size;
+    u_stat->inode = st.inode;
+    u_stat->flags = st.flags;
+    u_stat->created_at = st.created_at;
+    u_stat->modified_at = st.modified_at;
     regs->eax = 0;
 }
 

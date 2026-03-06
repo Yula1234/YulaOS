@@ -182,7 +182,7 @@ struct vfs_mount_entry {
 extern const vfs_fs_type g_yulafs_type;
 extern const vfs_fs_type g_devfs_type;
 
-static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append);
+static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append, int open_trunc, int open_create);
 static vfs_node_t* vfs_open_devfs_root_node(void);
 
 static vfs_fs_instance* vfs_yulafs_mount(const char* source, uint32_t flags) {
@@ -198,7 +198,7 @@ static vfs_fs_instance* vfs_yulafs_mount(const char* source, uint32_t flags) {
     inst->type = &g_yulafs_type;
     inst->refs = 1;
 
-    vfs_node_t* root = vfs_open_yulafs_node("/", 0, 0);
+    vfs_node_t* root = vfs_open_yulafs_node("/", 0, 0, 0, 0);
     if (!root) {
         kfree(inst);
         return nullptr;
@@ -1000,6 +1000,10 @@ static int vfs_yulafs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* d
 
     out->type = info.type;
     out->size = info.size;
+    out->inode = (uint32_t)ino;
+    out->flags = info.flags;
+    out->created_at = info.created_at;
+    out->modified_at = info.modified_at;
     return 0;
 }
 
@@ -1197,16 +1201,18 @@ static vfs_node_t* vfs_open_devfs_root_node(void) {
     return node;
 }
 
-static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append);
+static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append, int open_trunc, int open_create);
 
 static vfs_node_t* vfs_yulafs_open(vfs_fs_instance* inst, task_t* curr, const char* mountpoint, const char* rel, int is_abs, int flags) {
     (void)curr;
 
-    const int open_append = (flags & 2) != 0;
-    const int open_write = ((flags & 1) != 0) || open_append;
+    const int open_append = (flags & VFS_OPEN_APPEND) != 0;
+    const int open_trunc = (flags & VFS_OPEN_TRUNC) != 0;
+    const int open_write = (flags & (VFS_OPEN_WRITE | VFS_OPEN_TRUNC)) != 0;
+    const int open_create = (flags & VFS_OPEN_CREATE) != 0;
 
     if (!is_abs) {
-        vfs_node_t* node = vfs_open_yulafs_node(rel, open_write, open_append);
+        vfs_node_t* node = vfs_open_yulafs_node(rel, open_write, open_append, open_trunc, open_create);
         if (node) {
             node->fs_driver = inst;
         }
@@ -1219,7 +1225,7 @@ static vfs_node_t* vfs_yulafs_open(vfs_fs_instance* inst, task_t* curr, const ch
         return nullptr;
     }
 
-    vfs_node_t* node = vfs_open_yulafs_node(abs_path, open_write, open_append);
+    vfs_node_t* node = vfs_open_yulafs_node(abs_path, open_write, open_append, open_trunc, open_create);
     if (node) {
         node->fs_driver = inst;
     }
@@ -1341,6 +1347,10 @@ static int vfs_yulafs_stat(vfs_fs_instance* inst, const char* mountpoint, const 
 
     out->type = info.type;
     out->size = info.size;
+    out->inode = (uint32_t)inode_idx;
+    out->flags = info.flags;
+    out->created_at = info.created_at;
+    out->modified_at = info.modified_at;
     return 0;
 }
 
@@ -1430,6 +1440,10 @@ static int vfs_devfs_stat(vfs_fs_instance* inst, const char* mountpoint, const c
     if (!rel || rel[0] == '\0') {
         out->type = YFS_TYPE_DIR;
         out->size = 0;
+        out->inode = 0;
+        out->flags = 0;
+        out->created_at = 0;
+        out->modified_at = 0;
         return 0;
     }
 
@@ -1440,6 +1454,10 @@ static int vfs_devfs_stat(vfs_fs_instance* inst, const char* mountpoint, const c
 
     out->type = YFS_TYPE_FILE;
     out->size = tmpl->size;
+    out->inode = (uint32_t)(((uintptr_t)tmpl >> 4) | 1u);
+    out->flags = tmpl->flags;
+    out->created_at = 0;
+    out->modified_at = 0;
     return 0;
 }
 
@@ -1452,13 +1470,50 @@ static int vfs_devfs_getdents(
     uint32_t out_size
 ) {
     (void)inst;
-    (void)curr;
 
     if (!dir_node || (dir_node->flags & VFS_FLAG_DEVFS_ROOT) == 0) {
         return -1;
     }
 
-    return devfs_registry().getdents(inout_offset, out, out_size);
+    if (!inout_offset || !out || out_size < sizeof(yfs_dirent_info_t)) {
+        return -1;
+    }
+
+    const uint32_t max_entries = out_size / (uint32_t)sizeof(yfs_dirent_info_t);
+    uint32_t written = 0;
+    uint32_t reg_offset = *inout_offset;
+    const int has_tty = curr && curr->controlling_tty;
+
+    if (has_tty) {
+        if (*inout_offset == 0 && written < max_entries) {
+            yfs_dirent_info_t* dst = &out[written];
+            memset(dst, 0, sizeof(*dst));
+            dst->inode = (uint32_t)(((uintptr_t)curr->controlling_tty >> 4) | 1u);
+            dst->type = YFS_TYPE_FILE;
+            dst->size = curr->controlling_tty->size;
+            strlcpy(dst->name, "tty", sizeof(dst->name));
+            written++;
+        }
+
+        if (*inout_offset > 0) {
+            reg_offset = *inout_offset - 1u;
+        } else {
+            reg_offset = 0;
+        }
+    }
+
+    int res = 0;
+    if (written < max_entries) {
+        const uint32_t remaining = (max_entries - written) * (uint32_t)sizeof(yfs_dirent_info_t);
+        res = devfs_registry().getdents(&reg_offset, out + written, remaining);
+        if (res < 0) {
+            return res;
+        }
+        written += (uint32_t)res / (uint32_t)sizeof(yfs_dirent_info_t);
+    }
+
+    *inout_offset = reg_offset + (has_tty ? 1u : 0u);
+    return (int)(written * (uint32_t)sizeof(yfs_dirent_info_t));
 }
 
 static int vfs_devfs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* dir_node, const char* name, vfs_stat_t* out) {
@@ -1479,6 +1534,10 @@ static int vfs_devfs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* di
 
         out->type = YFS_TYPE_FILE;
         out->size = tty_node->size;
+        out->inode = (uint32_t)(((uintptr_t)tty_node >> 4) | 1u);
+        out->flags = tty_node->flags;
+        out->created_at = 0;
+        out->modified_at = 0;
         return 0;
     }
 
@@ -1489,6 +1548,10 @@ static int vfs_devfs_fstatat(vfs_fs_instance* inst, task_t* curr, vfs_node_t* di
 
     out->type = YFS_TYPE_FILE;
     out->size = tmpl->size;
+    out->inode = (uint32_t)(((uintptr_t)tmpl >> 4) | 1u);
+    out->flags = tmpl->flags;
+    out->created_at = 0;
+    out->modified_at = 0;
     return 0;
 }
 
@@ -1508,10 +1571,10 @@ static vfs_node_t* vfs_devfs_create_node_from_path(vfs_fs_instance* inst, const 
     return node;
 }
 
-static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append) {
+static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int open_append, int open_trunc, int open_create) {
     int inode = yulafs_lookup(path);
 
-    if (inode == -1 && open_write) {
+    if (inode == -1 && (open_write || open_append || open_trunc || open_create)) {
         inode = yulafs_create(path);
     }
 
@@ -1519,7 +1582,7 @@ static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int op
         return nullptr;
     }
 
-    if (open_write && !open_append) {
+    if ((open_trunc || (open_write && !open_append)) != 0) {
         yfs_inode_t info;
         yulafs_stat((yfs_ino_t)inode, &info);
 
@@ -1590,7 +1653,7 @@ static int vfs_open_resolved(task_t* curr, const VfsResolvedPath& resolved, int 
         return -1;
     }
 
-    const int open_append = (flags & 2) != 0;
+    const int open_append = (flags & VFS_OPEN_APPEND) != 0;
 
     d->node = node;
     d->offset = 0;
@@ -1605,7 +1668,11 @@ extern "C" int vfs_open(const char* path, int flags) {
         return -1;
     }
 
-    if ((flags & ~3) != 0) {
+    if ((flags & ~(VFS_OPEN_WRITE | VFS_OPEN_APPEND | VFS_OPEN_CREATE | VFS_OPEN_TRUNC)) != 0) {
+        return -1;
+    }
+
+    if ((flags & VFS_OPEN_APPEND) != 0 && (flags & VFS_OPEN_TRUNC) != 0) {
         return -1;
     }
 
@@ -1623,7 +1690,11 @@ extern "C" int vfs_openat(int dirfd, const char* path, int flags) {
         return -1;
     }
 
-    if ((flags & ~3) != 0) {
+    if ((flags & ~(VFS_OPEN_WRITE | VFS_OPEN_APPEND | VFS_OPEN_CREATE | VFS_OPEN_TRUNC)) != 0) {
+        return -1;
+    }
+
+    if ((flags & VFS_OPEN_APPEND) != 0 && (flags & VFS_OPEN_TRUNC) != 0) {
         return -1;
     }
 

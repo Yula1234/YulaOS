@@ -440,9 +440,11 @@ int vprintf(const char* format, va_list ap) {
 
 FILE* fopen(const char* filename, const char* mode) {
     int flags = 0;
-    if (strchr(mode, 'w')) flags = 1;
-    else if (strchr(mode, 'r')) flags = 0;
-    else if (strchr(mode, 'a')) flags = 2;
+    if (strchr(mode, 'w')) {
+        flags = VFS_OPEN_WRITE | VFS_OPEN_TRUNC | VFS_OPEN_CREATE;
+    } else if (strchr(mode, 'a')) {
+        flags = VFS_OPEN_APPEND | VFS_OPEN_CREATE;
+    }
     
     int fd = open(filename, flags);
     if (fd < 0) return NULL;

@@ -33,9 +33,18 @@ typedef struct vfs_ops {
     int (*ioctl)(struct vfs_node* node, uint32_t req, void* arg);
 } vfs_ops_t;
 
+#define VFS_OPEN_WRITE  1u
+#define VFS_OPEN_APPEND 2u
+#define VFS_OPEN_CREATE 4u
+#define VFS_OPEN_TRUNC  8u
+
 typedef struct {
     uint32_t type;
     uint32_t size;
+    uint32_t inode;
+    uint32_t flags;
+    uint32_t created_at;
+    uint32_t modified_at;
 } __attribute__((packed)) vfs_stat_t;
 
 typedef struct vfs_node {
