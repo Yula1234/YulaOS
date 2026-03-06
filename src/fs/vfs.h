@@ -78,6 +78,12 @@ int vfs_stat_path(const char* path, vfs_stat_t* out);
 int vfs_rename(const char* old_path, const char* new_path);
 int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, uint32_t* block_size);
 
+int vfs_openat(int dirfd, const char* path, int flags);
+int vfs_mkdirat(int dirfd, const char* path);
+int vfs_unlinkat(int dirfd, const char* path);
+int vfs_statat_path(int dirfd, const char* path, vfs_stat_t* out);
+int vfs_renameat(int old_dirfd, const char* old_path, int new_dirfd, const char* new_path);
+
 void vfs_node_retain(vfs_node_t* node);
 void vfs_node_release(vfs_node_t* node);
 

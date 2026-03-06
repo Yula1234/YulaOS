@@ -894,12 +894,54 @@ struct VfsResolvedPath {
     char abs[VFS_PATH_MAX];
 };
 
-static int vfs_resolve_path(task_t* curr, const char* path, VfsResolvedPath* out) {
+static int vfs_dirfd_to_base(task_t* curr, int dirfd, char* out, size_t out_size) {
+    if (!curr || !out || out_size < 2u) {
+        return -1;
+    }
+
+    if (dirfd < 0) {
+        const yfs_ino_t cwd_ino = (yfs_ino_t)(curr->cwd_inode ? curr->cwd_inode : 1u);
+        return yulafs_inode_to_path(cwd_ino, out, (uint32_t)out_size) < 0 ? -1 : 0;
+    }
+
+    FileDescHandle d(curr, dirfd);
+    if (!d || !d.get()->node) {
+        return -1;
+    }
+
+    vfs_node_t* node = d.get()->node;
+    if ((node->flags & VFS_FLAG_DEVFS_ROOT) != 0u) {
+        return strlcpy(out, "/dev", out_size) >= out_size ? -1 : 0;
+    }
+
+    if ((node->flags & VFS_FLAG_YULAFS) != 0u) {
+        yfs_inode_t info;
+        if (yulafs_stat((yfs_ino_t)node->inode_idx, &info) != 0 || info.type != YFS_TYPE_DIR) {
+            return -1;
+        }
+
+        return yulafs_inode_to_path((yfs_ino_t)node->inode_idx, out, (uint32_t)out_size) < 0 ? -1 : 0;
+    }
+
+    return -1;
+}
+
+static int vfs_resolve_path_base(task_t* curr, const char* base, const char* path, VfsResolvedPath* out) {
     if (!curr || !path || !out) {
         return -1;
     }
 
-    if (vfs_normalize_path(curr, path, out->abs, sizeof(out->abs)) != 0) {
+    const char* src = path;
+    char merged[VFS_PATH_MAX];
+
+    if (path[0] != '/' && base && base[0] != '\0') {
+        if (vfs_build_abs_path(base, path, merged, sizeof(merged)) != 0) {
+            return -1;
+        }
+        src = merged;
+    }
+
+    if (vfs_normalize_path(curr, src, out->abs, sizeof(out->abs)) != 0) {
         return -1;
     }
 
@@ -914,6 +956,10 @@ static int vfs_resolve_path(task_t* curr, const char* path, VfsResolvedPath* out
     out->rel = rel;
     out->is_abs = is_abs;
     return 0;
+}
+
+static int vfs_resolve_path(task_t* curr, const char* path, VfsResolvedPath* out) {
+    return vfs_resolve_path_base(curr, nullptr, path, out);
 }
 
 static int vfs_yulafs_getdents(
@@ -1503,20 +1549,8 @@ static vfs_node_t* vfs_open_yulafs_node(const char* path, int open_write, int op
     return node;
 }
 
-extern "C" int vfs_open(const char* path, int flags) {
-    task_t* curr = proc_current();
-    if (!curr) {
-        return -1;
-    }
-
-    if ((flags & ~3) != 0) {
-        return -1;
-    }
-
-    const int open_append = (flags & 2) != 0;
-
-    VfsResolvedPath resolved;
-    if (vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
+static int vfs_open_resolved(task_t* curr, const VfsResolvedPath& resolved, int flags) {
+    if (!curr || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return -1;
     }
 
@@ -1556,11 +1590,54 @@ extern "C" int vfs_open(const char* path, int flags) {
         return -1;
     }
 
+    const int open_append = (flags & 2) != 0;
+
     d->node = node;
     d->offset = 0;
     d->flags = open_append ? FILE_FLAG_APPEND : 0u;
 
     return fd;
+}
+
+extern "C" int vfs_open(const char* path, int flags) {
+    task_t* curr = proc_current();
+    if (!curr) {
+        return -1;
+    }
+
+    if ((flags & ~3) != 0) {
+        return -1;
+    }
+
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    return vfs_open_resolved(curr, resolved, flags);
+}
+
+extern "C" int vfs_openat(int dirfd, const char* path, int flags) {
+    task_t* curr = proc_current();
+    if (!curr || !path || path[0] == '\0') {
+        return -1;
+    }
+
+    if ((flags & ~3) != 0) {
+        return -1;
+    }
+
+    char base[VFS_PATH_MAX];
+    if (vfs_dirfd_to_base(curr, dirfd, base, sizeof(base)) != 0) {
+        return -1;
+    }
+
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path_base(curr, base, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    return vfs_open_resolved(curr, resolved, flags);
 }
 
 extern "C" int vfs_read(int fd, void* buf, uint32_t size) {
@@ -1712,6 +1789,34 @@ extern "C" int vfs_mkdir(const char* path) {
     );
 }
 
+extern "C" int vfs_mkdirat(int dirfd, const char* path) {
+    task_t* curr = proc_current();
+    if (!curr || !path || path[0] == '\0') {
+        return -1;
+    }
+
+    char base[VFS_PATH_MAX];
+    if (vfs_dirfd_to_base(curr, dirfd, base, sizeof(base)) != 0) {
+        return -1;
+    }
+
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path_base(curr, base, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    if (!resolved.mount->instance->type->ops->mkdir) {
+        return -1;
+    }
+
+    return resolved.mount->instance->type->ops->mkdir(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs
+    );
+}
+
 extern "C" int vfs_unlink(const char* path) {
     if (!path || path[0] == '\0') {
         return -1;
@@ -1720,6 +1825,34 @@ extern "C" int vfs_unlink(const char* path) {
     task_t* curr = proc_current();
     VfsResolvedPath resolved;
     if (!curr || vfs_resolve_path(curr, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    if (!resolved.mount->instance->type->ops->unlink) {
+        return -1;
+    }
+
+    return resolved.mount->instance->type->ops->unlink(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs
+    );
+}
+
+extern "C" int vfs_unlinkat(int dirfd, const char* path) {
+    task_t* curr = proc_current();
+    if (!curr || !path || path[0] == '\0') {
+        return -1;
+    }
+
+    char base[VFS_PATH_MAX];
+    if (vfs_dirfd_to_base(curr, dirfd, base, sizeof(base)) != 0) {
+        return -1;
+    }
+
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path_base(curr, base, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
         return -1;
     }
 
@@ -1759,6 +1892,35 @@ extern "C" int vfs_stat_path(const char* path, vfs_stat_t* out) {
     );
 }
 
+extern "C" int vfs_statat_path(int dirfd, const char* path, vfs_stat_t* out) {
+    task_t* curr = proc_current();
+    if (!curr || !path || path[0] == '\0' || !out) {
+        return -1;
+    }
+
+    char base[VFS_PATH_MAX];
+    if (vfs_dirfd_to_base(curr, dirfd, base, sizeof(base)) != 0) {
+        return -1;
+    }
+
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path_base(curr, base, path, &resolved) != 0 || !resolved.mount || !resolved.mount->instance || !resolved.mount->instance->type || !resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    if (!resolved.mount->instance->type->ops->stat) {
+        return -1;
+    }
+
+    return resolved.mount->instance->type->ops->stat(
+        resolved.mount->instance,
+        resolved.mount->mountpoint,
+        resolved.rel,
+        resolved.is_abs,
+        out
+    );
+}
+
 extern "C" int vfs_rename(const char* old_path, const char* new_path) {
     if (!old_path || old_path[0] == '\0' || !new_path || new_path[0] == '\0') {
         return -1;
@@ -1772,6 +1934,50 @@ extern "C" int vfs_rename(const char* old_path, const char* new_path) {
     }
 
     if (vfs_resolve_path(curr, new_path, &new_resolved) != 0 || !new_resolved.mount || !new_resolved.mount->instance || !new_resolved.mount->instance->type || !new_resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    if (old_resolved.mount->instance->type != new_resolved.mount->instance->type || old_resolved.mount->instance != new_resolved.mount->instance) {
+        return -1;
+    }
+
+    if (!old_resolved.mount->instance->type->ops->rename) {
+        return -1;
+    }
+
+    return old_resolved.mount->instance->type->ops->rename(
+        old_resolved.mount->instance,
+        old_resolved.mount->mountpoint,
+        old_resolved.rel,
+        new_resolved.mount->mountpoint,
+        new_resolved.rel,
+        old_resolved.is_abs,
+        new_resolved.is_abs
+    );
+}
+
+extern "C" int vfs_renameat(int old_dirfd, const char* old_path, int new_dirfd, const char* new_path) {
+    task_t* curr = proc_current();
+    if (!curr || !old_path || old_path[0] == '\0' || !new_path || new_path[0] == '\0') {
+        return -1;
+    }
+
+    char old_base[VFS_PATH_MAX];
+    char new_base[VFS_PATH_MAX];
+    if (vfs_dirfd_to_base(curr, old_dirfd, old_base, sizeof(old_base)) != 0) {
+        return -1;
+    }
+    if (vfs_dirfd_to_base(curr, new_dirfd, new_base, sizeof(new_base)) != 0) {
+        return -1;
+    }
+
+    VfsResolvedPath old_resolved;
+    VfsResolvedPath new_resolved;
+    if (vfs_resolve_path_base(curr, old_base, old_path, &old_resolved) != 0 || !old_resolved.mount || !old_resolved.mount->instance || !old_resolved.mount->instance->type || !old_resolved.mount->instance->type->ops) {
+        return -1;
+    }
+
+    if (vfs_resolve_path_base(curr, new_base, new_path, &new_resolved) != 0 || !new_resolved.mount || !new_resolved.mount->instance || !new_resolved.mount->instance->type || !new_resolved.mount->instance->type->ops) {
         return -1;
     }
 
