@@ -541,7 +541,8 @@ static vfs_ops_t yfs_vfs_ops = {
     0,
 };
 
-static vfs_mount_entry g_mounts[8];
+static kernel::SpinLock g_mount_lock;
+static HashMap<kernel::string, vfs_mount_entry*, 32> g_mounts;
 
 static const vfs_fs_type* vfs_fs_type_from_name(const char* fs_name);
 
@@ -555,7 +556,7 @@ static int vfs_mountpoint_is_valid(const char* mountpoint) {
     }
 
     const size_t n = strlen(mountpoint);
-    if (n == 0 || n >= sizeof(g_mounts[0].mountpoint)) {
+    if (n == 0 || n >= sizeof(((vfs_mount_entry*)nullptr)->mountpoint)) {
         return 0;
     }
 
@@ -570,30 +571,19 @@ static int vfs_path_is_abs(const char* path) {
     return path && path[0] == '/';
 }
 
-static int vfs_mount_match_len(const char* path, const char* mountpoint) {
-    if (!path || !mountpoint) {
-        return -1;
+static char* vfs_find_last_slash(char* s) {
+    if (!s) {
+        return nullptr;
     }
 
-    if (mountpoint[0] != '/') {
-        return -1;
+    char* last = nullptr;
+    for (char* p = s; *p; ++p) {
+        if (*p == '/') {
+            last = p;
+        }
     }
 
-    if (mountpoint[1] == '\0') {
-        return 1;
-    }
-
-    const size_t mlen = strlen(mountpoint);
-    if (strncmp(path, mountpoint, mlen) != 0) {
-        return -1;
-    }
-
-    const char next = path[mlen];
-    if (next == '\0' || next == '/') {
-        return (int)mlen;
-    }
-
-    return -1;
+    return last;
 }
 
 static int vfs_build_abs_path(
@@ -638,36 +628,62 @@ static int vfs_build_abs_path(
     return n2 >= out_size ? -1 : 0;
 }
 
-static int vfs_mount_table_insert(const char* mountpoint, vfs_fs_instance* instance) {
-    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-        if (!g_mounts[i].used) {
-            memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
-            g_mounts[i].used = 1u;
-            g_mounts[i].instance = instance;
-            strlcpy(g_mounts[i].mountpoint, mountpoint, sizeof(g_mounts[i].mountpoint));
-            return 0;
-        }
+static vfs_mount_entry* vfs_mount_table_find_locked(const char* mountpoint) {
+    if (!mountpoint) {
+        return nullptr;
     }
 
-    return -1;
+    const kernel::string key(mountpoint);
+    auto locked = g_mounts.find_ptr(key);
+    if (!locked) {
+        return nullptr;
+    }
+
+    vfs_mount_entry** entry_ptr = locked.value_ptr();
+    return entry_ptr ? *entry_ptr : nullptr;
 }
 
-static int vfs_mount_table_has(const char* mountpoint) {
-    if (!mountpoint) {
+static int vfs_mount_table_insert_locked(const char* mountpoint, vfs_fs_instance* instance) {
+    if (!mountpoint || !instance) {
         return -1;
     }
 
-    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-        if (!g_mounts[i].used) {
-            continue;
-        }
-
-        if (strcmp(g_mounts[i].mountpoint, mountpoint) == 0) {
-            return 0;
-        }
+    if (vfs_mount_table_find_locked(mountpoint)) {
+        return -1;
     }
 
-    return -1;
+    auto* entry = static_cast<vfs_mount_entry*>(kmalloc(sizeof(vfs_mount_entry)));
+    if (!entry) {
+        return -1;
+    }
+
+    memset(entry, 0, sizeof(*entry));
+    entry->used = 1u;
+    entry->instance = instance;
+    strlcpy(entry->mountpoint, mountpoint, sizeof(entry->mountpoint));
+
+    const kernel::string key(mountpoint);
+    g_mounts.insert_or_assign(key, entry);
+    return 0;
+}
+
+static int vfs_mount_table_remove_locked(const char* mountpoint, vfs_mount_entry** out_entry) {
+    if (!mountpoint || !out_entry) {
+        return -1;
+    }
+
+    vfs_mount_entry* entry = vfs_mount_table_find_locked(mountpoint);
+    if (!entry) {
+        return -1;
+    }
+
+    const kernel::string key(mountpoint);
+    if (!g_mounts.remove(key)) {
+        return -1;
+    }
+
+    *out_entry = entry;
+    return 0;
 }
 
 static int vfs_resolve_mount(
@@ -683,56 +699,58 @@ static int vfs_resolve_mount(
     const int is_abs = vfs_path_is_abs(path);
     *out_is_abs = is_abs;
 
+    kernel::SpinLockSafeGuard guard(g_mount_lock);
+
     if (!is_abs) {
-        for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-            if (!g_mounts[i].used) {
-                continue;
-            }
-
-            if (strcmp(g_mounts[i].mountpoint, "/") == 0) {
-                if (!g_mounts[i].instance || !g_mounts[i].instance->type || !g_mounts[i].instance->type->ops) {
-                    return -1;
-                }
-
-                *out_mount = &g_mounts[i];
-                *out_rel = path;
-                return 0;
-            }
+        vfs_mount_entry* root = vfs_mount_table_find_locked("/");
+        if (!root || !root->instance || !root->instance->type || !root->instance->type->ops) {
+            return -1;
         }
 
+        *out_mount = root;
+        *out_rel = path;
+        return 0;
+    }
+
+    char prefix[sizeof(((vfs_mount_entry*)nullptr)->mountpoint)];
+    const size_t path_len = strlen(path);
+    if (path_len >= sizeof(prefix)) {
         return -1;
     }
 
-    int best_len = -1;
-    const vfs_mount_entry* best = nullptr;
-    const char* best_mount = nullptr;
+    memcpy(prefix, path, path_len + 1);
 
-    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-        if (!g_mounts[i].used) {
-            continue;
+    for (;;) {
+        vfs_mount_entry* entry = vfs_mount_table_find_locked(prefix);
+        if (entry && entry->instance && entry->instance->type && entry->instance->type->ops) {
+            const size_t mlen = strlen(entry->mountpoint);
+            const char* rel = path + mlen;
+            if (rel[0] == '/') {
+                rel++;
+            }
+
+            *out_mount = entry;
+            *out_rel = rel;
+            return 0;
         }
 
-        const int mlen = vfs_mount_match_len(path, g_mounts[i].mountpoint);
-        if (mlen > best_len) {
-            best_len = mlen;
-            best = &g_mounts[i];
-            best_mount = g_mounts[i].mountpoint;
+        if (strcmp(prefix, "/") == 0) {
+            break;
+        }
+
+        char* last = vfs_find_last_slash(prefix);
+        if (!last) {
+            break;
+        }
+
+        if (last == prefix) {
+            prefix[1] = '\0';
+        } else {
+            *last = '\0';
         }
     }
 
-    if (best_len < 0 || !best_mount || !best || !best->instance || !best->instance->type || !best->instance->type->ops) {
-        return -1;
-    }
-
-    const size_t mlen = strlen(best_mount);
-    const char* rel = path + mlen;
-    if (rel[0] == '/') {
-        rel++;
-    }
-
-    *out_mount = best;
-    *out_rel = rel;
-    return 0;
+    return -1;
 }
 
 static int vfs_yulafs_getdents(
@@ -785,8 +803,11 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
         return -1;
     }
 
-    if (vfs_mount_table_has(mountpoint) == 0) {
-        return -1;
+    {
+        kernel::SpinLockSafeGuard guard(g_mount_lock);
+        if (vfs_mount_table_find_locked(mountpoint)) {
+            return -1;
+        }
     }
 
     const vfs_fs_type* type = vfs_fs_type_from_name(fs_name);
@@ -803,9 +824,12 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
         return -1;
     }
 
-    if (vfs_mount_table_insert(mountpoint, instance) != 0) {
-        (void)type->umount(instance);
-        return -1;
+    {
+        kernel::SpinLockSafeGuard guard(g_mount_lock);
+        if (vfs_mount_table_insert_locked(mountpoint, instance) != 0) {
+            (void)type->umount(instance);
+            return -1;
+        }
     }
 
     return 0;
@@ -820,37 +844,30 @@ static int vfs_umount_impl(const char* mountpoint) {
         return -1;
     }
 
-    if (!mountpoint) {
+    vfs_mount_entry* entry = nullptr;
+    {
+        kernel::SpinLockSafeGuard guard(g_mount_lock);
+        if (vfs_mount_table_remove_locked(mountpoint, &entry) != 0 || !entry) {
+            return -1;
+        }
+    }
+
+    vfs_fs_instance* inst = entry->instance;
+    if (!inst || !inst->type || !inst->type->umount) {
+        kfree(entry);
         return -1;
     }
 
-    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-        if (!g_mounts[i].used) {
-            continue;
-        }
-
-        if (strcmp(g_mounts[i].mountpoint, mountpoint) != 0) {
-            continue;
-        }
-
-        vfs_fs_instance* inst = g_mounts[i].instance;
-        if (!inst || !inst->type || !inst->type->umount) {
-            return -1;
-        }
-
-        if (inst->type->umount(inst) != 0) {
-            return -1;
-        }
-
-        memset(&g_mounts[i], 0, sizeof(g_mounts[i]));
-        return 0;
-    }
-
-    return -1;
+    const int rc = inst->type->umount(inst);
+    kfree(entry);
+    return rc;
 }
 
 static void vfs_init_impl(void) {
-    memset(g_mounts, 0, sizeof(g_mounts));
+    {
+        kernel::SpinLockSafeGuard guard(g_mount_lock);
+        g_mounts.clear();
+    }
 
     (void)vfs_mount_impl("/", "yulafs");
     (void)vfs_mount_impl("/dev", "devfs");
@@ -1589,11 +1606,9 @@ extern "C" int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, ui
     }
 
     const vfs_mount_entry* root = nullptr;
-    for (size_t i = 0; i < sizeof(g_mounts) / sizeof(g_mounts[0]); i++) {
-        if (g_mounts[i].used && strcmp(g_mounts[i].mountpoint, "/") == 0) {
-            root = &g_mounts[i];
-            break;
-        }
+    {
+        kernel::SpinLockSafeGuard guard(g_mount_lock);
+        root = vfs_mount_table_find_locked("/");
     }
 
     if (!root || !root->instance || !root->instance->type || !root->instance->type->ops || !root->instance->type->ops->get_fs_info) {
