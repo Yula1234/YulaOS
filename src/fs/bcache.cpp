@@ -4,7 +4,9 @@
 #include <lib/cpp/hash_traits.h>
 #include <lib/cpp/rwlock.h>
 #include <lib/cpp/atomic.h>
+#include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
+#include <lib/cpp/semaphore.h>
 
 #include <lib/hash_map.h>
 #include <lib/string.h>
@@ -37,31 +39,32 @@ static constexpr uint32_t k_flag_accessed = 1u << 4;
 
 struct BcacheIoEvent {
     kernel::atomic<int> done{0};
-    semaphore_t sem{};
+
+    kernel::Semaphore sem{};
 };
 
 static void io_event_init(BcacheIoEvent& ev) {
     ev.done.store(0, kernel::memory_order::release);
 
-    sem_init(&ev.sem, 0);
+    ev.sem.init(0);
 }
 
 static void io_event_reset(BcacheIoEvent& ev) {
     ev.done.store(0, kernel::memory_order::release);
 
-    sem_init(&ev.sem, 0);
+    ev.sem.init(0);
 }
 
 static void io_event_wait(BcacheIoEvent& ev) {
     while (ev.done.load(kernel::memory_order::acquire) == 0) {
-        sem_wait(&ev.sem);
+        ev.sem.wait();
     }
 }
 
 static void io_event_signal_all(BcacheIoEvent& ev) {
     ev.done.store(1, kernel::memory_order::release);
 
-    sem_signal_all(&ev.sem);
+    ev.sem.signal_all();
 }
 
 struct BcacheEntry {
@@ -100,7 +103,8 @@ struct HotSlot {
 };
 
 struct PerCpuHotCache {
-    spinlock_t lock{};
+
+    kernel::SpinLock lock{};
     HotSlot slots[HOT_SLOTS]{};
 };
 
@@ -116,26 +120,28 @@ static void hotcache_invalidate_entry(BcacheEntry& entry) {
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         PerCpuHotCache& hc = g_hot[cpu];
 
-        uint32_t flags = spinlock_acquire_safe(&hc.lock);
+        uint32_t removed = 0;
 
-        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
-            HotSlot& slot = hc.slots[i];
+        {
+            kernel::SpinLockSafeGuard guard(hc.lock);
 
-            if (slot.entry != &entry) {
-                continue;
+            for (uint32_t i = 0; i < HOT_SLOTS; i++) {
+                HotSlot& slot = hc.slots[i];
+
+                if (slot.entry != &entry) {
+                    continue;
+                }
+
+                slot.block_idx = 0;
+                slot.entry = nullptr;
+
+                removed++;
             }
-
-            slot.block_idx = 0;
-            slot.entry = nullptr;
-
-            spinlock_release_safe(&hc.lock, flags);
-
-            entry_put(entry);
-
-            flags = spinlock_acquire_safe(&hc.lock);
         }
 
-        spinlock_release_safe(&hc.lock, flags);
+        for (uint32_t i = 0; i < removed; i++) {
+            entry_put(entry);
+        }
     }
 }
 
@@ -284,20 +290,16 @@ static BcacheEntry* hotcache_try_get(uint32_t block_idx) {
     PerCpuHotCache& hc = g_hot[cpu_idx];
     const uint32_t slot_idx = hot_slot_index_for(block_idx);
 
-    uint32_t flags = spinlock_acquire_safe(&hc.lock);
+    kernel::SpinLockSafeGuard guard(hc.lock);
 
     HotSlot& slot = hc.slots[slot_idx];
-    BcacheEntry* e = nullptr;
-
-    if (slot.entry && slot.block_idx == block_idx) {
-        e = slot.entry;
-
-        entry_get(*e);
+    if (!slot.entry || slot.block_idx != block_idx) {
+        return nullptr;
     }
 
-    spinlock_release_safe(&hc.lock, flags);
+    entry_get(*slot.entry);
 
-    return e;
+    return slot.entry;
 }
 
 static void hotcache_put(uint32_t block_idx, BcacheEntry& entry) {
@@ -318,17 +320,18 @@ static void hotcache_put(uint32_t block_idx, BcacheEntry& entry) {
 
     entry_get(entry);
 
+    BcacheEntry* old = nullptr;
 
-    uint32_t flags = spinlock_acquire_safe(&hc.lock);
+    {
+        kernel::SpinLockSafeGuard guard(hc.lock);
 
-    HotSlot& slot = hc.slots[slot_idx];
-    BcacheEntry* old = slot.entry;
+        HotSlot& slot = hc.slots[slot_idx];
 
-    slot.block_idx = block_idx;
-    slot.entry = &entry;
+        old = slot.entry;
 
-    spinlock_release_safe(&hc.lock, flags);
-
+        slot.block_idx = block_idx;
+        slot.entry = &entry;
+    }
 
     if (old) {
         entry_put(*old);
@@ -491,8 +494,11 @@ static BcacheEntry* shard_get_or_create(
                     k_flag_evicting,
                     kernel::memory_order::acq_rel
                 );
+
                 created->refcnt.store(1u, kernel::memory_order::release);
+                
                 entry_put(*created);
+                
                 return nullptr;
             }
 
@@ -506,8 +512,11 @@ static BcacheEntry* shard_get_or_create(
                     k_flag_evicting,
                     kernel::memory_order::acq_rel
                 );
+                
                 created->refcnt.store(1u, kernel::memory_order::release);
+                
                 entry_put(*created);
+                
                 return nullptr;
             }
 
@@ -584,8 +593,6 @@ void bcache_init(void) {
     }
 
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
-        spinlock_init(&g_hot[cpu].lock);
-
         for (uint32_t i = 0; i < HOT_SLOTS; i++) {
             g_hot[cpu].slots[i] = {};
         }
