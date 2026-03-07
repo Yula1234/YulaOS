@@ -105,6 +105,23 @@ struct BcacheEntry {
         free_self();
     }
 
+    bool try_get_not_evicting() {
+        const uint32_t f0 = flags.load(kernel::memory_order::acquire);
+        if ((f0 & k_flag_evicting) != 0u) {
+            return false;
+        }
+
+        get();
+
+        const uint32_t f1 = flags.load(kernel::memory_order::acquire);
+        if ((f1 & k_flag_evicting) != 0u) {
+            put();
+            return false;
+        }
+
+        return true;
+    }
+
     ~BcacheEntry() = default;
 
 private:
@@ -159,7 +176,9 @@ struct PerCpuHotCache {
     void put(uint32_t block_idx, BcacheEntry& entry) {
         const uint32_t slot_idx = slot_index_for(block_idx);
 
-        entry.get();
+        if (!entry.try_get_not_evicting()) {
+            return;
+        }
 
         BcacheEntry* old = nullptr;
         {
@@ -176,26 +195,6 @@ struct PerCpuHotCache {
         if (old) {
             old->put();
         }
-    }
-
-    uint32_t invalidate(BcacheEntry& entry) {
-        uint32_t removed = 0;
-
-        kernel::SpinLockSafeGuard guard(lock);
-
-        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
-            HotSlot& slot = slots[i];
-            if (slot.entry != &entry) {
-                continue;
-            }
-
-            slot.block_idx = 0;
-            slot.entry = nullptr;
-
-            removed++;
-        }
-
-        return removed;
     }
 
 private:
@@ -234,16 +233,6 @@ struct HotCache {
         }
 
         per_cpu[cpu_idx].put(block_idx, entry);
-    }
-
-    void invalidate_entry(BcacheEntry& entry) {
-        for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
-            const uint32_t removed = per_cpu[cpu].invalidate(entry);
-
-            for (uint32_t i = 0; i < removed; i++) {
-                entry.put();
-            }
-        }
     }
 
 private:
@@ -418,6 +407,16 @@ struct BcacheShard {
                 kernel::memory_order::acq_rel
             );
 
+            const uint32_t refs_after =
+                cand->refcnt.load(kernel::memory_order::acquire);
+            if (refs_after != 1u) {
+                cand->flags.fetch_and(
+                    ~k_flag_evicting,
+                    kernel::memory_order::acq_rel
+                );
+                continue;
+            }
+
             map.remove(cand->block_idx);
             clock_remove_locked(*cand);
             entries--;
@@ -461,10 +460,6 @@ struct BcacheShard {
                 if (!try_evict_one_locked(ev)) {
                     return false;
                 }
-            }
-
-            if (ev.has_entry()) {
-                g_hot_cache.invalidate_entry(*ev.entry);
             }
 
             if (ev.dirty) {
