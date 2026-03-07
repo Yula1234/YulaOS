@@ -24,6 +24,22 @@
 
 #include "bcache.h"
 
+/*
+ * Block cache design notes.
+ *
+ * This cache sits below the filesystem and intentionally exposes a synchronous
+ * API. Do not add pinning semantics implicitly: callers must assume that any
+ * cached block can be evicted right after a call returns.
+ *
+ * Concurrency is split by intent:
+ * - shard metadata is protected by per-shard meta_lock
+ * - block payload is protected by per-entry data_lock
+ * - the hot-cache is per-CPU and exists purely to avoid shard lock traffic
+ *
+ * Keep this file readable. Any future feature that changes the lifetime rules,
+ * lock ordering or eviction invariants must be documented next to the code.
+ */
+
 static constexpr uint32_t BLOCK_SIZE = 4096;
 static constexpr uint32_t SECTOR_SIZE = 512;
 static constexpr uint32_t SECTORS_PER_BLK = 8;
@@ -33,6 +49,12 @@ static constexpr uint32_t BCACHE_SHARD_BUCKETS = 256;
 
 static constexpr uint32_t HOT_SLOTS = 64;
 
+/*
+ * flags is deliberately a bitmask instead of an enum class.
+ *
+ * This is hot code that uses atomic read-modify-write. Keep the operations
+ * explicit and cheap; avoid layering abstractions here.
+ */
 static constexpr uint32_t k_flag_valid = 1u << 0;
 static constexpr uint32_t k_flag_dirty = 1u << 1;
 static constexpr uint32_t k_flag_io_inflight = 1u << 2;
@@ -43,6 +65,12 @@ static constexpr uint32_t k_flag_on_dirty_list = 1u << 5;
 static kmem_cache_t* g_entry_cache = nullptr;
 
 struct BcacheIoEvent {
+    /*
+     * Avoid blocking on a spin-guarded condition.
+     *
+     * The atomic guards against lost wakeups and allows waiters to re-check the
+     * condition without holding locks.
+     */
     kernel::atomic<int> done{0};
 
     kernel::Semaphore sem{};
@@ -71,6 +99,14 @@ struct BcacheIoEvent {
 };
 
 struct BcacheEntry {
+    /*
+     * Lifetime rules are explicit because eviction is concurrent with users.
+     *
+     * Keep exactly one long-lived reference while the entry is linked in the
+     * shard map; everything else must be a short-lived get()/put(). Freeing is
+     * gated by k_flag_evicting so that an entry cannot disappear from under a
+     * reader that already holds a reference.
+     */
     uint32_t block_idx = 0;
 
     kernel::atomic<uint32_t> refcnt{0};
@@ -155,6 +191,13 @@ struct PerCpuHotCache {
     kernel::SpinLock lock{};
     HotSlot slots[HOT_SLOTS]{};
 
+    /*
+     * Only store a single direct pointer per slot.
+     *
+     * The cache is intentionally lossy: misses are acceptable, correctness is
+     * not. Any policy more complex than this belongs in the shard.
+     */
+
     void init() {
         kernel::SpinLockSafeGuard guard(lock);
 
@@ -181,6 +224,11 @@ struct PerCpuHotCache {
     void put(uint32_t block_idx, BcacheEntry& entry) {
         const uint32_t slot_idx = slot_index_for(block_idx);
 
+        /*
+         * Refuse to publish an entry that is already on the eviction path.
+         * That check must be done before taking the hot-cache lock; otherwise
+         * the eviction side can free the object while it is being installed.
+         */
         if (!entry.try_get_not_evicting()) {
             return;
         }
@@ -210,6 +258,12 @@ private:
 };
 
 struct HotCache {
+    /*
+     * Per-CPU fast path exists to avoid taking shard locks on hot blocks.
+     *
+     * Store only additionally referenced entries here; otherwise eviction would
+     * race and free memory that a CPU still points at.
+     */
     PerCpuHotCache per_cpu[MAX_CPUS]{};
 
     void init() {
@@ -260,6 +314,13 @@ static HotCache g_hot_cache{};
 static constexpr uint32_t PREFETCH_QUEUE_CAP = 128;
 
 struct PrefetchQueue {
+    /*
+     * Readahead must never stall the caller.
+     *
+     * Make the producer side drop work on pressure instead of sleeping.
+     * The semaphore exists only to park the worker when the ring is empty; the
+     * spinlock protects the ring metadata and nothing else.
+     */
     kernel::SpinLock lock{};
     kernel::Semaphore sem{};
 
@@ -311,6 +372,11 @@ static kernel::atomic<int> g_prefetch_started{0};
 static void bcache_prefetch_worker(void*);
 
 static bool ensure_prefetch_worker_started() {
+    /*
+     * Avoid spawning threads from early boot / no-process context.
+     * Readahead is explicitly best-effort; return failure and let the caller
+     * continue on the synchronous path.
+     */
     if (g_prefetch_started.load(kernel::memory_order::acquire) != 0) {
         return true;
     }
@@ -320,6 +386,13 @@ static bool ensure_prefetch_worker_started() {
     }
 
     int expected = 0;
+
+    /*
+     * Serialize thread creation.
+     *
+     * A racing starter is not an error; treat it as success and let the other
+     * CPU own the spawn path.
+     */
     if (!g_prefetch_started.compare_exchange_strong(
             expected,
             1,
@@ -329,6 +402,8 @@ static bool ensure_prefetch_worker_started() {
         return true;
     }
 
+    /* If this ever turns into a start/stop circus, you're already fucked. */
+
     task_t* t = proc_spawn_kthread(
         "bcache_pf",
         PRIO_LOW,
@@ -337,6 +412,12 @@ static bool ensure_prefetch_worker_started() {
     );
 
     if (!t) {
+        /*
+         * Drop the started flag on failure.
+         *
+         * Keeping it set would permanently disable readahead without providing
+         * any diagnostic. A later caller may succeed.
+         */
         g_prefetch_started.store(0, kernel::memory_order::release);
         return false;
     }
@@ -345,6 +426,12 @@ static bool ensure_prefetch_worker_started() {
 }
 
 struct DiskIo {
+    /*
+     * Keep the sector math and safety checks in one place.
+     *
+     * AHCI takes a 32-bit LBA; reject out-of-range block indices instead of
+     * silently truncating and corrupting data.
+     */
     static bool try_read_4k(uint32_t block_idx, uint8_t* buf) {
         if (!buf) {
             return false;
@@ -390,6 +477,13 @@ struct EvictedBlock {
     bool dirty = false;
     uint8_t data[BLOCK_SIZE]{};
 
+    /*
+     * Keep a private copy of evicted dirty data.
+     *
+     * An entry cannot be written back after it is unlinked unless its payload
+     * is captured while the data lock is still held.
+     */
+
     bool has_entry() const {
         return entry != nullptr;
     }
@@ -409,10 +503,24 @@ struct EvictedBlock {
 };
 
 struct BcacheShard {
+    /*
+     * Split locks by responsibility to keep fast paths short.
+     *
+     * meta_lock is for global shard structures (map/CLOCK/dirty_list). Data
+     * lives under entry->data_lock. When both are required, take meta_lock
+     * first, otherwise a writer can deadlock against a flusher.
+     */
     kernel::RwLock meta_lock{};
     HashMap<uint32_t, BcacheEntry*, BCACHE_SHARD_BUCKETS> map{};
 
     kernel::CDBLinkedList<BcacheEntry, &BcacheEntry::dirty_node> dirty_list{};
+
+    /*
+     * dirty_list is an optimization, not just convenience.
+     *
+     * bcache_sync must be O(number of dirty blocks), not O(cache size). Keep
+     * k_flag_on_dirty_list consistent with actual list membership.
+     */
 
     BcacheEntry* clock_hand = nullptr;
     uint32_t entries = 0;
@@ -503,6 +611,14 @@ struct BcacheShard {
     }
 
     bool try_evict_one_locked(EvictedBlock& out) {
+        /*
+         * Eviction must not take anything away from an active user.
+         *
+         * Only consider refcnt==1 entries (the shard's own reference). The
+         * accessed bit provides a cheap second chance under contention. Once
+         * k_flag_evicting is visible, treat the entry as dead and unlink it from
+         * every structure before dropping the shard reference.
+         */
         if (!clock_hand) {
             return false;
         }
@@ -513,11 +629,20 @@ struct BcacheShard {
 
             const uint32_t refs = cand->refcnt.load(kernel::memory_order::acquire);
             if (refs != 1u) {
+                /*
+                 * Do not evict from under an active user.
+                 * refcnt>1 means somebody holds a live reference.
+                 */
                 continue;
             }
 
             uint32_t flags = cand->flags.load(kernel::memory_order::acquire);
             if ((flags & k_flag_accessed) != 0u) {
+                /*
+                 * Second chance.
+                 * Clear accessed and move on; the next pass can evict if it is
+                 * still cold.
+                 */
                 cand->flags.fetch_and(
                     ~k_flag_accessed,
                     kernel::memory_order::acq_rel
@@ -534,6 +659,10 @@ struct BcacheShard {
             const uint32_t refs_after =
                 cand->refcnt.load(kernel::memory_order::acquire);
             if (refs_after != 1u) {
+                /*
+                 * Close the race with a late get().
+                 * Back out if somebody grabbed a reference after we checked.
+                 */
                 cand->flags.fetch_and(
                     ~k_flag_evicting,
                     kernel::memory_order::acq_rel
@@ -548,6 +677,11 @@ struct BcacheShard {
             clock_remove_locked(*cand);
             entries--;
 
+            /*
+             * From here on the entry is unreachable through the shard.
+             * Only existing references may still access it.
+             */
+
             out.block_idx = cand->block_idx;
             out.entry = cand;
 
@@ -561,6 +695,10 @@ struct BcacheShard {
 
                 out.dirty = true;
 
+                /*
+                 * Clear dirty after snapshot.
+                 * A flusher must never re-emit the same payload twice.
+                 */
                 cand->flags.fetch_and(
                     ~k_flag_dirty,
                     kernel::memory_order::acq_rel
@@ -574,6 +712,12 @@ struct BcacheShard {
     }
 
     bool ensure_space() {
+        /*
+         * Do not allocate an entry if making room fails.
+         *
+         * A cache that cannot evict is still required to behave correctly: the
+         * public API is allowed to fall back to direct I/O or fail.
+         */
         while (entries >= max_entries && max_entries != 0u) {
             EvictedBlock ev{};
 
@@ -590,6 +734,12 @@ struct BcacheShard {
             }
 
             if (ev.dirty) {
+                /*
+                 * Writeback happens after dropping meta_lock.
+                 * Keeping the lock over disk I/O would stall unrelated hits.
+                 */
+
+                /* Do not hold a lock while poking the disk. That's how you earn shitty latency. */
                 DiskIo::write_4k(ev.block_idx, ev.data);
             }
 
@@ -600,6 +750,11 @@ struct BcacheShard {
     }
 
     BcacheEntry* create_readahead_entry(uint32_t block_idx) {
+        /*
+         * Never start I/O under meta_lock.
+         * Readahead is a background activity and must keep shard lock hold time
+         * minimal.
+         */
         {
             kernel::ReadGuard meta_guard(meta_lock);
 
@@ -635,11 +790,23 @@ struct BcacheShard {
             created = new (mem) BcacheEntry();
             created->block_idx = block_idx;
 
+            /*
+             * Two references are required here.
+             *
+             * One stays with the shard map. The other is consumed by the
+             * readahead pipeline (enqueue + worker) so the entry cannot be
+             * reclaimed before I/O completion.
+             */
             created->refcnt.store(2u, kernel::memory_order::release);
             created->flags.store(k_flag_io_inflight, kernel::memory_order::release);
 
             created->data = static_cast<uint8_t*>(kmalloc_a(BLOCK_SIZE));
             if (!created->data) {
+                /*
+                 * Put the entry on the eviction path before dropping the last
+                 * reference; otherwise another CPU could observe it partially
+                 * constructed.
+                 */
                 created->flags.fetch_or(
                     k_flag_evicting,
                     kernel::memory_order::acq_rel
@@ -667,6 +834,13 @@ struct BcacheShard {
         bool for_write,
         const uint8_t* write_buf
     ) {
+        /*
+         * The double lookup is intentional.
+         *
+         * Avoid taking the exclusive lock on cache hits, but re-check under the
+         * writer lock before allocating to keep a racing creator from producing
+         * two entries for the same block.
+         */
         {
             kernel::ReadGuard meta_guard(meta_lock);
 
@@ -711,10 +885,21 @@ struct BcacheShard {
             const uint32_t base_flags = for_write
                 ? (k_flag_valid | k_flag_dirty | k_flag_accessed)
                 : k_flag_io_inflight;
+
+            /*
+             * for_write starts as valid+dirty so writers never block on I/O.
+             * for_read starts inflight so concurrent readers can wait on a
+             * single disk transaction.
+             */
             created->flags.store(base_flags, kernel::memory_order::release);
 
             created->data = static_cast<uint8_t*>(kmalloc_a(BLOCK_SIZE));
             if (!created->data) {
+                /*
+                 * Mark evicting before dropping references.
+                 * Leaving a visible entry without backing storage invites
+                 * use-after-free and corrupt data paths.
+                 */
                 created->flags.fetch_or(
                     k_flag_evicting,
                     kernel::memory_order::acq_rel
@@ -730,6 +915,10 @@ struct BcacheShard {
             if (for_write) {
                 kernel::WriteGuard data_guard(created->data_lock);
 
+                /*
+                 * Copy the payload while the entry is still private.
+                 * No other CPU can observe this block until it is linked.
+                 */
                 memcpy(created->data, write_buf, BLOCK_SIZE);
 
                 dirty_mark_locked(*created);
@@ -747,6 +936,11 @@ struct BcacheShard {
             return created;
         }
 
+        /*
+         * Perform disk I/O outside meta_lock.
+         * Holding the shard writer lock across AHCI I/O would serialize the
+         * whole shard on a slow path.
+         */
         uint8_t tmp[BLOCK_SIZE];
 
         DiskIo::read_4k(block_idx, tmp);
@@ -776,6 +970,13 @@ struct BcacheShard {
 static BcacheShard g_shards[BCACHE_SHARDS]{};
 
 static void bcache_prefetch_worker(void*) {
+    /*
+     * Keep a separate worker so the synchronous read path never blocks on
+     * readahead.
+     *
+     * The extra reference is mandatory: the worker must keep the entry alive
+     * from enqueue until I/O completes, even if the block becomes cold.
+     */
     for (;;) {
         BcacheEntry* e = g_prefetch.pop_blocking();
         if (!e) {
@@ -813,6 +1014,11 @@ void bcache_init(void) {
         g_entry_cache = kmem_cache_create("bcache_e", sizeof(BcacheEntry), 0, 0);
     }
 
+    /*
+     * Size by RAM to avoid hardcoding cache behavior across machines.
+     * Keep a minimum of one entry per shard to avoid pathological empty shards.
+     */
+
     const uint64_t total_ram_bytes =
         (uint64_t)pmm_get_total_blocks() * (uint64_t)BLOCK_SIZE;
     const uint64_t target_bytes = total_ram_bytes / 50u;
@@ -845,6 +1051,11 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
         return 0;
     }
 
+    /*
+     * Hot-cache hit must avoid shard locks.
+     * The point of this path is to keep contention down when a single block is
+     * hammered by one CPU.
+     */
     if (BcacheEntry* hot = g_hot_cache.try_get(block_idx)) {
         {
             kernel::ReadGuard data_guard(hot->data_lock);
@@ -862,11 +1073,19 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
     BcacheEntry* e = shard.get_or_create(block_idx, false, nullptr);
     if (!e) {
+        /*
+         * Under cache pressure a miss is not an error.
+         * Fall back to direct I/O and keep the filesystem moving.
+         */
         return DiskIo::try_read_4k(block_idx, buf) ? 1 : 0;
     }
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
     if ((flags & k_flag_io_inflight) != 0u) {
+        /*
+         * Avoid duplicating disk reads.
+         * If a creator is already fetching this block, wait for it.
+         */
         e->io_done.wait();
     }
 
@@ -918,11 +1137,19 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 
     BcacheEntry* e = shard.get_or_create(block_idx, true, buf);
     if (!e) {
+        /*
+         * Refuse to hide allocation/eviction failure.
+         * A write-through fallback is not always acceptable at this layer.
+         */
         return 0;
     }
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
     if ((flags & k_flag_io_inflight) != 0u) {
+        /*
+         * Preserve single-I/O semantics.
+         * Writing into a buffer that is being filled would publish torn data.
+         */
         e->io_done.wait();
     }
 
@@ -951,6 +1178,12 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 }
 
 void bcache_sync(void) {
+    /*
+     * Drain dirty_list per shard.
+     *
+     * Do not hold meta_lock during disk writes. Take a reference, clear dirty,
+     * snapshot the data, then release the lock and flush.
+     */
     for (uint32_t si = 0; si < BCACHE_SHARDS; si++) {
         BcacheShard& shard = g_shards[si];
 
@@ -982,6 +1215,11 @@ void bcache_sync(void) {
 
                 cur.get();
 
+                /*
+                 * Clear dirty under meta_lock before I/O.
+                 * If the write fails, the caller is not told anyway; do not
+                 * risk an infinite retry loop by leaving the same entry dirty.
+                 */
                 cur.flags.fetch_and(
                     ~k_flag_dirty,
                     kernel::memory_order::acq_rel
@@ -990,6 +1228,10 @@ void bcache_sync(void) {
                 {
                     kernel::ReadGuard data_guard(cur.data_lock);
 
+                    /*
+                     * Snapshot under data_lock.
+                     * Do not hold meta_lock here longer than necessary.
+                     */
                     memcpy(tmp, cur.data, BLOCK_SIZE);
                 }
 
@@ -1010,6 +1252,12 @@ void bcache_sync(void) {
 }
 
 void bcache_flush_block(uint32_t block_idx) {
+    /*
+     * Block-level flush is advisory.
+     *
+     * If the block is not cached or not dirty, return quickly. This call must
+     * not force a cache fill.
+     */
     BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
 
     uint8_t tmp[BLOCK_SIZE];
@@ -1035,6 +1283,10 @@ void bcache_flush_block(uint32_t block_idx) {
 
         shard.dirty_unmark_locked(*e);
 
+        /*
+         * Clear dirty while holding meta_lock.
+         * bcache_sync and flush_block must not race and emit two writebacks.
+         */
         e->flags.fetch_and(
             ~k_flag_dirty,
             kernel::memory_order::acq_rel
@@ -1069,6 +1321,12 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         count = 8;
     }
 
+    /*
+     * Limit the amount of speculative work.
+     * A large sequential hint is common; creating too many entries would just
+     * evict useful cache lines and amplify I/O.
+     */
+
     for (uint32_t i = 1; i <= count; i++) {
         const uint32_t block_idx = start_block + i;
 
@@ -1080,6 +1338,13 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         }
 
         if (!g_prefetch.try_push(*e)) {
+            /*
+             * If enqueue fails, roll back the created entry.
+             *
+             * Readahead must not leak entries into the map without a worker
+             * reference. The double put is intentional: one drops the caller
+             * reference, the other drops the shard/map reference after unlink.
+             */
             BcacheShard& rollback_shard =
                 g_shards[BcacheShard::index_for(e->block_idx)];
 
@@ -1090,6 +1355,11 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
 
                 BcacheEntry* cur = rollback_shard.lookup_locked(e->block_idx);
                 if (cur == e) {
+                    /*
+                     * Mark evicting before unlink.
+                     * Anybody that races and already holds a reference must
+                     * not see the entry as reusable.
+                     */
                     e->flags.fetch_or(
                         k_flag_evicting,
                         kernel::memory_order::acq_rel
@@ -1106,6 +1376,10 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
             e->put();
 
             if (unlinked) {
+                /*
+                 * Drop the shard's reference after unlink.
+                 * The first put drops the creator's transient reference.
+                 */
                 e->put();
             }
         }

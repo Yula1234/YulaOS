@@ -13,6 +13,9 @@
  * The cache is shared globally and is used as the lowest layer under the file
  * system code.
  *
+ * The cache uses a CLOCK-style eviction policy. Metadata is sharded internally
+ * to reduce lock contention.
+ *
  * The API is synchronous and does not provide buffer pinning: once a call
  * returns, the cached block may be evicted at any time.
  */
@@ -21,13 +24,27 @@
 extern "C" {
 #endif
 
-/* Initialize cache state and build the initial LRU list. */
+/*
+ * Initialize cache state and size the cache based on total RAM.
+ *
+ * The current policy targets ~2% of RAM, split evenly across internal shards.
+ */
 void bcache_init(void);
 
-/* Read a 4KiB block into `buf`. Returns non-zero on success. */
+/*
+ * Read a 4KiB block into `buf`.
+ *
+ * Returns non-zero on success. If the cache is under pressure and cannot
+ * allocate a new entry, the implementation may fall back to direct disk I/O.
+ */
 int bcache_read(uint32_t block_idx, uint8_t* buf);
 
-/* Update a cached 4KiB block from `buf` and mark it dirty. */
+/*
+ * Update a cached 4KiB block from `buf` and mark it dirty.
+ *
+ * Returns non-zero on success. Under cache pressure this call may fail if it
+ * cannot allocate (or make room for) a cache entry.
+ */
 int bcache_write(uint32_t block_idx, const uint8_t* buf);
 
 /*
