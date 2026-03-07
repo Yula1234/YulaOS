@@ -1,78 +1,159 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
+#include <lib/cpp/hash_traits.h>
+#include <lib/cpp/rwlock.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/new.h>
+
+#include <lib/hash_map.h>
+#include <lib/string.h>
+
+#include <kernel/sched.h>
+#include <kernel/cpu.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
+#include <drivers/ahci.h>
+#include <hal/lock.h>
+
 #include "bcache.h"
-#include "../drivers/ahci.h"
-#include "../lib/string.h"
-#include "../hal/lock.h"
-#include "../kernel/sched.h"
-#include "../mm/heap.h"
 
-#include "../lib/hash_map.h"
+static constexpr uint32_t BLOCK_SIZE = 4096;
+static constexpr uint32_t SECTOR_SIZE = 512;
+static constexpr uint32_t SECTORS_PER_BLK = 8;
 
-/*
- * Block cache.
- *
- * The cache provides a fixed-size in-memory store for 4KiB blocks indexed by
- * `block_idx`.
- *
- * Data structures:
- *  - block_map: lookup by block index
- *  - LRU list: eviction policy
- *
- * Concurrency model:
- *  - `cache_lock` protects all metadata and cached data buffers.
- *  - slow I/O is performed outside the lock.
- *  - the refill path re-checks the cache after I/O to handle races.
- *
- * The implementation is intentionally simple: there is no pinning, no per-block
- * locks, and no asynchronous writeback. Users must treat cache entries as
- * ephemeral and copy data out.
- */
+static constexpr uint32_t BCACHE_SHARDS = 64;
+static constexpr uint32_t BCACHE_SHARD_BUCKETS = 256;
 
-#define BCACHE_SIZE     128
-#define HASH_BUCKETS    64
-#define BLOCK_SIZE      4096
-#define SECTOR_SIZE     512
-#define SECTORS_PER_BLK 8
+static constexpr uint32_t HOT_SLOTS = 64;
 
-typedef struct cache_block {
-    uint32_t block_idx;
-    uint8_t  data[BLOCK_SIZE];
+static constexpr uint32_t k_flag_valid = 1u << 0;
+static constexpr uint32_t k_flag_dirty = 1u << 1;
+static constexpr uint32_t k_flag_io_inflight = 1u << 2;
+static constexpr uint32_t k_flag_evicting = 1u << 3;
+static constexpr uint32_t k_flag_accessed = 1u << 4;
 
-    uint8_t  valid;
-    uint8_t  dirty;
+struct BcacheIoEvent {
+    kernel::atomic<int> done{0};
+    semaphore_t sem{};
+};
 
-    struct cache_block *prev;
-    struct cache_block *next;
-} cache_block_t;
+static void io_event_init(BcacheIoEvent& ev) {
+    ev.done.store(0, kernel::memory_order::release);
 
-static cache_block_t pool[BCACHE_SIZE];
-static HashMap<uint32_t, cache_block_t*, HASH_BUCKETS> block_map;
+    sem_init(&ev.sem, 0);
+}
 
-static cache_block_t* lru_head = 0;
-static cache_block_t* lru_tail = 0;
+static void io_event_reset(BcacheIoEvent& ev) {
+    ev.done.store(0, kernel::memory_order::release);
 
-static spinlock_t cache_lock;
+    sem_init(&ev.sem, 0);
+}
 
-/*
- * Disk I/O helpers.
- *
- * The cache operates on 4KiB blocks. AHCI reads/writes in 512-byte sectors, so
- * we translate block indices to LBA by multiplying by SECTORS_PER_BLK.
- */
+static void io_event_wait(BcacheIoEvent& ev) {
+    while (ev.done.load(kernel::memory_order::acquire) == 0) {
+        sem_wait(&ev.sem);
+    }
+}
+
+static void io_event_signal_all(BcacheIoEvent& ev) {
+    ev.done.store(1, kernel::memory_order::release);
+
+    sem_signal_all(&ev.sem);
+}
+
+struct BcacheEntry {
+    uint32_t block_idx = 0;
+
+    kernel::atomic<uint32_t> refcnt{0};
+    kernel::atomic<uint32_t> flags{0};
+
+    kernel::RwLock data_lock{};
+    BcacheIoEvent io_done{};
+
+    uint8_t* data = nullptr;
+
+    BcacheEntry* clock_next = nullptr;
+    BcacheEntry* clock_prev = nullptr;
+
+    BcacheEntry() {
+        io_event_init(io_done);
+    }
+
+    ~BcacheEntry() = default;
+};
+
+struct BcacheShard {
+    kernel::RwLock meta_lock{};
+    HashMap<uint32_t, BcacheEntry*, BCACHE_SHARD_BUCKETS> map{};
+
+    BcacheEntry* clock_hand = nullptr;
+    uint32_t entries = 0;
+    uint32_t max_entries = 0;
+};
+
+struct HotSlot {
+    uint32_t block_idx = 0;
+    BcacheEntry* entry = nullptr;
+};
+
+struct PerCpuHotCache {
+    spinlock_t lock{};
+    HotSlot slots[HOT_SLOTS]{};
+};
+
+static BcacheShard g_shards[BCACHE_SHARDS]{};
+static PerCpuHotCache g_hot[MAX_CPUS]{};
+
+static kmem_cache_t* g_entry_cache = nullptr;
+
+static void entry_get(BcacheEntry& e);
+static void entry_put(BcacheEntry& e);
+
+static void hotcache_invalidate_entry(BcacheEntry& entry) {
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        PerCpuHotCache& hc = g_hot[cpu];
+
+        uint32_t flags = spinlock_acquire_safe(&hc.lock);
+
+        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
+            HotSlot& slot = hc.slots[i];
+
+            if (slot.entry != &entry) {
+                continue;
+            }
+
+            slot.block_idx = 0;
+            slot.entry = nullptr;
+
+            spinlock_release_safe(&hc.lock, flags);
+
+            entry_put(entry);
+
+            flags = spinlock_acquire_safe(&hc.lock);
+        }
+
+        spinlock_release_safe(&hc.lock, flags);
+    }
+}
 
 static void disk_read_4k(uint32_t block_idx, uint8_t* buf) {
     if (!buf) {
         return;
     }
 
-    uint64_t start_lba = (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
+    const uint64_t start_lba = (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
     if (start_lba > 0xFFFFFFFF) {
         return;
     }
 
-    ahci_read_sectors((uint32_t)start_lba, SECTORS_PER_BLK, buf);
+    ahci_read_sectors(
+        (uint32_t)start_lba,
+        SECTORS_PER_BLK,
+        buf
+    );
 }
 
 static void disk_write_4k(uint32_t block_idx, const uint8_t* buf) {
@@ -80,98 +161,433 @@ static void disk_write_4k(uint32_t block_idx, const uint8_t* buf) {
         return;
     }
 
-    uint64_t start_lba = (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
+    const uint64_t start_lba = (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
     if (start_lba > 0xFFFFFFFF) {
         return;
     }
 
-    ahci_write_sectors((uint32_t)start_lba, SECTORS_PER_BLK, buf);
+    ahci_write_sectors(
+        (uint32_t)start_lba,
+        SECTORS_PER_BLK,
+        buf
+    );
 }
 
-static void lru_touch(cache_block_t* b) {
-    /* Move block to the MRU position. */
-    if (b == lru_head) {
+static uint32_t shard_index_for(uint32_t block_idx) {
+    return kernel::HashTraits<uint32_t>::hash(block_idx) & (BCACHE_SHARDS - 1u);
+}
+
+static uint32_t hot_slot_index_for(uint32_t block_idx) {
+    return kernel::HashTraits<uint32_t>::hash(block_idx) & (HOT_SLOTS - 1u);
+}
+
+static void entry_get(BcacheEntry& e) {
+    e.refcnt.fetch_add(1, kernel::memory_order::acquire);
+}
+
+static void entry_free(BcacheEntry& e) {
+    if (e.data) {
+        kfree(e.data);
+        e.data = nullptr;
+    }
+
+    e.~BcacheEntry();
+
+    if (g_entry_cache) {
+        kmem_cache_free(g_entry_cache, &e);
+    } else {
+        kfree(&e);
+    }
+}
+
+static void entry_put(BcacheEntry& e) {
+    const uint32_t prev = e.refcnt.fetch_sub(1, kernel::memory_order::release);
+    if (prev != 1u) {
         return;
     }
 
-    if (b->prev) {
-        b->prev->next = b->next;
-    }
-    if (b->next) {
-        b->next->prev = b->prev;
-    }
-    if (b == lru_tail) {
-        lru_tail = b->prev;
-    }
+    kernel::atomic_thread_fence(kernel::memory_order::acquire);
 
-    b->next = lru_head;
-    b->prev = 0;
-
-    if (lru_head) {
-        lru_head->prev = b;
-    }
-
-    lru_head = b;
-
-    if (!lru_tail) {
-        lru_tail = b;
-    }
-}
-
-static void hash_remove(cache_block_t* b) {
-    if (!b->valid) {
+    const uint32_t flags = e.flags.load(kernel::memory_order::acquire);
+    if ((flags & k_flag_evicting) == 0u) {
         return;
     }
 
-    block_map.remove(b->block_idx);
+    entry_free(e);
 }
 
-static void hash_insert(cache_block_t* b) {
-    block_map.insert_or_assign(b->block_idx, b);
+static void clock_ring_insert(BcacheShard& shard, BcacheEntry& e) {
+    if (!shard.clock_hand) {
+        shard.clock_hand = &e;
+        e.clock_next = &e;
+        e.clock_prev = &e;
+        return;
+    }
+
+    BcacheEntry* hand = shard.clock_hand;
+    BcacheEntry* prev = hand->clock_prev;
+
+    e.clock_next = hand;
+    e.clock_prev = prev;
+
+    prev->clock_next = &e;
+    hand->clock_prev = &e;
 }
 
-static cache_block_t* cache_lookup(uint32_t block_idx) {
-    cache_block_t* b = nullptr;
-    if (!block_map.try_get(block_idx, b)) {
+static void clock_ring_remove(BcacheShard& shard, BcacheEntry& e) {
+    if (!shard.clock_hand) {
+        return;
+    }
+
+    if (e.clock_next == &e) {
+        shard.clock_hand = nullptr;
+        e.clock_next = nullptr;
+        e.clock_prev = nullptr;
+        return;
+    }
+
+    if (shard.clock_hand == &e) {
+        shard.clock_hand = e.clock_next;
+    }
+
+    BcacheEntry* next = e.clock_next;
+    BcacheEntry* prev = e.clock_prev;
+
+    prev->clock_next = next;
+    next->clock_prev = prev;
+
+    e.clock_next = nullptr;
+    e.clock_prev = nullptr;
+}
+
+static BcacheEntry* shard_lookup_locked(BcacheShard& shard, uint32_t block_idx) {
+    BcacheEntry* e = nullptr;
+    if (!shard.map.try_get(block_idx, e)) {
         return nullptr;
     }
 
-    if (!b || !b->valid) {
+    if (!e) {
         return nullptr;
     }
 
-    return b;
+    return e;
+}
+
+static BcacheEntry* hotcache_try_get(uint32_t block_idx) {
+    cpu_t* cpu = cpu_current();
+    const int cpu_idx = cpu ? cpu->index : 0;
+
+    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
+        return nullptr;
+    }
+
+    PerCpuHotCache& hc = g_hot[cpu_idx];
+    const uint32_t slot_idx = hot_slot_index_for(block_idx);
+
+    uint32_t flags = spinlock_acquire_safe(&hc.lock);
+
+    HotSlot& slot = hc.slots[slot_idx];
+    BcacheEntry* e = nullptr;
+
+    if (slot.entry && slot.block_idx == block_idx) {
+        e = slot.entry;
+
+        entry_get(*e);
+    }
+
+    spinlock_release_safe(&hc.lock, flags);
+
+    return e;
+}
+
+static void hotcache_put(uint32_t block_idx, BcacheEntry& entry) {
+    cpu_t* cpu = cpu_current();
+    const int cpu_idx = cpu ? cpu->index : 0;
+
+    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
+        return;
+    }
+
+    const uint32_t entry_flags = entry.flags.load(kernel::memory_order::acquire);
+    if ((entry_flags & k_flag_evicting) != 0u) {
+        return;
+    }
+
+    PerCpuHotCache& hc = g_hot[cpu_idx];
+    const uint32_t slot_idx = hot_slot_index_for(block_idx);
+
+    entry_get(entry);
+
+
+    uint32_t flags = spinlock_acquire_safe(&hc.lock);
+
+    HotSlot& slot = hc.slots[slot_idx];
+    BcacheEntry* old = slot.entry;
+
+    slot.block_idx = block_idx;
+    slot.entry = &entry;
+
+    spinlock_release_safe(&hc.lock, flags);
+
+
+    if (old) {
+        entry_put(*old);
+    }
+}
+
+struct EvictedBlock {
+    uint32_t block_idx = 0;
+    bool dirty = false;
+    uint8_t data[BLOCK_SIZE]{};
+    BcacheEntry* entry = nullptr;
+};
+
+static bool shard_try_evict_one(BcacheShard& shard, EvictedBlock& out) {
+    if (!shard.clock_hand) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < shard.entries + 1u; i++) {
+        BcacheEntry* cand = shard.clock_hand;
+        shard.clock_hand = shard.clock_hand->clock_next;
+
+        const uint32_t refs = cand->refcnt.load(kernel::memory_order::acquire);
+        if (refs != 1u) {
+            continue;
+        }
+
+        uint32_t flags = cand->flags.load(kernel::memory_order::acquire);
+        if ((flags & k_flag_accessed) != 0u) {
+            cand->flags.fetch_and(
+                ~k_flag_accessed,
+                kernel::memory_order::acq_rel
+            );
+            continue;
+        }
+
+        cand->flags.fetch_or(
+            k_flag_evicting,
+            kernel::memory_order::acq_rel
+        );
+
+        shard.map.remove(cand->block_idx);
+        clock_ring_remove(shard, *cand);
+        shard.entries--;
+
+        out.block_idx = cand->block_idx;
+        out.entry = cand;
+
+        flags = cand->flags.load(kernel::memory_order::acquire);
+        if ((flags & k_flag_dirty) != 0u) {
+            kernel::ReadGuard data_guard(cand->data_lock);
+
+            if (cand->data) {
+                memcpy(out.data, cand->data, BLOCK_SIZE);
+            }
+
+            out.dirty = true;
+
+            cand->flags.fetch_and(
+                ~k_flag_dirty,
+                kernel::memory_order::acq_rel
+            );
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+static bool shard_ensure_space(BcacheShard& shard) {
+    while (shard.entries >= shard.max_entries && shard.max_entries != 0u) {
+        EvictedBlock ev{};
+
+        {
+            kernel::WriteGuard meta_guard(shard.meta_lock);
+
+            if (shard.entries < shard.max_entries) {
+                break;
+            }
+
+            if (!shard_try_evict_one(shard, ev)) {
+                return false;
+            }
+        }
+
+        if (ev.entry) {
+            hotcache_invalidate_entry(*ev.entry);
+        }
+
+        if (ev.dirty) {
+            disk_write_4k(ev.block_idx, ev.data);
+        }
+
+        if (ev.entry) {
+            entry_put(*ev.entry);
+        }
+    }
+
+    return true;
+}
+
+static BcacheEntry* shard_get_or_create(
+    uint32_t block_idx,
+    bool for_write,
+    const uint8_t* write_buf
+) {
+    BcacheShard& shard = g_shards[shard_index_for(block_idx)];
+
+    {
+        kernel::ReadGuard meta_guard(shard.meta_lock);
+
+        BcacheEntry* e = shard_lookup_locked(shard, block_idx);
+        if (e) {
+            entry_get(*e);
+            return e;
+        }
+    }
+
+    if (!shard_ensure_space(shard)) {
+        return nullptr;
+    }
+
+    BcacheEntry* created = nullptr;
+
+    {
+        kernel::WriteGuard meta_guard(shard.meta_lock);
+
+        BcacheEntry* race = shard_lookup_locked(shard, block_idx);
+        if (race) {
+            entry_get(*race);
+            return race;
+        }
+
+        void* mem = nullptr;
+        if (g_entry_cache) {
+            mem = kmem_cache_alloc(g_entry_cache);
+        } else {
+            mem = kmalloc(sizeof(BcacheEntry));
+        }
+
+        if (!mem) {
+            return nullptr;
+        }
+
+        created = new (mem) BcacheEntry();
+        created->block_idx = block_idx;
+
+        created->refcnt.store(2u, kernel::memory_order::release);
+
+        const uint32_t base_flags = for_write
+            ? (k_flag_valid | k_flag_dirty | k_flag_accessed)
+            : k_flag_io_inflight;
+        created->flags.store(base_flags, kernel::memory_order::release);
+
+        if (for_write) {
+            created->data = static_cast<uint8_t*>(kmalloc_a(BLOCK_SIZE));
+            if (!created->data) {
+                created->flags.fetch_or(
+                    k_flag_evicting,
+                    kernel::memory_order::acq_rel
+                );
+                created->refcnt.store(1u, kernel::memory_order::release);
+                entry_put(*created);
+                return nullptr;
+            }
+
+            kernel::WriteGuard data_guard(created->data_lock);
+
+            memcpy(created->data, write_buf, BLOCK_SIZE);
+        } else {
+            created->data = static_cast<uint8_t*>(kmalloc_a(BLOCK_SIZE));
+            if (!created->data) {
+                created->flags.fetch_or(
+                    k_flag_evicting,
+                    kernel::memory_order::acq_rel
+                );
+                created->refcnt.store(1u, kernel::memory_order::release);
+                entry_put(*created);
+                return nullptr;
+            }
+
+            io_event_reset(created->io_done);
+        }
+
+        shard.map.insert_or_assign(block_idx, created);
+        clock_ring_insert(shard, *created);
+
+        shard.entries++;
+    }
+
+    if (for_write) {
+        return created;
+    }
+
+    uint8_t tmp[BLOCK_SIZE];
+
+    disk_read_4k(block_idx, tmp);
+
+    {
+        kernel::WriteGuard data_guard(created->data_lock);
+
+        memcpy(created->data, tmp, BLOCK_SIZE);
+    }
+
+    created->flags.fetch_or(
+        k_flag_valid | k_flag_accessed,
+        kernel::memory_order::acq_rel
+    );
+
+    created->flags.fetch_and(
+        ~k_flag_io_inflight,
+        kernel::memory_order::acq_rel
+    );
+
+    io_event_signal_all(created->io_done);
+
+    return created;
 }
 
 void bcache_init(void) {
-    /*
-     * Initialize the fixed pool and build the initial LRU list.
-     *
-     * All blocks start invalid. The LRU list is seeded with the entire pool so
-     * the tail is always a candidate for eviction.
-     */
-    memset(pool, 0, sizeof(pool));
-    block_map.clear();
+    if (!g_entry_cache) {
+        g_entry_cache = kmem_cache_create(
+            "bcache_e",
+            sizeof(BcacheEntry),
+            0,
+            0
+        );
+    }
 
-    spinlock_init(&cache_lock);
+    const uint64_t total_ram_bytes =
+        (uint64_t)pmm_get_total_blocks() * (uint64_t)BLOCK_SIZE;
+    const uint64_t target_bytes = total_ram_bytes / 50u;
 
-    lru_head = 0;
-    lru_tail = 0;
+    uint64_t target_entries = target_bytes / (uint64_t)BLOCK_SIZE;
 
-    for (int i = 0; i < BCACHE_SIZE; i++) {
-        cache_block_t* b = &pool[i];
+    if (target_entries < (uint64_t)BCACHE_SHARDS) {
+        target_entries = BCACHE_SHARDS;
+    }
 
-        b->next = lru_head;
-        b->prev = 0;
+    target_entries -= target_entries % (uint64_t)BCACHE_SHARDS;
 
-        if (lru_head) {
-            lru_head->prev = b;
-        }
+    const uint32_t per_shard =
+        (uint32_t)(target_entries / (uint64_t)BCACHE_SHARDS);
 
-        lru_head = b;
+    for (uint32_t i = 0; i < BCACHE_SHARDS; i++) {
+        kernel::WriteGuard meta_guard(g_shards[i].meta_lock);
 
-        if (!lru_tail) {
-            lru_tail = b;
+        g_shards[i].map.clear();
+        g_shards[i].clock_hand = nullptr;
+        g_shards[i].entries = 0;
+        g_shards[i].max_entries = per_shard;
+    }
+
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        spinlock_init(&g_hot[cpu].lock);
+
+        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
+            g_hot[cpu].slots[i] = {};
         }
     }
 }
@@ -181,101 +597,40 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
         return 0;
     }
 
-    spinlock_acquire(&cache_lock);
+    if (BcacheEntry* hot = hotcache_try_get(block_idx)) {
+        {
+            kernel::ReadGuard data_guard(hot->data_lock);
 
-    cache_block_t* b = cache_lookup(block_idx);
-    if (b) {
-        /* Fast path: cached hit. */
-        lru_touch(b);
+            memcpy(buf, hot->data, BLOCK_SIZE);
+        }
 
-        memcpy(buf, b->data, BLOCK_SIZE);
+        hot->flags.fetch_or(k_flag_accessed, kernel::memory_order::acq_rel);
 
-        spinlock_release(&cache_lock);
+        entry_put(*hot);
         return 1;
     }
 
-    b = lru_tail;
-    if (!b) {
-        spinlock_release(&cache_lock);
+    BcacheEntry* e = shard_get_or_create(block_idx, false, nullptr);
+    if (!e) {
         return 0;
     }
 
-    /*
-     * Eviction: copy dirty victim data out, drop from hash, then do I/O
-     * without holding cache_lock.
-     */
-
-    int was_dirty = b->valid
-                   && b->dirty;
-    uint32_t old_idx = b->block_idx;
-    uint8_t dirty_data[BLOCK_SIZE];
-
-    if (was_dirty) {
-        memcpy(dirty_data, b->data, BLOCK_SIZE);
+    const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
+    if ((flags & k_flag_io_inflight) != 0u) {
+        io_event_wait(e->io_done);
     }
 
-    hash_remove(b);
-    spinlock_release(&cache_lock);
+    {
+        kernel::ReadGuard data_guard(e->data_lock);
 
-    if (was_dirty) {
-        disk_write_4k(old_idx, dirty_data);
+        memcpy(buf, e->data, BLOCK_SIZE);
     }
 
-    disk_read_4k(block_idx, buf);
+    e->flags.fetch_or(k_flag_accessed, kernel::memory_order::acq_rel);
 
-    spinlock_acquire(&cache_lock);
+    hotcache_put(block_idx, *e);
 
-    cache_block_t* race_check = cache_lookup(block_idx);
-    if (race_check) {
-        /*
-         * Another CPU filled the same block while we were doing I/O.
-         * Prefer the cached copy and keep our read buffer as the output.
-         */
-        lru_touch(race_check);
-
-        memcpy(buf, race_check->data, BLOCK_SIZE);
-
-        spinlock_release(&cache_lock);
-        return 1;
-    }
-
-    b = lru_tail;
-    if (!b) {
-        spinlock_release(&cache_lock);
-        return 0;
-    }
-
-    /*
-     * Second-chance victim selection.
-     *
-     * We must re-select because `lru_tail` and the victim contents may have
-     * changed while we were doing I/O.
-     */
-
-    int new_was_dirty = b->valid
-                       && b->dirty;
-    uint32_t new_old_idx = b->block_idx;
-    uint8_t new_dirty_data[BLOCK_SIZE];
-
-    if (new_was_dirty) {
-        memcpy(new_dirty_data, b->data, BLOCK_SIZE);
-    }
-
-    hash_remove(b);
-
-    b->block_idx = block_idx;
-    b->valid = 1;
-    b->dirty = 0;
-    memcpy(b->data, buf, BLOCK_SIZE);
-
-    hash_insert(b);
-    lru_touch(b);
-
-    spinlock_release(&cache_lock);
-
-    if (new_was_dirty) {
-        disk_write_4k(new_old_idx, new_dirty_data);
-    }
+    entry_put(*e);
 
     return 1;
 }
@@ -285,219 +640,193 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
         return 0;
     }
 
-    spinlock_acquire(&cache_lock);
-    cache_block_t* b = cache_lookup(block_idx);
-    if (b) {
-        /* Cached hit: update in place and mark dirty. */
-        lru_touch(b);
+    if (BcacheEntry* hot = hotcache_try_get(block_idx)) {
+        {
+            kernel::WriteGuard data_guard(hot->data_lock);
 
-        memcpy(b->data, buf, BLOCK_SIZE);
+            memcpy(hot->data, buf, BLOCK_SIZE);
+        }
 
-        b->dirty = 1;
+        hot->flags.fetch_or(
+            k_flag_dirty | k_flag_valid | k_flag_accessed,
+            kernel::memory_order::acq_rel
+        );
 
-        spinlock_release(&cache_lock);
+        entry_put(*hot);
         return 1;
     }
 
-    b = lru_tail;
-    if (!b) {
-        spinlock_release(&cache_lock);
+    BcacheEntry* e = shard_get_or_create(block_idx, true, buf);
+    if (!e) {
         return 0;
     }
 
-    int was_dirty = b->valid
-                   && b->dirty;
-    uint32_t old_idx = b->block_idx;
-    uint8_t dirty_data[BLOCK_SIZE];
-
-    if (was_dirty) {
-        memcpy(dirty_data, b->data, BLOCK_SIZE);
+    const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
+    if ((flags & k_flag_io_inflight) != 0u) {
+        io_event_wait(e->io_done);
     }
 
-    hash_remove(b);
+    {
+        kernel::WriteGuard data_guard(e->data_lock);
 
-    b->block_idx = block_idx;
-    b->valid = 1;
-    b->dirty = 1;
-    memcpy(b->data, buf, BLOCK_SIZE);
-
-    hash_insert(b);
-    lru_touch(b);
-
-    spinlock_release(&cache_lock);
-
-    if (was_dirty) {
-        disk_write_4k(old_idx, dirty_data);
+        memcpy(e->data, buf, BLOCK_SIZE);
     }
+
+    e->flags.fetch_or(
+        k_flag_dirty | k_flag_valid | k_flag_accessed,
+        kernel::memory_order::acq_rel
+    );
+
+    hotcache_put(block_idx, *e);
+
+    entry_put(*e);
 
     return 1;
 }
 
 void bcache_sync(void) {
-    /*
-     * Write back dirty blocks.
-     *
-     * Each block is captured under the lock and flushed outside the lock to
-     * avoid stalling concurrent lookups.
-     */
-    for (int i = 0; i < BCACHE_SIZE; i++) {
-        uint8_t  tmp_buf[BLOCK_SIZE];
-        uint32_t blk_idx = 0;
-        int      do_flush = 0;
+    for (uint32_t si = 0; si < BCACHE_SHARDS; si++) {
+        BcacheShard& shard = g_shards[si];
 
-        spinlock_acquire(&cache_lock);
-        cache_block_t* b = &pool[i];
+        while (true) {
+            uint32_t blk = 0;
+            uint8_t tmp[BLOCK_SIZE];
+            BcacheEntry* e = nullptr;
+            bool do_flush = false;
 
-        if (b->valid && b->dirty) {
-            blk_idx = b->block_idx;
-            memcpy(tmp_buf, b->data, BLOCK_SIZE);
-            b->dirty = 0;
-            do_flush = 1;
-        }
+            {
+                kernel::WriteGuard meta_guard(shard.meta_lock);
 
-        spinlock_release(&cache_lock);
+                if (!shard.clock_hand) {
+                    break;
+                }
 
-        if (do_flush) {
-            disk_write_4k(blk_idx, tmp_buf);
+                BcacheEntry* cur = shard.clock_hand;
+                bool found = false;
+
+                for (uint32_t i = 0; i < shard.entries + 1u; i++) {
+                    const uint32_t flags =
+                        cur->flags.load(kernel::memory_order::acquire);
+                    const uint32_t refs =
+                        cur->refcnt.load(kernel::memory_order::acquire);
+
+                    if (refs >= 1u
+                        && (flags & k_flag_dirty) != 0u
+                        && (flags & k_flag_evicting) == 0u) {
+                        entry_get(*cur);
+
+                        cur->flags.fetch_and(
+                            ~k_flag_dirty,
+                            kernel::memory_order::acq_rel
+                        );
+
+                        {
+                            kernel::ReadGuard data_guard(cur->data_lock);
+
+                            memcpy(tmp, cur->data, BLOCK_SIZE);
+                        }
+
+                        blk = cur->block_idx;
+                        e = cur;
+                        do_flush = true;
+                        found = true;
+                        break;
+                    }
+
+                    cur = cur->clock_next;
+                }
+
+                if (!found) {
+                    break;
+                }
+            }
+
+
+            if (do_flush) {
+                disk_write_4k(blk, tmp);
+            }
+
+            if (e) {
+                entry_put(*e);
+            }
         }
     }
 }
 
 void bcache_flush_block(uint32_t block_idx) {
-    /* Write back a single dirty block if it is cached. */
-    uint8_t  tmp_buf[BLOCK_SIZE];
-    uint32_t phys_idx = 0;
-    int      do_flush = 0;
+    BcacheShard& shard = g_shards[shard_index_for(block_idx)];
 
-    spinlock_acquire(&cache_lock);
-    cache_block_t* b = cache_lookup(block_idx);
+    uint8_t tmp[BLOCK_SIZE];
+    bool do_flush = false;
 
-    if (b && b->dirty) {
-        phys_idx = b->block_idx;
+    {
+        kernel::ReadGuard meta_guard(shard.meta_lock);
 
-        memcpy(tmp_buf, b->data, BLOCK_SIZE);
+        BcacheEntry* e = shard_lookup_locked(shard, block_idx);
+        if (!e) {
+            return;
+        }
 
-        b->dirty = 0;
-        do_flush = 1;
+        entry_get(*e);
+
+        const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
+        if ((flags & k_flag_dirty) == 0u) {
+            entry_put(*e);
+            return;
+        }
+
+        e->flags.fetch_and(
+            ~k_flag_dirty,
+            kernel::memory_order::acq_rel
+        );
+
+        {
+            kernel::ReadGuard data_guard(e->data_lock);
+
+            memcpy(tmp, e->data, BLOCK_SIZE);
+        }
+
+        do_flush = true;
+
+        entry_put(*e);
     }
 
-    spinlock_release(&cache_lock);
-
     if (do_flush) {
-        disk_write_4k(phys_idx, tmp_buf);
+        disk_write_4k(block_idx, tmp);
     }
 }
 
 void bcache_readahead(uint32_t start_block, uint32_t count) {
-    /*
-     * Opportunistic sequential prefetch.
-     *
-     * This code trades optimality for simplicity: it does not reserve cache
-     * entries and can race with real reads/writes. The only hard guarantee is
-     * that it never blocks the caller on cache_lock during disk I/O.
-     */
     if (count == 0) {
         return;
     }
 
-    uint32_t max_prefetch = 8;
-    if (count > max_prefetch) {
-        count = max_prefetch;
+    if (count > 8) {
+        count = 8;
     }
 
     for (uint32_t i = 1; i <= count; i++) {
-        uint32_t block_idx = start_block + i;
+        const uint32_t block_idx = start_block + i;
 
-        spinlock_acquire(&cache_lock);
-        cache_block_t* b = cache_lookup(block_idx);
-        if (b) {
-            /* Already cached: just refresh LRU. */
-            lru_touch(b);
+        BcacheShard& shard = g_shards[shard_index_for(block_idx)];
+        {
+            kernel::ReadGuard meta_guard(shard.meta_lock);
 
-            spinlock_release(&cache_lock);
+            if (shard_lookup_locked(shard, block_idx)) {
+                continue;
+            }
+        }
+
+        BcacheEntry* e = shard_get_or_create(block_idx, false, nullptr);
+        if (!e) {
             continue;
         }
 
-        b = lru_tail;
-        if (!b) {
-            spinlock_release(&cache_lock);
-            continue;
+        const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
+        if ((flags & k_flag_io_inflight) != 0u) {
+            io_event_wait(e->io_done);
         }
 
-        /* Evict one victim and do I/O without holding cache_lock. */
-
-        int was_dirty = b->valid
-                       && b->dirty;
-        uint32_t old_idx = b->block_idx;
-        uint8_t dirty_data[BLOCK_SIZE];
-
-        if (was_dirty) {
-            memcpy(dirty_data, b->data, BLOCK_SIZE);
-        }
-
-        hash_remove(b);
-        spinlock_release(&cache_lock);
-
-        if (was_dirty) {
-            disk_write_4k(old_idx, dirty_data);
-        }
-
-        uint8_t* scratch = (uint8_t*)kmalloc(BLOCK_SIZE);
-        if (!scratch) {
-            continue;
-        }
-
-        disk_read_4k(block_idx, scratch);
-
-        spinlock_acquire(&cache_lock);
-
-        cache_block_t* race_check = cache_lookup(block_idx);
-        if (race_check) {
-            /* Another CPU brought it in meanwhile. */
-            lru_touch(race_check);
-
-            kfree(scratch);
-
-            spinlock_release(&cache_lock);
-            continue;
-        }
-
-        b = lru_tail;
-        if (!b) {
-            kfree(scratch);
-            spinlock_release(&cache_lock);
-            continue;
-        }
-
-        /* Re-select victim after I/O to avoid using stale state. */
-
-        int new_was_dirty = b->valid
-                           && b->dirty;
-
-        uint32_t new_old_idx = b->block_idx;
-        uint8_t new_dirty_data[BLOCK_SIZE];
-
-        if (new_was_dirty) {
-            memcpy(new_dirty_data, b->data, BLOCK_SIZE);
-        }
-
-        hash_remove(b);
-
-        b->block_idx = block_idx;
-        b->valid = 1;
-        b->dirty = 0;
-
-        memcpy(b->data, scratch, BLOCK_SIZE);
-
-        hash_insert(b);
-        lru_touch(b);
-
-        spinlock_release(&cache_lock);
-
-        if (new_was_dirty) {
-            disk_write_4k(new_old_idx, new_dirty_data);
-        }
-
-        kfree(scratch);
+        entry_put(*e);
     }
 }
