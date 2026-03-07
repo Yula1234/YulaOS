@@ -4,6 +4,7 @@
 #include <lib/cpp/hash_traits.h>
 #include <lib/cpp/rwlock.h>
 #include <lib/cpp/atomic.h>
+#include <lib/cpp/dlist.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
 #include <lib/cpp/semaphore.h>
@@ -37,6 +38,7 @@ static constexpr uint32_t k_flag_dirty = 1u << 1;
 static constexpr uint32_t k_flag_io_inflight = 1u << 2;
 static constexpr uint32_t k_flag_evicting = 1u << 3;
 static constexpr uint32_t k_flag_accessed = 1u << 4;
+static constexpr uint32_t k_flag_on_dirty_list = 1u << 5;
 
 static kmem_cache_t* g_entry_cache = nullptr;
 
@@ -81,6 +83,8 @@ struct BcacheEntry {
 
     BcacheEntry* clock_next = nullptr;
     BcacheEntry* clock_prev = nullptr;
+
+    dlist_head_t dirty_node{};
 
     BcacheEntry() {
         io_done.init();
@@ -406,6 +410,8 @@ struct BcacheShard {
     kernel::RwLock meta_lock{};
     HashMap<uint32_t, BcacheEntry*, BCACHE_SHARD_BUCKETS> map{};
 
+    kernel::CDBLinkedList<BcacheEntry, &BcacheEntry::dirty_node> dirty_list{};
+
     BcacheEntry* clock_hand = nullptr;
     uint32_t entries = 0;
     uint32_t max_entries = 0;
@@ -467,6 +473,32 @@ struct BcacheShard {
         e.clock_prev = nullptr;
     }
 
+    void dirty_mark_locked(BcacheEntry& e) {
+        const uint32_t f = e.flags.load(kernel::memory_order::acquire);
+        if ((f & k_flag_evicting) != 0u) {
+            return;
+        }
+
+        if ((f & k_flag_on_dirty_list) != 0u) {
+            return;
+        }
+
+        dirty_list.push_back(e);
+
+        e.flags.fetch_or(k_flag_on_dirty_list, kernel::memory_order::acq_rel);
+    }
+
+    void dirty_unmark_locked(BcacheEntry& e) {
+        const uint32_t f = e.flags.load(kernel::memory_order::acquire);
+        if ((f & k_flag_on_dirty_list) == 0u) {
+            return;
+        }
+
+        dlist_remove_node_if_present(dirty_list.native_head(), &e.dirty_node);
+
+        e.flags.fetch_and(~k_flag_on_dirty_list, kernel::memory_order::acq_rel);
+    }
+
     bool try_evict_one_locked(EvictedBlock& out) {
         if (!clock_hand) {
             return false;
@@ -504,6 +536,8 @@ struct BcacheShard {
                 );
                 continue;
             }
+
+            dirty_unmark_locked(*cand);
 
             map.remove(cand->block_idx);
             clock_remove_locked(*cand);
@@ -692,6 +726,8 @@ struct BcacheShard {
                 kernel::WriteGuard data_guard(created->data_lock);
 
                 memcpy(created->data, write_buf, BLOCK_SIZE);
+
+                dirty_mark_locked(*created);
             } else {
                 created->io_done.reset();
             }
@@ -861,10 +897,18 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
             memcpy(hot->data, buf, BLOCK_SIZE);
         }
 
-        hot->flags.fetch_or(
+        const uint32_t prev_flags = hot->flags.fetch_or(
             k_flag_dirty | k_flag_valid | k_flag_accessed,
             kernel::memory_order::acq_rel
         );
+
+        if ((prev_flags & k_flag_dirty) == 0u) {
+            BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
+
+            kernel::WriteGuard meta_guard(shard.meta_lock);
+
+            shard.dirty_mark_locked(*hot);
+        }
 
         hot->put();
         return 1;
@@ -888,10 +932,16 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
         memcpy(e->data, buf, BLOCK_SIZE);
     }
 
-    e->flags.fetch_or(
+    const uint32_t prev_flags = e->flags.fetch_or(
         k_flag_dirty | k_flag_valid | k_flag_accessed,
         kernel::memory_order::acq_rel
     );
+
+    if ((prev_flags & k_flag_dirty) == 0u) {
+        kernel::WriteGuard meta_guard(shard.meta_lock);
+
+        shard.dirty_mark_locked(*e);
+    }
 
     g_hot_cache.put(block_idx, *e);
 
@@ -915,48 +965,37 @@ void bcache_sync(void) {
             {
                 kernel::WriteGuard meta_guard(shard.meta_lock);
 
-                if (!shard.clock_hand) {
+                if (shard.dirty_list.empty()) {
                     break;
                 }
 
-                BcacheEntry* cur = shard.clock_hand;
-                bool found = false;
+                BcacheEntry& cur = shard.dirty_list.front();
 
-                for (uint32_t i = 0; i < shard.entries + 1u; i++) {
-                    const uint32_t flags =
-                        cur->flags.load(kernel::memory_order::acquire);
-                    const uint32_t refs =
-                        cur->refcnt.load(kernel::memory_order::acquire);
+                shard.dirty_unmark_locked(cur);
 
-                    if (refs >= 1u
-                        && (flags & k_flag_dirty) != 0u
-                        && (flags & k_flag_evicting) == 0u) {
-                        cur->get();
-
-                        cur->flags.fetch_and(
-                            ~k_flag_dirty,
-                            kernel::memory_order::acq_rel
-                        );
-
-                        {
-                            kernel::ReadGuard data_guard(cur->data_lock);
-
-                            memcpy(tmp, cur->data, BLOCK_SIZE);
-                        }
-
-                        blk = cur->block_idx;
-                        e = cur;
-                        do_flush = true;
-                        found = true;
-                        break;
-                    }
-
-                    cur = cur->clock_next;
+                const uint32_t flags =
+                    cur.flags.load(kernel::memory_order::acquire);
+                if ((flags & k_flag_dirty) == 0u
+                    || (flags & k_flag_evicting) != 0u) {
+                    continue;
                 }
 
-                if (!found) {
-                    break;
+                cur.get();
+
+                cur.flags.fetch_and(
+                    ~k_flag_dirty,
+                    kernel::memory_order::acq_rel
+                );
+
+                {
+                    kernel::ReadGuard data_guard(cur.data_lock);
+
+                    memcpy(tmp, cur.data, BLOCK_SIZE);
                 }
+
+                blk = cur.block_idx;
+                e = &cur;
+                do_flush = true;
             }
 
 
@@ -977,10 +1016,12 @@ void bcache_flush_block(uint32_t block_idx) {
     uint8_t tmp[BLOCK_SIZE];
     bool do_flush = false;
 
-    {
-        kernel::ReadGuard meta_guard(shard.meta_lock);
+    BcacheEntry* e = nullptr;
 
-        BcacheEntry* e = shard.lookup_locked(block_idx);
+    {
+        kernel::WriteGuard meta_guard(shard.meta_lock);
+
+        e = shard.lookup_locked(block_idx);
         if (!e) {
             return;
         }
@@ -993,21 +1034,23 @@ void bcache_flush_block(uint32_t block_idx) {
             return;
         }
 
+        shard.dirty_unmark_locked(*e);
+
         e->flags.fetch_and(
             ~k_flag_dirty,
             kernel::memory_order::acq_rel
         );
-
-        {
-            kernel::ReadGuard data_guard(e->data_lock);
-
-            memcpy(tmp, e->data, BLOCK_SIZE);
-        }
-
-        do_flush = true;
-
-        e->put();
     }
+
+    {
+        kernel::ReadGuard data_guard(e->data_lock);
+
+        memcpy(tmp, e->data, BLOCK_SIZE);
+    }
+
+    do_flush = true;
+
+    e->put();
 
     if (do_flush) {
         DiskIo::write_4k(block_idx, tmp);
