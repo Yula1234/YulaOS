@@ -204,7 +204,8 @@ struct PerCpuHotCache {
 
 private:
     static uint32_t slot_index_for(uint32_t block_idx) {
-        return kernel::HashTraits<uint32_t>::hash(block_idx) & (HOT_SLOTS - 1u);
+        return kernel::HashTraits<uint32_t>::hash(block_idx)
+            & (HOT_SLOTS - 1u);
     }
 };
 
@@ -227,7 +228,8 @@ struct HotCache {
     }
 
     void put(uint32_t block_idx, BcacheEntry& entry) {
-        const uint32_t entry_flags = entry.flags.load(kernel::memory_order::acquire);
+        const uint32_t entry_flags =
+            entry.flags.load(kernel::memory_order::acquire);
         if ((entry_flags & k_flag_evicting) != 0u) {
             return;
         }
@@ -354,11 +356,7 @@ struct DiskIo {
             return false;
         }
 
-        return ahci_read_sectors(
-            (uint32_t)start_lba,
-            SECTORS_PER_BLK,
-            buf
-        ) != 0;
+        return ahci_read_sectors((uint32_t)start_lba, SECTORS_PER_BLK, buf) != 0;
     }
 
     static bool try_write_4k(uint32_t block_idx, const uint8_t* buf) {
@@ -372,11 +370,7 @@ struct DiskIo {
             return false;
         }
 
-        return ahci_write_sectors(
-            (uint32_t)start_lba,
-            SECTORS_PER_BLK,
-            buf
-        ) != 0;
+        return ahci_write_sectors((uint32_t)start_lba, SECTORS_PER_BLK, buf) != 0;
     }
 
     static void read_4k(uint32_t block_idx, uint8_t* buf) {
@@ -390,9 +384,9 @@ struct DiskIo {
 
 struct EvictedBlock {
     uint32_t block_idx = 0;
-    
+
     BcacheEntry* entry = nullptr;
-    
+
     bool dirty = false;
     uint8_t data[BLOCK_SIZE]{};
 
@@ -425,7 +419,8 @@ struct BcacheShard {
     uint32_t max_entries = 0;
 
     static uint32_t index_for(uint32_t block_idx) {
-        return kernel::HashTraits<uint32_t>::hash(block_idx) & (BCACHE_SHARDS - 1u);
+        return kernel::HashTraits<uint32_t>::hash(block_idx)
+            & (BCACHE_SHARDS - 1u);
     }
 
     BcacheEntry* lookup_locked(uint32_t block_idx) {
@@ -527,6 +522,7 @@ struct BcacheShard {
                     ~k_flag_accessed,
                     kernel::memory_order::acq_rel
                 );
+
                 continue;
             }
 
@@ -542,6 +538,7 @@ struct BcacheShard {
                     ~k_flag_evicting,
                     kernel::memory_order::acq_rel
                 );
+
                 continue;
             }
 
@@ -813,12 +810,7 @@ static void bcache_prefetch_worker(void*) {
 
 void bcache_init(void) {
     if (!g_entry_cache) {
-        g_entry_cache = kmem_cache_create(
-            "bcache_e",
-            sizeof(BcacheEntry),
-            0,
-            0
-        );
+        g_entry_cache = kmem_cache_create("bcache_e", sizeof(BcacheEntry), 0, 0);
     }
 
     const uint64_t total_ram_bytes =
@@ -967,7 +959,7 @@ void bcache_sync(void) {
             uint8_t tmp[BLOCK_SIZE];
 
             BcacheEntry* e = nullptr;
-            
+
             bool do_flush = false;
 
             {
@@ -1005,7 +997,6 @@ void bcache_sync(void) {
                 e = &cur;
                 do_flush = true;
             }
-
 
             if (do_flush) {
                 DiskIo::write_4k(blk, tmp);
