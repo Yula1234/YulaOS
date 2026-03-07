@@ -2,11 +2,11 @@
 /* Copyright (C) 2025 Yula1234 */
 
 #include "yulafs.h"
-
 #include "bcache.h"
 
 #include "../drivers/ahci.h"
 #include "../drivers/vga.h"
+
 #include "../kernel/proc.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
@@ -14,9 +14,13 @@
 #include <hal/lock.h>
 #include <lib/rbtree.h>
 
-#define PTRS_PER_BLOCK      (YFS_BLOCK_SIZE / 4)
-#define INODE_LOCK_BUCKETS  128
+#define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
+#define INODE_LOCK_BUCKETS 128
 
+/*
+ * YFS keeps the on-disk format small.
+ * Lock scopes are short; writeback points are explicit.
+ */
 namespace yfs {
 
 struct DcacheEntry {
@@ -35,8 +39,8 @@ public:
         struct InodeTableCacheSlot {
             uint32_t lba;
             uint32_t stamp;
-            uint8_t  valid;
-            uint8_t  data[YFS_BLOCK_SIZE];
+            uint8_t valid;
+            uint8_t data[YFS_BLOCK_SIZE];
         };
 
         yfs_superblock_t sb;
@@ -47,9 +51,9 @@ public:
 
         rwlock_t inode_locks[INODE_LOCK_BUCKETS];
 
-        uint8_t  bmap_cache_data[YFS_BLOCK_SIZE];
+        uint8_t bmap_cache_data[YFS_BLOCK_SIZE];
         uint32_t bmap_cache_lba;
-        int      bmap_cache_dirty;
+        int bmap_cache_dirty;
 
         struct rb_root dcache_root;
         spinlock_t dcache_lock;
@@ -66,18 +70,31 @@ public:
     void init();
     void format(uint32_t disk_blocks_4k);
 
-    int read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size);
-    int write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size);
-    int append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off);
-
     int mkdir(const char* path);
     int create(const char* path);
     int unlink(const char* path);
+
+    int read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t size);
+    int write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size);
+    int append(
+        yfs_ino_t ino,
+        const void* buf,
+        uint32_t size,
+        yfs_off_t* out_start_off
+    );
+
     int lookup(const char* path);
     int lookup_in_dir(yfs_ino_t dir_ino, const char* name);
-    int getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size);
+
+    int getdents(
+        yfs_ino_t dir_ino,
+        uint32_t* inout_offset,
+        yfs_dirent_info_t* out,
+        uint32_t out_size
+    );
 
     int stat(yfs_ino_t ino, yfs_inode_t* out);
+
     void resize(yfs_ino_t ino, uint32_t new_size);
 
     void get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size);
@@ -108,6 +125,7 @@ static FileSystem g_fs;
 
 }
 
+/* Local aliases reduce noise at call sites. */
 static inline rwlock_t* get_inode_lock(yfs_ino_t ino) {
     return &yfs::g_fs.state().inode_locks[ino % INODE_LOCK_BUCKETS];
 }
@@ -129,7 +147,10 @@ static int& bmap_cache_dirty = yfs_state.bmap_cache_dirty;
 static struct rb_root& dcache_root = yfs_state.dcache_root;
 static spinlock_t& dcache_lock = yfs_state.dcache_lock;
 
-static yfs::FileSystem::State::InodeTableCacheSlot (&inode_table_cache)[yfs::FileSystem::State::inode_table_cache_slots] = yfs_state.inode_table_cache;
+static yfs::FileSystem::State::InodeTableCacheSlot (&inode_table_cache)[
+    yfs::FileSystem::State::inode_table_cache_slots
+] = yfs_state.inode_table_cache;
+
 static spinlock_t& inode_table_cache_lock = yfs_state.inode_table_cache_lock;
 static uint32_t& inode_table_cache_stamp = yfs_state.inode_table_cache_stamp;
 
@@ -137,7 +158,8 @@ static uint32_t& inode_table_cache_stamp = yfs_state.inode_table_cache_stamp;
 
 #define YFS_SCRATCH_SLOTS (yfs::FileSystem::State::scratch_slots)
 
-static uint8_t (&yfs_scratch_used)[yfs::FileSystem::State::scratch_slots] = yfs_state.yfs_scratch_used;
+static uint8_t (&yfs_scratch_used)[yfs::FileSystem::State::scratch_slots] =
+    yfs_state.yfs_scratch_used;
 static spinlock_t& yfs_scratch_lock = yfs_state.yfs_scratch_lock;
 
 static uint8_t* yfs_scratch_acquire(int* out_slot) {
@@ -172,6 +194,7 @@ static inline int chk_bit(uint8_t* map, int i) {
     return (map[i / 8] & (1u << (i % 8))) != 0u;
 }
 
+/* Stable ordering for (parent,name) keys. */
 static int rb_compare(yfs_ino_t p1, const char* n1, yfs_ino_t p2, const char* n2) {
     if (p1 < p2) {
         return -1;
@@ -223,6 +246,10 @@ void yfs::FileSystem::scratch_release(int slot) {
 }
 
 void yfs::FileSystem::dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
+    /*
+     * Only cache hits.
+     * Skipping misses avoids extra invalidation rules on create/unlink.
+     */
     spinlock_acquire(&state_.dcache_lock);
 
     struct rb_node** new_node = &state_.dcache_root.rb_node;
@@ -285,7 +312,8 @@ void yfs::FileSystem::dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_
     spinlock_release(&state_.dcache_lock);
 }
 
- yfs_ino_t yfs::FileSystem::dcache_lookup(yfs_ino_t parent, const char* name) {
+yfs_ino_t yfs::FileSystem::dcache_lookup(yfs_ino_t parent, const char* name) {
+    /* 0 is a safe miss value (inode 0 is reserved). */
     spinlock_acquire(&state_.dcache_lock);
 
     struct rb_node* node = state_.dcache_root.rb_node;
@@ -346,11 +374,13 @@ static void rb_free_tree(struct rb_node* node) {
 }
 
 static void flush_sb(void) {
+    /* Superblock is tiny; rewrite is cheaper than partial updates. */
     bcache_write(1, (uint8_t*)&sb);
     bcache_flush_block(1);
 }
 
 static void flush_bitmap_cache(void) {
+    /* Single-block bitmap cache; writeback is explicit at call sites. */
     if (bmap_cache_lba != 0 && bmap_cache_dirty) {
         bcache_write(bmap_cache_lba, bmap_cache_data);
         bmap_cache_dirty = 0;
@@ -358,6 +388,7 @@ static void flush_bitmap_cache(void) {
 }
 
 static void load_bitmap_block(uint32_t lba) {
+    /* Switching cache block is the writeback point for bitmap changes. */
     if (bmap_cache_lba == lba) {
         return;
     }
@@ -408,6 +439,7 @@ static int find_free_bit_in_block(uint8_t* buf, int start_bit) {
 }
 
 static yfs_blk_t alloc_block(void) {
+    /* 0 means allocation failure. */
     if (sb.free_blocks == 0) {
         return 0;
     }
@@ -466,6 +498,7 @@ static void free_block(yfs_blk_t lba) {
 }
 
 static yfs_ino_t alloc_inode(void) {
+    /* Inode 0 is reserved; allocator never returns it. */
     if (sb.free_inodes == 0) {
         return 0;
     }
@@ -542,6 +575,10 @@ static void free_inode(yfs_ino_t ino) {
 }
 
 static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
+    /*
+     * Small inode-table cache avoids hitting bcache on every lookup.
+     * Spinlock keeps the cache slot stable across memcpy.
+     */
     if (!data || ino == 0 || ino >= sb.total_inodes) {
         return 0;
     }
@@ -626,6 +663,10 @@ static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
 }
 
 static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc) {
+    /*
+     * Centralized block mapping.
+     * Allocation is caller-driven; reads must not allocate.
+     */
     if (file_block < YFS_DIRECT_PTRS) {
         if (node->direct[file_block] == 0) {
             if (!alloc) {
@@ -798,6 +839,10 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
 }
 
 static void free_indir_level(yfs_blk_t block, int level) {
+    /*
+     * Free an indirect pointer subtree.
+     * If table buffer allocation fails, still free the table block.
+     */
     if (block == 0) {
         return;
     }
@@ -821,6 +866,10 @@ static void free_indir_level(yfs_blk_t block, int level) {
 }
 
 static void truncate_inode(yfs_inode_t* node) {
+    /*
+     * Drop all block pointers from inode.
+     * Caller serializes and writes inode back.
+     */
     for (int i = 0; i < YFS_DIRECT_PTRS; i++) {
         if (node->direct[i]) {
             free_block(node->direct[i]);
@@ -848,6 +897,10 @@ static void truncate_inode(yfs_inode_t* node) {
 }
 
 static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
+    /*
+     * dir_find() runs unlocked; higher layers decide when to take inode locks.
+     * Cache is updated on hit.
+     */
     yfs_ino_t cached = dcache_lookup(dir->id, name);
     if (cached) {
         return cached;
@@ -884,6 +937,10 @@ static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
 }
 
 static int dir_link(yfs_ino_t dir_ino, yfs_ino_t child_ino, const char* name) {
+    /*
+     * Directory update under inode write lock.
+     * dcache is updated on success path; rename/unlink invalidate explicitly.
+     */
     rwlock_t* lock = get_inode_lock(dir_ino);
     rwlock_acquire_write(lock);
 
@@ -933,6 +990,10 @@ static int dir_link(yfs_ino_t dir_ino, yfs_ino_t child_ino, const char* name) {
 }
 
 static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
+    /*
+     * Unlink is destructive: truncate + free inode.
+     * No link count semantics.
+     */
     rwlock_t* lock = get_inode_lock(dir_ino);
     rwlock_acquire_write(lock);
 
@@ -985,6 +1046,7 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
 }
 
 static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
+    /* Used by rename(): drop name without touching target inode. */
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
 
@@ -1023,6 +1085,9 @@ static int dir_unlink_entry_only(yfs_ino_t dir_ino, const char* name) {
 }
 
 static yfs_ino_t path_to_inode_impl(const char* path, char* last_element, int allow_special_last) {
+    /*
+     * Return parent directory inode and final component name.
+     */
     if (!path || !*path) {
         if (last_element) {
             last_element[0] = '\0';
@@ -1127,6 +1192,7 @@ static yfs_ino_t path_to_inode_for_modify(const char* path, char* last_element) 
 }
 
 static int yulafs_find_child_name_in_dir(yfs_ino_t dir_ino, yfs_ino_t child_ino, char* out_name, uint32_t out_cap) {
+    /* inode_to_path() helper; skip dot entries to avoid loops. */
     if (!out_name || out_cap == 0) {
         return -1;
     }
@@ -1170,6 +1236,7 @@ static int yulafs_find_child_name_in_dir(yfs_ino_t dir_ino, yfs_ino_t child_ino,
 }
 
 int yulafs_inode_to_path(yfs_ino_t inode, char* out, uint32_t out_size) {
+    /* Walk ".." to root; resolve names by scanning parent dirents. */
     if (!out || out_size == 0) {
         return -1;
     }
@@ -1244,10 +1311,11 @@ int yulafs_inode_to_path(yfs_ino_t inode, char* out, uint32_t out_size) {
 }
 
 void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
+    /* Full format. */
     uint8_t* zero = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     uint8_t* map = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     yfs_dirent_t* dots = (yfs_dirent_t*)kmalloc(YFS_BLOCK_SIZE);
-    
+
     if (!zero || !map || !dots) {
         if (zero) {
             kfree(zero);
@@ -1260,7 +1328,7 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
         }
         return;
     }
-    
+
     memset(zero, 0, YFS_BLOCK_SIZE);
     memset(map, 0, YFS_BLOCK_SIZE);
     memset(dots, 0, YFS_BLOCK_SIZE);
@@ -1270,14 +1338,14 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     sb.version = YFS_VERSION;
     sb.block_size = YFS_BLOCK_SIZE;
     sb.total_blocks = disk_blocks_4k;
-    
+
     sb.total_inodes = disk_blocks_4k / 8;
     if (sb.total_inodes < 128) {
         sb.total_inodes = 128;
     }
 
-    uint32_t sec_per_map = (sb.total_blocks + (YFS_BLOCK_SIZE*8) - 1) / (YFS_BLOCK_SIZE*8);
-    uint32_t sec_per_imap = (sb.total_inodes + (YFS_BLOCK_SIZE*8) - 1) / (YFS_BLOCK_SIZE*8);
+    uint32_t sec_per_map = (sb.total_blocks + (YFS_BLOCK_SIZE * 8) - 1) / (YFS_BLOCK_SIZE * 8);
+    uint32_t sec_per_imap = (sb.total_inodes + (YFS_BLOCK_SIZE * 8) - 1) / (YFS_BLOCK_SIZE * 8);
     uint32_t sec_inodes = (sb.total_inodes * sizeof(yfs_inode_t) + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
 
     sb.map_inode_start = 2;
@@ -1311,7 +1379,7 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     root.type = YFS_TYPE_DIR;
     root.size = YFS_BLOCK_SIZE;
     root.direct[0] = alloc_block();
-    
+
     dots[0].inode = 1;
     strlcpy(dots[0].name, ".", YFS_NAME_MAX);
     dots[1].inode = 1;
@@ -1322,7 +1390,7 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     flush_sb();
     flush_bitmap_cache();
     bcache_sync();
-    
+
     fs_mounted = 1;
     last_free_blk_hint = 0;
     last_free_ino_hint = 2;
@@ -1337,7 +1405,7 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     yulafs_mkdir("/home");
     yulafs_mkdir("/dev");
     bcache_sync();
-    
+
     kfree(zero);
     kfree(map);
     kfree(dots);
@@ -1348,31 +1416,33 @@ void yulafs_format(uint32_t disk_blocks_4k) {
 }
 
 void yfs::FileSystem::init() {
+    /* Mount on valid magic, otherwise format. */
     bcache_init();
     spinlock_init(&dcache_lock);
     spinlock_init(&inode_table_cache_lock);
-    
+
     inode_table_cache_stamp = 0;
     memset(inode_table_cache, 0, sizeof(inode_table_cache));
- 
+
     spinlock_init(&yfs_scratch_lock);
     memset(yfs_scratch_used, 0, sizeof(yfs_scratch_used));
 
     bmap_cache_lba = 0;
     bmap_cache_dirty = 0;
     dcache_root = RB_ROOT;
-    
+
     uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     if (!buf) {
         return;
     }
 
     if (!bcache_read(1, buf)) {
+        kfree(buf);
+        return;
     }
-    else {
-        memcpy(&sb, buf, sizeof(sb));
-    }
-    
+
+    memcpy(&sb, buf, sizeof(sb));
+
     kfree(buf);
 
     for (int i = 0; i < INODE_LOCK_BUCKETS; i++) {
@@ -1385,8 +1455,7 @@ void yfs::FileSystem::init() {
             capacity = 131072;
         }
         yulafs_format(capacity / 8);
-    }
-    else {
+    } else {
         fs_mounted = 1;
         last_free_blk_hint = 0;
         last_free_ino_hint = 1;
@@ -1405,7 +1474,7 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
     if (size == 0) {
         return 0;
     }
-    
+
     if (offset > 0xFFFFFFFF - size) {
         return -1;
     }
@@ -1423,34 +1492,35 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
         rwlock_release_read(lock);
         return -1;
     }
-    
+
     if (offset >= node.size) {
         rwlock_release_read(lock);
         return 0;
     }
-    
+
     uint64_t total = (uint64_t)offset + (uint64_t)size;
     if (total > node.size) {
         size = node.size - offset;
     }
 
     uint32_t read_count = 0;
+
     int scratch_slot = -1;
     uint8_t* scratch = yfs_scratch_acquire(&scratch_slot);
     int scratch_heap = 0;
-    
+
     if (!scratch) {
         scratch = (uint8_t*)kmalloc_a(YFS_BLOCK_SIZE);
         scratch_heap = 1;
     }
-    
+
     if (!scratch) {
         rwlock_release_read(lock);
         return -1;
     }
 
     uint32_t last_prefetched_log_blk = 0xFFFFFFFF;
-    
+
     while (read_count < size) {
         uint32_t log_blk = (offset + read_count) / YFS_BLOCK_SIZE;
         uint32_t blk_off = (offset + read_count) % YFS_BLOCK_SIZE;
@@ -1460,14 +1530,14 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
         if (copy_len > size - read_count) {
             copy_len = size - read_count;
         }
-        
+
         if (copy_len > YFS_BLOCK_SIZE || copy_len > size - read_count) {
             if (scratch_heap) {
                 kfree(scratch);
-            }
-            else {
+            } else {
                 yfs_scratch_release(scratch_slot);
             }
+
             rwlock_release_read(lock);
             return -1;
         }
@@ -1476,22 +1546,24 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
             if (!bcache_read(phys_blk, scratch)) {
                 if (scratch_heap) {
                     kfree(scratch);
-                }
-                else {
+                } else {
                     yfs_scratch_release(scratch_slot);
                 }
+
                 rwlock_release_read(lock);
                 return -1;
             }
 
-            if (read_count + copy_len > size || 
-                blk_off + copy_len > YFS_BLOCK_SIZE) {
+            if (
+                read_count + copy_len > size ||
+                blk_off + copy_len > YFS_BLOCK_SIZE
+            ) {
                 if (scratch_heap) {
                     kfree(scratch);
-                }
-                else {
+                } else {
                     yfs_scratch_release(scratch_slot);
                 }
+
                 rwlock_release_read(lock);
                 return -1;
             }
@@ -1501,19 +1573,19 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
             if (log_blk != last_prefetched_log_blk) {
                 uint32_t next_log_blk = log_blk + 1;
                 uint32_t next_phys_blk = resolve_block(&node, next_log_blk, 0);
-                
+
                 if (next_phys_blk) {
-                    uint32_t blocks_remaining = ((node.size - (offset + read_count)) + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
-                    
+                    uint32_t blocks_remaining =
+                        ((node.size - (offset + read_count)) + YFS_BLOCK_SIZE - 1) / YFS_BLOCK_SIZE;
+
                     if (blocks_remaining > 0) {
                         bcache_readahead(phys_blk, blocks_remaining > 8 ? 8 : blocks_remaining);
                     }
                 }
-                
+
                 last_prefetched_log_blk = log_blk;
             }
-        }
-        else {
+        } else {
             memset((uint8_t*)buf + read_count, 0, copy_len);
         }
 
@@ -1522,12 +1594,12 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
 
     if (scratch_heap) {
         kfree(scratch);
-    }
-    else {
+    } else {
         yfs_scratch_release(scratch_slot);
     }
-    
+
     rwlock_release_read(lock);
+
     return read_count;
 }
 
@@ -1545,7 +1617,7 @@ int yfs::FileSystem::write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uin
     if (size == 0) {
         return 0;
     }
-    
+
     if (offset > 0xFFFFFFFF - size) {
         return -1;
     }
@@ -1560,6 +1632,7 @@ int yfs::FileSystem::write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uin
     }
 
     int rc = yulafs_write_locked(ino, &node, buf, offset, size);
+
     rwlock_release_write(lock);
 
     return rc;
@@ -1569,25 +1642,31 @@ int yulafs_write(yfs_ino_t ino, const void* buf, yfs_off_t offset, uint32_t size
     return yfs::g_fs.write(ino, buf, offset, size);
 }
 
-static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf, yfs_off_t offset, uint32_t size)
-{
+static int yulafs_write_locked(
+    yfs_ino_t ino,
+    yfs_inode_t* node,
+    const void* buf,
+    yfs_off_t offset,
+    uint32_t size
+) {
     if (!node || !buf) {
         return -1;
     }
 
     uint32_t written = 0;
+
     int dirty = 0;
     int blocks_allocated = 0;
 
     int scratch_slot = -1;
     uint8_t* scratch = yfs_scratch_acquire(&scratch_slot);
     int scratch_heap = 0;
-    
+
     if (!scratch) {
         scratch = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
         scratch_heap = 1;
     }
-    
+
     if (!scratch) {
         return -1;
     }
@@ -1600,6 +1679,7 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
         if (!phys_blk) {
             break;
         }
+
         blocks_allocated = 1;
 
         uint32_t copy_len = YFS_BLOCK_SIZE - blk_off;
@@ -1610,10 +1690,10 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
         if (copy_len > YFS_BLOCK_SIZE || copy_len > size - written) {
             if (scratch_heap) {
                 kfree(scratch);
-            }
-            else {
+            } else {
                 yfs_scratch_release(scratch_slot);
             }
+
             return written > 0 ? (int)written : -1;
         }
 
@@ -1621,10 +1701,10 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
             if (!bcache_read(phys_blk, scratch)) {
                 if (scratch_heap) {
                     kfree(scratch);
-                }
-                else {
+                } else {
                     yfs_scratch_release(scratch_slot);
                 }
+
                 return written > 0 ? (int)written : -1;
             }
         }
@@ -1632,10 +1712,10 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
         if (written + copy_len > size || blk_off + copy_len > YFS_BLOCK_SIZE) {
             if (scratch_heap) {
                 kfree(scratch);
-            }
-            else {
+            } else {
                 yfs_scratch_release(scratch_slot);
             }
+
             return written > 0 ? (int)written : -1;
         }
 
@@ -1654,7 +1734,7 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
     if (dirty) {
         sync_inode(ino, node, 1);
     }
-    
+
     if (blocks_allocated) {
         flush_bitmap_cache();
         flush_sb();
@@ -1662,16 +1742,14 @@ static int yulafs_write_locked(yfs_ino_t ino, yfs_inode_t* node, const void* buf
 
     if (scratch_heap) {
         kfree(scratch);
-    }
-    else {
+    } else {
         yfs_scratch_release(scratch_slot);
     }
 
     return (int)written;
 }
 
-int yfs::FileSystem::append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off)
-{
+int yfs::FileSystem::append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_off_t* out_start_off) {
     if (!fs_mounted || !buf) {
         return -1;
     }
@@ -1703,8 +1781,7 @@ int yfs::FileSystem::append(yfs_ino_t ino, const void* buf, uint32_t size, yfs_o
     return rc;
 }
 
-int yulafs_create_obj(const char* path, int type)
-{
+int yulafs_create_obj(const char* path, int type) {
     char name[YFS_NAME_MAX];
     yfs_ino_t dir_ino = path_to_inode_for_modify(path, name);
     if (!dir_ino) {
@@ -1713,6 +1790,7 @@ int yulafs_create_obj(const char* path, int type)
 
     yfs_inode_t dir;
     sync_inode(dir_ino, &dir, 0);
+
     if (dir_find(&dir, name) != 0) {
         return -1;
     }
@@ -1735,30 +1813,32 @@ int yulafs_create_obj(const char* path, int type)
         uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
         if (buf) {
             memset(buf, 0, YFS_BLOCK_SIZE);
+
             yfs_dirent_t* dots = (yfs_dirent_t*)buf;
-            
+
             dots[0].inode = new_ino;
             strlcpy(dots[0].name, ".", YFS_NAME_MAX);
-            
+
             dots[1].inode = dir_ino;
             strlcpy(dots[1].name, "..", YFS_NAME_MAX);
-            
+
             bcache_write(obj.direct[0], buf);
+
             kfree(buf);
         }
     }
 
     sync_inode(new_ino, &obj, 1);
+
     dir_link(dir_ino, new_ino, name);
-    
+
     flush_bitmap_cache();
     flush_sb();
 
     return new_ino;
 }
 
-int yfs::FileSystem::mkdir(const char* path)
-{
+int yfs::FileSystem::mkdir(const char* path) {
     return yulafs_create_obj(path, YFS_TYPE_DIR);
 }
 
@@ -1766,8 +1846,7 @@ int yulafs_mkdir(const char* path) {
     return yfs::g_fs.mkdir(path);
 }
 
-int yfs::FileSystem::create(const char* path)
-{
+int yfs::FileSystem::create(const char* path) {
     return yulafs_create_obj(path, YFS_TYPE_FILE);
 }
 
@@ -1775,15 +1854,14 @@ int yulafs_create(const char* path) {
     return yfs::g_fs.create(path);
 }
 
-int yfs::FileSystem::unlink(const char* path)
-{
+int yfs::FileSystem::unlink(const char* path) {
     char name[YFS_NAME_MAX];
     yfs_ino_t dir_ino = path_to_inode_for_modify(path, name);
-    
+
     if (!dir_ino) {
         return -1;
     }
-    
+
     return dir_unlink(dir_ino, name);
 }
 
@@ -1791,8 +1869,7 @@ int yulafs_unlink(const char* path) {
     return yfs::g_fs.unlink(path);
 }
 
-int yfs::FileSystem::lookup(const char* path)
-{
+int yfs::FileSystem::lookup(const char* path) {
     if (!path || !*path) {
         return (int)proc_current()->cwd_inode;
     }
@@ -1803,7 +1880,7 @@ int yfs::FileSystem::lookup(const char* path)
 
     char name[YFS_NAME_MAX];
     yfs_ino_t parent_dir = path_to_inode(path, name);
-    
+
     if (parent_dir == 0) {
         return -1;
     }
@@ -1824,7 +1901,9 @@ int yulafs_lookup(const char* path) {
 }
 
 int yfs::FileSystem::lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
-    if (!name || !*name) return -1;
+    if (!name || !*name) {
+        return -1;
+    }
 
     rwlock_t* lock = get_inode_lock(dir_ino);
     rwlock_acquire_read(lock);
@@ -1843,16 +1922,30 @@ int yfs::FileSystem::lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
     yfs_ino_t ino = dir_find(&dir, name);
     rwlock_release_read(lock);
 
-    return ino ? (int)ino : -1;
+    if (!ino) {
+        return -1;
+    }
+
+    return (int)ino;
 }
 
 int yulafs_lookup_in_dir(yfs_ino_t dir_ino, const char* name) {
     return yfs::g_fs.lookup_in_dir(dir_ino, name);
 }
 
-int yfs::FileSystem::getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size) {
-    if (!inout_offset || !out) return -1;
-    if (out_size < sizeof(yfs_dirent_info_t)) return -1;
+int yfs::FileSystem::getdents(
+    yfs_ino_t dir_ino,
+    uint32_t* inout_offset,
+    yfs_dirent_info_t* out,
+    uint32_t out_size
+) {
+    if (!inout_offset || !out) {
+        return -1;
+    }
+
+    if (out_size < sizeof(yfs_dirent_info_t)) {
+        return -1;
+    }
 
     uint32_t max_entries = out_size / (uint32_t)sizeof(yfs_dirent_info_t);
     uint32_t out_count = 0;
@@ -1875,11 +1968,14 @@ int yfs::FileSystem::getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dir
     uint32_t total_entries = (dir.size + (uint32_t)sizeof(yfs_dirent_t) - 1) / (uint32_t)sizeof(yfs_dirent_t);
 
     uint32_t idx = (*inout_offset) / (uint32_t)sizeof(yfs_dirent_t);
-    if (((*inout_offset) % (uint32_t)sizeof(yfs_dirent_t)) != 0) idx++;
+    if (((*inout_offset) % (uint32_t)sizeof(yfs_dirent_t)) != 0) {
+        idx++;
+    }
 
     int scratch_slot = -1;
     uint8_t* scratch = yfs_scratch_acquire(&scratch_slot);
     uint8_t* scratch_heap = 0;
+
     if (!scratch) {
         scratch = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
         scratch_heap = scratch;
@@ -1902,8 +1998,13 @@ int yfs::FileSystem::getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dir
         bcache_read(lba, scratch);
         yfs_dirent_t* ents = (yfs_dirent_t*)scratch;
 
-        for (; ent_idx < entries_per_block && idx < total_entries && out_count < max_entries; ent_idx++, idx++) {
-            if (ents[ent_idx].inode == 0) continue;
+        for (
+            ; ent_idx < entries_per_block && idx < total_entries && out_count < max_entries;
+            ent_idx++, idx++
+        ) {
+            if (ents[ent_idx].inode == 0) {
+                continue;
+            }
 
             yfs_dirent_info_t* d = &out[out_count++];
             d->inode = ents[ent_idx].inode;
@@ -1922,10 +2023,14 @@ int yfs::FileSystem::getdents(yfs_ino_t dir_ino, uint32_t* inout_offset, yfs_dir
 
     *inout_offset = idx * (uint32_t)sizeof(yfs_dirent_t);
 
-    if (scratch_heap) kfree(scratch_heap);
-    else yfs_scratch_release(scratch_slot);
+    if (scratch_heap) {
+        kfree(scratch_heap);
+    } else {
+        yfs_scratch_release(scratch_slot);
+    }
 
     rwlock_release_read(lock);
+
     return (int)(out_count * (uint32_t)sizeof(yfs_dirent_info_t));
 }
 
@@ -1942,8 +2047,7 @@ int yulafs_stat(yfs_ino_t ino, yfs_inode_t* out) {
     return yfs::g_fs.stat(ino, out);
 }
 
-void yfs::FileSystem::resize(yfs_ino_t ino, uint32_t new_size)
-{
+void yfs::FileSystem::resize(yfs_ino_t ino, uint32_t new_size) {
     rwlock_t* lock = get_inode_lock(ino);
     rwlock_acquire_write(lock);
 
@@ -1966,8 +2070,7 @@ void yulafs_resize(yfs_ino_t ino, uint32_t new_size) {
     yfs::g_fs.resize(ino, new_size);
 }
 
-void yfs::FileSystem::get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size)
-{
+void yfs::FileSystem::get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size) {
     if (fs_mounted) {
         *total = sb.total_blocks;
         *free = sb.free_blocks;
@@ -1983,8 +2086,7 @@ void yulafs_get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size)
     yfs::g_fs.get_filesystem_info(total, free, size);
 }
 
-int yfs::FileSystem::rename(const char* old_path, const char* new_path)
-{
+int yfs::FileSystem::rename(const char* old_path, const char* new_path) {
     char old_name[YFS_NAME_MAX];
     char new_name[YFS_NAME_MAX];
 
@@ -2011,6 +2113,7 @@ int yfs::FileSystem::rename(const char* old_path, const char* new_path)
     }
 
     dir_unlink_entry_only(old_dir, old_name);
+
     flush_bitmap_cache();
     flush_sb();
 
