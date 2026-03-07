@@ -343,40 +343,48 @@ static bool ensure_prefetch_worker_started() {
 }
 
 struct DiskIo {
-    static void read_4k(uint32_t block_idx, uint8_t* buf) {
+    static bool try_read_4k(uint32_t block_idx, uint8_t* buf) {
         if (!buf) {
-            return;
+            return false;
         }
 
         const uint64_t start_lba =
             (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
         if (start_lba > 0xFFFFFFFF) {
-            return;
+            return false;
         }
 
-        ahci_read_sectors(
+        return ahci_read_sectors(
             (uint32_t)start_lba,
             SECTORS_PER_BLK,
             buf
-        );
+        ) != 0;
+    }
+
+    static bool try_write_4k(uint32_t block_idx, const uint8_t* buf) {
+        if (!buf) {
+            return false;
+        }
+
+        const uint64_t start_lba =
+            (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
+        if (start_lba > 0xFFFFFFFF) {
+            return false;
+        }
+
+        return ahci_write_sectors(
+            (uint32_t)start_lba,
+            SECTORS_PER_BLK,
+            buf
+        ) != 0;
+    }
+
+    static void read_4k(uint32_t block_idx, uint8_t* buf) {
+        (void)try_read_4k(block_idx, buf);
     }
 
     static void write_4k(uint32_t block_idx, const uint8_t* buf) {
-        if (!buf) {
-            return;
-        }
-
-        const uint64_t start_lba =
-            (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
-        if (start_lba > 0xFFFFFFFF) {
-            return;
-        }
-
-        ahci_write_sectors(
-            (uint32_t)start_lba,
-            SECTORS_PER_BLK,
-            buf
-        );
+        (void)try_write_4k(block_idx, buf);
     }
 };
 
@@ -862,7 +870,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
     BcacheEntry* e = shard.get_or_create(block_idx, false, nullptr);
     if (!e) {
-        return 0;
+        return DiskIo::try_read_4k(block_idx, buf) ? 1 : 0;
     }
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
