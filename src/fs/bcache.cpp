@@ -13,6 +13,7 @@
 
 #include <kernel/sched.h>
 #include <kernel/cpu.h>
+#include <kernel/proc.h>
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
@@ -250,6 +251,93 @@ private:
 
 static HotCache g_hot_cache{};
 
+static constexpr uint32_t PREFETCH_QUEUE_CAP = 128;
+
+struct PrefetchQueue {
+    kernel::SpinLock lock{};
+    kernel::Semaphore sem{};
+
+    BcacheEntry* items[PREFETCH_QUEUE_CAP]{};
+
+    uint32_t head = 0;
+    uint32_t tail = 0;
+    uint32_t count = 0;
+
+    bool try_push(BcacheEntry& e) {
+        {
+            kernel::SpinLockSafeGuard guard(lock);
+
+            if (count == PREFETCH_QUEUE_CAP) {
+                return false;
+            }
+
+            items[tail] = &e;
+            tail = (tail + 1u) % PREFETCH_QUEUE_CAP;
+            count++;
+        }
+
+        sem.signal();
+        return true;
+    }
+
+    BcacheEntry* pop_blocking() {
+        sem.wait();
+
+        kernel::SpinLockSafeGuard guard(lock);
+
+        if (count == 0) {
+            return nullptr;
+        }
+
+        BcacheEntry* e = items[head];
+        items[head] = nullptr;
+
+        head = (head + 1u) % PREFETCH_QUEUE_CAP;
+        count--;
+
+        return e;
+    }
+};
+
+static PrefetchQueue g_prefetch{};
+static kernel::atomic<int> g_prefetch_started{0};
+
+static void bcache_prefetch_worker(void*);
+
+static bool ensure_prefetch_worker_started() {
+    if (g_prefetch_started.load(kernel::memory_order::acquire) != 0) {
+        return true;
+    }
+
+    if (!proc_current()) {
+        return false;
+    }
+
+    int expected = 0;
+    if (!g_prefetch_started.compare_exchange_strong(
+            expected,
+            1,
+            kernel::memory_order::acq_rel,
+            kernel::memory_order::acquire
+        )) {
+        return true;
+    }
+
+    task_t* t = proc_spawn_kthread(
+        "bcache_pf",
+        PRIO_LOW,
+        bcache_prefetch_worker,
+        nullptr
+    );
+
+    if (!t) {
+        g_prefetch_started.store(0, kernel::memory_order::release);
+        return false;
+    }
+
+    return true;
+}
+
 struct DiskIo {
     static void read_4k(uint32_t block_idx, uint8_t* buf) {
         if (!buf) {
@@ -472,6 +560,69 @@ struct BcacheShard {
         return true;
     }
 
+    BcacheEntry* create_readahead_entry(uint32_t block_idx) {
+        {
+            kernel::ReadGuard meta_guard(meta_lock);
+
+            if (lookup_locked(block_idx)) {
+                return nullptr;
+            }
+        }
+
+        if (!ensure_space()) {
+            return nullptr;
+        }
+
+        BcacheEntry* created = nullptr;
+
+        {
+            kernel::WriteGuard meta_guard(meta_lock);
+
+            if (lookup_locked(block_idx)) {
+                return nullptr;
+            }
+
+            void* mem = nullptr;
+            if (g_entry_cache) {
+                mem = kmem_cache_alloc(g_entry_cache);
+            } else {
+                mem = kmalloc(sizeof(BcacheEntry));
+            }
+
+            if (!mem) {
+                return nullptr;
+            }
+
+            created = new (mem) BcacheEntry();
+            created->block_idx = block_idx;
+
+            created->refcnt.store(2u, kernel::memory_order::release);
+            created->flags.store(k_flag_io_inflight, kernel::memory_order::release);
+
+            created->data = static_cast<uint8_t*>(kmalloc_a(BLOCK_SIZE));
+            if (!created->data) {
+                created->flags.fetch_or(
+                    k_flag_evicting,
+                    kernel::memory_order::acq_rel
+                );
+
+                created->refcnt.store(1u, kernel::memory_order::release);
+                created->put();
+
+                return nullptr;
+            }
+
+            created->io_done.reset();
+
+            map.insert_or_assign(block_idx, created);
+            clock_insert_locked(*created);
+
+            entries++;
+        }
+
+        return created;
+    }
+
     BcacheEntry* get_or_create(
         uint32_t block_idx,
         bool for_write,
@@ -582,6 +733,39 @@ struct BcacheShard {
 };
 
 static BcacheShard g_shards[BCACHE_SHARDS]{};
+
+static void bcache_prefetch_worker(void*) {
+    for (;;) {
+        BcacheEntry* e = g_prefetch.pop_blocking();
+        if (!e) {
+            continue;
+        }
+
+        uint8_t tmp[BLOCK_SIZE];
+
+        DiskIo::read_4k(e->block_idx, tmp);
+
+        {
+            kernel::WriteGuard data_guard(e->data_lock);
+
+            memcpy(e->data, tmp, BLOCK_SIZE);
+        }
+
+        e->flags.fetch_or(
+            k_flag_valid | k_flag_accessed,
+            kernel::memory_order::acq_rel
+        );
+
+        e->flags.fetch_and(
+            ~k_flag_io_inflight,
+            kernel::memory_order::acq_rel
+        );
+
+        e->io_done.signal_all();
+
+        e->put();
+    }
+}
 
 void bcache_init(void) {
     if (!g_entry_cache) {
@@ -835,6 +1019,10 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         return;
     }
 
+    if (!ensure_prefetch_worker_started()) {
+        return;
+    }
+
     if (count > 8) {
         count = 8;
     }
@@ -843,24 +1031,41 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         const uint32_t block_idx = start_block + i;
 
         BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
-        {
-            kernel::ReadGuard meta_guard(shard.meta_lock);
 
-            if (shard.lookup_locked(block_idx)) {
-                continue;
-            }
-        }
-
-        BcacheEntry* e = shard.get_or_create(block_idx, false, nullptr);
+        BcacheEntry* e = shard.create_readahead_entry(block_idx);
         if (!e) {
             continue;
         }
 
-        const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
-        if ((flags & k_flag_io_inflight) != 0u) {
-            e->io_done.wait();
-        }
+        if (!g_prefetch.try_push(*e)) {
+            BcacheShard& rollback_shard =
+                g_shards[BcacheShard::index_for(e->block_idx)];
 
-        e->put();
+            bool unlinked = false;
+
+            {
+                kernel::WriteGuard meta_guard(rollback_shard.meta_lock);
+
+                BcacheEntry* cur = rollback_shard.lookup_locked(e->block_idx);
+                if (cur == e) {
+                    e->flags.fetch_or(
+                        k_flag_evicting,
+                        kernel::memory_order::acq_rel
+                    );
+
+                    rollback_shard.map.remove(e->block_idx);
+                    rollback_shard.clock_remove_locked(*e);
+                    rollback_shard.entries--;
+
+                    unlinked = true;
+                }
+            }
+
+            e->put();
+
+            if (unlinked) {
+                e->put();
+            }
+        }
     }
 }
