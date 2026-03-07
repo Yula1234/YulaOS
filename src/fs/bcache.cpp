@@ -8,6 +8,8 @@
 #include "../kernel/sched.h"
 #include "../mm/heap.h"
 
+#include "../lib/hash_map.h"
+
 /*
  * Block cache.
  *
@@ -15,7 +17,7 @@
  * `block_idx`.
  *
  * Data structures:
- *  - hash_table: lookup by block index
+ *  - block_map: lookup by block index
  *  - LRU list: eviction policy
  *
  * Concurrency model:
@@ -43,21 +45,15 @@ typedef struct cache_block {
 
     struct cache_block *prev;
     struct cache_block *next;
-    struct cache_block *h_next;
-    struct cache_block *h_prev;
 } cache_block_t;
 
 static cache_block_t pool[BCACHE_SIZE];
-static cache_block_t* hash_table[HASH_BUCKETS];
+static HashMap<uint32_t, cache_block_t*, HASH_BUCKETS> block_map;
 
 static cache_block_t* lru_head = 0;
 static cache_block_t* lru_tail = 0;
 
 static spinlock_t cache_lock;
-
-static inline uint32_t hash_idx(uint32_t idx) {
-    return idx & (HASH_BUCKETS - 1);
-}
 
 /*
  * Disk I/O helpers.
@@ -123,55 +119,28 @@ static void lru_touch(cache_block_t* b) {
 }
 
 static void hash_remove(cache_block_t* b) {
-    /* Remove valid block from its hash bucket list. */
     if (!b->valid) {
         return;
     }
 
-    if (b->h_prev) {
-        b->h_prev->h_next = b->h_next;
-    }
-    else {
-        uint32_t h = hash_idx(b->block_idx);
-        if (hash_table[h] == b) {
-            hash_table[h] = b->h_next;
-        }
-    }
-
-    if (b->h_next) {
-        b->h_next->h_prev = b->h_prev;
-    }
-
-    b->h_next = 0;
-    b->h_prev = 0;
+    block_map.remove(b->block_idx);
 }
 
 static void hash_insert(cache_block_t* b) {
-    /* Insert block at the head of its hash bucket list. */
-    uint32_t h = hash_idx(b->block_idx);
-
-    b->h_next = hash_table[h];
-    b->h_prev = 0;
-
-    if (hash_table[h]) {
-        hash_table[h]->h_prev = b;
-    }
-    hash_table[h] = b;
+    block_map.insert_or_assign(b->block_idx, b);
 }
 
 static cache_block_t* cache_lookup(uint32_t block_idx) {
-    /* Hash lookup under cache_lock. */
-    uint32_t h = hash_idx(block_idx);
-    cache_block_t* b = hash_table[h];
-
-    while (b) {
-        if (b->block_idx == block_idx
-            && b->valid) {
-            return b;
-        }
-        b = b->h_next;
+    cache_block_t* b = nullptr;
+    if (!block_map.try_get(block_idx, b)) {
+        return nullptr;
     }
-    return 0;
+
+    if (!b || !b->valid) {
+        return nullptr;
+    }
+
+    return b;
 }
 
 void bcache_init(void) {
@@ -182,7 +151,7 @@ void bcache_init(void) {
      * the tail is always a candidate for eviction.
      */
     memset(pool, 0, sizeof(pool));
-    memset(hash_table, 0, sizeof(hash_table));
+    block_map.clear();
 
     spinlock_init(&cache_lock);
 
@@ -407,7 +376,7 @@ void bcache_flush_block(uint32_t block_idx) {
         phys_idx = b->block_idx;
 
         memcpy(tmp_buf, b->data, BLOCK_SIZE);
-        
+
         b->dirty = 0;
         do_flush = 1;
     }
@@ -517,7 +486,7 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         b->block_idx = block_idx;
         b->valid = 1;
         b->dirty = 0;
-        
+
         memcpy(b->data, scratch, BLOCK_SIZE);
 
         hash_insert(b);
