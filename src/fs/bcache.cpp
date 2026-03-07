@@ -37,6 +37,8 @@ static constexpr uint32_t k_flag_io_inflight = 1u << 2;
 static constexpr uint32_t k_flag_evicting = 1u << 3;
 static constexpr uint32_t k_flag_accessed = 1u << 4;
 
+static kmem_cache_t* g_entry_cache = nullptr;
+
 struct BcacheIoEvent {
     kernel::atomic<int> done{0};
 
@@ -83,7 +85,43 @@ struct BcacheEntry {
         io_done.init();
     }
 
+    void get() {
+        refcnt.fetch_add(1, kernel::memory_order::acquire);
+    }
+
+    void put() {
+        const uint32_t prev = refcnt.fetch_sub(1, kernel::memory_order::release);
+        if (prev != 1u) {
+            return;
+        }
+
+        kernel::atomic_thread_fence(kernel::memory_order::acquire);
+
+        const uint32_t f = flags.load(kernel::memory_order::acquire);
+        if ((f & k_flag_evicting) == 0u) {
+            return;
+        }
+
+        free_self();
+    }
+
     ~BcacheEntry() = default;
+
+private:
+    void free_self() {
+        if (data) {
+            kfree(data);
+            data = nullptr;
+        }
+
+        this->~BcacheEntry();
+
+        if (g_entry_cache) {
+            kmem_cache_free(g_entry_cache, this);
+        } else {
+            kfree(this);
+        }
+    }
 };
 
 struct BcacheShard {
@@ -109,11 +147,6 @@ struct PerCpuHotCache {
 static BcacheShard g_shards[BCACHE_SHARDS]{};
 static PerCpuHotCache g_hot[MAX_CPUS]{};
 
-static kmem_cache_t* g_entry_cache = nullptr;
-
-static void entry_get(BcacheEntry& e);
-static void entry_put(BcacheEntry& e);
-
 static void hotcache_invalidate_entry(BcacheEntry& entry) {
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         PerCpuHotCache& hc = g_hot[cpu];
@@ -138,7 +171,7 @@ static void hotcache_invalidate_entry(BcacheEntry& entry) {
         }
 
         for (uint32_t i = 0; i < removed; i++) {
-            entry_put(entry);
+            entry.put();
         }
     }
 }
@@ -183,41 +216,6 @@ static uint32_t shard_index_for(uint32_t block_idx) {
 
 static uint32_t hot_slot_index_for(uint32_t block_idx) {
     return kernel::HashTraits<uint32_t>::hash(block_idx) & (HOT_SLOTS - 1u);
-}
-
-static void entry_get(BcacheEntry& e) {
-    e.refcnt.fetch_add(1, kernel::memory_order::acquire);
-}
-
-static void entry_free(BcacheEntry& e) {
-    if (e.data) {
-        kfree(e.data);
-        e.data = nullptr;
-    }
-
-    e.~BcacheEntry();
-
-    if (g_entry_cache) {
-        kmem_cache_free(g_entry_cache, &e);
-    } else {
-        kfree(&e);
-    }
-}
-
-static void entry_put(BcacheEntry& e) {
-    const uint32_t prev = e.refcnt.fetch_sub(1, kernel::memory_order::release);
-    if (prev != 1u) {
-        return;
-    }
-
-    kernel::atomic_thread_fence(kernel::memory_order::acquire);
-
-    const uint32_t flags = e.flags.load(kernel::memory_order::acquire);
-    if ((flags & k_flag_evicting) == 0u) {
-        return;
-    }
-
-    entry_free(e);
 }
 
 static void clock_ring_insert(BcacheShard& shard, BcacheEntry& e) {
@@ -295,7 +293,7 @@ static BcacheEntry* hotcache_try_get(uint32_t block_idx) {
         return nullptr;
     }
 
-    entry_get(*slot.entry);
+    slot.entry->get();
 
     return slot.entry;
 }
@@ -316,7 +314,7 @@ static void hotcache_put(uint32_t block_idx, BcacheEntry& entry) {
     PerCpuHotCache& hc = g_hot[cpu_idx];
     const uint32_t slot_idx = hot_slot_index_for(block_idx);
 
-    entry_get(entry);
+    entry.get();
 
     BcacheEntry* old = nullptr;
 
@@ -332,7 +330,7 @@ static void hotcache_put(uint32_t block_idx, BcacheEntry& entry) {
     }
 
     if (old) {
-        entry_put(*old);
+        old->put();
     }
 }
 
@@ -425,7 +423,7 @@ static bool shard_ensure_space(BcacheShard& shard) {
         }
 
         if (ev.entry) {
-            entry_put(*ev.entry);
+            ev.entry->put();
         }
     }
 
@@ -444,7 +442,7 @@ static BcacheEntry* shard_get_or_create(
 
         BcacheEntry* e = shard_lookup_locked(shard, block_idx);
         if (e) {
-            entry_get(*e);
+            e->get();
             return e;
         }
     }
@@ -460,7 +458,7 @@ static BcacheEntry* shard_get_or_create(
 
         BcacheEntry* race = shard_lookup_locked(shard, block_idx);
         if (race) {
-            entry_get(*race);
+            race->get();
             return race;
         }
 
@@ -494,9 +492,9 @@ static BcacheEntry* shard_get_or_create(
                 );
 
                 created->refcnt.store(1u, kernel::memory_order::release);
-                
-                entry_put(*created);
-                
+
+                created->put();
+
                 return nullptr;
             }
 
@@ -510,11 +508,11 @@ static BcacheEntry* shard_get_or_create(
                     k_flag_evicting,
                     kernel::memory_order::acq_rel
                 );
-                
+
                 created->refcnt.store(1u, kernel::memory_order::release);
-                
-                entry_put(*created);
-                
+
+                created->put();
+
                 return nullptr;
             }
 
@@ -611,7 +609,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
         hot->flags.fetch_or(k_flag_accessed, kernel::memory_order::acq_rel);
 
-        entry_put(*hot);
+        hot->put();
         return 1;
     }
 
@@ -635,7 +633,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
     hotcache_put(block_idx, *e);
 
-    entry_put(*e);
+    e->put();
 
     return 1;
 }
@@ -657,7 +655,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
             kernel::memory_order::acq_rel
         );
 
-        entry_put(*hot);
+        hot->put();
         return 1;
     }
 
@@ -684,7 +682,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 
     hotcache_put(block_idx, *e);
 
-    entry_put(*e);
+    e->put();
 
     return 1;
 }
@@ -718,7 +716,7 @@ void bcache_sync(void) {
                     if (refs >= 1u
                         && (flags & k_flag_dirty) != 0u
                         && (flags & k_flag_evicting) == 0u) {
-                        entry_get(*cur);
+                        cur->get();
 
                         cur->flags.fetch_and(
                             ~k_flag_dirty,
@@ -752,7 +750,7 @@ void bcache_sync(void) {
             }
 
             if (e) {
-                entry_put(*e);
+                e->put();
             }
         }
     }
@@ -772,11 +770,11 @@ void bcache_flush_block(uint32_t block_idx) {
             return;
         }
 
-        entry_get(*e);
+        e->get();
 
         const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
         if ((flags & k_flag_dirty) == 0u) {
-            entry_put(*e);
+            e->put();
             return;
         }
 
@@ -793,7 +791,7 @@ void bcache_flush_block(uint32_t block_idx) {
 
         do_flush = true;
 
-        entry_put(*e);
+        e->put();
     }
 
     if (do_flush) {
@@ -832,6 +830,6 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
             e->io_done.wait();
         }
 
-        entry_put(*e);
+        e->put();
     }
 }
