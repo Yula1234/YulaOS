@@ -41,31 +41,29 @@ struct BcacheIoEvent {
     kernel::atomic<int> done{0};
 
     kernel::Semaphore sem{};
-};
 
-static void io_event_init(BcacheIoEvent& ev) {
-    ev.done.store(0, kernel::memory_order::release);
-
-    ev.sem.init(0);
-}
-
-static void io_event_reset(BcacheIoEvent& ev) {
-    ev.done.store(0, kernel::memory_order::release);
-
-    ev.sem.init(0);
-}
-
-static void io_event_wait(BcacheIoEvent& ev) {
-    while (ev.done.load(kernel::memory_order::acquire) == 0) {
-        ev.sem.wait();
+    void init() {
+        reset();
     }
-}
 
-static void io_event_signal_all(BcacheIoEvent& ev) {
-    ev.done.store(1, kernel::memory_order::release);
+    void reset() {
+        done.store(0, kernel::memory_order::release);
 
-    ev.sem.signal_all();
-}
+        sem.init(0);
+    }
+
+    void wait() {
+        while (done.load(kernel::memory_order::acquire) == 0) {
+            sem.wait();
+        }
+    }
+
+    void signal_all() {
+        done.store(1, kernel::memory_order::release);
+
+        sem.signal_all();
+    }
+};
 
 struct BcacheEntry {
     uint32_t block_idx = 0;
@@ -82,7 +80,7 @@ struct BcacheEntry {
     BcacheEntry* clock_prev = nullptr;
 
     BcacheEntry() {
-        io_event_init(io_done);
+        io_done.init();
     }
 
     ~BcacheEntry() = default;
@@ -520,7 +518,7 @@ static BcacheEntry* shard_get_or_create(
                 return nullptr;
             }
 
-            io_event_reset(created->io_done);
+            created->io_done.reset();
         }
 
         shard.map.insert_or_assign(block_idx, created);
@@ -553,7 +551,7 @@ static BcacheEntry* shard_get_or_create(
         kernel::memory_order::acq_rel
     );
 
-    io_event_signal_all(created->io_done);
+    created->io_done.signal_all();
 
     return created;
 }
@@ -624,7 +622,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
     if ((flags & k_flag_io_inflight) != 0u) {
-        io_event_wait(e->io_done);
+        e->io_done.wait();
     }
 
     {
@@ -670,7 +668,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
     if ((flags & k_flag_io_inflight) != 0u) {
-        io_event_wait(e->io_done);
+        e->io_done.wait();
     }
 
     {
@@ -831,7 +829,7 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
 
         const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
         if ((flags & k_flag_io_inflight) != 0u) {
-            io_event_wait(e->io_done);
+            e->io_done.wait();
         }
 
         entry_put(*e);
