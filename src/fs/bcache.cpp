@@ -261,16 +261,68 @@ private:
 
 static HotCache g_hot_cache{};
 
-static void disk_read_4k(uint32_t block_idx, uint8_t* buf);
-static void disk_write_4k(uint32_t block_idx, const uint8_t* buf);
+struct DiskIo {
+    static void read_4k(uint32_t block_idx, uint8_t* buf) {
+        if (!buf) {
+            return;
+        }
+
+        const uint64_t start_lba =
+            (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
+        if (start_lba > 0xFFFFFFFF) {
+            return;
+        }
+
+        ahci_read_sectors(
+            (uint32_t)start_lba,
+            SECTORS_PER_BLK,
+            buf
+        );
+    }
+
+    static void write_4k(uint32_t block_idx, const uint8_t* buf) {
+        if (!buf) {
+            return;
+        }
+
+        const uint64_t start_lba =
+            (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
+        if (start_lba > 0xFFFFFFFF) {
+            return;
+        }
+
+        ahci_write_sectors(
+            (uint32_t)start_lba,
+            SECTORS_PER_BLK,
+            buf
+        );
+    }
+};
 
 struct EvictedBlock {
     uint32_t block_idx = 0;
-
+    
     BcacheEntry* entry = nullptr;
-
+    
     bool dirty = false;
     uint8_t data[BLOCK_SIZE]{};
+
+    bool has_entry() const {
+        return entry != nullptr;
+    }
+
+    void clear() {
+        *this = {};
+    }
+
+    void release_entry() {
+        if (!entry) {
+            return;
+        }
+
+        entry->put();
+        entry = nullptr;
+    }
 };
 
 struct BcacheShard {
@@ -280,6 +332,10 @@ struct BcacheShard {
     BcacheEntry* clock_hand = nullptr;
     uint32_t entries = 0;
     uint32_t max_entries = 0;
+
+    static uint32_t index_for(uint32_t block_idx) {
+        return kernel::HashTraits<uint32_t>::hash(block_idx) & (BCACHE_SHARDS - 1u);
+    }
 
     BcacheEntry* lookup_locked(uint32_t block_idx) {
         BcacheEntry* e = nullptr;
@@ -407,17 +463,15 @@ struct BcacheShard {
                 }
             }
 
-            if (ev.entry) {
+            if (ev.has_entry()) {
                 g_hot_cache.invalidate_entry(*ev.entry);
             }
 
             if (ev.dirty) {
-                disk_write_4k(ev.block_idx, ev.data);
+                DiskIo::write_4k(ev.block_idx, ev.data);
             }
 
-            if (ev.entry) {
-                ev.entry->put();
-            }
+            ev.release_entry();
         }
 
         return true;
@@ -508,7 +562,7 @@ struct BcacheShard {
 
         uint8_t tmp[BLOCK_SIZE];
 
-        disk_read_4k(block_idx, tmp);
+        DiskIo::read_4k(block_idx, tmp);
 
         {
             kernel::WriteGuard data_guard(created->data_lock);
@@ -533,44 +587,6 @@ struct BcacheShard {
 };
 
 static BcacheShard g_shards[BCACHE_SHARDS]{};
-
-static void disk_read_4k(uint32_t block_idx, uint8_t* buf) {
-    if (!buf) {
-        return;
-    }
-
-    const uint64_t start_lba = (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
-    if (start_lba > 0xFFFFFFFF) {
-        return;
-    }
-
-    ahci_read_sectors(
-        (uint32_t)start_lba,
-        SECTORS_PER_BLK,
-        buf
-    );
-}
-
-static void disk_write_4k(uint32_t block_idx, const uint8_t* buf) {
-    if (!buf) {
-        return;
-    }
-
-    const uint64_t start_lba = (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
-    if (start_lba > 0xFFFFFFFF) {
-        return;
-    }
-
-    ahci_write_sectors(
-        (uint32_t)start_lba,
-        SECTORS_PER_BLK,
-        buf
-    );
-}
-
-static uint32_t shard_index_for(uint32_t block_idx) {
-    return kernel::HashTraits<uint32_t>::hash(block_idx) & (BCACHE_SHARDS - 1u);
-}
 
 void bcache_init(void) {
     if (!g_entry_cache) {
@@ -627,7 +643,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
         return 1;
     }
 
-    BcacheShard& shard = g_shards[shard_index_for(block_idx)];
+    BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
 
     BcacheEntry* e = shard.get_or_create(block_idx, false, nullptr);
     if (!e) {
@@ -675,7 +691,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
         return 1;
     }
 
-    BcacheShard& shard = g_shards[shard_index_for(block_idx)];
+    BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
 
     BcacheEntry* e = shard.get_or_create(block_idx, true, buf);
     if (!e) {
@@ -766,7 +782,7 @@ void bcache_sync(void) {
 
 
             if (do_flush) {
-                disk_write_4k(blk, tmp);
+                DiskIo::write_4k(blk, tmp);
             }
 
             if (e) {
@@ -777,7 +793,7 @@ void bcache_sync(void) {
 }
 
 void bcache_flush_block(uint32_t block_idx) {
-    BcacheShard& shard = g_shards[shard_index_for(block_idx)];
+    BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
 
     uint8_t tmp[BLOCK_SIZE];
     bool do_flush = false;
@@ -815,7 +831,7 @@ void bcache_flush_block(uint32_t block_idx) {
     }
 
     if (do_flush) {
-        disk_write_4k(block_idx, tmp);
+        DiskIo::write_4k(block_idx, tmp);
     }
 }
 
@@ -831,7 +847,7 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
     for (uint32_t i = 1; i <= count; i++) {
         const uint32_t block_idx = start_block + i;
 
-        BcacheShard& shard = g_shards[shard_index_for(block_idx)];
+        BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
         {
             kernel::ReadGuard meta_guard(shard.meta_lock);
 
