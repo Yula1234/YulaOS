@@ -124,14 +124,149 @@ private:
     }
 };
 
-static void hotcache_invalidate_entry(BcacheEntry& entry);
+struct HotSlot {
+    uint32_t block_idx = 0;
+    BcacheEntry* entry = nullptr;
+};
+
+struct PerCpuHotCache {
+    kernel::SpinLock lock{};
+    HotSlot slots[HOT_SLOTS]{};
+
+    void init() {
+        kernel::SpinLockSafeGuard guard(lock);
+
+        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
+            slots[i] = {};
+        }
+    }
+
+    BcacheEntry* try_get(uint32_t block_idx) {
+        const uint32_t slot_idx = slot_index_for(block_idx);
+
+        kernel::SpinLockSafeGuard guard(lock);
+
+        HotSlot& slot = slots[slot_idx];
+        if (!slot.entry || slot.block_idx != block_idx) {
+            return nullptr;
+        }
+
+        slot.entry->get();
+
+        return slot.entry;
+    }
+
+    void put(uint32_t block_idx, BcacheEntry& entry) {
+        const uint32_t slot_idx = slot_index_for(block_idx);
+
+        entry.get();
+
+        BcacheEntry* old = nullptr;
+        {
+            kernel::SpinLockSafeGuard guard(lock);
+
+            HotSlot& slot = slots[slot_idx];
+
+            old = slot.entry;
+
+            slot.block_idx = block_idx;
+            slot.entry = &entry;
+        }
+
+        if (old) {
+            old->put();
+        }
+    }
+
+    uint32_t invalidate(BcacheEntry& entry) {
+        uint32_t removed = 0;
+
+        kernel::SpinLockSafeGuard guard(lock);
+
+        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
+            HotSlot& slot = slots[i];
+            if (slot.entry != &entry) {
+                continue;
+            }
+
+            slot.block_idx = 0;
+            slot.entry = nullptr;
+
+            removed++;
+        }
+
+        return removed;
+    }
+
+private:
+    static uint32_t slot_index_for(uint32_t block_idx) {
+        return kernel::HashTraits<uint32_t>::hash(block_idx) & (HOT_SLOTS - 1u);
+    }
+};
+
+struct HotCache {
+    PerCpuHotCache per_cpu[MAX_CPUS]{};
+
+    void init() {
+        for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+            per_cpu[cpu].init();
+        }
+    }
+
+    BcacheEntry* try_get(uint32_t block_idx) {
+        const int cpu_idx = cpu_index();
+        if (cpu_idx < 0) {
+            return nullptr;
+        }
+
+        return per_cpu[cpu_idx].try_get(block_idx);
+    }
+
+    void put(uint32_t block_idx, BcacheEntry& entry) {
+        const uint32_t entry_flags = entry.flags.load(kernel::memory_order::acquire);
+        if ((entry_flags & k_flag_evicting) != 0u) {
+            return;
+        }
+
+        const int cpu_idx = cpu_index();
+        if (cpu_idx < 0) {
+            return;
+        }
+
+        per_cpu[cpu_idx].put(block_idx, entry);
+    }
+
+    void invalidate_entry(BcacheEntry& entry) {
+        for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+            const uint32_t removed = per_cpu[cpu].invalidate(entry);
+
+            for (uint32_t i = 0; i < removed; i++) {
+                entry.put();
+            }
+        }
+    }
+
+private:
+    static int cpu_index() {
+        cpu_t* cpu = cpu_current();
+        const int cpu_idx = cpu ? cpu->index : 0;
+
+        if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
+            return -1;
+        }
+
+        return cpu_idx;
+    }
+};
+
+static HotCache g_hot_cache{};
 
 static void disk_read_4k(uint32_t block_idx, uint8_t* buf);
 static void disk_write_4k(uint32_t block_idx, const uint8_t* buf);
 
 struct EvictedBlock {
     uint32_t block_idx = 0;
-    
+
     BcacheEntry* entry = nullptr;
 
     bool dirty = false;
@@ -273,7 +408,7 @@ struct BcacheShard {
             }
 
             if (ev.entry) {
-                hotcache_invalidate_entry(*ev.entry);
+                g_hot_cache.invalidate_entry(*ev.entry);
             }
 
             if (ev.dirty) {
@@ -397,48 +532,7 @@ struct BcacheShard {
     }
 };
 
-struct HotSlot {
-    uint32_t block_idx = 0;
-    BcacheEntry* entry = nullptr;
-};
-
-struct PerCpuHotCache {
-
-    kernel::SpinLock lock{};
-    HotSlot slots[HOT_SLOTS]{};
-};
-
 static BcacheShard g_shards[BCACHE_SHARDS]{};
-static PerCpuHotCache g_hot[MAX_CPUS]{};
-
-static void hotcache_invalidate_entry(BcacheEntry& entry) {
-    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
-        PerCpuHotCache& hc = g_hot[cpu];
-
-        uint32_t removed = 0;
-
-        {
-            kernel::SpinLockSafeGuard guard(hc.lock);
-
-            for (uint32_t i = 0; i < HOT_SLOTS; i++) {
-                HotSlot& slot = hc.slots[i];
-
-                if (slot.entry != &entry) {
-                    continue;
-                }
-
-                slot.block_idx = 0;
-                slot.entry = nullptr;
-
-                removed++;
-            }
-        }
-
-        for (uint32_t i = 0; i < removed; i++) {
-            entry.put();
-        }
-    }
-}
 
 static void disk_read_4k(uint32_t block_idx, uint8_t* buf) {
     if (!buf) {
@@ -478,69 +572,6 @@ static uint32_t shard_index_for(uint32_t block_idx) {
     return kernel::HashTraits<uint32_t>::hash(block_idx) & (BCACHE_SHARDS - 1u);
 }
 
-static uint32_t hot_slot_index_for(uint32_t block_idx) {
-    return kernel::HashTraits<uint32_t>::hash(block_idx) & (HOT_SLOTS - 1u);
-}
-
-static BcacheEntry* hotcache_try_get(uint32_t block_idx) {
-    cpu_t* cpu = cpu_current();
-    const int cpu_idx = cpu ? cpu->index : 0;
-
-    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
-        return nullptr;
-    }
-
-    PerCpuHotCache& hc = g_hot[cpu_idx];
-    const uint32_t slot_idx = hot_slot_index_for(block_idx);
-
-    kernel::SpinLockSafeGuard guard(hc.lock);
-
-    HotSlot& slot = hc.slots[slot_idx];
-    if (!slot.entry || slot.block_idx != block_idx) {
-        return nullptr;
-    }
-
-    slot.entry->get();
-
-    return slot.entry;
-}
-
-static void hotcache_put(uint32_t block_idx, BcacheEntry& entry) {
-    cpu_t* cpu = cpu_current();
-    const int cpu_idx = cpu ? cpu->index : 0;
-
-    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
-        return;
-    }
-
-    const uint32_t entry_flags = entry.flags.load(kernel::memory_order::acquire);
-    if ((entry_flags & k_flag_evicting) != 0u) {
-        return;
-    }
-
-    PerCpuHotCache& hc = g_hot[cpu_idx];
-    const uint32_t slot_idx = hot_slot_index_for(block_idx);
-
-    entry.get();
-
-    BcacheEntry* old = nullptr;
-
-    {
-        kernel::SpinLockSafeGuard guard(hc.lock);
-
-        HotSlot& slot = hc.slots[slot_idx];
-
-        old = slot.entry;
-
-        slot.block_idx = block_idx;
-        slot.entry = &entry;
-    }
-
-    if (old) {
-        old->put();
-    }
-}
-
 void bcache_init(void) {
     if (!g_entry_cache) {
         g_entry_cache = kmem_cache_create(
@@ -575,11 +606,7 @@ void bcache_init(void) {
         g_shards[i].max_entries = per_shard;
     }
 
-    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
-        for (uint32_t i = 0; i < HOT_SLOTS; i++) {
-            g_hot[cpu].slots[i] = {};
-        }
-    }
+    g_hot_cache.init();
 }
 
 int bcache_read(uint32_t block_idx, uint8_t* buf) {
@@ -587,7 +614,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
         return 0;
     }
 
-    if (BcacheEntry* hot = hotcache_try_get(block_idx)) {
+    if (BcacheEntry* hot = g_hot_cache.try_get(block_idx)) {
         {
             kernel::ReadGuard data_guard(hot->data_lock);
 
@@ -620,7 +647,7 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
     e->flags.fetch_or(k_flag_accessed, kernel::memory_order::acq_rel);
 
-    hotcache_put(block_idx, *e);
+    g_hot_cache.put(block_idx, *e);
 
     e->put();
 
@@ -632,7 +659,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
         return 0;
     }
 
-    if (BcacheEntry* hot = hotcache_try_get(block_idx)) {
+    if (BcacheEntry* hot = g_hot_cache.try_get(block_idx)) {
         {
             kernel::WriteGuard data_guard(hot->data_lock);
 
@@ -671,7 +698,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
         kernel::memory_order::acq_rel
     );
 
-    hotcache_put(block_idx, *e);
+    g_hot_cache.put(block_idx, *e);
 
     e->put();
 
