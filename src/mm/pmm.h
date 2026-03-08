@@ -95,12 +95,14 @@ typedef struct page {
 
     struct page* prev;
     struct page* next;
+
+    uint32_t _reserved;
 } page_t;
 
 #ifdef __cplusplus
-static_assert(sizeof(page_t) == 28u);
+static_assert(sizeof(page_t) == 32u);
 #else
-typedef char pmm_page_t_size_assert[(sizeof(page_t) == 28u) ? 1 : -1];
+typedef char pmm_page_t_size_assert[(sizeof(page_t) == 32u) ? 1 : -1];
 #endif
 
 #ifdef __cplusplus
