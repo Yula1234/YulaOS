@@ -5,6 +5,7 @@
 #include <fs/vfs.h>
 #include <hal/io.h>
 #include <hal/lock.h>
+#include <kernel/proc.h>
 #include <yos/ioctl.h>
 
 #include <lib/string.h>
@@ -68,7 +69,7 @@ typedef struct {
 } ne2k_state_t;
 
 static ne2k_state_t g_ne2k;
-static spinlock_t g_ne2k_tx_lock;
+static mutex_t g_ne2k_tx_lock;
 
 typedef struct __attribute__((packed)) {
     uint8_t status;
@@ -237,14 +238,26 @@ static void ne2k_remote_read(uint16_t base, uint16_t addr, uint8_t* out, uint16_
 }
 
 static int ne2k_wait_rdc(uint16_t base) {
-    for (uint32_t i = 0; i < NE2K_RESET_TIMEOUT; i++) {
+    static const uint32_t kTotalWaitUs = 10000;
+    static const uint32_t kSleepStepUs = 50;
+
+    uint32_t waited_us = 0;
+    while (waited_us < kTotalWaitUs) {
         uint8_t isr = ne2k_read_reg(base, NE2K_REG_ISR);
-        if (isr & NE2K_ISR_RDC) {
+        if ((isr & NE2K_ISR_RDC) != 0u) {
             ne2k_write_reg(base, NE2K_REG_ISR, NE2K_ISR_RDC);
             return 1;
         }
-        io_wait();
+
+        if (proc_current()) {
+            proc_usleep(kSleepStepUs);
+            waited_us += kSleepStepUs;
+        } else {
+            io_wait();
+            waited_us += 1;
+        }
     }
+
     return 0;
 }
 
@@ -544,11 +557,11 @@ static int ne2k_transmit(const uint8_t* data, uint32_t len) {
         memset(frame + len, 0, send_len - len);
     }
 
-    uint32_t flags = spinlock_acquire_safe(&g_ne2k_tx_lock);
+    mutex_lock(&g_ne2k_tx_lock);
 
     uint16_t base = g_ne2k.io_base;
     if (!ne2k_remote_write(base, (uint16_t)(NE2K_TX_START * 256u), frame, (uint16_t)send_len)) {
-        spinlock_release_safe(&g_ne2k_tx_lock, flags);
+        mutex_unlock(&g_ne2k_tx_lock);
         return -1;
     }
 
@@ -557,7 +570,7 @@ static int ne2k_transmit(const uint8_t* data, uint32_t len) {
     ne2k_write_reg(base, NE2K_REG_TPSR, NE2K_TX_START);
     ne2k_set_cmd(base, NE2K_CR_STA | NE2K_CR_TXP | NE2K_CR_RD2 | NE2K_CR_PAGE0);
 
-    spinlock_release_safe(&g_ne2k_tx_lock, flags);
+    mutex_unlock(&g_ne2k_tx_lock);
     return (int)len;
 }
 
@@ -691,7 +704,7 @@ void ne2k_init(void) {
         return;
     }
 
-    spinlock_init(&g_ne2k_tx_lock);
+    mutex_init(&g_ne2k_tx_lock);
 
     uint16_t io_base = 0;
     if (!ne2k_find_io_base(&io_base)) {
