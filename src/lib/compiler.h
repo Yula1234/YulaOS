@@ -8,7 +8,7 @@
 
 namespace kernel {
 
-[[nodiscard]] constexpr inline bool likely(bool value) noexcept {
+[[nodiscard]] __attribute__((always_inline)) constexpr inline bool likely(bool value) noexcept {
 #if defined(__GNUC__) || defined(__clang__)
     return __builtin_expect(!!value, 1);
 #else
@@ -16,7 +16,7 @@ namespace kernel {
 #endif
 }
 
-[[nodiscard]] constexpr inline bool unlikely(bool value) noexcept {
+[[nodiscard]] __attribute__((always_inline)) constexpr inline bool unlikely(bool value) noexcept {
 #if defined(__GNUC__) || defined(__clang__)
     return __builtin_expect(!!value, 0);
 #else

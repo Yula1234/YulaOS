@@ -139,7 +139,7 @@ if [[ "${KERNEL_PROFILE:-0}" == "1" ]]; then
     $LD -T src/linker.ld -o bin/kernel.elf $SORTED_K_OBJS
 
     nm -n bin/kernel.elf \
-        | awk '$2=="t" || $2=="T" { print $1 " " $3 }' \
+        | awk 'tolower($2)=="t" || tolower($2)=="w" { print $1 " " $3 }' \
         | awk 'BEGIN { \
                 print "#include <kernel/ksyms.h>"; \
                 print "const ksym_t ksyms_table[] = {"; \
