@@ -140,7 +140,7 @@ void PmmState::init_regions(
      * This makes it hard to accidentally hand out memory we never meant to.
      */
     total_pages_ = 0u;
-    used_pages_count_ = 0u;
+    used_pages_count_.store(0u, kernel::memory_order::relaxed);
     mem_map_ = nullptr;
 
     for (uint32_t zone = 0u; zone < PMM_ZONE_COUNT; zone++) {
@@ -322,7 +322,7 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
     }
 
     page->order = order;
-    __atomic_fetch_add(&used_pages_count_, 1u << order, __ATOMIC_RELAXED);
+    used_pages_count_.fetch_add(1u << order, kernel::memory_order::relaxed);
 
     return reinterpret_cast<void*>(page_to_phys(page));
 }
@@ -469,11 +469,11 @@ uint32_t PmmState::page_to_phys(page_t* page) const noexcept {
 }
 
 uint32_t PmmState::get_used_blocks() const noexcept {
-    return __atomic_load_n(&used_pages_count_, __ATOMIC_RELAXED);
+    return used_pages_count_.load(kernel::memory_order::relaxed);
 }
 
 uint32_t PmmState::get_free_blocks() const noexcept {
-    return total_pages_ - __atomic_load_n(&used_pages_count_, __ATOMIC_RELAXED);
+    return total_pages_ - used_pages_count_.load(kernel::memory_order::relaxed);
 }
 
 uint32_t PmmState::get_total_blocks() const noexcept {
@@ -493,7 +493,7 @@ void PmmState::init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) n
      * Start with everything marked used.
      * Later we selectively free the ranges we're willing to allocate from.
      */
-    used_pages_count_ = total_pages;
+    used_pages_count_.store(total_pages, kernel::memory_order::relaxed);
 
     const uint32_t kernel_end = align_up(kernel_end_addr);
 
@@ -732,7 +732,7 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
         return;
     }
 
-    __atomic_fetch_sub(&used_pages_count_, 1u << order, __ATOMIC_RELAXED);
+    used_pages_count_.fetch_sub(1u << order, kernel::memory_order::relaxed);
 
     uint32_t pfn = static_cast<uint32_t>(page - mem_map_);
     const pmm_zone_t zone = zone_for_flags(page->flags);

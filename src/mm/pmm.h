@@ -105,6 +105,7 @@ typedef char pmm_page_t_size_assert[(sizeof(page_t) == 28u) ? 1 : -1];
 
 #ifdef __cplusplus
 
+#include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
 
 namespace kernel {
@@ -194,7 +195,7 @@ private:
 
     page_t* mem_map_ = nullptr;
     uint32_t total_pages_ = 0u;
-    uint32_t used_pages_count_ = 0u;
+    atomic<uint32_t> used_pages_count_{0u};
 
     struct FreeArea {
         page_t* head = nullptr;
