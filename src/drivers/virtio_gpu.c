@@ -202,7 +202,7 @@ typedef struct {
     int virgl_ctx_ready;
     virtio_pci_dev_t dev;
     virtqueue_t ctrlq;
-    spinlock_t lock;
+    mutex_t lock;
     uint32_t scanout_id;
     uint32_t scanout_bound_resource_id;
     virtio_gpu_rect_t scanout_bound_rect;
@@ -527,9 +527,9 @@ static int vgpu_ctrlq_submit_sg_locked(const uint64_t* addrs,
 }
 
 static int vgpu_ctrlq_submit(uint32_t cmd_len, uint32_t resp_len, uint32_t expected_resp_type) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
     int ok = vgpu_ctrlq_submit_locked(cmd_len, resp_len, expected_resp_type);
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return ok;
 }
 
@@ -602,7 +602,7 @@ static int vgpu_get_display_info(uint32_t* out_w, uint32_t* out_h, uint32_t* out
 
 int virtio_gpu_init(void) {
     memset(&g_vgpu, 0, sizeof(g_vgpu));
-    spinlock_init(&g_vgpu.lock);
+    mutex_init(&g_vgpu.lock);
     vgpu_attached_reset(&g_vgpu.attached);
 
     if (!virtio_pci_find_device(VIRTIO_PCI_VENDOR_ID, VIRTIO_GPU_PCI_DEVICE_ID, &g_vgpu.dev)) {
@@ -705,7 +705,7 @@ int virtio_gpu_init(void) {
     g_vgpu.fb.fb_phys = (uint32_t)(uintptr_t)fb_phys;
     g_vgpu.fb.fb_ptr = (uint32_t*)fb_phys;
 
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     {
         virtio_gpu_resource_create_2d_t* cmd = (virtio_gpu_resource_create_2d_t*)g_vgpu.ctrl_cmd;
@@ -717,7 +717,7 @@ int virtio_gpu_init(void) {
         cmd->height = g_vgpu.fb.height;
 
         if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
-            spinlock_release(&g_vgpu.lock);
+            mutex_unlock(&g_vgpu.lock);
             vgpu_cleanup_state();
             return 0;
         }
@@ -734,13 +734,13 @@ int virtio_gpu_init(void) {
         cmd->entry.padding = 0;
 
         if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
-            spinlock_release(&g_vgpu.lock);
+            mutex_unlock(&g_vgpu.lock);
             vgpu_cleanup_state();
             return 0;
         }
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
 
     g_vgpu.scanout_bound_resource_id = 0;
     memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
@@ -771,10 +771,10 @@ int virtio_gpu_virgl_is_supported(void) {
 }
 
 int virtio_gpu_flush_rect(int x, int y, int w, int h) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.fb.fb_ptr) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -797,7 +797,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
             g_vgpu.active = 0;
             g_vgpu.scanout_bound_resource_id = 0;
             memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
-            spinlock_release(&g_vgpu.lock);
+            mutex_unlock(&g_vgpu.lock);
             return -1;
         }
 
@@ -809,7 +809,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
     }
 
     if (w <= 0 || h <= 0) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return 0;
     }
 
@@ -824,7 +824,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
     if (y2 > (int)g_vgpu.fb.height) y2 = (int)g_vgpu.fb.height;
 
     if (x1 >= x2 || y1 >= y2) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return 0;
     }
 
@@ -832,7 +832,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
 
     uint64_t offset64 = (uint64_t)(uint32_t)y1 * (uint64_t)g_vgpu.fb.pitch + (uint64_t)(uint32_t)x1 * 4ull;
     if (offset64 > (uint64_t)g_vgpu.fb.size_bytes) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -850,7 +850,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
         g_vgpu.active = 0;
         g_vgpu.scanout_bound_resource_id = 0;
         memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -867,11 +867,11 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
         g_vgpu.active = 0;
         g_vgpu.scanout_bound_resource_id = 0;
         memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
@@ -886,10 +886,10 @@ int virtio_gpu_resource_create_3d(uint32_t resource_id,
                                   uint32_t last_level,
                                   uint32_t nr_samples,
                                   uint32_t flags) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -910,11 +910,11 @@ int virtio_gpu_resource_create_3d(uint32_t resource_id,
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
@@ -929,10 +929,10 @@ int virtio_gpu_transfer_to_host_3d(uint32_t resource_id,
                                    uint32_t h,
                                    uint32_t d,
                                    uint64_t offset) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -953,25 +953,25 @@ int virtio_gpu_transfer_to_host_3d(uint32_t resource_id,
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
 int virtio_gpu_virgl_resource_attach(uint32_t resource_id) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
     int ok = vgpu_virgl_attach_resource_locked(resource_id);
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return ok ? 0 : -1;
 }
 
 int virtio_gpu_virgl_resource_detach(uint32_t resource_id) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
     int ok = vgpu_virgl_detach_resource_locked(resource_id);
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return ok ? 0 : -1;
 }
 
@@ -988,15 +988,15 @@ int virtio_gpu_virgl_copy_region(uint32_t dst_resource_id,
                                  uint32_t width,
                                  uint32_t height,
                                  uint32_t depth) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
     if (!vgpu_virgl_attach_resource_locked(dst_resource_id) || !vgpu_virgl_attach_resource_locked(src_resource_id)) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1025,17 +1025,17 @@ int virtio_gpu_virgl_copy_region(uint32_t dst_resource_id,
 
     uint32_t total_len = (uint32_t)sizeof(*cmd) + cmd->size;
     if (total_len > PAGE_SIZE) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
     if (!vgpu_ctrlq_submit_locked(total_len, sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
@@ -1140,9 +1140,9 @@ int virtio_gpu_resource_attach_phys_pages(uint32_t resource_id,
         return -1;
     }
 
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         pmm_free_pages(entries, entries_order);
         return -1;
     }
@@ -1176,7 +1176,7 @@ int virtio_gpu_resource_attach_phys_pages(uint32_t resource_id,
         vgpu_mark_inactive_locked();
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     pmm_free_pages(entries, entries_order);
     return ok ? 0 : -1;
 }
@@ -1187,10 +1187,10 @@ int virtio_gpu_set_scanout(uint32_t scanout_id,
                            uint32_t y,
                            uint32_t width,
                            uint32_t height) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1206,7 +1206,7 @@ int virtio_gpu_set_scanout(uint32_t scanout_id,
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1216,7 +1216,7 @@ int virtio_gpu_set_scanout(uint32_t scanout_id,
     g_vgpu.scanout_bound_rect.width = width;
     g_vgpu.scanout_bound_rect.height = height;
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
@@ -1226,10 +1226,10 @@ int virtio_gpu_transfer_to_host_2d(uint32_t resource_id,
                                    uint32_t width,
                                    uint32_t height,
                                    uint64_t offset) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1245,19 +1245,19 @@ int virtio_gpu_transfer_to_host_2d(uint32_t resource_id,
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
 int virtio_gpu_resource_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1272,19 +1272,19 @@ int virtio_gpu_resource_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
 int virtio_gpu_resource_detach_backing(uint32_t resource_id) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1299,7 +1299,7 @@ int virtio_gpu_resource_detach_backing(uint32_t resource_id) {
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1308,15 +1308,15 @@ int virtio_gpu_resource_detach_backing(uint32_t resource_id) {
         memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
 int virtio_gpu_resource_unref(uint32_t resource_id) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1331,7 +1331,7 @@ int virtio_gpu_resource_unref(uint32_t resource_id) {
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1340,15 +1340,15 @@ int virtio_gpu_resource_unref(uint32_t resource_id) {
         memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
 int virtio_gpu_resource_create_2d(uint32_t resource_id, uint32_t format, uint32_t width, uint32_t height) {
-    spinlock_acquire(&g_vgpu.lock);
+    mutex_lock(&g_vgpu.lock);
 
     if (!g_vgpu.active) {
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1362,10 +1362,10 @@ int virtio_gpu_resource_create_2d(uint32_t resource_id, uint32_t format, uint32_
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        spinlock_release(&g_vgpu.lock);
+        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    spinlock_release(&g_vgpu.lock);
+    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
