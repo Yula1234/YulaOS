@@ -27,7 +27,7 @@ static constexpr uint32_t pcp_drain_batch = 128u;
 
 static constexpr uint32_t pcp_refill_order = 5u;
 
-static PerCpuPageCache pcp_caches[PMM_ZONE_COUNT][MAX_CPUS]{};
+static PerCpuPageCache pcp_caches[MAX_CPUS][PMM_ZONE_COUNT]{};
 
 static inline uint32_t pcp_cpu_index() {
     cpu_t* cpu = cpu_current();
@@ -44,7 +44,7 @@ static inline uint32_t pcp_cpu_index() {
 }
 
 static inline PerCpuPageCache& pcp_current_cache(pmm_zone_t zone) {
-    return pcp_caches[zone][pcp_cpu_index()];
+    return pcp_caches[pcp_cpu_index()][zone];
 }
 
 static inline void pcp_cache_drain(PmmState* pmm, PerCpuPageCache& cache) {
