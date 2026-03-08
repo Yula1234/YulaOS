@@ -1033,99 +1033,147 @@ private:
         return old;
     }
 
-    Bucket* try_resize_locked(uint32_t new_size, size_t& out_old_count) {
-        if (resizing.load(kernel::memory_order::relaxed) != 0u) {
-            return nullptr;
-        }
-
-        if (!should_grow(new_size)) {
-            return nullptr;
-        }
-
-        quiesce_locked();
-
-        out_old_count = bucket_count;
-
-        const size_t target = grow_target_count();
-
-        Bucket* new_buckets = allocate_buckets(target);
-        if (!new_buckets) {
-            resizing.store(0u, kernel::memory_order::relaxed);
-            return nullptr;
-        }
-
-
-        Bucket* old_buckets = rehash_locked(new_buckets, target);
-
-
-        resizing.store(0u, kernel::memory_order::relaxed);
-
-
-        return old_buckets;
-    }
+    Bucket* try_resize_locked(uint32_t new_size, size_t& out_old_count) = delete;
 
     bool begin_op(Bucket*& out_buckets, size_t& out_mask) {
+        Bucket* fresh = nullptr;
+        size_t fresh_count = 0u;
+
         while (1) {
-            kernel::SpinLockGuard lock(table_lock);
+            {
+                kernel::SpinLockGuard lock(table_lock);
 
-            if (resizing.load(kernel::memory_order::relaxed) != 0u) {
-                kernel::cpu_relax();
-                continue;
+                if (resizing.load(kernel::memory_order::relaxed) != 0u) {
+                    kernel::cpu_relax();
+                    continue;
+                }
+
+                if (buckets && bucket_count > 0u) {
+                    active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+
+                    out_buckets = buckets;
+                    out_mask = bucket_mask;
+
+                    return true;
+                }
+
+                resizing.store(1u, kernel::memory_order::relaxed);
             }
 
+            kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
 
-            if (!ensure_buckets_locked()) {
-                out_buckets = nullptr;
-                out_mask = 0u;
-                return false;
+            if (!fresh) {
+                fresh_count = normalize_bucket_count(Buckets);
+                fresh = allocate_buckets(fresh_count);
             }
 
+            {
+                kernel::SpinLockGuard lock(table_lock);
 
-            active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+                if (buckets && bucket_count > 0u) {
+                    resizing.store(0u, kernel::memory_order::relaxed);
 
-            out_buckets = buckets;
-            out_mask = bucket_mask;
+                    active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
 
-            return true;
+                    out_buckets = buckets;
+                    out_mask = bucket_mask;
+
+                    break;
+                }
+
+                if (!fresh) {
+                    resizing.store(0u, kernel::memory_order::relaxed);
+                    out_buckets = nullptr;
+                    out_mask = 0u;
+                    return false;
+                }
+
+                buckets = fresh;
+                bucket_count = fresh_count;
+                bucket_mask = fresh_count - 1u;
+
+                resizing.store(0u, kernel::memory_order::relaxed);
+
+                active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+
+                out_buckets = buckets;
+                out_mask = bucket_mask;
+
+                fresh = nullptr;
+                break;
+            }
         }
+
+        if (fresh) {
+            destroy_buckets(fresh, fresh_count);
+        }
+
+        return true;
     }
 
     void end_op() {
         active_ops.fetch_sub(1u, kernel::memory_order::seq_cst);
     }
 
-    bool ensure_buckets_locked() {
-        if (buckets && bucket_count > 0u) {
-            return true;
-        }
-
-        const size_t init_count = normalize_bucket_count(Buckets);
-
-        Bucket* fresh = allocate_buckets(init_count);
-        if (!fresh) {
-            return false;
-        }
-
-        buckets = fresh;
-        bucket_count = init_count;
-        bucket_mask = init_count - 1u;
-
-
-        return true;
-    }
+    bool ensure_buckets_locked() = delete;
 
     void maybe_resize(uint32_t new_size) {
         if (!should_grow(new_size)) {
             return;
         }
 
+        size_t target = 0u;
+        Bucket* new_buckets = nullptr;
+
         Bucket* old_buckets = nullptr;
         size_t old_bucket_count = 0u;
 
-        {
-            kernel::SpinLockGuard lock(table_lock);
+        while (1) {
+            {
+                kernel::SpinLockGuard lock(table_lock);
 
-            old_buckets = try_resize_locked(new_size, old_bucket_count);
+                if (resizing.load(kernel::memory_order::relaxed) != 0u) {
+                    return;
+                }
+
+                if (!should_grow(new_size)) {
+                    return;
+                }
+
+                resizing.store(1u, kernel::memory_order::relaxed);
+            }
+
+            kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
+
+            target = grow_target_count();
+
+            new_buckets = allocate_buckets(target);
+            if (!new_buckets) {
+                kernel::SpinLockGuard lock(table_lock);
+                resizing.store(0u, kernel::memory_order::relaxed);
+                return;
+            }
+
+            {
+                kernel::SpinLockGuard lock(table_lock);
+
+                if (!should_grow(new_size)) {
+                    resizing.store(0u, kernel::memory_order::relaxed);
+                    break;
+                }
+
+                old_bucket_count = bucket_count;
+
+                old_buckets = rehash_locked(new_buckets, target);
+                new_buckets = nullptr;
+
+                resizing.store(0u, kernel::memory_order::relaxed);
+                break;
+            }
+        }
+
+        if (new_buckets) {
+            destroy_buckets(new_buckets, target);
         }
 
         if (old_buckets) {
