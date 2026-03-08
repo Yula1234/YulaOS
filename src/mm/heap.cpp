@@ -2,15 +2,14 @@
 /* Copyright (C) 2026 Yula1234 */
 
 #include <lib/compiler.h>
+#include <lib/string.h>
 
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
 
-#include <kernel/panic.h>
 #include <kernel/cpu.h>
-
-#include <lib/string.h>
+#include <kernel/panic.h>
 
 #include <arch/i386/paging.h>
 
@@ -41,10 +40,10 @@ namespace {
 struct KmemCache {
     char name[16];
     size_t object_size;
-    
+
     uint32_t align;
     uint32_t flags;
-    
+
     kernel::SpinLock lock;
 
     struct PerCpuSlab {
@@ -170,6 +169,7 @@ public:
             kernel_page_directory,
             static_cast<uint32_t>(virt)
         );
+
         page_t* page = pmm_->phys_to_page(phys);
 
         if (kernel::unlikely(!page)) {
@@ -180,7 +180,7 @@ public:
             panic("SLUB: free cache mismatch");
         }
 
-        const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1);
+        const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
         const uintptr_t off = virt - page_virt;
 
         if (kernel::unlikely(
