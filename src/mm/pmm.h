@@ -84,15 +84,24 @@ typedef struct {
 typedef struct page {
     uint32_t flags;
     int32_t  ref_count;
-    uint32_t order;
 
-    void* slab_cache;
+    union {
+        uint32_t order;
+        void* slab_cache;
+    };
+
     void* freelist;
     uint16_t objects;
 
     struct page* prev;
     struct page* next;
 } page_t;
+
+#ifdef __cplusplus
+static_assert(sizeof(page_t) == 28u);
+#else
+typedef char pmm_page_t_size_assert[(sizeof(page_t) == 28u) ? 1 : -1];
+#endif
 
 #ifdef __cplusplus
 
