@@ -52,6 +52,65 @@ static void virtqueue_build_free_list(virtqueue_t* vq) {
     vq->num_free = vq->size;
 }
 
+static void virtqueue_tokens_init(virtqueue_t* vq) {
+    vq->token_free_head = 0;
+    vq->token_num_free = vq->size;
+
+    for (uint16_t i = 0; i < vq->size; i++) {
+        virtqueue_token_t* t = &vq->tokens[i];
+
+        sem_init(&t->sem, 0);
+        t->used_len = 0;
+        t->owner_vq = vq;
+        t->pool_index = i;
+
+        vq->token_next[i] = (uint16_t)(i + 1);
+    }
+
+    if (vq->size != 0u) {
+        vq->token_next[vq->size - 1u] = (uint16_t)0xFFFFu;
+    }
+}
+
+static virtqueue_token_t* virtqueue_token_alloc_locked(virtqueue_t* vq) {
+    if (!vq || vq->token_num_free == 0u) {
+        return 0;
+    }
+
+    uint16_t idx = vq->token_free_head;
+    if (idx == (uint16_t)0xFFFFu || idx >= vq->size) {
+        return 0;
+    }
+
+    vq->token_free_head = vq->token_next[idx];
+    vq->token_next[idx] = (uint16_t)0xFFFFu;
+    vq->token_num_free = (uint16_t)(vq->token_num_free - 1u);
+
+    virtqueue_token_t* token = &vq->tokens[idx];
+    token->used_len = 0;
+    sem_reset(&token->sem, 0);
+
+    return token;
+}
+
+static void virtqueue_token_free_locked(virtqueue_t* vq, virtqueue_token_t* token) {
+    if (!vq || !token) {
+        return;
+    }
+
+    const uint16_t idx = token->pool_index;
+    if (idx >= vq->size) {
+        return;
+    }
+
+    token->used_len = 0;
+    sem_reset(&token->sem, 0);
+
+    vq->token_next[idx] = vq->token_free_head;
+    vq->token_free_head = idx;
+    vq->token_num_free = (uint16_t)(vq->token_num_free + 1u);
+}
+
 int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, volatile uint16_t* notify_addr) {
     if (!vq || size == 0) return 0;
 
@@ -92,11 +151,27 @@ int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, volatil
 
     virtqueue_build_free_list(vq);
 
-    vq->pending = (virtqueue_token_t**)kzalloc((size_t)size * sizeof(virtqueue_token_t*));
-    if (!vq->pending) {
+    const size_t pending_bytes = (size_t)size * sizeof(virtqueue_token_t*);
+    const size_t token_bytes = (size_t)size * sizeof(virtqueue_token_t);
+    const size_t token_next_bytes = (size_t)size * sizeof(uint16_t);
+
+    const size_t aux_bytes = pending_bytes + token_bytes + token_next_bytes;
+    vq->aux_mem = kzalloc(aux_bytes);
+    if (!vq->aux_mem) {
         virtqueue_destroy(vq);
         return 0;
     }
+
+    uint8_t* aux = (uint8_t*)vq->aux_mem;
+    vq->pending = (virtqueue_token_t**)aux;
+
+    aux += pending_bytes;
+    vq->tokens = (virtqueue_token_t*)aux;
+
+    aux += token_bytes;
+    vq->token_next = (uint16_t*)aux;
+
+    virtqueue_tokens_init(vq);
 
     return 1;
 }
@@ -113,9 +188,19 @@ void virtqueue_destroy(virtqueue_t* vq) {
                 vq->pending[i] = 0;
             }
         }
-        kfree(vq->pending);
+
         vq->pending = 0;
     }
+
+    if (vq->aux_mem) {
+        kfree(vq->aux_mem);
+        vq->aux_mem = 0;
+    }
+
+    vq->tokens = 0;
+    vq->token_next = 0;
+    vq->token_free_head = 0;
+    vq->token_num_free = 0;
 
     if (vq->ring_mem) {
         pmm_free_pages(vq->ring_mem, vq->ring_order);
@@ -179,23 +264,25 @@ int virtqueue_submit(virtqueue_t* vq,
                      virtqueue_token_t** out_token) {
     if (!vq || !addrs || !lens || !flags || count == 0 || count > vq->size) return 0;
 
-    virtqueue_token_t* token = (virtqueue_token_t*)kzalloc(sizeof(virtqueue_token_t));
-    if (!token) return 0;
-    sem_init(&token->sem, 0);
-
     uint32_t iflags = spinlock_acquire_safe(&vq->lock);
+
+    virtqueue_token_t* token = virtqueue_token_alloc_locked(vq);
+    if (!token) {
+        spinlock_release_safe(&vq->lock, iflags);
+        return 0;
+    }
 
     uint16_t head;
     if (!virtqueue_alloc_desc_chain(vq, count, &head)) {
+        virtqueue_token_free_locked(vq, token);
         spinlock_release_safe(&vq->lock, iflags);
-        virtqueue_token_destroy(token);
         return 0;
     }
 
     if (vq->pending && vq->pending[head]) {
         virtqueue_free_desc_chain(vq, head);
+        virtqueue_token_free_locked(vq, token);
         spinlock_release_safe(&vq->lock, iflags);
-        virtqueue_token_destroy(token);
         return 0;
     }
 
@@ -248,8 +335,18 @@ uint32_t virtqueue_token_wait(virtqueue_token_t* token) {
 }
 
 void virtqueue_token_destroy(virtqueue_token_t* token) {
-    if (!token) return;
-    kfree(token);
+    if (!token) {
+        return;
+    }
+
+    virtqueue_t* vq = token->owner_vq;
+    if (!vq) {
+        return;
+    }
+
+    uint32_t iflags = spinlock_acquire_safe(&vq->lock);
+    virtqueue_token_free_locked(vq, token);
+    spinlock_release_safe(&vq->lock, iflags);
 }
 
 void virtqueue_handle_irq(virtqueue_t* vq) {

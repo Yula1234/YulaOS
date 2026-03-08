@@ -470,7 +470,6 @@ static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_
 
         if ((uint32_t)(timer_ticks - start_ticks) > VGPU_CTRLQ_TIMEOUT_TICKS || spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
             virtqueue_destroy(&g_vgpu.ctrlq);
-            virtqueue_token_destroy(token);
             return 0;
         }
 
@@ -516,7 +515,6 @@ static int vgpu_ctrlq_submit_sg_locked(const uint64_t* addrs,
 
         if ((uint32_t)(timer_ticks - start_ticks) > VGPU_CTRLQ_TIMEOUT_TICKS || spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
             virtqueue_destroy(&g_vgpu.ctrlq);
-            virtqueue_token_destroy(token);
             return 0;
         }
 

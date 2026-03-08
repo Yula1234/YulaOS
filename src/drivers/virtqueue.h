@@ -38,6 +38,9 @@ typedef struct __attribute__((packed)) {
 typedef struct virtqueue_token {
     semaphore_t sem;
     uint32_t used_len;
+
+    struct virtqueue* owner_vq;
+    uint16_t pool_index;
 } virtqueue_token_t;
 
 typedef struct virtqueue {
@@ -59,7 +62,13 @@ typedef struct virtqueue {
     uint16_t avail_idx;
     uint16_t last_used_idx;
 
+    void* aux_mem;
     virtqueue_token_t** pending;
+
+    virtqueue_token_t* tokens;
+    uint16_t* token_next;
+    uint16_t token_free_head;
+    uint16_t token_num_free;
 
     spinlock_t lock;
 } virtqueue_t;
