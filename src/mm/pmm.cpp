@@ -144,10 +144,11 @@ void PmmState::init_regions(
     mem_map_ = nullptr;
 
     for (uint32_t zone = 0u; zone < PMM_ZONE_COUNT; zone++) {
-        free_bitmap_[zone] = 0u;
         for (uint32_t order = 0u; order <= PMM_MAX_ORDER; order++) {
-            free_areas_[zone][order] = {};
+            zones_[zone].free_areas[order] = {};
         }
+
+        zones_[zone].free_bitmap = 0u;
     }
 
     if (!regions || region_count == 0u) {
@@ -261,7 +262,7 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
         return pcp_alloc_from_cache(this, zone);
     }
 
-    SpinLockSafeGuard guard(lock_);
+    SpinLockSafeGuard guard(zones_[zone].lock);
     return alloc_pages_zone_unlocked(order, zone);
 }
 
@@ -280,7 +281,7 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
      * requested order while putting the spare buddies back on freelists.
      */
 
-    const uint32_t bitmap = free_bitmap_[zone];
+    const uint32_t bitmap = zones_[zone].free_bitmap;
     const uint32_t order_mask = (order == 0u) ? 0u : ((1u << order) - 1u);
     const uint32_t available = bitmap & ~order_mask;
 
@@ -321,7 +322,7 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
     }
 
     page->order = order;
-    used_pages_count_ += 1u << order;
+    __atomic_fetch_add(&used_pages_count_, 1u << order, __ATOMIC_RELAXED);
 
     return reinterpret_cast<void*>(page_to_phys(page));
 }
@@ -340,25 +341,32 @@ uint32_t PmmState::alloc_pages_order0_batch(pmm_zone_t preferred, void** out, ui
         fallback = PMM_ZONE_DMA;
     }
 
-    SpinLockSafeGuard guard(lock_);
-
     uint32_t n = 0u;
-    for (; n < cap; n++) {
-        void* p = alloc_pages_zone_unlocked(0u, preferred);
-        if (!p) {
-            break;
-        }
 
-        out[n] = p;
+    {
+        SpinLockSafeGuard guard(zones_[preferred].lock);
+
+        for (; n < cap; n++) {
+            void* p = alloc_pages_zone_unlocked(0u, preferred);
+            if (!p) {
+                break;
+            }
+
+            out[n] = p;
+        }
     }
 
-    for (; n < cap; n++) {
-        void* p = alloc_pages_zone_unlocked(0u, fallback);
-        if (!p) {
-            break;
-        }
+    if (n < cap) {
+        SpinLockSafeGuard guard(zones_[fallback].lock);
 
-        out[n] = p;
+        for (; n < cap; n++) {
+            void* p = alloc_pages_zone_unlocked(0u, fallback);
+            if (!p) {
+                break;
+            }
+
+            out[n] = p;
+        }
     }
 
     return n;
@@ -369,14 +377,44 @@ void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept 
         return;
     }
 
-    SpinLockSafeGuard guard(lock_);
+    void* dma_pages[pcp_drain_batch] = {};
+    void* normal_pages[pcp_drain_batch] = {};
+
+    uint32_t dma_count = 0u;
+    uint32_t normal_count = 0u;
 
     for (uint32_t i = 0u; i < n; i++) {
         if (!pages[i]) {
             continue;
         }
 
-        free_pages_unlocked(pages[i], 0u);
+        page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pages[i])));
+        if (!page) {
+            continue;
+        }
+
+        const pmm_zone_t zone = zone_for_flags(page->flags);
+        if (zone == PMM_ZONE_DMA) {
+            dma_pages[dma_count++] = pages[i];
+        } else {
+            normal_pages[normal_count++] = pages[i];
+        }
+    }
+
+    if (dma_count > 0u) {
+        SpinLockSafeGuard guard(zones_[PMM_ZONE_DMA].lock);
+
+        for (uint32_t i = 0u; i < dma_count; i++) {
+            free_pages_unlocked(dma_pages[i], 0u);
+        }
+    }
+
+    if (normal_count > 0u) {
+        SpinLockSafeGuard guard(zones_[PMM_ZONE_NORMAL].lock);
+
+        for (uint32_t i = 0u; i < normal_count; i++) {
+            free_pages_unlocked(normal_pages[i], 0u);
+        }
     }
 }
 
@@ -408,7 +446,8 @@ void PmmState::free_pages(void* addr, uint32_t order) noexcept {
         return;
     }
 
-    SpinLockSafeGuard guard(lock_);
+    const pmm_zone_t zone = zone_for_flags(page->flags);
+    SpinLockSafeGuard guard(zones_[zone].lock);
 
     free_pages_unlocked(addr, order);
 }
@@ -430,11 +469,11 @@ uint32_t PmmState::page_to_phys(page_t* page) const noexcept {
 }
 
 uint32_t PmmState::get_used_blocks() const noexcept {
-    return used_pages_count_;
+    return __atomic_load_n(&used_pages_count_, __ATOMIC_RELAXED);
 }
 
 uint32_t PmmState::get_free_blocks() const noexcept {
-    return total_pages_ - used_pages_count_;
+    return total_pages_ - __atomic_load_n(&used_pages_count_, __ATOMIC_RELAXED);
 }
 
 uint32_t PmmState::get_total_blocks() const noexcept {
@@ -634,19 +673,19 @@ void PmmState::list_remove(page_t** head, page_t* page) noexcept {
 }
 
 void PmmState::free_area_push(pmm_zone_t zone, uint32_t order, page_t* page) noexcept {
-    FreeArea& area = free_areas_[zone][order];
+    FreeArea& area = zones_[zone].free_areas[order];
 
     const uint32_t prev_count = area.count;
     list_add(&area.head, page);
     area.count = prev_count + 1u;
 
     if (prev_count == 0u) {
-        free_bitmap_[zone] |= 1u << order;
+        zones_[zone].free_bitmap |= 1u << order;
     }
 }
 
 page_t* PmmState::free_area_pop(pmm_zone_t zone, uint32_t order) noexcept {
-    FreeArea& area = free_areas_[zone][order];
+    FreeArea& area = zones_[zone].free_areas[order];
     page_t* page = area.head;
     if (!page) {
         return nullptr;
@@ -656,19 +695,19 @@ page_t* PmmState::free_area_pop(pmm_zone_t zone, uint32_t order) noexcept {
     area.count--;
 
     if (area.count == 0u) {
-        free_bitmap_[zone] &= ~(1u << order);
+        zones_[zone].free_bitmap &= ~(1u << order);
     }
 
     return page;
 }
 
 void PmmState::free_area_remove(pmm_zone_t zone, uint32_t order, page_t* page) noexcept {
-    FreeArea& area = free_areas_[zone][order];
+    FreeArea& area = zones_[zone].free_areas[order];
     list_remove(&area.head, page);
     area.count--;
 
     if (area.count == 0u) {
-        free_bitmap_[zone] &= ~(1u << order);
+        zones_[zone].free_bitmap &= ~(1u << order);
     }
 }
 
@@ -693,7 +732,7 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
         return;
     }
 
-    used_pages_count_ -= 1u << order;
+    __atomic_fetch_sub(&used_pages_count_, 1u << order, __ATOMIC_RELAXED);
 
     uint32_t pfn = static_cast<uint32_t>(page - mem_map_);
     const pmm_zone_t zone = zone_for_flags(page->flags);

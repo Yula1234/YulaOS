@@ -192,8 +192,6 @@ private:
     static uint32_t zone_flags_for_addr(uint32_t addr) noexcept;
     static pmm_zone_t zone_for_flags(uint32_t flags) noexcept;
 
-    SpinLock lock_;
-
     page_t* mem_map_ = nullptr;
     uint32_t total_pages_ = 0u;
     uint32_t used_pages_count_ = 0u;
@@ -203,9 +201,13 @@ private:
         uint32_t count = 0u;
     };
 
-    FreeArea free_areas_[PMM_ZONE_COUNT][PMM_MAX_ORDER + 1]{};
+    struct PmmZone {
+        SpinLock lock;
+        FreeArea free_areas[PMM_MAX_ORDER + 1]{};
+        uint32_t free_bitmap = 0u;
+    };
 
-    uint32_t free_bitmap_[PMM_ZONE_COUNT]{};
+    PmmZone zones_[PMM_ZONE_COUNT]{};
 };
 
 /* Global PMM singleton state, created on first init call. */
