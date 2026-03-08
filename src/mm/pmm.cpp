@@ -25,6 +25,8 @@ static constexpr uint32_t pcp_capacity = 256u;
 static constexpr uint32_t pcp_refill_batch = 32u;
 static constexpr uint32_t pcp_drain_batch = 128u;
 
+static constexpr uint32_t pcp_refill_order = 5u;
+
 static PerCpuPageCache pcp_caches[PMM_ZONE_COUNT][MAX_CPUS]{};
 
 static inline uint32_t pcp_cpu_index() {
@@ -61,14 +63,7 @@ static inline void pcp_cache_drain(PmmState* pmm, PerCpuPageCache& cache) {
     pmm->free_pages_order0_batch(batch, drain);
 }
 
-static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
-    kernel::ScopedIrqDisable irq_guard;
-
-    PerCpuPageCache& cache = pcp_current_cache(zone);
-    if (kernel::likely(cache.count > 0u)) {
-        return cache.phys_pages[--cache.count];
-    }
-
+static inline void* pcp_refill_fallback(PmmState* pmm, pmm_zone_t zone, PerCpuPageCache& cache) {
     void* batch[pcp_refill_batch] = {};
     const uint32_t n = pmm->alloc_pages_order0_batch(zone, batch, pcp_refill_batch);
     if (kernel::unlikely(n == 0u)) {
@@ -80,6 +75,59 @@ static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
     }
 
     return batch[0];
+}
+
+static inline void pcp_fix_shattered_page_metadata(page_t& page, pmm_zone_t zone) {
+    page.flags |= PMM_FLAG_USED;
+    page.flags &= ~PMM_FLAG_FREE;
+
+    if (zone == PMM_ZONE_DMA) {
+        page.flags |= PMM_FLAG_DMA;
+    } else {
+        page.flags &= ~PMM_FLAG_DMA;
+    }
+
+    page.ref_count = 1;
+
+    page.slab_cache = nullptr;
+    page.freelist = nullptr;
+    page.objects = 0;
+
+    page.prev = nullptr;
+    page.next = nullptr;
+}
+
+static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
+    kernel::ScopedIrqDisable irq_guard;
+
+    PerCpuPageCache& cache = pcp_current_cache(zone);
+    if (kernel::likely(cache.count > 0u)) {
+        return cache.phys_pages[--cache.count];
+    }
+
+    void* big_block = pmm->alloc_pages_zone(pcp_refill_order, zone);
+    if (kernel::unlikely(!big_block)) {
+        return pcp_refill_fallback(pmm, zone, cache);
+    }
+
+    uint8_t* base = static_cast<uint8_t*>(big_block);
+    for (uint32_t i = 1u; i < pcp_refill_batch; i++) {
+        void* phys = base + (i * PAGE_SIZE);
+        page_t* meta = pmm->phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys)));
+        if (kernel::unlikely(!meta)) {
+            continue;
+        }
+
+        pcp_fix_shattered_page_metadata(*meta, zone);
+        cache.phys_pages[cache.count++] = phys;
+    }
+
+    page_t* head_meta = pmm->phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(base)));
+    if (kernel::likely(head_meta)) {
+        pcp_fix_shattered_page_metadata(*head_meta, zone);
+    }
+
+    return base;
 }
 
 static inline void pcp_free_to_cache(PmmState* pmm, pmm_zone_t zone, void* addr) {
