@@ -359,24 +359,52 @@ void sem_init(semaphore_t* sem, int init_count) {
     dlist_init(&sem->wait_list);
 }
 
+static inline bool sem_try_acquire_fast(semaphore_t* sem) {
+    int c = __atomic_load_n(&sem->count, __ATOMIC_RELAXED);
+    while (c > 0) {
+        if (__atomic_compare_exchange_n(
+                &sem->count,
+                &c,
+                c - 1,
+                false,
+                __ATOMIC_ACQUIRE,
+                __ATOMIC_RELAXED
+            )) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 int sem_try_acquire(semaphore_t* sem) {
+    if (sem_try_acquire_fast(sem)) {
+        return 1;
+    }
+
     kernel::SpinLockNativeSafeGuard guard(sem->lock);
 
     if (sem->count <= 0) {
         return 0;
     }
 
-    __sync_fetch_and_sub(&sem->count, 1);
+    __atomic_fetch_sub(&sem->count, 1, __ATOMIC_ACQUIRE);
     return 1;
 }
 
 void sem_wait(semaphore_t* sem) {
     while (1) {
+        if (sem_try_acquire_fast(sem)) {
+            task_t* curr = proc_current();
+            curr->blocked_on_sem = nullptr;
+            return;
+        }
+
         {
             kernel::SpinLockNativeSafeGuard guard(sem->lock);
 
             if (sem->count > 0) {
-                __sync_fetch_and_sub(&sem->count, 1);
+                __atomic_fetch_sub(&sem->count, 1, __ATOMIC_ACQUIRE);
                 task_t* curr = proc_current();
                 curr->blocked_on_sem = nullptr;
                 return;
@@ -398,7 +426,7 @@ void sem_wait(semaphore_t* sem) {
 void sem_signal(semaphore_t* sem) {
     kernel::SpinLockNativeSafeGuard guard(sem->lock);
 
-    __sync_fetch_and_add(&sem->count, 1);
+    __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
     if (dlist_empty(&sem->wait_list)) {
         return;
@@ -432,7 +460,7 @@ void sem_signal_all(semaphore_t* sem) {
         t->sem_node.prev = nullptr;
         t->blocked_on_sem = nullptr;
 
-        __sync_fetch_and_add(&sem->count, 1);
+        __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
         if (t->state != TASK_ZOMBIE) {
             t->state = TASK_RUNNABLE;
