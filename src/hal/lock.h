@@ -106,6 +106,7 @@ typedef struct {
 } semaphore_t;
 
 void sem_init(semaphore_t* sem, int init_count);
+void sem_reset(semaphore_t* sem, int value);
 void sem_wait(semaphore_t* sem);
 void sem_signal(semaphore_t* sem);
 void sem_signal_all(semaphore_t* sem);

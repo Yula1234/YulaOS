@@ -9,6 +9,7 @@
 #include <hal/simd.h>
 #include <drivers/vga.h>
 #include <lib/rbtree.h>
+#include <kernel/panic.h>
 
 #include <lib/cpp/lock_guard.h>
 
@@ -357,6 +358,20 @@ void sem_init(semaphore_t* sem, int init_count) {
     sem->count = init_count;
     spinlock_init(&sem->lock);
     dlist_init(&sem->wait_list);
+}
+
+void sem_reset(semaphore_t* sem, int value) {
+    if (!sem) {
+        return;
+    }
+
+    kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
+    if (!dlist_empty(&sem->wait_list)) {
+        panic("SEM: reset with waiters");
+    }
+
+    __atomic_store_n(&sem->count, value, __ATOMIC_RELEASE);
 }
 
 static inline bool sem_try_acquire_fast(semaphore_t* sem) {
