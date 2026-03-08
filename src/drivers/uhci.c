@@ -68,7 +68,9 @@ extern volatile uint32_t timer_ticks;
 
 #define UHCI_USBSOF_DEFAULT 0x40u
 
-#define UHCI_RESET_WAIT_IO_LOOPS 20000u
+#define UHCI_RESET_GRESET_DELAY_US      10000u
+#define UHCI_RESET_HCRESET_TIMEOUT_US   50000u
+#define UHCI_RESET_HCRESET_POLL_US        100u
 
 #define UHCI_PIC_MASTER_DATA_PORT 0x21u
 #define UHCI_PIC_SLAVE_DATA_PORT  0xA1u
@@ -1144,16 +1146,17 @@ static void uhci_reset_controller(void) {
     uhci_writew(UHCI_REG_USBCMD, 0);
 
     uhci_writew(UHCI_REG_USBCMD, UHCI_USBCMD_GRESET);
-    uhci_wait_io(UHCI_RESET_WAIT_IO_LOOPS);
+    proc_usleep(UHCI_RESET_GRESET_DELAY_US);
     uhci_writew(UHCI_REG_USBCMD, 0);
 
     uhci_writew(UHCI_REG_USBCMD, UHCI_USBCMD_HCRESET);
 
-    for (uint32_t i = 0; i < UHCI_RESET_WAIT_IO_LOOPS; i++) {
+    for (uint32_t waited = 0; waited < UHCI_RESET_HCRESET_TIMEOUT_US; waited += UHCI_RESET_HCRESET_POLL_US) {
         if ((uhci_readw(UHCI_REG_USBCMD) & UHCI_USBCMD_HCRESET) == 0) {
             break;
         }
-        io_wait();
+
+        proc_usleep(UHCI_RESET_HCRESET_POLL_US);
     }
 
     uhci_writew(UHCI_REG_USBSTS, UHCI_USBSTS_CLEAR_ALL);
