@@ -65,13 +65,13 @@ static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
     kernel::ScopedIrqDisable irq_guard;
 
     PerCpuPageCache& cache = pcp_current_cache(zone);
-    if (cache.count > 0u) {
+    if (kernel::likely(cache.count > 0u)) {
         return cache.phys_pages[--cache.count];
     }
 
     void* batch[pcp_refill_batch] = {};
     const uint32_t n = pmm->alloc_pages_order0_batch(zone, batch, pcp_refill_batch);
-    if (n == 0u) {
+    if (kernel::unlikely(n == 0u)) {
         return nullptr;
     }
 
@@ -255,7 +255,7 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
 
 void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
     if (order == 0u) {
-        if (zone >= PMM_ZONE_COUNT) {
+        if (kernel::unlikely(zone >= PMM_ZONE_COUNT)) {
             return nullptr;
         }
 
@@ -267,11 +267,11 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
 }
 
 void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexcept {
-    if (order > PMM_MAX_ORDER) {
+    if (kernel::unlikely(order > PMM_MAX_ORDER)) {
         return nullptr;
     }
 
-    if (zone >= PMM_ZONE_COUNT) {
+    if (kernel::unlikely(zone >= PMM_ZONE_COUNT)) {
         return nullptr;
     }
 
@@ -285,14 +285,14 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
     const uint32_t order_mask = (order == 0u) ? 0u : ((1u << order) - 1u);
     const uint32_t available = bitmap & ~order_mask;
 
-    if (available == 0u) {
+    if (kernel::unlikely(available == 0u)) {
         return nullptr;
     }
 
     uint32_t current_order = static_cast<uint32_t>(__builtin_ctz(available));
 
     page_t* page = free_area_pop(zone, current_order);
-    if (!page) {
+    if (kernel::unlikely(!page)) {
         return nullptr;
     }
 
@@ -328,11 +328,11 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
 }
 
 uint32_t PmmState::alloc_pages_order0_batch(pmm_zone_t preferred, void** out, uint32_t cap) noexcept {
-    if (!out || cap == 0u) {
+    if (kernel::unlikely(!out || cap == 0u)) {
         return 0u;
     }
 
-    if (preferred >= PMM_ZONE_COUNT) {
+    if (kernel::unlikely(preferred >= PMM_ZONE_COUNT)) {
         preferred = PMM_ZONE_NORMAL;
     }
 
@@ -373,7 +373,7 @@ uint32_t PmmState::alloc_pages_order0_batch(pmm_zone_t preferred, void** out, ui
 }
 
 void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept {
-    if (!pages || n == 0u) {
+    if (kernel::unlikely(!pages || n == 0u)) {
         return;
     }
 
@@ -384,12 +384,12 @@ void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept 
     uint32_t normal_count = 0u;
 
     for (uint32_t i = 0u; i < n; i++) {
-        if (!pages[i]) {
+        if (kernel::unlikely(!pages[i])) {
             continue;
         }
 
         page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pages[i])));
-        if (!page) {
+        if (kernel::unlikely(!page)) {
             continue;
         }
 
@@ -419,25 +419,25 @@ void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept 
 }
 
 void PmmState::free_pages(void* addr, uint32_t order) noexcept {
-    if (!addr) {
+    if (kernel::unlikely(!addr)) {
         return;
     }
 
-    if (order > PMM_MAX_ORDER) {
+    if (kernel::unlikely(order > PMM_MAX_ORDER)) {
         return;
     }
 
     page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(addr)));
-    if (!page) {
+    if (kernel::unlikely(!page)) {
         return;
     }
 
     if (order == 0u) {
-        if ((page->flags & PMM_FLAG_KERNEL) != 0u) {
+        if (kernel::unlikely((page->flags & PMM_FLAG_KERNEL) != 0u)) {
             return;
         }
 
-        if ((page->flags & PMM_FLAG_USED) == 0u) {
+        if (kernel::unlikely((page->flags & PMM_FLAG_USED) == 0u)) {
             return;
         }
 
@@ -455,7 +455,7 @@ void PmmState::free_pages(void* addr, uint32_t order) noexcept {
 page_t* PmmState::phys_to_page(uint32_t phys_addr) noexcept {
     const uint32_t idx = phys_addr / PAGE_SIZE;
 
-    if (idx >= total_pages_) {
+    if (kernel::unlikely(idx >= total_pages_)) {
         return nullptr;
     }
 
