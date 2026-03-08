@@ -1,45 +1,40 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
+/*
+ * Physical Memory Manager.
+ *
+ * Expose a simple C ABI returning physical addresses (carried as void*).
+ * Keep the core implementation in C++ to enforce invariants and keep locking
+ * structured.
+ */
+
 #ifndef MM_PMM_H
 #define MM_PMM_H
 
 #include <stdint.h>
 #include <stddef.h>
 
-/*
- * Physical Memory Manager.
- *
- * This is a page-based allocator. The core implementation is a buddy system
- * with per-zone freelists.
- *
- * The API returns physical addresses. They are carried as `void*` to keep the
- * call sites lightweight, but the value is not a virtual pointer.
- */
-
-#define PAGE_SIZE       4096
-#define PAGE_SHIFT      12
-#define PAGE_ALIGN(x)   (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
+#define PAGE_SIZE 4096
+#define PAGE_SHIFT 12
+#define PAGE_ALIGN(x) (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
 
 /*
- * Maximum buddy order. `order == n` means a block size of
- *   (PAGE_SIZE << n)
- * and (1 << n) base pages.
+ * Keep the buddy order small to cap metadata and scanning. Higher orders are
+ * still available through the buddy itself by coalescing.
  */
-#define PMM_MAX_ORDER   11
+#define PMM_MAX_ORDER 11
 
 typedef enum {
     PMM_FLAG_FREE     = 0,
-    PMM_FLAG_USED     = (1 << 0),
-    PMM_FLAG_KERNEL   = (1 << 1),
-    PMM_FLAG_DMA      = (1 << 2),
+    PMM_FLAG_USED     = (1u << 0),
+    PMM_FLAG_KERNEL   = (1u << 1),
+    PMM_FLAG_DMA      = (1u << 2),
 } page_flags_t;
 
 /*
- * Allocation zones.
- *
- * DMA is intended for low memory used by devices with addressing limits.
- * NORMAL is everything else.
+ * Split low DMA-addressable memory from the rest.
+ * This is a contention win: independent zones can make progress in parallel.
  */
 typedef enum {
     PMM_ZONE_DMA = 0,
@@ -52,34 +47,23 @@ typedef enum {
     PMM_REGION_RESERVED = 2,
 } pmm_region_type_t;
 
-/*
- * Memory map as provided by early boot code.
- *
- * base/size are physical byte ranges.
- * type is a pmm_region_type_t value.
- */
 typedef struct {
     uint32_t base;
     uint32_t size;
     uint32_t type;
 } pmm_region_t;
 
-/*
- * Extra "hands-off" ranges inside otherwise available memory.
- *
- * Use this for things like ACPI tables, MMIO windows, bootloader scratch
- * buffers, etc.
- */
 typedef struct {
     uint32_t base;
     uint32_t size;
 } pmm_reserved_region_t;
 
 /*
- * Per-page metadata.
+ * Keep this struct compact and cache-friendly: the allocator walks it a lot.
  *
- * This structure is also used as the node for buddy freelists.
- * When a page is allocated, list pointers must not be relied upon.
+ * `order` is buddy-only state.
+ * `slab_cache` is SLUB-only state.
+ * Those lifetimes do not overlap for an allocated page, so share the storage.
  */
 typedef struct page {
     uint32_t flags;
@@ -99,6 +83,10 @@ typedef struct page {
     uint32_t _reserved;
 } page_t;
 
+/*
+ * Keep the size a power of two to make page-indexing and cacheline packing
+ * predictable. This is a hot structure.
+ */
 #ifdef __cplusplus
 static_assert(sizeof(page_t) == 32u);
 #else
@@ -115,57 +103,38 @@ namespace kernel {
 class PmmState {
 public:
     /*
-     * Initialize PMM with a single [0, mem_size) available range.
-     * `kernel_end_addr` is a physical address and is treated as the end of the
-     * kernel image. Internal metadata is placed after it.
+     * `kernel_end_addr` pins the kernel image and places PMM metadata after it.
+     * Do not rely on dynamic allocations during boot.
      */
     void init(uint32_t mem_size, uint32_t kernel_end_addr) noexcept;
 
     /*
-     * Initialize PMM from an explicit region list plus optional reservations.
-     *
-     * Only PMM_REGION_AVAILABLE ranges are considered.
-     * `reserved` further carves out subranges from those.
+     * Build allocator state from an explicit memory map.
+     * Treat non-AVAILABLE regions and `reserved` subranges as hands-off.
      */
     void init_regions(
-        const pmm_region_t* regions,
-        uint32_t region_count,
-        const pmm_reserved_region_t* reserved,
-        uint32_t reserved_count,
+        const pmm_region_t* regions, uint32_t region_count,
+        const pmm_reserved_region_t* reserved, uint32_t reserved_count,
         uint32_t kernel_end_addr
     ) noexcept;
 
     /*
-     * Allocate 2^order contiguous pages.
-     *
-     * Returns a physical base address, aligned to (PAGE_SIZE << order), or
-     * nullptr on failure.
+     * Return a physical base address aligned to the allocation size.
+     * Keep the interface minimal: higher layers pick policies.
      */
     [[nodiscard]] void* alloc_pages(uint32_t order) noexcept;
-
-    /*
-     * Same as alloc_pages(), but restricted to a specific zone.
-     */
     [[nodiscard]] void* alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept;
 
-    [[nodiscard]] uint32_t alloc_pages_order0_batch(pmm_zone_t preferred, void** out, uint32_t cap) noexcept;
+    [[nodiscard]] uint32_t alloc_pages_order0_batch(
+        pmm_zone_t preferred,
+        void** out, uint32_t cap
+    ) noexcept;
+
     void free_pages_order0_batch(void* const* pages, uint32_t n) noexcept;
 
-    /*
-     * Free a block previously allocated with alloc_pages*().
-     * `addr` must be the same physical base and `order` must match.
-     */
     void free_pages(void* addr, uint32_t order) noexcept;
 
-    /*
-     * Translate a physical address to per-page metadata.
-     * The address does not need to be page-aligned.
-     */
     [[nodiscard]] page_t* phys_to_page(uint32_t phys_addr) noexcept;
-
-    /*
-     * Return base physical address of the page described by `page`.
-     */
     [[nodiscard]] uint32_t page_to_phys(page_t* page) const noexcept;
 
     [[nodiscard]] uint32_t get_used_blocks() const noexcept;
@@ -186,17 +155,26 @@ private:
     void free_area_remove(pmm_zone_t zone, uint32_t order, page_t* page) noexcept;
 
     void free_pages_unlocked(void* addr, uint32_t order) noexcept;
-    
+
     void init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) noexcept;
-    
-    void free_range(uint32_t start, uint32_t end, uint32_t zone_flags, const pmm_reserved_region_t* reserved, uint32_t reserved_count) noexcept;
-    bool range_is_reserved(uint32_t start, uint32_t end, const pmm_reserved_region_t* reserved, uint32_t reserved_count) const noexcept;
-    
+
+    void free_range(
+        uint32_t start, uint32_t end,
+        uint32_t zone_flags,
+        const pmm_reserved_region_t* reserved, uint32_t reserved_count
+    ) noexcept;
+
+    bool range_is_reserved(
+        uint32_t start, uint32_t end,
+        const pmm_reserved_region_t* reserved, uint32_t reserved_count
+    ) const noexcept;
+
     static uint32_t zone_flags_for_addr(uint32_t addr) noexcept;
     static pmm_zone_t zone_for_flags(uint32_t flags) noexcept;
 
     page_t* mem_map_ = nullptr;
     uint32_t total_pages_ = 0u;
+
     atomic<uint32_t> used_pages_count_{0u};
 
     struct FreeArea {
@@ -205,6 +183,10 @@ private:
     };
 
     struct PmmZone {
+        /*
+         * Guard the freelists and the bitmap together.
+         * Keep the critical section small and the ownership obvious.
+         */
         SpinLock lock;
         FreeArea free_areas[PMM_MAX_ORDER + 1]{};
         uint32_t free_bitmap = 0u;
@@ -213,7 +195,6 @@ private:
     PmmZone zones_[PMM_ZONE_COUNT]{};
 };
 
-/* Global PMM singleton state, created on first init call. */
 [[nodiscard]] PmmState* pmm_state() noexcept;
 
 } /* namespace kernel */
@@ -224,12 +205,15 @@ private:
 extern "C" {
 #endif
 
+/*
+ * Keep the ABI surface stable.
+ * Route everything through the C++ singleton to avoid duplicated state.
+ */
+
 void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr);
 void pmm_init_regions(
-    const pmm_region_t* regions,
-    uint32_t region_count,
-    const pmm_reserved_region_t* reserved,
-    uint32_t reserved_count,
+    const pmm_region_t* regions, uint32_t region_count,
+    const pmm_reserved_region_t* reserved, uint32_t reserved_count,
     uint32_t kernel_end_addr
 );
 
