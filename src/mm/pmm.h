@@ -164,6 +164,10 @@ private:
     static void list_add(page_t** head, page_t* page) noexcept;
     static void list_remove(page_t** head, page_t* page) noexcept;
 
+    void free_area_push(pmm_zone_t zone, uint32_t order, page_t* page) noexcept;
+    [[nodiscard]] page_t* free_area_pop(pmm_zone_t zone, uint32_t order) noexcept;
+    void free_area_remove(pmm_zone_t zone, uint32_t order, page_t* page) noexcept;
+
     void free_pages_unlocked(void* addr, uint32_t order) noexcept;
     
     void init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) noexcept;
@@ -186,6 +190,8 @@ private:
     };
 
     FreeArea free_areas_[PMM_ZONE_COUNT][PMM_MAX_ORDER + 1]{};
+
+    uint32_t free_bitmap_[PMM_ZONE_COUNT]{};
 };
 
 /* Global PMM singleton state, created on first init call. */

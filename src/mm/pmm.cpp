@@ -55,6 +55,7 @@ void PmmState::init_regions(
     mem_map_ = nullptr;
 
     for (uint32_t zone = 0u; zone < PMM_ZONE_COUNT; zone++) {
+        free_bitmap_[zone] = 0u;
         for (uint32_t order = 0u; order <= PMM_MAX_ORDER; order++) {
             free_areas_[zone][order] = {};
         }
@@ -170,22 +171,17 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
      * requested order while putting the spare buddies back on freelists.
      */
 
-    uint32_t current_order = order;
-    while (current_order <= PMM_MAX_ORDER) {
-        if (free_areas_[zone][current_order].head) {
-            break;
-        }
+    const uint32_t bitmap = free_bitmap_[zone];
+    const uint32_t order_mask = (order == 0u) ? 0u : ((1u << order) - 1u);
+    const uint32_t available = bitmap & ~order_mask;
 
-        current_order++;
-    }
-
-    if (current_order > PMM_MAX_ORDER) {
+    if (available == 0u) {
         return nullptr;
     }
 
-    page_t* page = free_areas_[zone][current_order].head;
-    list_remove(&free_areas_[zone][current_order].head, page);
-    free_areas_[zone][current_order].count--;
+    uint32_t current_order = static_cast<uint32_t>(__builtin_ctz(available));
+
+    page_t* page = free_area_pop(zone, current_order);
 
     page->flags |= PMM_FLAG_USED;
     page->flags &= ~PMM_FLAG_FREE;
@@ -209,8 +205,7 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
         buddy->order = current_order;
         buddy->ref_count = 0;
 
-        list_add(&free_areas_[zone][current_order].head, buddy);
-        free_areas_[zone][current_order].count++;
+        free_area_push(zone, current_order, buddy);
     }
 
     page->order = order;
@@ -458,6 +453,45 @@ void PmmState::list_remove(page_t** head, page_t* page) noexcept {
     page->prev = nullptr;
 }
 
+void PmmState::free_area_push(pmm_zone_t zone, uint32_t order, page_t* page) noexcept {
+    FreeArea& area = free_areas_[zone][order];
+
+    const uint32_t prev_count = area.count;
+    list_add(&area.head, page);
+    area.count = prev_count + 1u;
+
+    if (prev_count == 0u) {
+        free_bitmap_[zone] |= 1u << order;
+    }
+}
+
+page_t* PmmState::free_area_pop(pmm_zone_t zone, uint32_t order) noexcept {
+    FreeArea& area = free_areas_[zone][order];
+    page_t* page = area.head;
+    if (!page) {
+        return nullptr;
+    }
+
+    list_remove(&area.head, page);
+    area.count--;
+
+    if (area.count == 0u) {
+        free_bitmap_[zone] &= ~(1u << order);
+    }
+
+    return page;
+}
+
+void PmmState::free_area_remove(pmm_zone_t zone, uint32_t order, page_t* page) noexcept {
+    FreeArea& area = free_areas_[zone][order];
+    list_remove(&area.head, page);
+    area.count--;
+
+    if (area.count == 0u) {
+        free_bitmap_[zone] &= ~(1u << order);
+    }
+}
+
 void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
     page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(addr)));
     if (!page) {
@@ -510,8 +544,7 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
             break;
         }
 
-        list_remove(&free_areas_[zone][order].head, buddy);
-        free_areas_[zone][order].count--;
+        free_area_remove(zone, order, buddy);
 
         buddy->order = 0;
 
@@ -531,8 +564,7 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
     page->order = order;
     page->ref_count = 0;
 
-    list_add(&free_areas_[zone][order].head, page);
-    free_areas_[zone][order].count++;
+    free_area_push(zone, order, page);
 }
 
 static inline PmmState& pmm_state_init_once() noexcept {
