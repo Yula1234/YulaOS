@@ -8,6 +8,7 @@
 #include <lib/cpp/new.h>
 
 #include <kernel/panic.h>
+#include <kernel/cpu.h>
 
 #include <lib/string.h>
 
@@ -46,7 +47,13 @@ struct KmemCache {
     
     kernel::SpinLock lock;
 
-    page_t* cpu_slab;
+    struct PerCpuSlab {
+        page_t* page;
+        kernel::atomic<void*> remote_free;
+        kernel::atomic<uint32_t> remote_free_count;
+    };
+
+    PerCpuSlab cpu_slabs[MAX_CPUS];
     page_t* partial;
     page_t* full;
 
@@ -87,7 +94,13 @@ public:
             c->object_size = size;
             c->align = k_align_default;
             c->flags = 0;
-            c->cpu_slab = nullptr;
+
+            for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+                c->cpu_slabs[cpu].page = nullptr;
+                c->cpu_slabs[cpu].remote_free.store(nullptr);
+                c->cpu_slabs[cpu].remote_free_count.store(0u);
+            }
+
             c->partial = nullptr;
             c->full = nullptr;
 
@@ -98,93 +111,56 @@ public:
     }
 
     [[nodiscard]] void* cache_alloc(KmemCache& cache) noexcept {
-        /*
-         * Fast path uses cpu_slab if it still has free objects.
-         * When cpu_slab is exhausted we pull from partial, otherwise we grow
-         * the cache by allocating a new backing page.
-         */
-        while (true) {
-            page_t* page = nullptr;
-            void* obj = nullptr;
+        kernel::ScopedIrqDisable irq_guard;
 
-            {
-                kernel::SpinLockSafeGuard guard(cache.lock);
+        cpu_t* cpu = cpu_current();
+        if (kernel::unlikely(!cpu)) {
+            return nullptr;
+        }
 
-                page = cache.cpu_slab;
+        const int cpu_index = cpu->index;
+        if (kernel::unlikely(cpu_index < 0 || cpu_index >= MAX_CPUS)) {
+            return nullptr;
+        }
 
-                if (page && page->freelist) {
-                    if (kernel::unlikely(page->slab_cache != &cache)) {
-                        panic("SLUB: cpu_slab cache mismatch");
-                    }
+        KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
 
-                    obj = slub_alloc_from_page(*page);
+        page_t* page = local.page;
+        if (kernel::likely(page != nullptr)) {
+            drain_remote_frees(cache, local);
 
-                    if (!page->freelist) {
-                        cache.cpu_slab = nullptr;
-                        slab_list_add(cache.full, *page);
-                    }
-
-                    return obj;
+            if (kernel::likely(page->freelist != nullptr)) {
+                if (kernel::unlikely(page->slab_cache != &cache)) {
+                    panic("SLUB: cpu slab cache mismatch");
                 }
 
-                if (cache.partial) {
-                    page = cache.partial;
+                void* obj = slub_alloc_from_page(*page);
 
-                    if (kernel::unlikely(page->slab_cache != &cache)) {
-                        panic("SLUB: partial page cache mismatch");
-                    }
-
-                    if (kernel::unlikely(!page->freelist)) {
-                        panic("SLUB: partial page has null freelist");
-                    }
-
-                    slab_list_remove(cache.partial, *page);
-                    cache.cpu_slab = page;
-
-                    obj = slub_alloc_from_page(*page);
-
-                    if (!page->freelist) {
-                        cache.cpu_slab = nullptr;
-                        slab_list_add(cache.full, *page);
-                    }
-
-                    return obj;
+                if (kernel::unlikely(page->freelist == nullptr)) {
+                    finish_cpu_slab_full(cache, cpu_index, *page);
                 }
-            }
 
-            void* new_virt = vmm_->alloc_pages(1);
-            if (kernel::unlikely(!new_virt)) {
-                return nullptr;
-            }
-
-            const uint32_t phys = paging_get_phys(
-                kernel_page_directory,
-                static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_virt))
-            );
-            page_t* new_page = pmm_->phys_to_page(phys);
-
-            if (kernel::unlikely(!new_page)) {
-                vmm_->free_pages(new_virt, 1);
-
-                return nullptr;
-            }
-
-            slub_init_page(cache, *new_page, new_virt);
-
-            {
-                kernel::SpinLockSafeGuard guard(cache.lock);
-
-                if (!cache.cpu_slab) {
-                    cache.cpu_slab = new_page;
-                } else {
-                    slab_list_add(cache.partial, *new_page);
-                }
+                return obj;
             }
         }
+
+        return cache_alloc_slowpath(cache, cpu_index);
     }
 
     void cache_free(KmemCache& cache, void* obj) noexcept {
         if (kernel::unlikely(!obj)) {
+            return;
+        }
+
+        kernel::ScopedIrqDisable irq_guard;
+
+        cpu_t* cpu = cpu_current();
+        if (kernel::unlikely(!cpu)) {
+            return;
+        }
+
+        const int cpu_index = cpu->index;
+        if (kernel::unlikely(cpu_index < 0 || cpu_index >= MAX_CPUS)) {
             return;
         }
 
@@ -215,50 +191,26 @@ public:
             panic("SLUB: invalid object address");
         }
 
-        /*
-         * If the last object is freed and the page is not cpu_slab, we return
-         * the whole page back to VMM.
-         */
-        bool need_free_page = false;
+        const uint32_t owner_tag = page->_reserved;
+        const int owner_cpu = static_cast<int>(owner_tag) - 1;
 
-        {
-            kernel::SpinLockSafeGuard guard(cache.lock);
+        if (owner_tag != 0u && owner_cpu >= 0 && owner_cpu < MAX_CPUS) {
+            if (owner_cpu == cpu_index) {
+                KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
+                if (kernel::likely(local.page == page)) {
+                    drain_remote_frees(cache, local);
 
-            const bool was_full = (page->freelist == nullptr);
-            const bool will_free_page = (page != cache.cpu_slab && page->objects == 1u);
-
-            if (!will_free_page) {
-                *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(page->freelist) | 1u;
-                page->freelist = obj;
-            }
-
-            page->objects--;
-
-            if (was_full && page != cache.cpu_slab) {
-                slab_list_remove(cache.full, *page);
-                if (!will_free_page) {
-                    slab_list_add(cache.partial, *page);
+                    push_object_to_page_freelist(*page, obj);
+                    page->objects--;
+                    return;
                 }
-            }
-
-            if (will_free_page) {
-                if (!was_full) {
-                    slab_list_remove(cache.partial, *page);
-                }
-
-                page->slab_cache = nullptr;
-                page->freelist = nullptr;
-                page->objects = 0;
-                page->prev = nullptr;
-                page->next = nullptr;
-
-                need_free_page = true;
+            } else {
+                remote_free_object(cache.cpu_slabs[owner_cpu], obj);
+                return;
             }
         }
 
-        if (need_free_page) {
-            vmm_->free_pages(reinterpret_cast<void*>(page_virt), 1);
-        }
+        cache_free_slowpath(cache, obj, *page, page_virt);
     }
 
     [[nodiscard]] void* malloc(size_t size) noexcept {
@@ -490,7 +442,8 @@ public:
     }
 
     int cache_destroy(KmemCache& cache) noexcept {
-        uintptr_t free_page_virt = 0u;
+        uintptr_t free_pages_virt[MAX_CPUS]{};
+        uint32_t free_pages_count = 0u;
 
         {
             kernel::SpinLockSafeGuard dyn_guard(dynamic_caches_lock_);
@@ -506,8 +459,22 @@ public:
                     return 0;
                 }
 
-                if (cache.cpu_slab) {
-                    page_t* page = cache.cpu_slab;
+                for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+                    KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu];
+
+                    if (local.remote_free.load() != nullptr) {
+                        return 0;
+                    }
+
+                    if (local.remote_free_count.load() != 0u) {
+                        return 0;
+                    }
+
+                    if (!local.page) {
+                        continue;
+                    }
+
+                    page_t* page = local.page;
 
                     if (page->objects != 0u) {
                         return 0;
@@ -517,16 +484,23 @@ public:
                         return 0;
                     }
 
-                    free_page_virt = reinterpret_cast<uintptr_t>(page->freelist)
+                    if (free_pages_count >= MAX_CPUS) {
+                        return 0;
+                    }
+
+                    const uintptr_t page_virt = reinterpret_cast<uintptr_t>(page->freelist)
                         & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
 
-                    cache.cpu_slab = nullptr;
+                    free_pages_virt[free_pages_count++] = page_virt;
+
+                    local.page = nullptr;
 
                     page->slab_cache = nullptr;
                     page->freelist = nullptr;
                     page->objects = 0;
                     page->prev = nullptr;
                     page->next = nullptr;
+                    page->_reserved = 0u;
                 }
             }
 
@@ -536,8 +510,10 @@ public:
             dynamic_free_head_ = &cache;
         }
 
-        if (free_page_virt != 0u) {
-            vmm_->free_pages(reinterpret_cast<void*>(free_page_virt), 1);
+        for (uint32_t i = 0; i < free_pages_count; i++) {
+            if (free_pages_virt[i] != 0u) {
+                vmm_->free_pages(reinterpret_cast<void*>(free_pages_virt[i]), 1);
+            }
         }
 
         return 1;
@@ -696,6 +672,7 @@ private:
         page.objects = 0;
         page.next = nullptr;
         page.prev = nullptr;
+        page._reserved = 0u;
 
         const uint32_t obj_count = PAGE_SIZE / cache.object_size;
         uint8_t* base = static_cast<uint8_t*>(virt_addr);
@@ -740,6 +717,233 @@ private:
         *reinterpret_cast<uintptr_t*>(obj) = 0;
 
         return obj;
+    }
+
+    static void push_object_to_page_freelist(page_t& page, void* obj) noexcept {
+        *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(page.freelist) | 1u;
+        page.freelist = obj;
+    }
+
+    static void remote_free_object(KmemCache::PerCpuSlab& target, void* obj) noexcept {
+        void* head = target.remote_free.load();
+        while (true) {
+            *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(head) | 1u;
+
+            if (target.remote_free.compare_exchange_weak(head, obj)) {
+                target.remote_free_count.fetch_add(1u);
+                return;
+            }
+        }
+    }
+
+    void drain_remote_frees(KmemCache& cache, KmemCache::PerCpuSlab& local) noexcept {
+        if (kernel::unlikely(local.page == nullptr)) {
+            return;
+        }
+
+        if (kernel::likely(local.remote_free.load() == nullptr)) {
+            return;
+        }
+
+        void* list = local.remote_free.exchange(nullptr);
+        const uint32_t count = local.remote_free_count.exchange(0u);
+
+        page_t* page = local.page;
+
+        if (kernel::unlikely(list == nullptr)) {
+            if (kernel::unlikely(count != 0u)) {
+                local.remote_free_count.store(count);
+            }
+            return;
+        }
+
+        if (kernel::unlikely(page->slab_cache != &cache)) {
+            panic("SLUB: remote free slab cache mismatch");
+        }
+
+        uint32_t drained = 0u;
+        void* it = list;
+        while (it) {
+            const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(it);
+            if (kernel::unlikely((next_tagged & 1u) == 0u)) {
+                panic("SLUB: remote free tag corrupt");
+            }
+
+            void* next = reinterpret_cast<void*>(next_tagged & ~static_cast<uintptr_t>(1u));
+            push_object_to_page_freelist(*page, it);
+            drained++;
+            it = next;
+        }
+
+        if (drained != count) {
+            if (kernel::unlikely(count < drained)) {
+                panic("SLUB: remote free count underflow");
+            }
+        }
+
+        if (kernel::unlikely(page->objects < drained)) {
+            panic("SLUB: remote free objects underflow");
+        }
+
+        page->objects = static_cast<uint16_t>(page->objects - drained);
+    }
+
+    void finish_cpu_slab_full(KmemCache& cache, int cpu_index, page_t& page) noexcept {
+        kernel::SpinLockSafeGuard guard(cache.lock);
+
+        KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
+        if (local.page != &page) {
+            return;
+        }
+
+        if (page.freelist != nullptr) {
+            return;
+        }
+
+        local.page = nullptr;
+        page._reserved = 0u;
+
+        slab_list_add(cache.full, page);
+    }
+
+    [[nodiscard]] void* cache_alloc_slowpath(KmemCache& cache, int cpu_index) noexcept {
+        while (true) {
+            {
+                kernel::SpinLockSafeGuard guard(cache.lock);
+
+                KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
+
+                if (local.page != nullptr) {
+                    if (kernel::unlikely(local.page->slab_cache != &cache)) {
+                        panic("SLUB: cpu slab cache mismatch in slowpath");
+                    }
+
+                    if (local.page->freelist == nullptr) {
+                        page_t* full_page = local.page;
+                        local.page = nullptr;
+
+                        full_page->_reserved = 0u;
+                        slab_list_add(cache.full, *full_page);
+                    }
+                }
+
+                if (local.page == nullptr && cache.partial != nullptr) {
+                    page_t* page = cache.partial;
+
+                    if (kernel::unlikely(page->slab_cache != &cache)) {
+                        panic("SLUB: partial page cache mismatch");
+                    }
+
+                    if (kernel::unlikely(page->freelist == nullptr)) {
+                        panic("SLUB: partial page has null freelist");
+                    }
+
+                    slab_list_remove(cache.partial, *page);
+
+                    local.page = page;
+                    page->_reserved = static_cast<uint32_t>(cpu_index + 1);
+                }
+            }
+
+            KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
+            if (local.page != nullptr) {
+                drain_remote_frees(cache, local);
+
+                if (kernel::likely(local.page->freelist != nullptr)) {
+                    void* obj = slub_alloc_from_page(*local.page);
+                    if (kernel::unlikely(!obj)) {
+                        continue;
+                    }
+
+                    if (kernel::unlikely(local.page->freelist == nullptr)) {
+                        finish_cpu_slab_full(cache, cpu_index, *local.page);
+                    }
+
+                    return obj;
+                }
+            }
+
+            void* new_virt = vmm_->alloc_pages(1);
+            if (kernel::unlikely(!new_virt)) {
+                return nullptr;
+            }
+
+            const uint32_t phys = paging_get_phys(
+                kernel_page_directory,
+                static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_virt))
+            );
+            page_t* new_page = pmm_->phys_to_page(phys);
+
+            if (kernel::unlikely(!new_page)) {
+                vmm_->free_pages(new_virt, 1);
+                return nullptr;
+            }
+
+            slub_init_page(cache, *new_page, new_virt);
+
+            {
+                kernel::SpinLockSafeGuard guard(cache.lock);
+
+                KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
+                if (local.page == nullptr) {
+                    local.page = new_page;
+                    new_page->_reserved = static_cast<uint32_t>(cpu_index + 1);
+                } else {
+                    new_page->_reserved = 0u;
+                    slab_list_add(cache.partial, *new_page);
+                }
+            }
+        }
+    }
+
+    void cache_free_slowpath(
+        KmemCache& cache,
+        void* obj,
+        page_t& page,
+        uintptr_t page_virt
+    ) noexcept {
+        bool need_free_page = false;
+
+        {
+            kernel::SpinLockSafeGuard guard(cache.lock);
+
+            const bool was_full = (page.freelist == nullptr);
+            const bool will_free_page = (page._reserved == 0u && page.objects == 1u);
+
+            if (!will_free_page) {
+                push_object_to_page_freelist(page, obj);
+            }
+
+            page.objects--;
+
+            if (page._reserved == 0u) {
+                if (was_full) {
+                    slab_list_remove(cache.full, page);
+                    if (!will_free_page) {
+                        slab_list_add(cache.partial, page);
+                    }
+                }
+            }
+
+            if (will_free_page) {
+                if (!was_full) {
+                    slab_list_remove(cache.partial, page);
+                }
+
+                page.slab_cache = nullptr;
+                page.freelist = nullptr;
+                page.objects = 0;
+                page.prev = nullptr;
+                page.next = nullptr;
+                page._reserved = 0u;
+
+                need_free_page = true;
+            }
+        }
+
+        if (need_free_page) {
+            vmm_->free_pages(reinterpret_cast<void*>(page_virt), 1);
+        }
     }
 
     static bool heap_range_contains(uintptr_t addr) noexcept {
@@ -867,7 +1071,13 @@ private:
         cache->object_size = size;
         cache->align = align;
         cache->flags = flags;
-        cache->cpu_slab = nullptr;
+
+        for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+            cache->cpu_slabs[cpu].page = nullptr;
+            cache->cpu_slabs[cpu].remote_free.store(nullptr);
+            cache->cpu_slabs[cpu].remote_free_count.store(0u);
+        }
+
         cache->partial = nullptr;
         cache->full = nullptr;
         cache->next_dyn = nullptr;
