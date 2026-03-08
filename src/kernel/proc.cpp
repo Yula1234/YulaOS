@@ -637,7 +637,7 @@ void proc_fd_table_init(task_t* t) {
     memset(ft, 0, sizeof(*ft));
 
     ft->refs = 1;
-    spinlock_init(&ft->lock);
+    mutex_init(&ft->lock);
     
     ft->max_fds = 32;
     ft->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft->max_fds));
@@ -706,7 +706,7 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return 0;
 
-    kernel::SpinLockNativeSafeGuard guard(ft->lock);
+    kernel::MutexNativeGuard guard(ft->lock);
     
     file_desc_t* out = 0;
     if ((uint32_t)fd < ft->max_fds && ft->fds) {
@@ -753,7 +753,7 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::SpinLockNativeSafeGuard guard(ft->lock);
+    kernel::MutexNativeGuard guard(ft->lock);
     
     if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
         return -1;
@@ -789,7 +789,7 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::SpinLockNativeSafeGuard guard(ft->lock);
+    kernel::MutexNativeGuard guard(ft->lock);
     
     if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
         return -1;
@@ -819,7 +819,7 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     int found = -1;
 
     {
-        kernel::SpinLockNativeSafeGuard guard(ft->lock);
+        kernel::MutexNativeGuard guard(ft->lock);
 
         int expected = ft->fd_next;
         if (expected < 0) {
@@ -865,7 +865,7 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::SpinLockNativeSafeGuard guard(ft->lock);
+    kernel::MutexNativeGuard guard(ft->lock);
     
     if ((uint32_t)fd >= ft->max_fds || !ft->fds || !ft->fds[fd]) {
         return -1;
@@ -892,9 +892,9 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
 
     memset(ft.get(), 0, sizeof(*ft.get()));
     ft.get()->refs = 1;
-    spinlock_init(&ft.get()->lock);
+    mutex_init(&ft.get()->lock);
 
-    kernel::SpinLockNativeSafeGuard src_guard(src->lock);
+    kernel::MutexNativeGuard src_guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
     ft.get()->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds));

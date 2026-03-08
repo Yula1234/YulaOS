@@ -218,6 +218,29 @@ private:
     bool acquired_;
 };
 
+class MutexNativeGuard {
+public:
+    explicit MutexNativeGuard(mutex_t& lock)
+        : lock_(&lock) {
+        mutex_lock(lock_);
+    }
+
+    MutexNativeGuard(const MutexNativeGuard&) = delete;
+    MutexNativeGuard& operator=(const MutexNativeGuard&) = delete;
+
+    MutexNativeGuard(MutexNativeGuard&&) = delete;
+    MutexNativeGuard& operator=(MutexNativeGuard&&) = delete;
+
+    ~MutexNativeGuard() {
+        if (lock_) {
+            mutex_unlock(lock_);
+        }
+    }
+
+private:
+    mutex_t* lock_;
+};
+
 }
 
 #endif
