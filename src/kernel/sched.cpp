@@ -411,7 +411,17 @@ void sem_wait(semaphore_t* sem) {
     while (1) {
         if (sem_try_acquire_fast(sem)) {
             task_t* curr = proc_current();
-            curr->blocked_on_sem = nullptr;
+            if (curr) {
+                curr->blocked_on_sem = nullptr;
+            }
+            return;
+        }
+
+        task_t* curr_fast = proc_current();
+        if (!curr_fast) {
+            while (!sem_try_acquire_fast(sem)) {
+                __asm__ volatile("pause" ::: "memory");
+            }
             return;
         }
 
@@ -421,11 +431,16 @@ void sem_wait(semaphore_t* sem) {
             if (sem->count > 0) {
                 __atomic_fetch_sub(&sem->count, 1, __ATOMIC_ACQUIRE);
                 task_t* curr = proc_current();
-                curr->blocked_on_sem = nullptr;
+                if (curr) {
+                    curr->blocked_on_sem = nullptr;
+                }
                 return;
             }
 
             task_t* curr = proc_current();
+            if (!curr) {
+                continue;
+            }
 
             curr->blocked_on_sem = static_cast<void*>(sem);
 

@@ -2,6 +2,7 @@
 #include <kernel/output/console.h>
 
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/mutex.h>
 
 #include <lib/types.h>
 #include <stddef.h>
@@ -10,7 +11,7 @@
 namespace kernel::output {
 namespace {
 
-static kernel::SpinLock g_kprintf_lock;
+static kernel::Mutex g_kprintf_lock;
 
 class ConsoleSink {
 public:
@@ -398,7 +399,7 @@ static int kvprintf_locked(ConsoleSink& out, const char* fmt, va_list ap);
 }
 
 int kvprintf(const char* fmt, va_list ap) {
-    kernel::SpinLockSafeGuard guard(g_kprintf_lock);
+    kernel::MutexGuard guard(g_kprintf_lock);
 
     ConsoleSink out;
     return kvprintf_locked(out, fmt, ap);

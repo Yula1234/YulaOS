@@ -1,13 +1,14 @@
 #include <drivers/serial/serial_core.h>
 
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/mutex.h>
 
 #include <stddef.h>
 #include <stdint.h>
 
 namespace {
 
-static kernel::SpinLock g_serial_core_lock;
+static kernel::Mutex g_serial_core_lock;
 static NS16550::Port g_port = NS16550::Port::COM1;
 
 static constexpr size_t kRxCap = 4096;
@@ -82,7 +83,7 @@ static void pump_tx_unlocked(void) {
 }
 
 extern "C" void serial_core_init(uint16_t port) {
-    kernel::SpinLockSafeGuard guard(g_serial_core_lock);
+    kernel::MutexGuard guard(g_serial_core_lock);
 
     g_port = static_cast<NS16550::Port>(port);
     g_rx = Ring{};
@@ -99,7 +100,7 @@ extern "C" size_t serial_core_write(const void* data, size_t size) {
 
     const uint8_t* bytes = static_cast<const uint8_t*>(data);
 
-    kernel::SpinLockSafeGuard guard(g_serial_core_lock);
+    kernel::MutexGuard guard(g_serial_core_lock);
 
     pump_rx_unlocked();
 
@@ -132,7 +133,7 @@ extern "C" size_t serial_core_read(void* data, size_t size) {
 
     uint8_t* bytes = static_cast<uint8_t*>(data);
 
-    kernel::SpinLockSafeGuard guard(g_serial_core_lock);
+    kernel::MutexGuard guard(g_serial_core_lock);
 
     pump_rx_unlocked();
 
@@ -150,19 +151,19 @@ extern "C" size_t serial_core_read(void* data, size_t size) {
 }
 
 extern "C" size_t serial_core_rx_available(void) {
-    kernel::SpinLockSafeGuard guard(g_serial_core_lock);
+    kernel::MutexGuard guard(g_serial_core_lock);
     pump_rx_unlocked();
     return g_rx.count;
 }
 
 extern "C" size_t serial_core_tx_free(void) {
-    kernel::SpinLockSafeGuard guard(g_serial_core_lock);
+    kernel::MutexGuard guard(g_serial_core_lock);
     pump_tx_unlocked();
     return g_tx.free_space();
 }
 
 extern "C" void serial_core_poll(void) {
-    kernel::SpinLockSafeGuard guard(g_serial_core_lock);
+    kernel::MutexGuard guard(g_serial_core_lock);
     pump_rx_unlocked();
     pump_tx_unlocked();
 }
