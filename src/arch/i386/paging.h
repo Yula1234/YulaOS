@@ -38,6 +38,9 @@ extern "C" {
 #define PTE_PCD     0x010u
 #define PTE_PAT     0x080u
 
+/* paging_map_ex() flags. */
+#define PAGING_MAP_NO_TLB_FLUSH 0x00000001u
+
 /* Build identity+kernel mappings and switch to the initial kernel directory. */
 void paging_init(uint32_t ram_size_bytes);
 
@@ -74,6 +77,14 @@ uint32_t* paging_clone_directory(void);
  * `flags` are the PTE flags (PTE_PRESENT is expected for valid mappings).
  */
 void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags);
+
+void paging_map_ex(
+    uint32_t* dir,
+    uint32_t virt,
+    uint32_t phys,
+    uint32_t flags,
+    uint32_t map_flags
+);
 
 /* Zero a physical page, using a temporary fixmap mapping once paging is on. */
 void paging_zero_phys_page(uint32_t phys);

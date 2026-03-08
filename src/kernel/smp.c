@@ -24,12 +24,40 @@ volatile int ap_running_count = 0;
 
 static volatile uint32_t tlb_shootdown_lock = 0;
 static volatile uint32_t tlb_shootdown_addr = 0;
+static volatile uint32_t tlb_shootdown_end = 0;
 static volatile uint32_t tlb_shootdown_pending = 0;
 
 static inline int smp_interrupts_enabled(void) {
     uint32_t flags;
     __asm__ volatile("pushfl; popl %0" : "=r"(flags));
     return (flags & 0x200u) != 0u;
+}
+
+static inline void tlb_flush_range_local(uint32_t start, uint32_t end) {
+    if (end <= start) {
+        return;
+    }
+
+    start &= ~0xFFFu;
+    end = (end + 0xFFFu) & ~0xFFFu;
+
+    const uint32_t pages = (end - start) >> 12;
+    if (pages > 16u) {
+        uint32_t cr3;
+        __asm__ volatile(
+            "mov %%cr3, %0\n\t"
+            "mov %0, %%cr3"
+            : "=r"(cr3)
+            :
+            : "memory"
+        );
+
+        return;
+    }
+
+    for (uint32_t addr = start; addr < end; addr += 0x1000u) {
+        __asm__ volatile("invlpg (%0)" :: "r" (addr) : "memory");
+    }
 }
 
 void smp_ap_main(cpu_t* cpu_arg) {
@@ -107,22 +135,28 @@ void smp_boot_aps(void) {
 }
 
 void smp_tlb_ipi_handler(void) {
-    uint32_t addr = tlb_shootdown_addr;
-    __asm__ volatile("invlpg (%0)" :: "r" (addr) : "memory");
+    const uint32_t start = tlb_shootdown_addr;
+    const uint32_t end = tlb_shootdown_end;
+
+    tlb_flush_range_local(start, end);
 
     cpu_t* cpu = cpu_current();
     uint32_t bit = 1u << cpu->index;
     __sync_fetch_and_and(&tlb_shootdown_pending, ~bit);
 }
 
-void smp_tlb_shootdown(uint32_t virt) {
+void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
+    if (end <= start) {
+        return;
+    }
+
     if (cpu_count <= 1 || ap_running_count == 0) {
-        __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+        tlb_flush_range_local(start, end);
         return;
     }
 
     if (!smp_interrupts_enabled()) {
-        __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+        tlb_flush_range_local(start, end);
         return;
     }
 
@@ -132,11 +166,12 @@ void smp_tlb_shootdown(uint32_t virt) {
 
     if (cpu_count <= 1 || ap_running_count == 0 || !smp_interrupts_enabled()) {
         __sync_lock_release(&tlb_shootdown_lock);
-        __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+        tlb_flush_range_local(start, end);
         return;
     }
 
-    tlb_shootdown_addr = virt;
+    tlb_shootdown_addr = start;
+    tlb_shootdown_end = end;
 
     cpu_t* me = cpu_current();
     uint32_t mask = 0;
@@ -162,13 +197,17 @@ void smp_tlb_shootdown(uint32_t virt) {
         lapic_write(LAPIC_ICRLO, (uint32_t)IPI_TLB_VECTOR | 0x00004000);
     }
 
-    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+    tlb_flush_range_local(start, end);
 
     while (tlb_shootdown_pending != 0) {
         __asm__ volatile("pause");
     }
 
     __sync_lock_release(&tlb_shootdown_lock);
+}
+
+void smp_tlb_shootdown(uint32_t virt) {
+    smp_tlb_shootdown_range(virt, virt + 0x1000u);
 }
 
 static volatile uint32_t blit_lock = 0;

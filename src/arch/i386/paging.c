@@ -385,7 +385,13 @@ static inline uint32_t* read_cr3(void) {
     return (uint32_t*)val;
 }
 
-void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
+void paging_map_ex(
+    uint32_t* dir,
+    uint32_t virt,
+    uint32_t phys,
+    uint32_t flags,
+    uint32_t map_flags
+) {
     /*
      * Map a single 4KiB page.
      *
@@ -416,6 +422,10 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
 
     spinlock_release_safe(&paging_lock, int_flags);
 
+    if ((map_flags & PAGING_MAP_NO_TLB_FLUSH) != 0u) {
+        return;
+    }
+
     if (dir == kernel_page_directory) {
         /*
          * Kernel mappings are global: other CPUs may have this address cached.
@@ -428,6 +438,10 @@ void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
     }
 
     __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+}
+
+void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
+    paging_map_ex(dir, virt, phys, flags, 0u);
 }
 
 static void paging_allocate_table(uint32_t virt) {
