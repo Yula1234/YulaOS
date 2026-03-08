@@ -20,6 +20,13 @@ SECTIONS
         *(.rodata*)
     }
 
+    .yosdrivers : ALIGN(8)
+    {
+        __yosdrivers_start = .;
+        KEEP(*(.yosdrivers*))
+        __yosdrivers_end = .;
+    }
+
     .init_array : ALIGN(0x1000)
     {
         __init_array_start = .;

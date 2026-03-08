@@ -11,6 +11,9 @@
 #include <drivers/console.h>
 #include <drivers/vga.h>
 
+#include <drivers/cdev.h>
+#include <drivers/driver.h>
+
 #include <kernel/tty/tty_internal.h>
 #include <kernel/tty/tty_service.h>
 
@@ -151,8 +154,31 @@ vfs_node_t console_node = {
     .private_release = nullptr,
 };
 
+static cdevice_t g_console_cdev = {
+    .dev = {
+        .driver = nullptr,
+        .name = "console",
+        .flags = 0u,
+        .private_data = nullptr,
+    },
+    .ops = console_ops,
+    .node_template = console_node,
+};
+
+static int console_driver_init(void) {
+    return cdevice_register(&g_console_cdev);
+}
+
+DRIVER_REGISTER(
+    .name = "console",
+    .klass = DRIVER_CLASS_CHAR,
+    .stage = DRIVER_STAGE_VFS,
+    .init = console_driver_init,
+    .shutdown = nullptr
+);
+
 }
 
 extern "C" void console_init() {
-    devfs_register(&console_node);
+    (void)console_driver_init();
 }

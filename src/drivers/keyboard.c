@@ -14,6 +14,9 @@
 #include <hal/irq.h>
 #include <hal/lock.h>
 
+#include <drivers/cdev.h>
+#include <drivers/driver.h>
+
 #include "keyboard.h"
 
 static int shift_pressed = 0;
@@ -417,11 +420,32 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     }
 }
 
-static vfs_ops_t kbd_ops = { .read = kbd_vfs_read };
-static vfs_node_t kbd_node = { .name = "kbd", .ops = &kbd_ops };
+static cdevice_t g_kbd_cdev = {
+    .dev = {
+        .driver = 0,
+        .name = "kbd",
+        .flags = 0u,
+        .private_data = 0,
+    },
+    .ops = { .read = kbd_vfs_read },
+    .node_template = { .name = "kbd", .ops = 0, .size = 0u },
+};
+
+static int kbd_driver_init(void) {
+    g_kbd_cdev.node_template.ops = &g_kbd_cdev.ops;
+    return cdevice_register(&g_kbd_cdev);
+}
+
+DRIVER_REGISTER(
+    .name = "kbd",
+    .klass = DRIVER_CLASS_INPUT,
+    .stage = DRIVER_STAGE_VFS,
+    .init = kbd_driver_init,
+    .shutdown = 0
+);
 
 void kbd_vfs_init() {
-    devfs_register(&kbd_node);
+    (void)kbd_driver_init();
 }
 
 void kbd_init(void) {

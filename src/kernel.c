@@ -24,6 +24,8 @@
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
 
+#include <drivers/driver.h>
+
 #include <kernel/clipboard.h>
 #include <kernel/boot.h>
 #include <kernel/init.h>
@@ -289,8 +291,8 @@ static void kmain_devices_init(void) {
     ahci_init();
     ne2k_init();
 
-    kbd_vfs_init();
-    console_init();
+    drivers_init_stage(DRIVER_STAGE_CORE);
+
     ttyS0_init();
     mouse_vfs_init();
     fb_vfs_init();
@@ -299,6 +301,9 @@ static void kmain_devices_init(void) {
 
 static void kmain_fs_init(void) {
     vfs_init();
+
+    drivers_init_stage(DRIVER_STAGE_VFS);
+
     yulafs_init();
     yulafs_lookup("/");
 
