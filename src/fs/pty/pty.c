@@ -57,15 +57,14 @@ static void pty_pair_destroy(pty_pair_t* p);
 
 static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n);
 
-static __cacheline_aligned spinlock_t pty_id_lock;
-static __attribute__((unused)) uint8_t pty_id_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
+static __cacheline_aligned mutex_t pty_id_lock;
 static uint32_t pty_next_id = 1u;
 
 __attribute__((unused)) static uint32_t pty_alloc_id(void) {
-    uint32_t flags = spinlock_acquire_safe(&pty_id_lock);
+    mutex_lock(&pty_id_lock);
     uint32_t id = pty_next_id++;
     if (pty_next_id == 0u) pty_next_id = 1u;
-    spinlock_release_safe(&pty_id_lock, flags);
+    mutex_unlock(&pty_id_lock);
     return id;
 }
 
@@ -822,8 +821,16 @@ static int pty_ptmx_open(vfs_node_t* node) {
     pty_pair_t* p = pty_pair_create();
     if (!p) return -1;
 
+    vfs_node_t* slave = (vfs_node_t*)kmalloc(sizeof(*slave));
+    if (!slave) {
+        pty_pair_release(p);
+        return -1;
+    }
+
+    memset(slave, 0, sizeof(*slave));
+
     char pts_name[32];
-    uint32_t id_flags = spinlock_acquire_safe(&pty_id_lock);
+    mutex_lock(&pty_id_lock);
     for (;;) {
         uint32_t id = pty_next_id++;
         if (pty_next_id == 0u) pty_next_id = 1u;
@@ -842,17 +849,12 @@ static int pty_ptmx_open(vfs_node_t* node) {
     node->private_release = pty_pair_release;
 
     if (pty_master_open(node) != 0) {
-        spinlock_release_safe(&pty_id_lock, id_flags);
+        mutex_unlock(&pty_id_lock);
+        pty_pair_release(p);
+        kfree(slave);
         return -1;
     }
 
-    vfs_node_t* slave = (vfs_node_t*)kmalloc(sizeof(*slave));
-    if (!slave) {
-        spinlock_release_safe(&pty_id_lock, id_flags);
-        return -1;
-    }
-
-    memset(slave, 0, sizeof(*slave));
     strlcpy(slave->name, pts_name, sizeof(slave->name));
     slave->flags = VFS_FLAG_PTY_SLAVE;
     slave->size = 0;
@@ -868,11 +870,11 @@ static int pty_ptmx_open(vfs_node_t* node) {
     if (devfs_fetch(pts_name) != slave) {
         pty_pair_release(p);
         kfree(slave);
-        spinlock_release_safe(&pty_id_lock, id_flags);
+        mutex_unlock(&pty_id_lock);
         return -1;
     }
 
-    spinlock_release_safe(&pty_id_lock, id_flags);
+    mutex_unlock(&pty_id_lock);
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     p->slave_node = slave;
@@ -891,7 +893,7 @@ void pty_init(void) {
         return;
     }
 
-    spinlock_init(&pty_id_lock);
+    mutex_init(&pty_id_lock);
 
     ptmx_ops.read = 0;
     ptmx_ops.write = 0;
