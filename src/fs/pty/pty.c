@@ -57,7 +57,8 @@ static void pty_pair_destroy(pty_pair_t* p);
 
 static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n);
 
-static spinlock_t pty_id_lock;
+static __cacheline_aligned spinlock_t pty_id_lock;
+static __attribute__((unused)) uint8_t pty_id_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
 static uint32_t pty_next_id = 1u;
 
 __attribute__((unused)) static uint32_t pty_alloc_id(void) {

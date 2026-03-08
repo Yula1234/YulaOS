@@ -36,7 +36,8 @@ static constexpr uint32_t u32_max = 0xFFFFFFFFu;
 
 static int cached_best_cpu = -1;
 static uint32_t cache_tick = 0;
-static spinlock_t cpu_cache_lock;
+static __cacheline_aligned spinlock_t cpu_cache_lock;
+static __attribute__((unused)) uint8_t cpu_cache_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
 
 uint32_t calc_weight(task_prio_t prio) {
     int nice = 10 - static_cast<int>(prio);

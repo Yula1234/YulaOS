@@ -6,6 +6,8 @@
 
 #include <lib/dlist.h>
 
+#include <hal/align.h>
+
 #include <stdint.h>
 
 #ifdef __cplusplus

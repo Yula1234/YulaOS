@@ -251,7 +251,8 @@ typedef struct {
     semaphore_t sem;
 } futex_entry_t;
 
-static spinlock_t futex_table_lock;
+static __cacheline_aligned spinlock_t futex_table_lock;
+static __attribute__((unused)) uint8_t futex_table_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
 static futex_entry_t futex_table[FUTEX_TABLE_CAP];
 
 static semaphore_t* futex_get_sem(uint32_t key) {
