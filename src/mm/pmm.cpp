@@ -6,9 +6,98 @@
 #include <lib/string.h>
 #include <lib/compiler.h>
 
+#include <lib/cpp/lock_guard.h>
+
 #include "pmm.h"
 
+#include <kernel/cpu.h>
+
 namespace kernel {
+
+namespace {
+
+struct __cacheline_aligned PerCpuPageCache {
+    uint32_t count = 0u;
+    void* phys_pages[256]{};
+};
+
+static constexpr uint32_t pcp_capacity = 256u;
+static constexpr uint32_t pcp_refill_batch = 32u;
+static constexpr uint32_t pcp_drain_batch = 128u;
+
+static PerCpuPageCache pcp_caches[PMM_ZONE_COUNT][MAX_CPUS]{};
+
+static inline uint32_t pcp_cpu_index() {
+    cpu_t* cpu = cpu_current();
+    if (!cpu) {
+        return 0u;
+    }
+
+    const int idx = cpu->index;
+    if (idx < 0 || idx >= MAX_CPUS) {
+        return 0u;
+    }
+
+    return static_cast<uint32_t>(idx);
+}
+
+static inline PerCpuPageCache& pcp_current_cache(pmm_zone_t zone) {
+    return pcp_caches[zone][pcp_cpu_index()];
+}
+
+static inline void pcp_cache_drain(PmmState* pmm, PerCpuPageCache& cache) {
+    if (!pmm || cache.count < pcp_capacity) {
+        return;
+    }
+
+    void* batch[pcp_drain_batch] = {};
+    const uint32_t drain = (cache.count < pcp_drain_batch) ? cache.count : pcp_drain_batch;
+
+    for (uint32_t i = 0u; i < drain; i++) {
+        batch[i] = cache.phys_pages[cache.count - 1u - i];
+    }
+
+    cache.count -= drain;
+    pmm->free_pages_order0_batch(batch, drain);
+}
+
+static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
+    kernel::ScopedIrqDisable irq_guard;
+
+    PerCpuPageCache& cache = pcp_current_cache(zone);
+    if (cache.count > 0u) {
+        return cache.phys_pages[--cache.count];
+    }
+
+    void* batch[pcp_refill_batch] = {};
+    const uint32_t n = pmm->alloc_pages_order0_batch(zone, batch, pcp_refill_batch);
+    if (n == 0u) {
+        return nullptr;
+    }
+
+    for (uint32_t i = 1u; i < n && cache.count < pcp_capacity; i++) {
+        cache.phys_pages[cache.count++] = batch[i];
+    }
+
+    return batch[0];
+}
+
+static inline void pcp_free_to_cache(PmmState* pmm, pmm_zone_t zone, void* addr) {
+    kernel::ScopedIrqDisable irq_guard;
+
+    PerCpuPageCache& cache = pcp_current_cache(zone);
+    if (cache.count >= pcp_capacity) {
+        pcp_cache_drain(pmm, cache);
+    }
+
+    if (cache.count < pcp_capacity) {
+        cache.phys_pages[cache.count++] = addr;
+    } else {
+        pmm->free_pages_order0_batch(&addr, 1u);
+    }
+}
+
+}
 
 /*
  * Single instance is enough: PMM is a global resource, and keeping it in a
@@ -146,6 +235,15 @@ void PmmState::init_regions(
 }
 
 void* PmmState::alloc_pages(uint32_t order) noexcept {
+    if (order == 0u) {
+        void* p = pcp_alloc_from_cache(this, PMM_ZONE_NORMAL);
+        if (p) {
+            return p;
+        }
+
+        return pcp_alloc_from_cache(this, PMM_ZONE_DMA);
+    }
+
     void* ptr = alloc_pages_zone(order, PMM_ZONE_NORMAL);
     if (ptr) {
         return ptr;
@@ -155,6 +253,19 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
 }
 
 void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
+    if (order == 0u) {
+        if (zone >= PMM_ZONE_COUNT) {
+            return nullptr;
+        }
+
+        return pcp_alloc_from_cache(this, zone);
+    }
+
+    SpinLockSafeGuard guard(lock_);
+    return alloc_pages_zone_unlocked(order, zone);
+}
+
+void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexcept {
     if (order > PMM_MAX_ORDER) {
         return nullptr;
     }
@@ -162,8 +273,6 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
     if (zone >= PMM_ZONE_COUNT) {
         return nullptr;
     }
-
-    SpinLockSafeGuard guard(lock_);
 
     /*
      * Buddy allocation:
@@ -182,6 +291,9 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
     uint32_t current_order = static_cast<uint32_t>(__builtin_ctz(available));
 
     page_t* page = free_area_pop(zone, current_order);
+    if (!page) {
+        return nullptr;
+    }
 
     page->flags |= PMM_FLAG_USED;
     page->flags &= ~PMM_FLAG_FREE;
@@ -214,6 +326,60 @@ void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
     return reinterpret_cast<void*>(page_to_phys(page));
 }
 
+uint32_t PmmState::alloc_pages_order0_batch(pmm_zone_t preferred, void** out, uint32_t cap) noexcept {
+    if (!out || cap == 0u) {
+        return 0u;
+    }
+
+    if (preferred >= PMM_ZONE_COUNT) {
+        preferred = PMM_ZONE_NORMAL;
+    }
+
+    pmm_zone_t fallback = PMM_ZONE_NORMAL;
+    if (preferred == PMM_ZONE_NORMAL) {
+        fallback = PMM_ZONE_DMA;
+    }
+
+    SpinLockSafeGuard guard(lock_);
+
+    uint32_t n = 0u;
+    for (; n < cap; n++) {
+        void* p = alloc_pages_zone_unlocked(0u, preferred);
+        if (!p) {
+            break;
+        }
+
+        out[n] = p;
+    }
+
+    for (; n < cap; n++) {
+        void* p = alloc_pages_zone_unlocked(0u, fallback);
+        if (!p) {
+            break;
+        }
+
+        out[n] = p;
+    }
+
+    return n;
+}
+
+void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept {
+    if (!pages || n == 0u) {
+        return;
+    }
+
+    SpinLockSafeGuard guard(lock_);
+
+    for (uint32_t i = 0u; i < n; i++) {
+        if (!pages[i]) {
+            continue;
+        }
+
+        free_pages_unlocked(pages[i], 0u);
+    }
+}
+
 void PmmState::free_pages(void* addr, uint32_t order) noexcept {
     if (!addr) {
         return;
@@ -225,6 +391,20 @@ void PmmState::free_pages(void* addr, uint32_t order) noexcept {
 
     page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(addr)));
     if (!page) {
+        return;
+    }
+
+    if (order == 0u) {
+        if ((page->flags & PMM_FLAG_KERNEL) != 0u) {
+            return;
+        }
+
+        if ((page->flags & PMM_FLAG_USED) == 0u) {
+            return;
+        }
+
+        const pmm_zone_t zone = zone_for_flags(page->flags);
+        pcp_free_to_cache(this, zone, addr);
         return;
     }
 

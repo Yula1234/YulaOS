@@ -136,6 +136,9 @@ public:
      */
     [[nodiscard]] void* alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept;
 
+    [[nodiscard]] uint32_t alloc_pages_order0_batch(pmm_zone_t preferred, void** out, uint32_t cap) noexcept;
+    void free_pages_order0_batch(void* const* pages, uint32_t n) noexcept;
+
     /*
      * Free a block previously allocated with alloc_pages*().
      * `addr` must be the same physical base and `order` must match.
@@ -163,6 +166,8 @@ private:
 
     static void list_add(page_t** head, page_t* page) noexcept;
     static void list_remove(page_t** head, page_t* page) noexcept;
+
+    [[nodiscard]] void* alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexcept;
 
     void free_area_push(pmm_zone_t zone, uint32_t order, page_t* page) noexcept;
     [[nodiscard]] page_t* free_area_pop(pmm_zone_t zone, uint32_t order) noexcept;
