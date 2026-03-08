@@ -21,13 +21,25 @@ static inline void spinlock_init(spinlock_t* lock) {
 }
 
 static inline void spinlock_acquire(spinlock_t* lock) {
-    while (1) {
-        if (__sync_lock_test_and_set(&lock->locked, 1) == 0) {
-            break;
+    uint32_t backoff = 1;
+
+    for (;;) {
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0u) {
+            for (uint32_t i = 0; i < backoff; i++) {
+                __asm__ volatile("pause" ::: "memory");
+            }
+
+            if (backoff < 1024u) {
+                backoff <<= 1;
+            }
         }
-        __asm__ volatile("pause");
+
+        if (__atomic_exchange_n(&lock->locked, 1u, __ATOMIC_ACQUIRE) == 0u) {
+            return;
+        }
+
+        __asm__ volatile("pause" ::: "memory");
     }
-    __sync_synchronize();
 }
 
 static inline uint32_t spinlock_acquire_safe(spinlock_t* lock) {
@@ -42,22 +54,31 @@ static inline uint32_t spinlock_acquire_safe(spinlock_t* lock) {
         : "memory"
     );
 
-    while (1) {
-        if (__sync_lock_test_and_set(&lock->locked, 1) == 0) {
+    uint32_t backoff = 1;
+
+    for (;;) {
+        while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0u) {
+            for (uint32_t i = 0; i < backoff; i++) {
+                __asm__ volatile("pause" ::: "memory");
+            }
+
+            if (backoff < 1024u) {
+                backoff <<= 1;
+            }
+        }
+
+        if (__atomic_exchange_n(&lock->locked, 1u, __ATOMIC_ACQUIRE) == 0u) {
             break;
         }
-        __asm__ volatile("pause");
+
+        __asm__ volatile("pause" ::: "memory");
     }
-    
-    __sync_synchronize();
     
     return flags;
 }
 
 static inline void spinlock_release_safe(spinlock_t* lock, uint32_t flags) {
-    __sync_synchronize();
-    
-    __sync_lock_release(&lock->locked);
+    __atomic_store_n(&lock->locked, 0u, __ATOMIC_RELEASE);
     
     if (flags & 0x200) {
         __asm__ volatile("sti");
@@ -65,11 +86,11 @@ static inline void spinlock_release_safe(spinlock_t* lock, uint32_t flags) {
 }
 
 static inline int spinlock_try_acquire(spinlock_t* lock) {
-    return __sync_lock_test_and_set(&lock->locked, 1) == 0;
+    return __atomic_exchange_n(&lock->locked, 1u, __ATOMIC_ACQUIRE) == 0u;
 }
 
 static inline void spinlock_release(spinlock_t* lock) {
-    __sync_lock_release(&lock->locked);
+    __atomic_store_n(&lock->locked, 0u, __ATOMIC_RELEASE);
 }
 
 struct task;
