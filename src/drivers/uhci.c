@@ -183,11 +183,7 @@ typedef struct {
     uint16_t ep_in_mps;
     uint8_t ep_interval;
 
-    uhci_qh_t* intr_qh;
-    uhci_td_t* intr_td;
-    uint8_t* intr_buf;
-    uint32_t intr_buf_phys;
-    uint8_t intr_toggle;
+    struct uhci_intr_pipe* intr_pipe;
     uint8_t intr_reported;
 
     uint8_t kbd_prev_mod;
@@ -198,6 +194,223 @@ typedef struct {
 } uhci_hid_dev_t;
 
 static uhci_hid_dev_t g_hid_devs[2];
+
+static inline uint32_t uhci_td_maxlen_field(uint16_t len);
+
+static uhci_td_t* uhci_alloc_td(void);
+static uhci_qh_t* uhci_alloc_qh(void);
+
+static void uhci_sched_insert_head_qh(uhci_qh_t* qh);
+static void uhci_sched_remove_head_qh(uhci_qh_t* qh);
+
+static void uhci_hid_intr_cb(void* ctx, const uint8_t* data, uint32_t len);
+
+typedef void (*uhci_intr_cb_t)(void* ctx, const uint8_t* data, uint32_t len);
+
+typedef struct uhci_intr_pipe {
+    int used;
+
+    uint8_t addr;
+    uint8_t low_speed;
+
+    uint8_t ep_in;
+    uint16_t ep_in_mps;
+
+    uhci_qh_t* qh;
+    uhci_td_t* td;
+
+    uint8_t* buf;
+    uint32_t buf_phys;
+
+    uint8_t toggle;
+
+    uhci_intr_cb_t cb;
+    void* cb_ctx;
+} uhci_intr_pipe_t;
+
+static uhci_intr_pipe_t g_intr_pipes[8];
+
+static void uhci_intr_pipe_release(uhci_intr_pipe_t* p) {
+    if (!p) {
+        return;
+    }
+
+    if (p->qh) {
+        uhci_sched_remove_head_qh(p->qh);
+    }
+
+    if (p->qh) {
+        p->qh->element = UHCI_PTR_T;
+    }
+
+    if (p->buf) {
+        kfree(p->buf);
+    }
+
+    if (p->td) {
+        kfree(p->td);
+    }
+
+    if (p->qh) {
+        kfree(p->qh);
+    }
+
+    memset(p, 0, sizeof(*p));
+}
+
+static void uhci_intr_pipes_reset(void) {
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_intr_pipes) / sizeof(g_intr_pipes[0])); i++) {
+        if (g_intr_pipes[i].used) {
+            uhci_intr_pipe_release(&g_intr_pipes[i]);
+        }
+    }
+}
+
+static uhci_intr_pipe_t* uhci_intr_pipe_alloc(void) {
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_intr_pipes) / sizeof(g_intr_pipes[0])); i++) {
+        if (!g_intr_pipes[i].used) {
+            return &g_intr_pipes[i];
+        }
+    }
+
+    return 0;
+}
+
+static void uhci_intr_pipe_arm_td(uhci_intr_pipe_t* p) {
+    if (!p || !p->td || !p->qh) {
+        return;
+    }
+
+    p->td->link = UHCI_PTR_T;
+    p->td->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_SPD;
+    if (p->low_speed) {
+        p->td->status |= UHCI_TD_CTRL_LS;
+    }
+
+    p->td->token =
+        (uhci_td_maxlen_field(p->ep_in_mps) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
+        ((uint32_t)p->toggle << UHCI_TD_TOKEN_D_SHIFT) |
+        ((uint32_t)p->ep_in << UHCI_TD_TOKEN_ENDP_SHIFT) |
+        ((uint32_t)p->addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
+        UHCI_TD_PID_IN;
+
+    p->td->buffer = p->buf_phys;
+
+    p->qh->element = p->td->sw_phys;
+
+    __sync_synchronize();
+}
+
+static uhci_intr_pipe_t* uhci_intr_pipe_setup(
+    uint8_t addr,
+    uint8_t low_speed,
+    uint8_t ep_in,
+    uint16_t ep_in_mps,
+    uhci_intr_cb_t cb,
+    void* cb_ctx
+) {
+    if (!addr || !ep_in) {
+        return 0;
+    }
+
+    if (ep_in_mps == 0) {
+        ep_in_mps = 8;
+    }
+
+    if (ep_in_mps > 64) {
+        ep_in_mps = 64;
+    }
+
+    uhci_intr_pipe_t* p = uhci_intr_pipe_alloc();
+    if (!p) {
+        return 0;
+    }
+
+    memset(p, 0, sizeof(*p));
+    p->used = 1;
+
+    p->addr = addr;
+    p->low_speed = low_speed;
+
+    p->ep_in = ep_in;
+    p->ep_in_mps = ep_in_mps;
+
+    p->cb = cb;
+    p->cb_ctx = cb_ctx;
+
+    p->buf = (uint8_t*)kmalloc_a(p->ep_in_mps);
+    if (!p->buf) {
+        uhci_intr_pipe_release(p);
+        return 0;
+    }
+
+    memset(p->buf, 0, p->ep_in_mps);
+
+    p->buf_phys = paging_get_phys(kernel_page_directory, (uint32_t)p->buf);
+    if (!p->buf_phys) {
+        uhci_intr_pipe_release(p);
+        return 0;
+    }
+
+    p->td = uhci_alloc_td();
+    p->qh = uhci_alloc_qh();
+    if (!p->td || !p->qh) {
+        uhci_intr_pipe_release(p);
+        return 0;
+    }
+
+    p->toggle = 0;
+
+    p->qh->link = UHCI_PTR_T;
+    p->qh->element = UHCI_PTR_T;
+
+    uhci_intr_pipe_arm_td(p);
+
+    uhci_sched_insert_head_qh(p->qh);
+
+    return p;
+}
+
+static void uhci_intr_pipe_poll_one(uhci_intr_pipe_t* p) {
+    if (!p || !p->used || !p->td || !p->qh) {
+        return;
+    }
+
+    __sync_synchronize();
+
+    uint32_t st = p->td->status;
+    if (st & UHCI_TD_CTRL_ACTIVE) {
+        return;
+    }
+
+    int bad = 0;
+    if (st & (UHCI_TD_CTRL_STALLED | UHCI_TD_CTRL_DBUFERR | UHCI_TD_CTRL_BABBLE | UHCI_TD_CTRL_CRCTIMEO | UHCI_TD_CTRL_BITSTUFF)) {
+        bad = 1;
+    }
+
+    if (!bad) {
+        uint32_t al = st & UHCI_TD_CTRL_ACTLEN_MASK;
+        uint32_t got = (al == UHCI_TD_CTRL_ACTLEN_MASK) ? 0u : (al + 1u);
+        if (got > p->ep_in_mps) {
+            got = p->ep_in_mps;
+        }
+
+        if (got && p->cb) {
+            p->cb(p->cb_ctx, p->buf, got);
+            p->toggle ^= 1u;
+        }
+    }
+
+    uhci_intr_pipe_arm_td(p);
+}
+
+static void uhci_intr_pipes_poll_all(void) {
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_intr_pipes) / sizeof(g_intr_pipes[0])); i++) {
+        if (g_intr_pipes[i].used) {
+            uhci_intr_pipe_poll_one(&g_intr_pipes[i]);
+        }
+    }
+}
 
 static inline uint8_t pci_read8(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     uint32_t reg = pci_read(bus, slot, func, offset & 0xFCu);
@@ -771,91 +984,42 @@ static int uhci_hid_setup_interrupt(uhci_hid_dev_t* dev) {
     if (!dev || !dev->present) return 0;
     if (!dev->addr || !dev->ep_in) return 0;
 
-    if (dev->ep_in_mps == 0) dev->ep_in_mps = 8;
-    if (dev->ep_in_mps > 64) dev->ep_in_mps = 64;
-
-    dev->intr_buf = (uint8_t*)kmalloc_a(dev->ep_in_mps);
-    if (!dev->intr_buf) return 0;
-    memset(dev->intr_buf, 0, dev->ep_in_mps);
-    dev->intr_buf_phys = paging_get_phys(kernel_page_directory, (uint32_t)dev->intr_buf);
-    if (!dev->intr_buf_phys) return 0;
-
-    dev->intr_td = uhci_alloc_td();
-    dev->intr_qh = uhci_alloc_qh();
-    if (!dev->intr_td || !dev->intr_qh) return 0;
-
-    dev->intr_toggle = 0;
     dev->intr_reported = 0;
 
-    dev->intr_td->link = UHCI_PTR_T;
-    dev->intr_td->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_SPD;
-    if (dev->low_speed) dev->intr_td->status |= UHCI_TD_CTRL_LS;
-    dev->intr_td->token =
-        (uhci_td_maxlen_field(dev->ep_in_mps) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
-        ((uint32_t)dev->intr_toggle << UHCI_TD_TOKEN_D_SHIFT) |
-        ((uint32_t)dev->ep_in << UHCI_TD_TOKEN_ENDP_SHIFT) |
-        ((uint32_t)dev->addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
-        UHCI_TD_PID_IN;
-    dev->intr_td->buffer = dev->intr_buf_phys;
+    dev->intr_pipe = uhci_intr_pipe_setup(
+        dev->addr,
+        dev->low_speed,
+        dev->ep_in,
+        dev->ep_in_mps,
+        uhci_hid_intr_cb,
+        dev
+    );
 
-    dev->intr_qh->link = UHCI_PTR_T;
-    dev->intr_qh->element = dev->intr_td->sw_phys;
-
-    uhci_sched_insert_head_qh(dev->intr_qh);
-    return 1;
+    return dev->intr_pipe != 0;
 }
 
 static void uhci_hid_kbd_process(uhci_hid_dev_t* dev, const uint8_t* rep, uint32_t rep_len);
 static void uhci_hid_mouse_process(const uint8_t* rep, uint32_t rep_len);
 
-static void uhci_hid_poll_dev(uhci_hid_dev_t* dev) {
-    if (!dev || !dev->present || !dev->intr_td || !dev->intr_qh) return;
-
-    __sync_synchronize();
-
-    uint32_t st = dev->intr_td->status;
-    if (st & UHCI_TD_CTRL_ACTIVE) {
+static void uhci_hid_intr_cb(void* ctx, const uint8_t* data, uint32_t len) {
+    uhci_hid_dev_t* dev = (uhci_hid_dev_t*)ctx;
+    if (!dev || !dev->present) {
         return;
     }
 
-    int bad = 0;
-    if (st & (UHCI_TD_CTRL_STALLED | UHCI_TD_CTRL_DBUFERR | UHCI_TD_CTRL_BABBLE | UHCI_TD_CTRL_CRCTIMEO | UHCI_TD_CTRL_BITSTUFF)) {
-        bad = 1;
+    if (len == 0) {
+        return;
     }
 
-    if (!bad) {
-        uint32_t al = st & UHCI_TD_CTRL_ACTLEN_MASK;
-        uint32_t got = (al == UHCI_TD_CTRL_ACTLEN_MASK) ? 0u : (al + 1u);
-        if (got > dev->ep_in_mps) got = dev->ep_in_mps;
-
-        if (got) {
-            if (!dev->intr_reported) {
-                dev->intr_reported = 1;
-            }
-            if (dev->hid_protocol == USB_PROTOCOL_BOOT_KBD) {
-                uhci_hid_kbd_process(dev, dev->intr_buf, got);
-            } else if (dev->hid_protocol == USB_PROTOCOL_BOOT_MOUSE) {
-                uhci_hid_mouse_process(dev->intr_buf, got);
-            }
-
-            dev->intr_toggle ^= 1u;
-        }
+    if (!dev->intr_reported) {
+        dev->intr_reported = 1;
     }
 
-    dev->intr_td->link = UHCI_PTR_T;
-    dev->intr_td->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_SPD;
-    if (dev->low_speed) dev->intr_td->status |= UHCI_TD_CTRL_LS;
-    dev->intr_td->token =
-        (uhci_td_maxlen_field(dev->ep_in_mps) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
-        ((uint32_t)dev->intr_toggle << UHCI_TD_TOKEN_D_SHIFT) |
-        ((uint32_t)dev->ep_in << UHCI_TD_TOKEN_ENDP_SHIFT) |
-        ((uint32_t)dev->addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
-        UHCI_TD_PID_IN;
-    dev->intr_td->buffer = dev->intr_buf_phys;
-
-    dev->intr_qh->element = dev->intr_td->sw_phys;
-
-    __sync_synchronize();
+    if (dev->hid_protocol == USB_PROTOCOL_BOOT_KBD) {
+        uhci_hid_kbd_process(dev, data, len);
+    } else if (dev->hid_protocol == USB_PROTOCOL_BOOT_MOUSE) {
+        uhci_hid_mouse_process(data, len);
+    }
 }
 
 static void uhci_kbd_send_scancode(uint8_t sc, int is_e0, int is_break) {
@@ -1226,6 +1390,7 @@ void uhci_late_init(void) {
         uhci_route_irq(g_uhci_irq_line);
     }
 
+    uhci_intr_pipes_reset();
     memset(g_hid_devs, 0, sizeof(g_hid_devs));
 
     uint8_t next_addr = 1;
@@ -1343,8 +1508,7 @@ void uhci_poll(void) {
         return;
     }
 
-    uhci_hid_poll_dev(&g_hid_devs[0]);
-    uhci_hid_poll_dev(&g_hid_devs[1]);
+    uhci_intr_pipes_poll_all();
 
     uhci_kbd_repeat_tick(&g_hid_devs[0]);
     uhci_kbd_repeat_tick(&g_hid_devs[1]);

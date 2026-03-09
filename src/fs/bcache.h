@@ -24,12 +24,16 @@
 extern "C" {
 #endif
 
+struct block_device;
+
 /*
  * Initialize cache state and size the cache based on total RAM.
  *
  * The current policy targets ~2% of RAM, split evenly across internal shards.
  */
 void bcache_init(void);
+
+void bcache_attach_device(struct block_device* dev);
 
 /*
  * Read a 4KiB block into `buf`.

@@ -4,7 +4,7 @@
 #include "yulafs.h"
 #include "bcache.h"
 
-#include "../drivers/ahci.h"
+#include "../drivers/block/bdev.h"
 #include "../drivers/vga.h"
 
 #include "../kernel/proc.h"
@@ -1450,11 +1450,16 @@ void yfs::FileSystem::init() {
     }
 
     if (sb.magic != YFS_MAGIC) {
-        uint32_t capacity = ahci_get_capacity();
-        if (capacity == 0) {
-            capacity = 131072;
+        uint64_t capacity_sectors = 0;
+        if (block_device_t* root = bdev_root()) {
+            capacity_sectors = root->sector_count;
         }
-        yulafs_format(capacity / 8);
+
+        if (capacity_sectors == 0) {
+            capacity_sectors = 131072;
+        }
+
+        yulafs_format((uint32_t)(capacity_sectors / 8ull));
     } else {
         fs_mounted = 1;
         last_free_blk_hint = 0;

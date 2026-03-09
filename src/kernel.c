@@ -24,6 +24,8 @@
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
 
+#include <drivers/block/bdev.h>
+
 #include <drivers/driver.h>
 
 #include <kernel/clipboard.h>
@@ -288,6 +290,8 @@ static void kmain_devices_init(void) {
 
     init_ioapic_legacy();
 
+    bdev_init();
+
     ahci_init();
     ne2k_init();
 
@@ -303,6 +307,15 @@ static void kmain_fs_init(void) {
     vfs_init();
 
     drivers_init_stage(DRIVER_STAGE_VFS);
+
+    block_device_t* root_bdev = bdev_find_by_name("sd0");
+    if (!root_bdev) {
+        root_bdev = bdev_first();
+    }
+
+    bdev_set_root(root_bdev);
+
+    bcache_attach_device(root_bdev);
 
     yulafs_init();
     yulafs_lookup("/");

@@ -12,6 +12,8 @@
 #include <hal/io.h>
 #include <hal/ioapic.h>
 
+#include <drivers/block/bdev.h>
+
 #include "ahci.h"
 #include "pci.h"
 
@@ -54,6 +56,57 @@ static int g_ahci_has_device = 0;
 static int g_ahci_msi_enabled = 0;
 
 static volatile uint32_t port_active_slots[32] = {0};
+
+static int ahci_bdev_read_sectors(block_device_t* dev, uint64_t lba, uint32_t count, void* buf);
+static int ahci_bdev_write_sectors(block_device_t* dev, uint64_t lba, uint32_t count, const void* buf);
+static int ahci_bdev_flush(block_device_t* dev);
+
+static const block_ops_t g_ahci_bdev_ops = {
+    .read_sectors = ahci_bdev_read_sectors,
+    .write_sectors = ahci_bdev_write_sectors,
+    .flush = ahci_bdev_flush,
+};
+
+static block_device_t g_ahci_bdev = {
+    .name = "sd0",
+    .sector_size = 512,
+    .sector_count = 0,
+    .ops = &g_ahci_bdev_ops,
+    .private_data = 0,
+};
+
+static int ahci_bdev_read_sectors(block_device_t* dev, uint64_t lba, uint32_t count, void* buf) {
+    (void)dev;
+
+    if (!buf) {
+        return 0;
+    }
+
+    if (lba > 0xFFFFFFFFull) {
+        return 0;
+    }
+
+    return ahci_read_sectors((uint32_t)lba, count, (uint8_t*)buf) != 0;
+}
+
+static int ahci_bdev_write_sectors(block_device_t* dev, uint64_t lba, uint32_t count, const void* buf) {
+    (void)dev;
+
+    if (!buf) {
+        return 0;
+    }
+
+    if (lba > 0xFFFFFFFFull) {
+        return 0;
+    }
+
+    return ahci_write_sectors((uint32_t)lba, count, (const uint8_t*)buf) != 0;
+}
+
+static int ahci_bdev_flush(block_device_t* dev) {
+    (void)dev;
+    return 1;
+}
 
 void ahci_set_async_mode(int enable) { g_ahci_async_mode = enable; }
 
@@ -477,6 +530,11 @@ void ahci_init(void) {
                 if (primary_port_idx == -1) {
                     primary_port_idx = i;
                     primary_disk_sectors = ahci_identify_device(i);
+
+                    if (primary_disk_sectors != 0) {
+                        g_ahci_bdev.sector_count = primary_disk_sectors;
+                        (void)bdev_register(&g_ahci_bdev);
+                    }
                 }
             }
         }

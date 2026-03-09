@@ -19,7 +19,7 @@
 #include <mm/heap.h>
 #include <mm/pmm.h>
 
-#include <drivers/ahci.h>
+#include <drivers/block/bdev.h>
 #include <hal/lock.h>
 
 #include "bcache.h"
@@ -369,6 +369,12 @@ struct PrefetchQueue {
 static PrefetchQueue g_prefetch{};
 static kernel::atomic<int> g_prefetch_started{0};
 
+static block_device_t* g_bcache_bdev = nullptr;
+
+extern "C" void bcache_attach_device(block_device_t* dev) {
+    g_bcache_bdev = dev;
+}
+
 static void bcache_prefetch_worker(void*);
 
 static bool ensure_prefetch_worker_started() {
@@ -437,13 +443,21 @@ struct DiskIo {
             return false;
         }
 
+        if (!g_bcache_bdev) {
+            return false;
+        }
+
+        if (g_bcache_bdev->sector_size != SECTOR_SIZE) {
+            return false;
+        }
+
         const uint64_t start_lba =
             (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
         if (start_lba > 0xFFFFFFFF) {
             return false;
         }
 
-        return ahci_read_sectors((uint32_t)start_lba, SECTORS_PER_BLK, buf) != 0;
+        return bdev_read_sectors(g_bcache_bdev, start_lba, SECTORS_PER_BLK, buf) != 0;
     }
 
     static bool try_write_4k(uint32_t block_idx, const uint8_t* buf) {
@@ -451,13 +465,21 @@ struct DiskIo {
             return false;
         }
 
+        if (!g_bcache_bdev) {
+            return false;
+        }
+
+        if (g_bcache_bdev->sector_size != SECTOR_SIZE) {
+            return false;
+        }
+
         const uint64_t start_lba =
             (uint64_t)block_idx * (uint64_t)SECTORS_PER_BLK;
         if (start_lba > 0xFFFFFFFF) {
             return false;
         }
 
-        return ahci_write_sectors((uint32_t)start_lba, SECTORS_PER_BLK, buf) != 0;
+        return bdev_write_sectors(g_bcache_bdev, start_lba, SECTORS_PER_BLK, buf) != 0;
     }
 
     static void read_4k(uint32_t block_idx, uint8_t* buf) {
