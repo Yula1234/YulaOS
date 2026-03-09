@@ -156,8 +156,25 @@ typedef struct __attribute__((packed)) {
 #define USB_REQ_SET_ADDRESS    5u
 #define USB_REQ_SET_CONFIG     9u
 
+#define USB_REQ_CLEAR_FEATURE  1u
+#define USB_REQ_SET_FEATURE    3u
+#define USB_REQ_GET_STATUS     0u
+
 #define USB_REQ_HID_SET_PROTOCOL 0x0Bu
 #define USB_REQ_HID_SET_IDLE     0x0Au
+
+#define USB_CLASS_HUB 0x09u
+
+#define USB_DESC_HUB 0x29u
+
+#define USB_HUB_PORT_FEAT_CONNECTION   0u
+#define USB_HUB_PORT_FEAT_ENABLE       1u
+#define USB_HUB_PORT_FEAT_RESET        4u
+#define USB_HUB_PORT_FEAT_POWER        8u
+
+#define USB_HUB_PORT_FEAT_C_CONNECTION 16u
+#define USB_HUB_PORT_FEAT_C_ENABLE     17u
+#define USB_HUB_PORT_FEAT_C_RESET      20u
 
 #define USB_CLASS_HID 0x03u
 #define USB_SUBCLASS_BOOT 0x01u
@@ -193,7 +210,560 @@ typedef struct {
     uint32_t kbd_repeat_next_tick;
 } uhci_hid_dev_t;
 
-static uhci_hid_dev_t g_hid_devs[2];
+static uhci_hid_dev_t g_hid_devs[8];
+
+typedef struct {
+    uint8_t addr;
+    uint8_t port;
+
+    uint16_t ep0_mps;
+
+    uint8_t cfg_value;
+    uint8_t iface_num;
+
+    uint8_t intr_ep;
+    uint16_t intr_mps;
+    uint8_t intr_interval;
+
+    struct uhci_intr_pipe* intr_pipe;
+
+    uint8_t port_count;
+    uint8_t status_change_bytes;
+
+    uint32_t pending_bitmap;
+} uhci_hub_t;
+
+static uhci_hub_t g_hubs[4];
+
+static void uhci_hubs_reset(void) {
+    memset(g_hubs, 0, sizeof(g_hubs));
+}
+
+struct uhci_intr_pipe;
+
+static inline uint16_t usb_le16(const void* p);
+
+static int uhci_control_transfer(
+    uint8_t devaddr,
+    uint8_t low_speed,
+    uint16_t ep0_mps,
+    const usb_setup_packet_t* setup,
+    void* data,
+    uint16_t length,
+    uint32_t timeout_us
+);
+
+static int uhci_usb_get_descriptor(
+    uint8_t addr,
+    uint8_t low_speed,
+    uint16_t ep0_mps,
+    uint8_t desc_type,
+    uint8_t desc_index,
+    void* out,
+    uint16_t out_len
+);
+
+static int uhci_usb_set_address(uint8_t low_speed, uint16_t ep0_mps, uint8_t new_addr);
+
+static int uhci_usb_set_config(uint8_t addr, uint8_t low_speed, uint16_t ep0_mps, uint8_t cfg_value);
+
+static int uhci_hid_set_protocol(
+    uint8_t addr,
+    uint8_t low_speed,
+    uint16_t ep0_mps,
+    uint8_t iface,
+    uint8_t protocol_boot
+);
+
+static int uhci_hid_set_idle(uint8_t addr, uint8_t low_speed, uint16_t ep0_mps, uint8_t iface);
+
+static int uhci_hid_parse_cfg(
+    const uint8_t* cfg,
+    uint16_t cfg_len,
+    uint8_t* out_cfg_value,
+    uint8_t* out_iface,
+    uint8_t* out_protocol,
+    uint8_t* out_ep_in,
+    uint16_t* out_ep_mps,
+    uint8_t* out_ep_interval
+);
+
+static int uhci_hid_setup_interrupt(uhci_hid_dev_t* dev);
+
+static struct uhci_intr_pipe* uhci_intr_pipe_setup(
+    uint8_t addr,
+    uint8_t low_speed,
+    uint8_t ep_in,
+    uint16_t ep_in_mps,
+    void (*cb)(void*, const uint8_t*, uint32_t),
+    void* cb_ctx
+);
+
+static uhci_hid_dev_t* uhci_hid_alloc(void);
+static uhci_hub_t* uhci_hub_alloc(void);
+static void uhci_hub_enum_downstream(uhci_hub_t* hub, uint8_t* next_addr);
+
+static int uhci_hub_parse_cfg(
+    const uint8_t* cfg,
+    uint16_t cfg_len,
+    uint8_t* out_cfg_value,
+    uint8_t* out_iface,
+    uint8_t* out_ep_in,
+    uint16_t* out_ep_mps,
+    uint8_t* out_ep_interval
+) {
+    if (cfg_len < sizeof(usb_config_descriptor_t)) {
+        return 0;
+    }
+
+    const usb_config_descriptor_t* cd = (const usb_config_descriptor_t*)cfg;
+    if (cd->bLength < 9 || cd->bDescriptorType != USB_DESC_CONFIGURATION) {
+        return 0;
+    }
+
+    *out_cfg_value = cd->bConfigurationValue;
+
+    int in_hub = 0;
+    uint8_t iface_num = 0;
+
+    uint16_t i = 0;
+    while (i + 2 <= cfg_len) {
+        uint8_t blen = cfg[i + 0];
+        uint8_t dtype = cfg[i + 1];
+        if (blen < 2) {
+            break;
+        }
+        if (i + blen > cfg_len) {
+            break;
+        }
+
+        if (dtype == USB_DESC_INTERFACE && blen >= sizeof(usb_interface_descriptor_t)) {
+            const usb_interface_descriptor_t* id = (const usb_interface_descriptor_t*)&cfg[i];
+            if (id->bInterfaceClass == USB_CLASS_HUB) {
+                in_hub = 1;
+                iface_num = id->bInterfaceNumber;
+            } else {
+                in_hub = 0;
+            }
+        } else if (dtype == USB_DESC_ENDPOINT && blen >= sizeof(usb_endpoint_descriptor_t)) {
+            if (in_hub) {
+                const usb_endpoint_descriptor_t* ed = (const usb_endpoint_descriptor_t*)&cfg[i];
+                uint8_t ep_addr = ed->bEndpointAddress;
+                uint8_t ep_attr = ed->bmAttributes & 0x03u;
+                if ((ep_addr & USB_EP_DIR_IN) && ep_attr == USB_EP_XFER_INT) {
+                    *out_iface = iface_num;
+                    *out_ep_in = (uint8_t)(ep_addr & 0x0Fu);
+                    *out_ep_mps = (uint16_t)(usb_le16(&ed->wMaxPacketSize) & 0x07FFu);
+                    *out_ep_interval = ed->bInterval;
+                    return 1;
+                }
+            }
+        }
+
+        i = (uint16_t)(i + blen);
+    }
+
+    return 0;
+}
+
+static int uhci_hub_get_descriptor(uhci_hub_t* hub, uint8_t* out_buf, uint16_t out_len) {
+    if (!hub || !hub->addr || !out_buf || out_len == 0) {
+        return 0;
+    }
+
+    usb_setup_packet_t setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.bmRequestType = 0xA0;
+    setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+    setup.wValue = (uint16_t)((uint16_t)USB_DESC_HUB << 8);
+    setup.wIndex = 0;
+    setup.wLength = out_len;
+
+    return uhci_control_transfer(hub->addr, 0, hub->ep0_mps, &setup, out_buf, out_len, 1000000) >= 0;
+}
+
+static int uhci_hub_set_port_feature(uhci_hub_t* hub, uint8_t port, uint16_t feat) {
+    if (!hub || !hub->addr || port == 0) {
+        return 0;
+    }
+
+    usb_setup_packet_t setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.bmRequestType = 0x23;
+    setup.bRequest = USB_REQ_SET_FEATURE;
+    setup.wValue = feat;
+    setup.wIndex = port;
+    setup.wLength = 0;
+
+    return uhci_control_transfer(hub->addr, 0, hub->ep0_mps, &setup, 0, 0, 1000000) >= 0;
+}
+
+static int uhci_hub_clear_port_feature(uhci_hub_t* hub, uint8_t port, uint16_t feat) {
+    if (!hub || !hub->addr || port == 0) {
+        return 0;
+    }
+
+    usb_setup_packet_t setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.bmRequestType = 0x23;
+    setup.bRequest = USB_REQ_CLEAR_FEATURE;
+    setup.wValue = feat;
+    setup.wIndex = port;
+    setup.wLength = 0;
+
+    return uhci_control_transfer(hub->addr, 0, hub->ep0_mps, &setup, 0, 0, 1000000) >= 0;
+}
+
+static int uhci_hub_get_port_status(uhci_hub_t* hub, uint8_t port, uint8_t out_status[4]) {
+    if (!hub || !hub->addr || port == 0 || !out_status) {
+        return 0;
+    }
+
+    usb_setup_packet_t setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.bmRequestType = 0xA3;
+    setup.bRequest = USB_REQ_GET_STATUS;
+    setup.wValue = 0;
+    setup.wIndex = port;
+    setup.wLength = 4;
+
+    int r = uhci_control_transfer(hub->addr, 0, hub->ep0_mps, &setup, out_status, 4, 1000000);
+    return r >= 4;
+}
+
+static void uhci_hub_intr_cb(void* ctx, const uint8_t* data, uint32_t len) {
+    uhci_hub_t* hub = (uhci_hub_t*)ctx;
+    if (!hub || !hub->addr || !data || len == 0) {
+        return;
+    }
+
+    uint32_t bits = 0;
+    uint32_t max_bits = (hub->port_count + 1u);
+    if (max_bits > 32u) {
+        max_bits = 32u;
+    }
+
+    for (uint32_t i = 0; i < len && i < 4; i++) {
+        bits |= ((uint32_t)data[i]) << (i * 8u);
+    }
+
+    if (max_bits < 32u) {
+        bits &= (1u << max_bits) - 1u;
+    }
+
+    hub->pending_bitmap |= bits;
+}
+
+static void uhci_enum_device(uint8_t upstream_port, uint8_t low_speed, uint8_t* next_addr) {
+    if (!next_addr || *next_addr == 0 || *next_addr >= 127) {
+        return;
+    }
+
+    if (upstream_port == 0) {
+        return;
+    }
+
+    usb_device_descriptor_t dd;
+    memset(&dd, 0, sizeof(dd));
+
+    int r = uhci_usb_get_descriptor(0, low_speed, 8, USB_DESC_DEVICE, 0, &dd, 8);
+    if (r < 8) {
+        return;
+    }
+
+    uint16_t ep0_mps = dd.bMaxPacketSize0 ? dd.bMaxPacketSize0 : 8;
+    uint8_t addr = *next_addr;
+
+    if (!uhci_usb_set_address(low_speed, ep0_mps, addr)) {
+        return;
+    }
+
+    (*next_addr)++;
+
+    memset(&dd, 0, sizeof(dd));
+    uhci_usb_get_descriptor(addr, low_speed, ep0_mps, USB_DESC_DEVICE, 0, &dd, sizeof(dd));
+
+    usb_config_descriptor_t cd;
+    memset(&cd, 0, sizeof(cd));
+    r = uhci_usb_get_descriptor(addr, low_speed, ep0_mps, USB_DESC_CONFIGURATION, 0, &cd, sizeof(cd));
+    if (r < 9) {
+        return;
+    }
+
+    uint16_t total = usb_le16(&cd.wTotalLength);
+    if (total < 9) {
+        total = 9;
+    }
+    if (total > 512) {
+        total = 512;
+    }
+
+    uint8_t* cfg = (uint8_t*)kmalloc_a(total);
+    if (!cfg) {
+        return;
+    }
+
+    memset(cfg, 0, total);
+    r = uhci_usb_get_descriptor(addr, low_speed, ep0_mps, USB_DESC_CONFIGURATION, 0, cfg, total);
+    if (r < (int)total) {
+        kfree(cfg);
+        return;
+    }
+
+    uint8_t cfg_value = 0;
+
+    uint8_t hid_iface = 0;
+    uint8_t hid_proto = 0;
+    uint8_t hid_ep_in = 0;
+    uint16_t hid_ep_mps = 0;
+    uint8_t hid_ep_interval = 0;
+    int is_hid = uhci_hid_parse_cfg(cfg, (uint16_t)r, &cfg_value, &hid_iface, &hid_proto, &hid_ep_in, &hid_ep_mps, &hid_ep_interval);
+
+    uint8_t hub_iface = 0;
+    uint8_t hub_ep_in = 0;
+    uint16_t hub_ep_mps = 0;
+    uint8_t hub_ep_interval = 0;
+    int is_hub = uhci_hub_parse_cfg(cfg, (uint16_t)r, &cfg_value, &hub_iface, &hub_ep_in, &hub_ep_mps, &hub_ep_interval);
+
+    kfree(cfg);
+
+    if (!uhci_usb_set_config(addr, low_speed, ep0_mps, cfg_value)) {
+        return;
+    }
+
+    if (is_hid) {
+        uhci_hid_dev_t* dev = uhci_hid_alloc();
+        if (!dev) {
+            return;
+        }
+
+        dev->port = upstream_port;
+        dev->low_speed = low_speed;
+        dev->addr = addr;
+        dev->ep0_mps = (uint8_t)ep0_mps;
+        dev->iface_num = hid_iface;
+        dev->hid_protocol = hid_proto;
+        dev->ep_in = hid_ep_in;
+        dev->ep_in_mps = hid_ep_mps;
+        dev->ep_interval = hid_ep_interval;
+
+        uhci_hid_set_idle(dev->addr, low_speed, dev->ep0_mps, dev->iface_num);
+        uhci_hid_set_protocol(dev->addr, low_speed, dev->ep0_mps, dev->iface_num, 0);
+
+        if (!uhci_hid_setup_interrupt(dev)) {
+            dev->present = 0;
+        }
+
+        return;
+    }
+
+    if (is_hub) {
+        uhci_hub_t* hub = uhci_hub_alloc();
+        if (!hub) {
+            return;
+        }
+
+        hub->addr = addr;
+        hub->port = upstream_port;
+        hub->ep0_mps = ep0_mps;
+        hub->cfg_value = cfg_value;
+        hub->iface_num = hub_iface;
+        hub->intr_ep = hub_ep_in;
+        hub->intr_mps = hub_ep_mps;
+        hub->intr_interval = hub_ep_interval;
+
+        uint8_t desc[16];
+        memset(desc, 0, sizeof(desc));
+        if (!uhci_hub_get_descriptor(hub, desc, sizeof(desc))) {
+            memset(hub, 0, sizeof(*hub));
+            return;
+        }
+
+        uint8_t bNbrPorts = desc[2];
+        if (bNbrPorts == 0) {
+            memset(hub, 0, sizeof(*hub));
+            return;
+        }
+
+        hub->port_count = bNbrPorts;
+
+        uint8_t bytes = (uint8_t)(((uint32_t)hub->port_count + 1u + 7u) / 8u);
+        if (bytes == 0) {
+            bytes = 1;
+        }
+        hub->status_change_bytes = bytes;
+
+        hub->intr_pipe = uhci_intr_pipe_setup(
+            hub->addr,
+            0,
+            hub->intr_ep,
+            hub->intr_mps,
+            uhci_hub_intr_cb,
+            hub
+        );
+
+        if (!hub->intr_pipe) {
+            memset(hub, 0, sizeof(*hub));
+            return;
+        }
+
+        uhci_hub_enum_downstream(hub, next_addr);
+    }
+}
+
+static void uhci_hub_enum_downstream(uhci_hub_t* hub, uint8_t* next_addr) {
+    if (!hub || !hub->addr || !next_addr) {
+        return;
+    }
+
+    for (uint8_t port = 1; port <= hub->port_count; port++) {
+        (void)uhci_hub_set_port_feature(hub, port, USB_HUB_PORT_FEAT_POWER);
+    }
+
+    proc_usleep(100000);
+
+    for (uint8_t port = 1; port <= hub->port_count; port++) {
+        uint8_t st[4];
+        if (!uhci_hub_get_port_status(hub, port, st)) {
+            continue;
+        }
+
+        uint16_t wStatus = (uint16_t)st[0] | ((uint16_t)st[1] << 8);
+        if ((wStatus & (1u << 0)) == 0u) {
+            continue;
+        }
+
+        (void)uhci_hub_set_port_feature(hub, port, USB_HUB_PORT_FEAT_RESET);
+        proc_usleep(50000);
+
+        if (!uhci_hub_get_port_status(hub, port, st)) {
+            continue;
+        }
+
+        wStatus = (uint16_t)st[0] | ((uint16_t)st[1] << 8);
+        if ((wStatus & (1u << 1)) == 0u) {
+            continue;
+        }
+
+        uint8_t low_speed = (wStatus & (1u << 9)) ? 1u : 0u;
+        uhci_enum_device(port, low_speed, next_addr);
+    }
+}
+
+static void uhci_hub_poll(void) {
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_hubs) / sizeof(g_hubs[0])); i++) {
+        uhci_hub_t* hub = &g_hubs[i];
+        if (!hub->addr) {
+            continue;
+        }
+
+        uint32_t pending = hub->pending_bitmap;
+        hub->pending_bitmap = 0;
+
+        if (!pending) {
+            continue;
+        }
+
+        for (uint8_t port = 1; port <= hub->port_count; port++) {
+            if ((pending & (1u << port)) == 0u) {
+                continue;
+            }
+
+            uint8_t st[4];
+            if (!uhci_hub_get_port_status(hub, port, st)) {
+                continue;
+            }
+
+            uint16_t wStatus = (uint16_t)st[0] | ((uint16_t)st[1] << 8);
+            uint16_t wChange = (uint16_t)st[2] | ((uint16_t)st[3] << 8);
+
+            if (wChange & (1u << 0)) {
+                (void)uhci_hub_clear_port_feature(hub, port, USB_HUB_PORT_FEAT_C_CONNECTION);
+            }
+
+            if (wChange & (1u << 1)) {
+                (void)uhci_hub_clear_port_feature(hub, port, USB_HUB_PORT_FEAT_C_ENABLE);
+            }
+
+            if (wChange & (1u << 4)) {
+                (void)uhci_hub_clear_port_feature(hub, port, USB_HUB_PORT_FEAT_C_RESET);
+            }
+
+            if ((wStatus & (1u << 0)) == 0u) {
+                continue;
+            }
+
+            if ((wStatus & (1u << 1)) == 0u) {
+                (void)uhci_hub_set_port_feature(hub, port, USB_HUB_PORT_FEAT_RESET);
+                proc_usleep(50000);
+                if (!uhci_hub_get_port_status(hub, port, st)) {
+                    continue;
+                }
+                wStatus = (uint16_t)st[0] | ((uint16_t)st[1] << 8);
+                if ((wStatus & (1u << 1)) == 0u) {
+                    continue;
+                }
+            }
+
+            uint8_t low_speed = (wStatus & (1u << 9)) ? 1u : 0u;
+            uint8_t next_addr = 1;
+            for (uint32_t k = 0; k < (uint32_t)(sizeof(g_hid_devs) / sizeof(g_hid_devs[0])); k++) {
+                if (g_hid_devs[k].present && g_hid_devs[k].addr >= next_addr) {
+                    next_addr = (uint8_t)(g_hid_devs[k].addr + 1u);
+                }
+            }
+            for (uint32_t k = 0; k < (uint32_t)(sizeof(g_hubs) / sizeof(g_hubs[0])); k++) {
+                if (g_hubs[k].addr && g_hubs[k].addr >= next_addr) {
+                    next_addr = (uint8_t)(g_hubs[k].addr + 1u);
+                }
+            }
+
+            uhci_enum_device(port, low_speed, &next_addr);
+        }
+    }
+}
+
+static uhci_hid_dev_t* uhci_hid_alloc(void) {
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_hid_devs) / sizeof(g_hid_devs[0])); i++) {
+        if (!g_hid_devs[i].present) {
+            memset(&g_hid_devs[i], 0, sizeof(g_hid_devs[i]));
+            g_hid_devs[i].present = 1;
+            return &g_hid_devs[i];
+        }
+    }
+
+    return 0;
+}
+
+static uhci_hub_t* uhci_hub_alloc(void) {
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_hubs) / sizeof(g_hubs[0])); i++) {
+        if (!g_hubs[i].addr) {
+            memset(&g_hubs[i], 0, sizeof(g_hubs[i]));
+            return &g_hubs[i];
+        }
+    }
+
+    return 0;
+}
+
+static int uhci_hub_parse_cfg(
+    const uint8_t* cfg,
+    uint16_t cfg_len,
+    uint8_t* out_cfg_value,
+    uint8_t* out_iface,
+    uint8_t* out_ep_in,
+    uint16_t* out_ep_mps,
+    uint8_t* out_ep_interval
+);
+
+static int uhci_hub_get_descriptor(uhci_hub_t* hub, uint8_t* out_buf, uint16_t out_len);
+static int uhci_hub_set_port_feature(uhci_hub_t* hub, uint8_t port, uint16_t feat);
+static int uhci_hub_clear_port_feature(uhci_hub_t* hub, uint8_t port, uint16_t feat);
+static int uhci_hub_get_port_status(uhci_hub_t* hub, uint8_t port, uint8_t out_status[4]);
+static void uhci_hub_intr_cb(void* ctx, const uint8_t* data, uint32_t len);
+static void uhci_hub_poll(void);
+static void uhci_enum_device(uint8_t upstream_port, uint8_t low_speed, uint8_t* next_addr);
+static void uhci_hub_enum_downstream(uhci_hub_t* hub, uint8_t* next_addr);
 
 static inline uint32_t uhci_td_maxlen_field(uint16_t len);
 
@@ -646,6 +1216,205 @@ static int uhci_wait_qh_done(uhci_qh_t* qh, uint32_t timeout_us) {
             uhci_wait_io(1000);
         }
     }
+}
+
+int uhci_usb_bulk_transfer(
+    uint8_t devaddr,
+    uint8_t low_speed,
+    uint8_t ep_num,
+    uint8_t dir_in,
+    uint16_t max_packet,
+    void* data,
+    uint32_t length,
+    uint32_t timeout_us,
+    uint8_t* toggle_io
+) {
+    if (!g_uhci_initialized || !g_uhci_async_qh) {
+        return -1;
+    }
+
+    if (!devaddr) {
+        return -1;
+    }
+
+    if (ep_num > 15) {
+        return -1;
+    }
+
+    if (length && !data) {
+        return -1;
+    }
+
+    if (max_packet == 0) {
+        max_packet = 8;
+    }
+
+    if (max_packet > 64) {
+        max_packet = 64;
+    }
+
+    if (length == 0) {
+        return 0;
+    }
+
+    uint8_t toggle = 0;
+    if (toggle_io) {
+        toggle = *toggle_io & 1u;
+    }
+
+    uint8_t* data_dma = (uint8_t*)kmalloc_a(length);
+    if (!data_dma) {
+        return -1;
+    }
+
+    if (dir_in) {
+        memset(data_dma, 0, length);
+    } else {
+        memcpy(data_dma, data, length);
+    }
+
+    uint32_t data_phys = paging_get_phys(kernel_page_directory, (uint32_t)data_dma);
+    if (!data_phys) {
+        kfree(data_dma);
+        return -1;
+    }
+
+    uhci_td_t* td_first = 0;
+    uhci_td_t* td_prev = 0;
+
+    uint32_t remaining = length;
+    uint32_t offset = 0;
+
+    while (remaining) {
+        uint16_t pkt = remaining > max_packet ? max_packet : (uint16_t)remaining;
+
+        uhci_td_t* td = uhci_alloc_td();
+        if (!td) {
+            uhci_free_td_chain(td_first);
+            kfree(data_dma);
+            return -1;
+        }
+
+        td->link = UHCI_PTR_T;
+
+        uint32_t status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE;
+        if (low_speed) {
+            status |= UHCI_TD_CTRL_LS;
+        }
+        if (dir_in) {
+            status |= UHCI_TD_CTRL_SPD;
+        }
+
+        td->status = status;
+
+        td->token =
+            (uhci_td_maxlen_field(pkt) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
+            ((uint32_t)toggle << UHCI_TD_TOKEN_D_SHIFT) |
+            ((uint32_t)ep_num << UHCI_TD_TOKEN_ENDP_SHIFT) |
+            ((uint32_t)devaddr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
+            (dir_in ? UHCI_TD_PID_IN : UHCI_TD_PID_OUT);
+
+        td->buffer = data_phys + offset;
+
+        if (!td_first) {
+            td_first = td;
+        }
+
+        if (td_prev) {
+            td_prev->link = td->sw_phys;
+            td_prev->sw_next = (uint32_t)(uintptr_t)td;
+        }
+
+        td_prev = td;
+
+        toggle ^= 1u;
+
+        remaining -= pkt;
+        offset += pkt;
+    }
+
+    if (td_prev) {
+        td_prev->status |= UHCI_TD_CTRL_IOC;
+    }
+
+    uhci_qh_t* qh = uhci_alloc_qh();
+    if (!qh) {
+        uhci_free_td_chain(td_first);
+        kfree(data_dma);
+        return -1;
+    }
+
+    qh->link = UHCI_PTR_T;
+    qh->element = td_first->sw_phys;
+
+    uhci_sched_insert_head_qh(qh);
+
+    int ok = uhci_wait_qh_done(qh, timeout_us);
+
+    uhci_sched_remove_head_qh(qh);
+
+    if (g_uhci_can_sleep) {
+        proc_usleep(2000);
+    } else {
+        uhci_wait_io(2000);
+    }
+
+    if (!ok) {
+        qh->element = UHCI_PTR_T;
+        kfree(qh);
+        uhci_free_td_chain(td_first);
+        kfree(data_dma);
+        return -1;
+    }
+
+    int success = 1;
+    uint32_t total = 0;
+    uhci_td_t* td = td_first;
+
+    while (td) {
+        uint32_t st = td->status;
+        if (st & (UHCI_TD_CTRL_STALLED | UHCI_TD_CTRL_DBUFERR | UHCI_TD_CTRL_BABBLE | UHCI_TD_CTRL_CRCTIMEO | UHCI_TD_CTRL_BITSTUFF)) {
+            success = 0;
+            break;
+        }
+
+        uint32_t al = st & UHCI_TD_CTRL_ACTLEN_MASK;
+        uint32_t got = (al == UHCI_TD_CTRL_ACTLEN_MASK) ? 0u : (al + 1u);
+        if (got > max_packet) {
+            got = max_packet;
+        }
+
+        total += got;
+
+        if (got < max_packet) {
+            break;
+        }
+
+        td = (uhci_td_t*)(uintptr_t)td->sw_next;
+    }
+
+    if (total > length) {
+        total = length;
+    }
+
+    if (success && dir_in) {
+        memcpy(data, data_dma, total);
+    }
+
+    if (toggle_io) {
+        *toggle_io = toggle & 1u;
+    }
+
+    qh->element = UHCI_PTR_T;
+    kfree(qh);
+    uhci_free_td_chain(td_first);
+    kfree(data_dma);
+
+    if (!success) {
+        return -1;
+    }
+
+    return (int)total;
 }
 
 static int uhci_control_transfer(uint8_t devaddr, uint8_t low_speed, uint16_t ep0_mps,
@@ -1392,6 +2161,7 @@ void uhci_late_init(void) {
 
     uhci_intr_pipes_reset();
     memset(g_hid_devs, 0, sizeof(g_hid_devs));
+    uhci_hubs_reset();
 
     uint8_t next_addr = 1;
 
@@ -1406,100 +2176,7 @@ void uhci_late_init(void) {
             continue;
         }
 
-        if (next_addr == 0 || next_addr >= 127) {
-            break;
-        }
-
-        uhci_hid_dev_t* dev = &g_hid_devs[port - 1];
-        memset(dev, 0, sizeof(*dev));
-        dev->present = 1;
-        dev->port = port;
-        dev->low_speed = low_speed;
-
-        usb_device_descriptor_t dd;
-        memset(&dd, 0, sizeof(dd));
-        int r = uhci_usb_get_descriptor(0, low_speed, 8, USB_DESC_DEVICE, 0, &dd, 8);
-        if (r < 8) {
-            dev->present = 0;
-            continue;
-        }
-
-        dev->ep0_mps = dd.bMaxPacketSize0 ? dd.bMaxPacketSize0 : 8;
-
-        if (!uhci_usb_set_address(low_speed, dev->ep0_mps, next_addr)) {
-            dev->present = 0;
-            continue;
-        }
-        dev->addr = next_addr;
-        next_addr++;
-
-        memset(&dd, 0, sizeof(dd));
-        uhci_usb_get_descriptor(dev->addr, low_speed, dev->ep0_mps, USB_DESC_DEVICE, 0, &dd, sizeof(dd));
-
-        usb_config_descriptor_t cd;
-        memset(&cd, 0, sizeof(cd));
-        r = uhci_usb_get_descriptor(dev->addr, low_speed, dev->ep0_mps, USB_DESC_CONFIGURATION, 0, &cd, sizeof(cd));
-        if (r < 9) {
-            dev->present = 0;
-            continue;
-        }
-
-        uint16_t total = usb_le16(&cd.wTotalLength);
-        if (total < 9) total = 9;
-        if (total > 512) total = 512;
-
-        uint8_t* cfg = (uint8_t*)kmalloc_a(total);
-        if (!cfg) {
-            dev->present = 0;
-            continue;
-        }
-        memset(cfg, 0, total);
-
-        r = uhci_usb_get_descriptor(dev->addr, low_speed, dev->ep0_mps, USB_DESC_CONFIGURATION, 0, cfg, total);
-        if (r < 9) {
-            kfree(cfg);
-            dev->present = 0;
-            continue;
-        }
-
-        if (r < (int)total) {
-            kfree(cfg);
-            dev->present = 0;
-            continue;
-        }
-
-        uint8_t cfg_value = 0;
-        uint8_t iface = 0;
-        uint8_t proto = 0;
-        uint8_t ep_in = 0;
-        uint16_t ep_mps = 0;
-        uint8_t ep_interval = 0;
-        int ok = uhci_hid_parse_cfg(cfg, (uint16_t)r, &cfg_value, &iface, &proto, &ep_in, &ep_mps, &ep_interval);
-        kfree(cfg);
-
-        if (!ok) {
-            dev->present = 0;
-            continue;
-        }
-
-        dev->iface_num = iface;
-        dev->hid_protocol = proto;
-        dev->ep_in = ep_in;
-        dev->ep_in_mps = ep_mps;
-        dev->ep_interval = ep_interval;
-
-        if (!uhci_usb_set_config(dev->addr, low_speed, dev->ep0_mps, cfg_value)) {
-            dev->present = 0;
-            continue;
-        }
-
-        uhci_hid_set_idle(dev->addr, low_speed, dev->ep0_mps, dev->iface_num);
-        uhci_hid_set_protocol(dev->addr, low_speed, dev->ep0_mps, dev->iface_num, 0);
-
-        if (!uhci_hid_setup_interrupt(dev)) {
-            dev->present = 0;
-            continue;
-        }
+        uhci_enum_device(port, low_speed, &next_addr);
     }
 }
 
@@ -1510,6 +2187,11 @@ void uhci_poll(void) {
 
     uhci_intr_pipes_poll_all();
 
-    uhci_kbd_repeat_tick(&g_hid_devs[0]);
-    uhci_kbd_repeat_tick(&g_hid_devs[1]);
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_hid_devs) / sizeof(g_hid_devs[0])); i++) {
+        if (g_hid_devs[i].present) {
+            uhci_kbd_repeat_tick(&g_hid_devs[i]);
+        }
+    }
+
+    uhci_hub_poll();
 }

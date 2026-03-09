@@ -68,4 +68,16 @@ void uhci_poll(void);
 int uhci_is_initialized(void);
 void uhci_quiesce_early(void);
 
+int uhci_usb_bulk_transfer(
+    uint8_t devaddr,
+    uint8_t low_speed,
+    uint8_t ep_num,
+    uint8_t dir_in,
+    uint16_t max_packet,
+    void* data,
+    uint32_t length,
+    uint32_t timeout_us,
+    uint8_t* toggle_io
+);
+
 #endif
