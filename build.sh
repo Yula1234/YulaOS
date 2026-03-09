@@ -91,6 +91,29 @@ for FILE in $(find src -name "*.cpp"); do
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
 done
 
+echo "[kernel] compiling Rust..."
+RUST_TARGET="${RUST_TARGET:-i686-unknown-linux-gnu}"
+
+RUST_OBJ="bin/obj/rust_kernel.o"
+
+if ! rustc \
+    --crate-type=lib \
+    --emit=obj \
+    --target="$RUST_TARGET" \
+    -A non_upper_case_globals \
+    -C opt-level=2 \
+    -C panic=abort \
+    -C relocation-model=static \
+    -C lto=no \
+    src/rust/lib.rs \
+    -o "$RUST_OBJ"; then
+    echo "[kernel] rustc failed for src/rust/lib.rs"
+    echo "[kernel] If you use rustup, ensure the target is installed: rustup target add $RUST_TARGET"
+    exit 1
+fi
+
+KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $RUST_OBJ"
+
 echo "[user] compiling libs..."
 $ASM usr/start.asm bin/usr/start.o &
 $CC $CFLAGS_USER -c usr/lib/malloc.c -o bin/obj/malloc.o &
