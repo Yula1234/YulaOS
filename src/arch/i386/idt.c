@@ -15,7 +15,6 @@
 #include <kernel/cpu.h>
 #include <kernel/shm.h>
 #include <kernel/panic.h>
-#include <kernel/output/kprintf.h>
 
 #ifdef KERNEL_PROFILE
 #include <kernel/profiler.h>
@@ -550,24 +549,9 @@ void isr_handler(registers_t* regs) {
                 } else {
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
-                        kprintf(
-                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                            curr->pid,
-                            regs->eip,
-                            cr2,
-                            regs->err_code
-                        );
                         maybe_deliver_pending_signal(curr, regs);
                         goto out;
                     }
-
-                    kprintf(
-                        "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                        curr->pid,
-                        regs->eip,
-                        cr2,
-                        regs->err_code
-                    );
                     proc_kill(curr);
                     sched_yield();
                     goto out;
@@ -585,24 +569,9 @@ void isr_handler(registers_t* regs) {
                 } else {
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
-                        kprintf(
-                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                            curr->pid,
-                            regs->eip,
-                            cr2,
-                            regs->err_code
-                        );
                         maybe_deliver_pending_signal(curr, regs);
                         goto out;
                     }
-
-                    kprintf(
-                        "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                        curr->pid,
-                        regs->eip,
-                        cr2,
-                        regs->err_code
-                    );
                     proc_kill(curr);
                     sched_yield();
                     goto out;
@@ -616,24 +585,9 @@ void isr_handler(registers_t* regs) {
                 } else if (r < 0) {
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
-                        kprintf(
-                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                            curr->pid,
-                            regs->eip,
-                            cr2,
-                            regs->err_code
-                        );
                         maybe_deliver_pending_signal(curr, regs);
                         goto out;
                     }
-
-                    kprintf(
-                        "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                        curr->pid,
-                        regs->eip,
-                        cr2,
-                        regs->err_code
-                    );
                     proc_kill(curr);
                     sched_yield();
                     goto out;
@@ -672,22 +626,8 @@ void isr_handler(registers_t* regs) {
 
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
-                        kprintf(
-                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                            curr->pid,
-                            regs->eip,
-                            cr2,
-                            regs->err_code
-                        );
                         maybe_deliver_pending_signal(curr, regs);
                     } else {
-                        kprintf(
-                            "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
-                            curr->pid,
-                            regs->eip,
-                            cr2,
-                            regs->err_code
-                        );
                         proc_kill(curr);
                         sched_yield();
                     }
