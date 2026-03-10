@@ -15,6 +15,7 @@
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
 #include <kernel/rtc.h>
+#include <kernel/panic.h>
 #include <kernel/shm.h>
 #include <kernel/ipc_endpoint.h>
 #include <kernel/poll_waitq.h>
@@ -29,6 +30,9 @@
 #include <mm/pmm.h>
 #include <mm/heap.h>
 
+#include <lib/hash_map.h>
+#include <lib/cpp/new.h>
+
 #include "clipboard.h"
 #include "syscall.h"
 #include "sched.h"
@@ -39,7 +43,120 @@ extern volatile uint32_t timer_ticks;
 
 extern uint32_t* paging_get_dir(void); 
 
-extern int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h);
+extern "C" int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h);
+
+typedef struct {
+    uint32_t key;
+    uint32_t refs;
+    semaphore_t sem;
+} futex_entry_t;
+
+static __cacheline_aligned spinlock_t futex_table_lock;
+static __attribute__((unused)) uint8_t futex_table_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
+
+static HashMap<uint32_t, futex_entry_t*> futex_map;
+
+static futex_entry_t* futex_acquire_entry(uint32_t key, bool create) {
+    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
+
+    futex_entry_t* entry = nullptr;
+    if (futex_map.try_get(key, entry)) {
+        entry->refs++;
+        spinlock_release_safe(&futex_table_lock, flags);
+        return entry;
+    }
+
+    if (!create) {
+        spinlock_release_safe(&futex_table_lock, flags);
+        return nullptr;
+    }
+
+    entry = new (kernel::nothrow) futex_entry_t();
+    if (!entry) {
+        spinlock_release_safe(&futex_table_lock, flags);
+        return nullptr;
+    }
+
+    entry->key = key;
+    entry->refs = 1u;
+    sem_init(&entry->sem, 0);
+
+    const bool inserted = futex_map.insert_unique(key, entry);
+    if (!inserted) {
+        delete entry;
+        spinlock_release_safe(&futex_table_lock, flags);
+        return nullptr;
+    }
+
+    spinlock_release_safe(&futex_table_lock, flags);
+    return entry;
+}
+
+static bool futex_entry_is_unused(futex_entry_t& entry) {
+    semaphore_t* sem = &entry.sem;
+    const uint32_t sflags = spinlock_acquire_safe(&sem->lock);
+    const bool unused = (sem->count == 0) && dlist_empty(&sem->wait_list);
+    spinlock_release_safe(&sem->lock, sflags);
+
+    return unused;
+}
+
+static void futex_release_entry(futex_entry_t* entry) {
+    if (!entry) {
+        return;
+    }
+
+    bool maybe_free = false;
+
+    {
+        const uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
+
+        if (entry->refs == 0u) {
+            panic("FUTEX: entry ref underflow");
+        }
+
+        entry->refs--;
+        maybe_free = (entry->refs == 0u);
+
+        spinlock_release_safe(&futex_table_lock, flags);
+    }
+
+    if (!maybe_free) {
+        return;
+    }
+
+    if (!futex_entry_is_unused(*entry)) {
+        return;
+    }
+
+    const uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
+
+    futex_entry_t* current = nullptr;
+    const bool still_present = futex_map.try_get(entry->key, current);
+    if (!still_present || current != entry) {
+        spinlock_release_safe(&futex_table_lock, flags);
+        return;
+    }
+
+    if (entry->refs != 0u) {
+        spinlock_release_safe(&futex_table_lock, flags);
+        return;
+    }
+
+    if (!futex_entry_is_unused(*entry)) {
+        spinlock_release_safe(&futex_table_lock, flags);
+        return;
+    }
+
+    futex_entry_t* removed = nullptr;
+    (void)futex_map.remove_and_get(entry->key, removed);
+
+    spinlock_release_safe(&futex_table_lock, flags);
+
+    if (removed) {
+        delete removed;
+    }
+}
 
 static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     if (!buf) return 0;
@@ -243,68 +360,6 @@ static mmap_area_t* mmap_find_overlap(task_t* t, uint32_t start, uint32_t end_ex
 }
 
 
-#define FUTEX_TABLE_CAP 256u
-
-typedef struct {
-    uint32_t in_use;
-    uint32_t key;
-    semaphore_t sem;
-} futex_entry_t;
-
-static __cacheline_aligned spinlock_t futex_table_lock;
-static __attribute__((unused)) uint8_t futex_table_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
-static futex_entry_t futex_table[FUTEX_TABLE_CAP];
-
-static semaphore_t* futex_get_sem(uint32_t key) {
-    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
-
-    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
-        if (!futex_table[i].in_use) continue;
-        if (futex_table[i].key == key) {
-            spinlock_release_safe(&futex_table_lock, flags);
-            return &futex_table[i].sem;
-        }
-    }
-
-    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
-        if (futex_table[i].in_use) continue;
-        futex_table[i].in_use = 1u;
-        futex_table[i].key = key;
-        sem_init(&futex_table[i].sem, 0);
-        spinlock_release_safe(&futex_table_lock, flags);
-        return &futex_table[i].sem;
-    }
-
-    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
-        if (!futex_table[i].in_use) continue;
-        semaphore_t* sem = &futex_table[i].sem;
-        uint32_t sflags = spinlock_acquire_safe(&sem->lock);
-        const int reusable = (sem->count == 0) && dlist_empty(&sem->wait_list);
-        spinlock_release_safe(&sem->lock, sflags);
-        if (!reusable) continue;
-
-        sem_init(&futex_table[i].sem, 0);
-        futex_table[i].key = key;
-        spinlock_release_safe(&futex_table_lock, flags);
-        return &futex_table[i].sem;
-    }
-
-    spinlock_release_safe(&futex_table_lock, flags);
-    return 0;
-}
-
-static semaphore_t* futex_lookup_sem(uint32_t key) {
-    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
-    for (uint32_t i = 0; i < FUTEX_TABLE_CAP; i++) {
-        if (!futex_table[i].in_use) continue;
-        if (futex_table[i].key == key) {
-            spinlock_release_safe(&futex_table_lock, flags);
-            return &futex_table[i].sem;
-        }
-    }
-    spinlock_release_safe(&futex_table_lock, flags);
-    return 0;
-}
 
 static int futex_sem_wait(semaphore_t* sem, volatile const uint32_t* uaddr, uint32_t expected) {
     if (!sem || !uaddr) return -1;
@@ -323,7 +378,8 @@ static int futex_sem_wait(semaphore_t* sem, volatile const uint32_t* uaddr, uint
         }
 
         if (sem->count > 0) {
-            sem->count--;
+            const int new_count = sem->count - 1;
+            sem->count = new_count;
             task_t* curr = proc_current();
             if (curr) curr->blocked_on_sem = 0;
             spinlock_release_safe(&sem->lock, flags);
@@ -359,7 +415,8 @@ static int futex_sem_wake(semaphore_t* sem, uint32_t max_wake) {
         t->sem_node.prev = 0;
         t->blocked_on_sem = 0;
 
-        sem->count++;
+        const int new_count = sem->count + 1;
+        sem->count = new_count;
         if (t->state != TASK_ZOMBIE) {
             t->state = TASK_RUNNABLE;
             sched_add(t);
@@ -1912,13 +1969,18 @@ static void syscall_futex_wait(registers_t* regs, task_t* curr) {
     }
     uint32_t key = phys & ~3u;
 
-    semaphore_t* sem = futex_get_sem(key);
-    if (!sem) {
+    futex_entry_t* entry = futex_acquire_entry(key, true);
+    if (!entry) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
+    semaphore_t* sem = &entry->sem;
+
     regs->eax = (uint32_t)futex_sem_wait(sem, uaddr, expected);
+
+    futex_release_entry(entry);
+    return;
 }
 
 static void syscall_futex_wake(registers_t* regs, task_t* curr) {
@@ -1947,13 +2009,18 @@ static void syscall_futex_wake(registers_t* regs, task_t* curr) {
     }
     uint32_t key = phys & ~3u;
 
-    semaphore_t* sem = futex_lookup_sem(key);
-    if (!sem) {
+    futex_entry_t* entry = futex_acquire_entry(key, false);
+    if (!entry) {
         regs->eax = 0;
         return;
     }
 
+    semaphore_t* sem = &entry->sem;
+
     regs->eax = (uint32_t)futex_sem_wake(sem, max_wake);
+
+    futex_release_entry(entry);
+    return;
 }
 
 static void syscall_ioctl(registers_t* regs, task_t* curr) {
@@ -2630,7 +2697,7 @@ static const syscall_fn_t syscall_table[] = {
     [69] = syscall_renameat,
 };
 
-void syscall_handler(registers_t* regs) {
+extern "C" void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti");
     uint32_t sys_num = regs->eax;
     if (sys_num >= (uint32_t)(sizeof(syscall_table) / sizeof(syscall_table[0]))) {

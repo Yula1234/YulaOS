@@ -4,6 +4,14 @@
 #ifndef KERNEL_RTC_H
 #define KERNEL_RTC_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void get_time_string(char* buf);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

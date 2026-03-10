@@ -6,6 +6,14 @@
 
 #include <arch/i386/idt.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void syscall_handler(registers_t* regs);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

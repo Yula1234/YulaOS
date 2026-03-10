@@ -12,6 +12,10 @@
 
 struct task;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int32_t x;
     int32_t y;
@@ -34,5 +38,9 @@ void mouse_vfs_init(void);
 int mouse_poll_ready(struct task* task);
 int mouse_poll_waitq_register(poll_waiter_t* w, struct task* task);
 void mouse_poll_notify_focus_change(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
