@@ -935,7 +935,7 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
     mem->refcount = 1;
     mem->mmap_top = proc::detail::default_mmap_top;
 
-    spinlock_init(&mem->mmap_lock);
+    vma_init(mem);
 
     mem->page_dir = paging_clone_directory();
     if (!mem->page_dir) {
@@ -968,18 +968,7 @@ static void proc_mem_release(proc_mem_t* mem) {
         }
     }
 
-    mmap_area_t* m = mem->mmap_list;
-    while (m) {
-        mmap_area_t* next = m->next;
-
-        if (m->file) {
-            vfs_node_release(m->file);
-        }
-
-        kfree(m);
-        m = next;
-    }
-    mem->mmap_list = 0;
+    vma_destroy(mem);
 
     if (mem->page_dir && mem->page_dir != kernel_page_directory) {
         for (int i = 0; i < 1024; i++) {

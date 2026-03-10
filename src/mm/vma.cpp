@@ -40,37 +40,138 @@ static inline bool ranges_overlap(uint32_t a_start, uint32_t a_end, uint32_t b_s
     return (a_start < b_end) && (b_start < a_end);
 }
 
-static vma_region_t* vma_find_unlocked(proc_mem_t* mem, uint32_t vaddr) noexcept {
+static inline vma_region_t* rb_to_region(rb_node* node) noexcept {
+    return node ? rb_entry(node, vma_region_t, rb_node) : nullptr;
+}
+
+static inline const vma_region_t* rb_to_region(const rb_node* node) noexcept {
+    return node ? rb_entry(node, const vma_region_t, rb_node) : nullptr;
+}
+
+static vma_region_t* tree_find_leq(proc_mem_t* mem, uint32_t vaddr) noexcept {
     if (!mem) {
         return nullptr;
     }
 
-    vma_region_t* curr = mem->mmap_list;
+    rb_node* node = mem->mmap_tree.rb_node;
+    vma_region_t* best = nullptr;
 
-    while (curr) {
-        if (vaddr >= curr->vaddr_start && vaddr < curr->vaddr_end) {
-            return curr;
+    while (node) {
+        vma_region_t* cur = rb_to_region(node);
+        if (!cur) {
+            break;
         }
 
-        curr = curr->next;
+        if (vaddr < cur->vaddr_start) {
+            node = node->rb_left;
+            continue;
+        }
+
+        best = cur;
+        node = node->rb_right;
+    }
+
+    return best;
+}
+
+static vma_region_t* tree_first_ge(proc_mem_t* mem, uint32_t vaddr) noexcept {
+    if (!mem) {
+        return nullptr;
+    }
+
+    rb_node* node = mem->mmap_tree.rb_node;
+    vma_region_t* best = nullptr;
+
+    while (node) {
+        vma_region_t* cur = rb_to_region(node);
+        if (!cur) {
+            break;
+        }
+
+        if (cur->vaddr_start < vaddr) {
+            node = node->rb_right;
+            continue;
+        }
+
+        best = cur;
+        node = node->rb_left;
+    }
+
+    return best;
+}
+
+static int tree_insert(proc_mem_t* mem, vma_region_t* region) noexcept {
+    if (!mem || !region) {
+        return 0;
+    }
+
+    rb_node** link = &mem->mmap_tree.rb_node;
+    rb_node* parent = nullptr;
+
+    while (*link) {
+        parent = *link;
+        vma_region_t* cur = rb_to_region(parent);
+
+        if (region->vaddr_start < cur->vaddr_start) {
+            link = &((*link)->rb_left);
+            continue;
+        }
+
+        if (region->vaddr_start > cur->vaddr_start) {
+            link = &((*link)->rb_right);
+            continue;
+        }
+
+        return 0;
+    }
+
+    rb_link_node(&region->rb_node, parent, link);
+    rb_insert_color(&region->rb_node, &mem->mmap_tree);
+    return 1;
+}
+
+static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept {
+    if (!mem || !region) {
+        return;
+    }
+
+    rb_erase(&region->rb_node, &mem->mmap_tree);
+    region->rb_node.__parent_color = 0;
+    region->rb_node.rb_left = nullptr;
+    region->rb_node.rb_right = nullptr;
+}
+
+static vma_region_t* vma_find_unlocked(proc_mem_t* mem, uint32_t vaddr) noexcept {
+    vma_region_t* cand = tree_find_leq(mem, vaddr);
+    if (!cand) {
+        return nullptr;
+    }
+
+    if (vaddr >= cand->vaddr_start && vaddr < cand->vaddr_end) {
+        return cand;
     }
 
     return nullptr;
 }
 
 static vma_region_t* vma_find_overlap_unlocked(proc_mem_t* mem, uint32_t start, uint32_t end_excl) noexcept {
-    if (!mem) {
+    if (!mem || end_excl <= start) {
         return nullptr;
     }
 
-    vma_region_t* curr = mem->mmap_list;
+    vma_region_t* cand = tree_find_leq(mem, start);
+    if (cand && ranges_overlap(start, end_excl, cand->vaddr_start, cand->vaddr_end)) {
+        return cand;
+    }
 
-    while (curr) {
-        if (ranges_overlap(start, end_excl, curr->vaddr_start, curr->vaddr_end)) {
-            return curr;
-        }
+    if (cand) {
+        cand = rb_to_region(rb_next(&cand->rb_node));
+    } else {
+        cand = rb_to_region(rb_first(&mem->mmap_tree));
+    }
 
-        curr = curr->next;
+    if (cand && ranges_overlap(start, end_excl, cand->vaddr_start, cand->vaddr_end)) {
+        return cand;
     }
 
     return nullptr;
@@ -125,8 +226,12 @@ extern "C" void vma_init(proc_mem_t* mem) {
 
     spinlock_init(&mem->mmap_lock);
 
-    mem->mmap_list = nullptr;
-    mem->mmap_top = user_addr_min;
+    mem->mmap_tree = RB_ROOT;
+    dlist_init(&mem->mmap_regions);
+
+    if (mem->mmap_top == 0u) {
+        mem->mmap_top = user_addr_min;
+    }
 }
 
 extern "C" void vma_destroy(proc_mem_t* mem) {
@@ -134,22 +239,26 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
         return;
     }
 
-    vma_region_t* curr = nullptr;
-    {
-        kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
-        curr = mem->mmap_list;
-        mem->mmap_list = nullptr;
+    while (true) {
+        vma_region_t* victim = nullptr;
+
+        {
+            kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+
+            if (dlist_empty(&mem->mmap_regions)) {
+                mem->mmap_tree = RB_ROOT;
+                break;
+            }
+
+            dlist_head_t* first = mem->mmap_regions.next;
+            victim = container_of(first, vma_region_t, list_node);
+
+            dlist_del(&victim->list_node);
+            tree_erase(mem, victim);
+        }
+
+        free_region(victim);
     }
-
-    while (curr) {
-        vma_region_t* next = curr->next;
-
-        free_region(curr);
-
-        curr = next;
-    }
-
-    mem->mmap_list = nullptr;
 }
 
 extern "C" vma_region_t* vma_create(
@@ -198,6 +307,12 @@ extern "C" vma_region_t* vma_create(
     region->map_flags = flags;
     region->file = nullptr;
 
+    region->rb_node.__parent_color = 0;
+    region->rb_node.rb_left = nullptr;
+    region->rb_node.rb_right = nullptr;
+    region->list_node.next = nullptr;
+    region->list_node.prev = nullptr;
+
     if (file) {
         vfs_node_retain(file);
         region->file = file;
@@ -211,8 +326,11 @@ extern "C" vma_region_t* vma_create(
         has_overlap = vma_find_overlap_unlocked(mem, region->vaddr_start, region->vaddr_end) != nullptr;
 
         if (!has_overlap) {
-            region->next = mem->mmap_list;
-            mem->mmap_list = region;
+            if (!tree_insert(mem, region)) {
+                has_overlap = true;
+            } else {
+                dlist_add_tail(&region->list_node, &mem->mmap_regions);
+            }
 
             if (mem->mmap_top < region->vaddr_end) {
                 mem->mmap_top = region->vaddr_end;
@@ -283,25 +401,25 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         scan = region->vaddr_end;
     }
 
-    vma_region_t* prev = nullptr;
-    vma_region_t* curr = mem->mmap_list;
-
-    while (curr) {
-        vma_region_t* next = curr->next;
+    scan = vaddr;
+    while (scan < vaddr_end) {
+        vma_region_t* curr = vma_find_unlocked(mem, scan);
+        if (!curr) {
+            return -1;
+        }
 
         uint32_t u_start = vaddr;
         uint32_t u_end = vaddr_end;
         uint32_t m_start = curr->vaddr_start;
         uint32_t m_end = curr->vaddr_end;
 
-        if (u_end <= m_start || u_start >= m_end) {
-            prev = curr;
-            curr = next;
-            continue;
-        }
-
         uint32_t o_start = (u_start > m_start) ? u_start : m_start;
         uint32_t o_end = (u_end < m_end) ? u_end : m_end;
+
+        if (o_start >= o_end) {
+            scan = m_end;
+            continue;
+        }
 
         if (o_start > m_start && o_end < m_end) {
             vma_region_t* new_right = alloc_region();
@@ -318,7 +436,12 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             new_right->vaddr_end = m_end;
             new_right->length = right_len;
             new_right->map_flags = curr->map_flags;
-            new_right->next = curr->next;
+
+            new_right->rb_node.__parent_color = 0;
+            new_right->rb_node.rb_left = nullptr;
+            new_right->rb_node.rb_right = nullptr;
+            new_right->list_node.next = nullptr;
+            new_right->list_node.prev = nullptr;
 
             if (curr->file) {
                 vfs_node_retain(curr->file);
@@ -347,27 +470,25 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             }
             curr->file_size = left_file_size;
 
-            curr->next = new_right;
+            if (!tree_insert(mem, new_right)) {
+                free_region(new_right);
+                return -1;
+            }
+
+            dlist_add_tail(&new_right->list_node, &mem->mmap_regions);
 
             unmap_range(mem->page_dir, o_start, o_end);
-
-            prev = new_right;
-            curr = new_right->next;
+            scan = o_end;
             continue;
         }
 
         unmap_range(mem->page_dir, o_start, o_end);
 
         if (o_start == m_start && o_end == m_end) {
-            if (prev) {
-                prev->next = next;
-            } else {
-                mem->mmap_list = next;
-            }
-
+            dlist_del(&curr->list_node);
+            tree_erase(mem, curr);
             free_region(curr);
-
-            curr = next;
+            scan = o_end;
             continue;
         }
 
@@ -375,7 +496,10 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             uint32_t cut_len = o_end - m_start;
             uint32_t new_len = m_end - o_end;
 
+            tree_erase(mem, curr);
+
             curr->vaddr_start = o_end;
+            curr->vaddr_end = m_end;
             curr->length = new_len;
 
             if (curr->file) {
@@ -392,8 +516,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                 curr->file_size = new_len;
             }
 
-            prev = curr;
-            curr = next;
+            if (!tree_insert(mem, curr)) {
+                return -1;
+            }
+
+            scan = o_end;
             continue;
         }
 
@@ -407,13 +534,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                 curr->file_size = new_len;
             }
 
-            prev = curr;
-            curr = next;
+            scan = o_end;
             continue;
         }
 
-        prev = curr;
-        curr = next;
+        scan = o_end;
     }
 
     return 0;
@@ -483,25 +608,51 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
 
     const uint32_t alloc_limit = 0xB0000000u;
 
-    while (vaddr < alloc_limit) {
-        uint32_t end_excl = vaddr + aligned_size;
+    if (vaddr >= alloc_limit) {
+        return 0;
+    }
 
-        if (end_excl < vaddr || end_excl > alloc_limit) {
+    uint32_t cur = vaddr;
+
+    vma_region_t* left = tree_find_leq(mem, cur);
+    if (left && left->vaddr_end > cur) {
+        cur = align_up_4k(left->vaddr_end);
+    }
+
+    vma_region_t* right = tree_first_ge(mem, cur);
+
+    while (cur < alloc_limit) {
+        uint32_t gap_end = alloc_limit;
+
+        if (right) {
+            gap_end = right->vaddr_start;
+        }
+
+        uint32_t end_excl = cur + aligned_size;
+
+        if (end_excl < cur) {
             return 0;
         }
 
-        vma_region_t* overlap = vma_find_overlap_unlocked(mem, vaddr, end_excl);
-
-        if (!overlap) {
-            *out_vaddr = vaddr;
+        if (end_excl <= gap_end) {
+            *out_vaddr = cur;
 
             if (end_excl > mem->mmap_top) {
                 mem->mmap_top = end_excl;
             }
+
             return 1;
         }
 
-        vaddr = align_up_4k(overlap->vaddr_end);
+        if (!right) {
+            return 0;
+        }
+
+        if (right->vaddr_end > cur) {
+            cur = align_up_4k(right->vaddr_end);
+        }
+
+        right = rb_to_region(rb_next(&right->rb_node));
     }
 
     return 0;

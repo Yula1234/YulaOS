@@ -69,14 +69,23 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
         {
             kernel::SpinLockNativeSafeGuard guard(t->mem->mmap_lock);
 
-            vma_region_t* region = t->mem->mmap_list;
-            while (region) {
-                if (v >= region->vaddr_start && v < region->vaddr_end) {
-                    region_end = region->vaddr_end;
-                    break;
+            rb_node* node = t->mem->mmap_tree.rb_node;
+            vma_region_t* best = nullptr;
+
+            while (node) {
+                vma_region_t* cur_region = rb_entry(node, vma_region_t, rb_node);
+
+                if (v < cur_region->vaddr_start) {
+                    node = node->rb_left;
+                    continue;
                 }
 
-                region = region->next;
+                best = cur_region;
+                node = node->rb_right;
+            }
+
+            if (best && v >= best->vaddr_start && v < best->vaddr_end) {
+                region_end = best->vaddr_end;
             }
         }
 

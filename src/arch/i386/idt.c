@@ -145,6 +145,37 @@ typedef struct {
     vfs_node_t* file;
 } mmap_pf_info_t;
 
+static mmap_area_t* mmap_find_area_locked(proc_mem_t* mem, uint32_t vaddr) {
+    if (!mem) {
+        return 0;
+    }
+
+    struct rb_node* node = mem->mmap_tree.rb_node;
+    mmap_area_t* best = 0;
+
+    while (node) {
+        mmap_area_t* cur = rb_entry(node, mmap_area_t, rb_node);
+
+        if (vaddr < cur->vaddr_start) {
+            node = node->rb_left;
+            continue;
+        }
+
+        best = cur;
+        node = node->rb_right;
+    }
+
+    if (!best) {
+        return 0;
+    }
+
+    if (vaddr >= best->vaddr_start && vaddr < best->vaddr_end) {
+        return best;
+    }
+
+    return 0;
+}
+
 static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
     if (!t || !t->mem || !out) {
         return 0;
@@ -154,25 +185,21 @@ static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
 
     const uint32_t flags = spinlock_acquire_safe(&mem->mmap_lock);
 
-    mmap_area_t* m = mem->mmap_list;
-    while (m) {
-        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) {
-            out->vaddr_start = m->vaddr_start;
-            out->vaddr_end = m->vaddr_end;
-            out->file_offset = m->file_offset;
-            out->file_size = m->file_size;
-            out->map_flags = m->map_flags;
-            out->file = m->file;
+    mmap_area_t* m = mmap_find_area_locked(mem, vaddr);
+    if (m) {
+        out->vaddr_start = m->vaddr_start;
+        out->vaddr_end = m->vaddr_end;
+        out->file_offset = m->file_offset;
+        out->file_size = m->file_size;
+        out->map_flags = m->map_flags;
+        out->file = m->file;
 
-            if (out->file) {
-                vfs_node_retain(out->file);
-            }
-
-            spinlock_release_safe(&mem->mmap_lock, flags);
-            return 1;
+        if (out->file) {
+            vfs_node_retain(out->file);
         }
 
-        m = m->next;
+        spinlock_release_safe(&mem->mmap_lock, flags);
+        return 1;
     }
 
     spinlock_release_safe(&mem->mmap_lock, flags);

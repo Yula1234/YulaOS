@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <lib/dlist.h>
+#include <lib/rbtree.h>
+
 struct vfs_node;
 
 struct proc_mem;
@@ -29,7 +32,8 @@ struct vma_region {
 
     struct vfs_node* file;
 
-    vma_region_t* next;
+    struct rb_node rb_node;
+    dlist_head_t list_node;
 };
 
 #ifdef __cplusplus
