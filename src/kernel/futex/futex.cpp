@@ -159,6 +159,12 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
     }
 
     for (;;) {
+        task_t* curr = proc_current();
+
+        if (curr && curr->pending_signals != 0) {
+            return -2;
+        }
+
         uaccess_prefault_user_read((const void*)uaddr, 4u);
 
         uint32_t v = *(volatile const uint32_t*)uaddr;
@@ -175,8 +181,6 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             if (v != expected) {
                 return 0;
             }
-
-            task_t* curr = proc_current();
 
             if (!curr) {
                 return -1;
