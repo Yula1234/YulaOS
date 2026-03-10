@@ -78,23 +78,6 @@ static int ensure_user_buffer_writable_mappable(task_t* task, void* buf, uint32_
     return uaccess_ensure_user_buffer_writable_mappable(task, buf, size);
 }
 
-static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
-    if (!dir) return 0;
-
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FF;
-
-    uint32_t pde = dir[pd_idx];
-    if (!(pde & 1)) return 0;
-
-    uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
-    uint32_t pte = pt[pt_idx];
-    if (!(pte & 1)) return 0;
-
-    if (out_pte) *out_pte = pte;
-    return 1;
-}
-
 static int check_user_buffer_present(task_t* task, const void* buf, uint32_t size) {
     return uaccess_check_user_buffer_present(task, buf, size);
 }

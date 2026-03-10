@@ -38,32 +38,6 @@ static inline bool ranges_overlap(uint32_t a_start, uint32_t a_end, uint32_t b_s
     return (a_start < b_end) && (b_start < a_end);
 }
 
-static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) noexcept {
-    if (!dir) {
-        return 0;
-    }
-
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FFu;
-
-    uint32_t pde = dir[pd_idx];
-    if ((pde & 1u) == 0u) {
-        return 0;
-    }
-
-    uint32_t* pt = (uint32_t*)(pde & ~page_mask);
-    uint32_t pte = pt[pt_idx];
-    if ((pte & 1u) == 0u) {
-        return 0;
-    }
-
-    if (out_pte) {
-        *out_pte = pte;
-    }
-
-    return 1;
-}
-
 static void unmap_range(uint32_t* page_dir, uint32_t start, uint32_t end) noexcept {
     for (uint32_t v = start; v < end; v += page_size) {
         uint32_t pte;

@@ -96,6 +96,12 @@ int paging_is_user_accessible(uint32_t* dir, uint32_t virt);
 uint32_t paging_get_phys(uint32_t* dir, uint32_t virt);
 
 /*
+ * Get the PTE for a virtual address if present.
+ * Returns 1 and stores PTE in *out_pte if the mapping exists, 0 otherwise.
+ */
+int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte);
+
+/*
  * Global kernel page directory.
  *
  * This is the directory installed during early boot and used as the reference

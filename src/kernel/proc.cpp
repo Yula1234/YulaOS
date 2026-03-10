@@ -1324,7 +1324,6 @@ static int proc_setup_thread_user_stack(task_t* t, uint32_t stack_bottom, uint32
     return 1;
 }
 
-static int proc_mem_has_mmap_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl);
 static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom, uint32_t stack_top);
 
 task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, uint32_t stack_top) {

@@ -3,6 +3,8 @@
 
 #include <kernel/uaccess/uaccess.h>
 
+#include <arch/i386/paging.h>
+
 #include <kernel/proc.h>
 
 #include <mm/vma.h>
@@ -71,32 +73,6 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
 
         uintptr_t lim = (uintptr_t)region->vaddr_end;
         cur = (end_excl < lim) ? end_excl : lim;
-    }
-
-    return 1;
-}
-
-static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
-    if (!dir) {
-        return 0;
-    }
-
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FFu;
-
-    uint32_t pde = dir[pd_idx];
-    if ((pde & 1u) == 0) {
-        return 0;
-    }
-
-    uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
-    uint32_t pte = pt[pt_idx];
-    if ((pte & 1u) == 0) {
-        return 0;
-    }
-
-    if (out_pte) {
-        *out_pte = pte;
     }
 
     return 1;
