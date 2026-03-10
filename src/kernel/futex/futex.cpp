@@ -31,11 +31,13 @@ static __attribute__((unused)) uint8_t futex_table_lock_pad[HAL_CACHELINE_SIZE -
 static HashMap<uint32_t, futex_entry_t*> futex_map;
 
 static futex_entry_t* futex_acquire_entry(uint32_t key, bool create) {
-    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
+    const uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
 
     futex_entry_t* entry = nullptr;
+
     if (futex_map.try_get(key, entry)) {
         entry->refs++;
+
         spinlock_release_safe(&futex_table_lock, flags);
         return entry;
     }
@@ -53,11 +55,13 @@ static futex_entry_t* futex_acquire_entry(uint32_t key, bool create) {
 
     entry->key = key;
     entry->refs = 1u;
+
     sem_init(&entry->sem, 0);
 
     const bool inserted = futex_map.insert_unique(key, entry);
     if (!inserted) {
         delete entry;
+
         spinlock_release_safe(&futex_table_lock, flags);
         return nullptr;
     }
@@ -146,7 +150,7 @@ static int futex_sem_wait(semaphore_t* sem, volatile const uint32_t* uaddr, uint
             return 0;
         }
 
-        uint32_t flags = spinlock_acquire_safe(&sem->lock);
+        const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
         v = *(volatile const uint32_t*)uaddr;
         if (v != expected) {
@@ -174,10 +178,12 @@ static int futex_sem_wait(semaphore_t* sem, volatile const uint32_t* uaddr, uint
         }
 
         curr->blocked_on_sem = (void*)sem;
+
         dlist_add_tail(&curr->sem_node, &sem->wait_list);
         curr->state = TASK_WAITING;
 
         spinlock_release_safe(&sem->lock, flags);
+
         sched_yield();
     }
 }
@@ -187,7 +193,7 @@ static int futex_sem_wake(semaphore_t* sem, uint32_t max_wake) {
         return 0;
     }
 
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
+    const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
     uint32_t woken = 0;
     while (woken < max_wake && !dlist_empty(&sem->wait_list)) {
@@ -203,6 +209,7 @@ static int futex_sem_wake(semaphore_t* sem, uint32_t max_wake) {
 
         if (t->state != TASK_ZOMBIE) {
             t->state = TASK_RUNNABLE;
+
             sched_add(t);
         }
 
@@ -222,7 +229,6 @@ extern "C" int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t
     }
 
     semaphore_t* sem = &entry->sem;
-
     const int rc = futex_sem_wait(sem, uaddr, expected);
 
     futex_release_entry(entry);
@@ -236,7 +242,6 @@ extern "C" int futex_wake(uint32_t key, uint32_t max_wake) {
     }
 
     semaphore_t* sem = &entry->sem;
-
     const int rc = futex_sem_wake(sem, max_wake);
 
     futex_release_entry(entry);

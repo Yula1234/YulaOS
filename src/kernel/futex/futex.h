@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t expected);
+
 int futex_wake(uint32_t key, uint32_t max_wake);
 
 #ifdef __cplusplus
