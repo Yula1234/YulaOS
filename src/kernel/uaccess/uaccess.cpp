@@ -57,15 +57,19 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
 
     uintptr_t cur = start;
     while (cur < end_excl) {
-        uint32_t v = (uint32_t)cur;
+        const uint32_t v = (uint32_t)cur;
 
-        if (t->stack_bottom < t->stack_top && v >= t->stack_bottom && v < t->stack_top) {
+        if (t->stack_bottom < t->stack_top
+            && v >= t->stack_bottom
+            && v < t->stack_top) {
             uintptr_t lim = (uintptr_t)t->stack_top;
             cur = (end_excl < lim) ? end_excl : lim;
             continue;
         }
 
-        if (t->mem->heap_start < t->mem->prog_break && v >= t->mem->heap_start && v < t->mem->prog_break) {
+        if (t->mem->heap_start < t->mem->prog_break
+            && v >= t->mem->heap_start
+            && v < t->mem->prog_break) {
             uintptr_t lim = (uintptr_t)t->mem->prog_break;
             cur = (end_excl < lim) ? end_excl : lim;
             continue;
@@ -127,7 +131,7 @@ static int check_user_buffer_present_impl(task_t* task, uintptr_t start, uintptr
     }
 
     uint32_t v = (uint32_t)start & ~0xFFFu;
-    uint32_t v_end = ((uint32_t)end_excl + 0xFFFu) & ~0xFFFu;
+    const uint32_t v_end = ((uint32_t)end_excl + 0xFFFu) & ~0xFFFu;
 
     for (; v < v_end; v += 4096u) {
         uint32_t pte;
@@ -158,8 +162,9 @@ extern "C" int uaccess_check_user_buffer(task_t* task, const void* buf, uint32_t
         return 1;
     }
 
-    uintptr_t start = (uintptr_t)buf;
-    uintptr_t end_excl = start + (uintptr_t)size;
+    const uintptr_t start = (uintptr_t)buf;
+    const uintptr_t end_excl = start + (uintptr_t)size;
+
     if (end_excl < start) {
         return 0;
     }
@@ -172,8 +177,9 @@ extern "C" void uaccess_prefault_user_read(const void* p, uint32_t len) {
         return;
     }
 
-    uintptr_t addr = (uintptr_t)p;
-    uintptr_t end = addr + (uintptr_t)len - 1u;
+    const uintptr_t addr = (uintptr_t)p;
+    const uintptr_t end = addr + (uintptr_t)len - 1u;
+
     if (end < addr) {
         return;
     }
@@ -181,7 +187,7 @@ extern "C" void uaccess_prefault_user_read(const void* p, uint32_t len) {
     for (uintptr_t cur = addr; cur <= end;) {
         (void)*(volatile const uint8_t*)cur;
 
-        uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
+        const uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
         if (next <= cur) {
             break;
         }
@@ -199,8 +205,8 @@ extern "C" int uaccess_check_user_buffer_present(task_t* task, const void* buf, 
         return 1;
     }
 
-    uintptr_t start = (uintptr_t)buf;
-    uintptr_t end_excl = start + (uintptr_t)size;
+    const uintptr_t start = (uintptr_t)buf;
+    const uintptr_t end_excl = start + (uintptr_t)size;
 
     return check_user_buffer_present_impl(task, start, end_excl, 0);
 }
@@ -214,8 +220,8 @@ extern "C" int uaccess_check_user_buffer_writable_present(task_t* task, void* bu
         return 1;
     }
 
-    uintptr_t start = (uintptr_t)buf;
-    uintptr_t end_excl = start + (uintptr_t)size;
+    const uintptr_t start = (uintptr_t)buf;
+    const uintptr_t end_excl = start + (uintptr_t)size;
 
     return check_user_buffer_present_impl(task, start, end_excl, 1);
 }
@@ -229,8 +235,9 @@ extern "C" int uaccess_ensure_user_buffer_writable_mappable(task_t* task, void* 
         return 1;
     }
 
-    uintptr_t start = (uintptr_t)buf;
-    uintptr_t end_excl = start + (uintptr_t)size;
+    const uintptr_t start = (uintptr_t)buf;
+    const uintptr_t end_excl = start + (uintptr_t)size;
+
     if (end_excl < start) {
         return 0;
     }
@@ -240,6 +247,7 @@ extern "C" int uaccess_ensure_user_buffer_writable_mappable(task_t* task, void* 
     }
 
     uaccess_prefault_user_read((const void*)buf, size);
+
     return uaccess_check_user_buffer_writable_present(task, buf, size);
 }
 
@@ -258,6 +266,7 @@ extern "C" int uaccess_copy_user_str_bounded(task_t* task, char* dst, uint32_t d
 
     for (uint32_t i = 0; i < dst_size; i++) {
         const void* p = (const void*)((uintptr_t)user_src + (uintptr_t)i);
+
         if (!uaccess_check_user_buffer(task, p, 1u)) {
             return -1;
         }
