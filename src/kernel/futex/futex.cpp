@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
+#include <kernel/uaccess/uaccess.h>
+
 #include <kernel/futex/futex.h>
 
 #include <kernel/panic.h>
-
-#include <kernel/proc.h>
 #include <kernel/sched.h>
+#include <kernel/proc.h>
 
-#include <kernel/uaccess/uaccess.h>
-
+#include <lib/cpp/intrusive_ref.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/dlist.h>
-#include <lib/cpp/intrusive_ref.h>
+#include <lib/cpp/new.h>
 
 #include <lib/hash_map.h>
-#include <lib/cpp/new.h>
 
 #include <stdint.h>
 
