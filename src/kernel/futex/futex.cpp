@@ -41,6 +41,7 @@ public:
         kernel::SpinLockSafeGuard guard(lock_);
 
         futex_entry_t* entry = nullptr;
+
         if (map_.try_get(key, entry)) {
             if (!entry->table) {
                 entry->table = this;
@@ -58,6 +59,7 @@ public:
         }
 
         entry = new (kernel::nothrow) futex_entry_t();
+
         if (!entry) {
             return {};
         }
@@ -69,8 +71,10 @@ public:
         dlist_init(&entry->wait_list);
 
         const bool inserted = map_.insert_unique(key, entry);
+
         if (!inserted) {
             delete entry;
+
             return {};
         }
 
@@ -88,6 +92,7 @@ public:
             }
 
             entry.refs--;
+
             maybe_free = (entry.refs == 0u);
         }
 
@@ -105,6 +110,7 @@ public:
             kernel::SpinLockSafeGuard guard(lock_);
 
             futex_entry_t* current = nullptr;
+
             if (!map_.try_get(entry.key, current) || current != &entry) {
                 return;
             }
@@ -157,6 +163,7 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
         uaccess_prefault_user_read((const void*)uaddr, 4u);
 
         uint32_t v = *(volatile const uint32_t*)uaddr;
+
         if (v != expected) {
             return 0;
         }
@@ -165,11 +172,13 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             kernel::SpinLockSafeGuard guard(entry->lock);
 
             v = *(volatile const uint32_t*)uaddr;
+
             if (v != expected) {
                 return 0;
             }
 
             task_t* curr = proc_current();
+
             if (!curr) {
                 return -1;
             }
@@ -177,6 +186,7 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             curr->blocked_on_sem = (void*)entry;
 
             dlist_add_tail(&curr->sem_node, &entry->wait_list);
+
             curr->state = TASK_WAITING;
         }
 
@@ -222,6 +232,7 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
 
 extern "C" int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t expected) {
     kernel::IntrusiveRef<futex_entry_t> entry_ref = futex_table.acquire_entry(key, true);
+
     if (!entry_ref) {
         return -1;
     }
@@ -233,6 +244,7 @@ extern "C" int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t
 
 extern "C" int futex_wake(uint32_t key, uint32_t max_wake) {
     kernel::IntrusiveRef<futex_entry_t> entry_ref = futex_table.acquire_entry(key, false);
+
     if (!entry_ref) {
         return 0;
     }
