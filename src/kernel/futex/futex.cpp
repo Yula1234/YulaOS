@@ -26,8 +26,6 @@ struct futex_entry_t {
 
     kernel::SpinLock lock;
     dlist_head_t wait_list;
-
-    bool retain();
     void release();
 };
 
@@ -76,22 +74,6 @@ static bool futex_entry_is_unused(futex_entry_t& entry) {
     const bool unused = dlist_empty(&entry.wait_list);
 
     return unused;
-}
-
-bool futex_entry_t::retain() {
-    kernel::SpinLockSafeGuard guard(futex_table_lock);
-
-    if (refs == 0u) {
-        return false;
-    }
-
-    futex_entry_t* current = nullptr;
-    if (!futex_map.try_get(key, current) || current != this) {
-        return false;
-    }
-
-    refs++;
-    return true;
 }
 
 void futex_entry_t::release() {
