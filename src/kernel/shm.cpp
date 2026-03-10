@@ -530,12 +530,38 @@ static int shm_close(vfs_node_t* node) {
     return 0;
 }
 
+static uint32_t shm_get_phys_page(vfs_node_t* node, uint32_t offset) {
+    if (!node || (node->flags & VFS_FLAG_SHM) == 0u) {
+        return 0u;
+    }
+
+    auto* data = (kernel::shm::ShmNodeData*)node->private_data;
+    if (!data || !data->obj) {
+        return 0u;
+    }
+
+    const uint32_t* pages = nullptr;
+    uint32_t page_count = 0u;
+
+    if (!data->obj->get_phys_pages(pages, page_count) || !pages || page_count == 0u) {
+        return 0u;
+    }
+
+    const uint32_t page_idx = offset / 4096u;
+    if (page_idx >= page_count) {
+        return 0u;
+    }
+
+    return pages[page_idx];
+}
+
 static vfs_ops_t shm_ops = {
     .read = shm_read,
     .write = shm_write,
     .open = 0,
     .close = shm_close,
     .ioctl = 0,
+    .get_phys_page = shm_get_phys_page,
 };
 
 }

@@ -481,15 +481,7 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         }
     }
 
-    uint32_t alloc_limit = 0xB0000000u;
-
-    if (mem->fbmap_user_ptr != 0u) {
-        const uint32_t fb_start = align_down_4k(mem->fbmap_user_ptr);
-
-        if (fb_start >= user_addr_min && fb_start < alloc_limit) {
-            alloc_limit = fb_start;
-        }
-    }
+    const uint32_t alloc_limit = 0xB0000000u;
 
     while (vaddr < alloc_limit) {
         uint32_t end_excl = vaddr + aligned_size;

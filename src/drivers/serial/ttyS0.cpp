@@ -311,6 +311,7 @@ vfs_ops_t ttyS0_ops = {
     0,
     0,
     ttyS0_vfs_ioctl,
+    0,
 };
 
 vfs_node_t ttyS0_node = {

@@ -839,6 +839,7 @@ static vfs_ops_t yfs_vfs_ops = {
     0,
     0,
     0,
+    0,
 };
 
 static kernel::Mutex g_mount_lock;

@@ -13,7 +13,6 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/cpu.h>
-#include <kernel/shm.h>
 #include <kernel/panic.h>
 
 #ifdef KERNEL_PROFILE
@@ -303,30 +302,29 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         return 0;
     }
 
-    if ((info.map_flags & MAP_SHARED) && info.file && (info.file->flags & VFS_FLAG_SHM) && info.file->private_data) {
-        uint32_t rel = vaddr - info.vaddr_start;
-        uint32_t page_idx = rel / 4096u;
+    uint32_t rel = vaddr - info.vaddr_start;
 
-        const uint32_t* pages = 0;
-        uint32_t page_count = 0u;
+    if ((info.map_flags & MAP_SHARED)
+        && info.file
+        && info.file->ops
+        && info.file->ops->get_phys_page) {
 
-        if (!shm_get_phys_pages(info.file, &pages, &page_count)) {
+        if (info.file_offset > 0xFFFFFFFFu - rel) {
             vfs_node_release(info.file);
             return -1;
         }
 
-        if (!pages || page_idx >= page_count) {
-            vfs_node_release(info.file);
-            return -1;
-        }
+        const uint32_t file_off = info.file_offset + rel;
+        const uint32_t phys = info.file->ops->get_phys_page(info.file, file_off);
 
-        const uint32_t phys = pages[page_idx];
         if (!phys) {
             vfs_node_release(info.file);
             return -1;
         }
 
-        paging_map(curr->mem->page_dir, vaddr, phys, 7 | 0x200u);
+        uint32_t pte_flags = 7u | 0x200u;
+
+        paging_map(curr->mem->page_dir, vaddr, phys, pte_flags);
 
         vfs_node_release(info.file);
         return 1;
@@ -341,8 +339,6 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     }
 
     memset(new_page, 0, 4096);
-
-    uint32_t rel = vaddr - info.vaddr_start;
 
     if ((info.map_flags & MAP_STACK) == 0 &&
         info.file &&

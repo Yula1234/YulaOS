@@ -868,6 +868,68 @@ static void syscall_fstatat(registers_t* regs, task_t* curr) {
     regs->eax = (uint32_t)vfs_fstatat(dirfd, name, u_stat);
 }
 
+static int fb_get_mapping_params(uint32_t* out_fb_phys, uint32_t* out_size_bytes, uint32_t* out_page_off) {
+    if (!out_fb_phys || !out_size_bytes || !out_page_off) {
+        return 0;
+    }
+
+    *out_fb_phys = 0u;
+    *out_size_bytes = 0u;
+    *out_page_off = 0u;
+
+    if (virtio_gpu_is_active()) {
+        const virtio_gpu_fb_t* vfb = virtio_gpu_get_fb();
+        if (!vfb || vfb->fb_phys == 0u || vfb->width == 0u || vfb->height == 0u || vfb->pitch == 0u) {
+            return 0;
+        }
+
+        const uint64_t min_pitch64 = (uint64_t)vfb->width * 4ull;
+        if (min_pitch64 > 0xFFFFFFFFull || vfb->pitch < (uint32_t)min_pitch64) {
+            return 0;
+        }
+
+        const uint64_t size64 = (uint64_t)vfb->pitch * (uint64_t)vfb->height;
+        if (size64 == 0u || size64 > 0xFFFFFFFFull || vfb->size_bytes < (uint32_t)size64) {
+            return 0;
+        }
+
+        *out_fb_phys = vfb->fb_phys;
+        *out_size_bytes = (uint32_t)size64;
+    } else {
+        if (!fb_ptr || fb_pitch == 0u || fb_width == 0u || fb_height == 0u) {
+            return 0;
+        }
+
+        const uint64_t size64 = (uint64_t)fb_pitch * (uint64_t)fb_height;
+        if (size64 == 0u || size64 > 0xFFFFFFFFull) {
+            return 0;
+        }
+
+        *out_fb_phys = (uint32_t)fb_ptr;
+        *out_size_bytes = (uint32_t)size64;
+    }
+
+    *out_page_off = (*out_fb_phys) & 0xFFFu;
+    return 1;
+}
+
+static uint32_t fb_expected_user_ptr(void) {
+    const uint32_t user_vaddr_start = 0xB1000000u;
+
+    uint32_t fb_phys = 0u;
+    uint32_t size_bytes = 0u;
+    uint32_t page_off = 0u;
+
+    if (!fb_get_mapping_params(&fb_phys, &size_bytes, &page_off)) {
+        return 0u;
+    }
+
+    (void)fb_phys;
+    (void)size_bytes;
+
+    return user_vaddr_start + page_off;
+}
+
 static void syscall_fb_map(registers_t* regs, task_t* curr) {
     if (!curr->mem || !curr->mem->page_dir) {
         regs->eax = 0;
@@ -881,130 +943,44 @@ static void syscall_fb_map(registers_t* regs, task_t* curr) {
 
     const uint32_t user_vaddr_start = 0xB1000000u;
 
-    if (virtio_gpu_is_active()) {
-        const virtio_gpu_fb_t* vfb = virtio_gpu_get_fb();
-        if (!vfb || !vfb->fb_ptr || vfb->width == 0 || vfb->height == 0 || vfb->pitch == 0) {
-            regs->eax = 0;
-            return;
-        }
+    uint32_t fb_phys = 0u;
+    uint32_t fb_size = 0u;
+    uint32_t page_off = 0u;
 
-        uint64_t virtio_min_pitch64 = (uint64_t)vfb->width * 4ull;
-        if (virtio_min_pitch64 > 0xFFFFFFFFu || vfb->pitch < (uint32_t)virtio_min_pitch64) {
-            regs->eax = 0;
-            return;
-        }
-
-        uint64_t fb_size64 = (uint64_t)vfb->pitch * (uint64_t)vfb->height;
-        if (fb_size64 == 0 || fb_size64 > 0xFFFFFFFFu || vfb->size_bytes < (uint32_t)fb_size64) {
-            regs->eax = 0;
-            return;
-        }
-
-        uint32_t fb_base = vfb->fb_phys;
-        uint32_t page_off = fb_base & 0xFFFu;
-        uint32_t fb_page = fb_base & ~0xFFFu;
-        uint32_t fb_size = (uint32_t)fb_size64;
-
-        if (fb_size > 0xFFFFFFFFu - page_off) {
-            regs->eax = 0;
-            return;
-        }
-
-        uint32_t map_size = fb_size + page_off;
-        uint32_t pages = (map_size + 0xFFFu) / 4096u;
-
-        if (curr->mem->fbmap_pages > 0) {
-            for (uint32_t i = 0; i < curr->mem->fbmap_pages; i++) {
-                uint32_t v = user_vaddr_start + i * 4096u;
-                if (paging_is_user_accessible(curr->mem->page_dir, v)) {
-                    paging_map(curr->mem->page_dir, v, 0, 0);
-                }
-            }
-            if (curr->mem->mem_pages >= curr->mem->fbmap_pages) curr->mem->mem_pages -= curr->mem->fbmap_pages;
-            else curr->mem->mem_pages = 0;
-            curr->mem->fbmap_pages = 0;
-            curr->mem->fbmap_user_ptr = 0;
-            curr->mem->fbmap_size_bytes = 0;
-            curr->mem->fbmap_is_virtio = 0;
-        }
-
-        uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
-        if (paging_pat_is_supported()) {
-            flags |= PTE_PAT;
-        }
-
-        for (uint32_t i = 0; i < pages; i++) {
-            uint32_t offset = i * 4096u;
-            paging_map(curr->mem->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
-            curr->mem->mem_pages++;
-        }
-
-        curr->mem->fbmap_pages = pages;
-        curr->mem->fbmap_user_ptr = user_vaddr_start + page_off;
-        curr->mem->fbmap_size_bytes = fb_size;
-        curr->mem->fbmap_is_virtio = 1;
-
-        __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
-        regs->eax = user_vaddr_start + page_off;
-        return;
-    }
-
-    if (!fb_ptr || fb_width == 0 || fb_height == 0 || fb_pitch == 0) {
+    if (!fb_get_mapping_params(&fb_phys, &fb_size, &page_off)) {
         regs->eax = 0;
         return;
     }
 
-    uint32_t fb_base = (uint32_t)fb_ptr;
-    uint32_t page_off = fb_base & 0xFFFu;
-    uint32_t fb_page = fb_base & ~0xFFFu;
-
-    uint64_t fb_size64 = (uint64_t)fb_pitch * (uint64_t)fb_height;
-    if (fb_size64 == 0 || fb_size64 > 0xFFFFFFFFu) {
-        regs->eax = 0;
-        return;
-    }
-
-    uint32_t fb_size = (uint32_t)fb_size64;
     if (fb_size > 0xFFFFFFFFu - page_off) {
         regs->eax = 0;
         return;
     }
 
-    uint32_t map_size = fb_size + page_off;
-    uint32_t pages = (map_size + 0xFFFu) / 4096u;
+    const uint32_t map_size = fb_size + page_off;
 
-    if (curr->mem->fbmap_pages > 0) {
-        for (uint32_t i = 0; i < curr->mem->fbmap_pages; i++) {
-            uint32_t v = user_vaddr_start + i * 4096u;
-            if (paging_is_user_accessible(curr->mem->page_dir, v)) {
-                paging_map(curr->mem->page_dir, v, 0, 0);
-            }
-        }
-        if (curr->mem->mem_pages >= curr->mem->fbmap_pages) curr->mem->mem_pages -= curr->mem->fbmap_pages;
-        else curr->mem->mem_pages = 0;
-        curr->mem->fbmap_pages = 0;
-        curr->mem->fbmap_user_ptr = 0;
-        curr->mem->fbmap_size_bytes = 0;
-        curr->mem->fbmap_is_virtio = 0;
+    vma_region_t* existing = vma_find(curr->mem, user_vaddr_start);
+    if (existing && existing->vaddr_start == user_vaddr_start) {
+        const uint32_t old_len = existing->vaddr_end - existing->vaddr_start;
+        (void)vma_remove(curr->mem, existing->vaddr_start, old_len);
     }
 
-    uint32_t flags = PTE_PRESENT | PTE_RW | PTE_USER | 0x200u;
-    if (paging_pat_is_supported()) {
-        flags |= PTE_PAT;
+    vfs_node_t* fb_node = devfs_clone("fb0");
+    if (!fb_node) {
+        regs->eax = 0;
+        return;
     }
 
-    for (uint32_t i = 0; i < pages; i++) {
-        uint32_t offset = i * 4096u;
-        paging_map(curr->mem->page_dir, user_vaddr_start + offset, fb_page + offset, flags);
-        curr->mem->mem_pages++;
+    vma_region_t* region = vma_create(curr->mem, user_vaddr_start, map_size, fb_node, 0u, map_size, MAP_SHARED);
+    vfs_node_release(fb_node);
+
+    if (!region) {
+        regs->eax = 0;
+        return;
     }
 
-    curr->mem->fbmap_pages = pages;
-    curr->mem->fbmap_user_ptr = user_vaddr_start + page_off;
-    curr->mem->fbmap_size_bytes = fb_size;
-    curr->mem->fbmap_is_virtio = 0;
+    (void)fb_phys;
 
-    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
     regs->eax = user_vaddr_start + page_off;
 }
 
@@ -1015,25 +991,14 @@ static void syscall_fb_acquire(registers_t* regs, task_t* curr) {
 static void syscall_fb_release(registers_t* regs, task_t* curr) {
     const uint32_t user_vaddr_start = 0xB1000000u;
 
-    if (curr->mem && curr->mem->fbmap_pages > 0) {
-        for (uint32_t i = 0; i < curr->mem->fbmap_pages; i++) {
-            uint32_t v = user_vaddr_start + i * 4096u;
-            if (curr->mem->page_dir && paging_is_user_accessible(curr->mem->page_dir, v)) {
-                paging_map(curr->mem->page_dir, v, 0, 0);
-            }
+    if (curr->mem && curr->mem->page_dir) {
+        vma_region_t* region = vma_find(curr->mem, user_vaddr_start);
+        if (region && region->vaddr_start == user_vaddr_start) {
+            const uint32_t len = region->vaddr_end - region->vaddr_start;
+            (void)vma_remove(curr->mem, region->vaddr_start, len);
         }
-        if (curr->mem->mem_pages >= curr->mem->fbmap_pages) curr->mem->mem_pages -= curr->mem->fbmap_pages;
-        else curr->mem->mem_pages = 0;
-        curr->mem->fbmap_pages = 0;
     }
 
-    if (curr->mem) {
-        curr->mem->fbmap_user_ptr = 0;
-        curr->mem->fbmap_size_bytes = 0;
-        curr->mem->fbmap_is_virtio = 0;
-    }
-
-    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax");
     regs->eax = (uint32_t)fb_release(curr->pid);
 }
 
@@ -1694,9 +1659,10 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
     }
 
     if (!virtio_active) {
-        const int src_is_mapped_fb = curr->mem && !curr->mem->fbmap_is_virtio && curr->mem->fbmap_user_ptr != 0 &&
-                                    (uintptr_t)req.src == (uintptr_t)curr->mem->fbmap_user_ptr &&
-                                    req.src_stride == dst_pitch;
+        const uint32_t fb_user_ptr = fb_expected_user_ptr();
+        const int src_is_mapped_fb = (fb_user_ptr != 0u)
+            && ((uintptr_t)req.src == (uintptr_t)fb_user_ptr)
+            && (req.src_stride == dst_pitch);
         if (src_is_mapped_fb) {
             regs->eax = 0;
             return;
@@ -1744,9 +1710,10 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
         const uint8_t* src_base = (const uint8_t*)req.src;
 
         if (virtio_active) {
-            const int flush_only = curr->mem && curr->mem->fbmap_is_virtio && curr->mem->fbmap_user_ptr != 0 &&
-                                    (uintptr_t)req.src == (uintptr_t)curr->mem->fbmap_user_ptr &&
-                                    req.src_stride == dst_pitch;
+            const uint32_t fb_user_ptr = fb_expected_user_ptr();
+            const int flush_only = (fb_user_ptr != 0u)
+                && ((uintptr_t)req.src == (uintptr_t)fb_user_ptr)
+                && (req.src_stride == dst_pitch);
 
             if (!flush_only) {
                 uint8_t* dst_base = (uint8_t*)dst_ptr;

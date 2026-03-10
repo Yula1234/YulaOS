@@ -60,12 +60,6 @@ typedef struct proc_mem {
     uint32_t mmap_top;
     uint32_t mem_pages;
 
-    uint32_t fbmap_pages;
-    uint32_t fbmap_user_ptr;
-    uint32_t fbmap_size_bytes;
-    uint8_t fbmap_is_virtio;
-    uint8_t fbmap_pad[3];
-
     uint32_t leader_pid;
     uint32_t refcount;
 } proc_mem_t;

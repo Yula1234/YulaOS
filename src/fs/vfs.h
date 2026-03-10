@@ -90,6 +90,8 @@ typedef struct vfs_ops {
     int (*open)(struct vfs_node* node);
     int (*close)(struct vfs_node* node);
     int (*ioctl)(struct vfs_node* node, uint32_t req, void* arg);
+
+    uint32_t (*get_phys_page)(struct vfs_node* node, uint32_t offset);
 } vfs_ops_t;
 
 /* Flags passed to vfs_open/vfs_openat. */

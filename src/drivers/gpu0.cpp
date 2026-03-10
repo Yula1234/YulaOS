@@ -1611,6 +1611,7 @@ static vfs_ops_t g_gpu0_ops = {
     .open = vfs_open,
     .close = vfs_close,
     .ioctl = vfs_ioctl,
+    .get_phys_page = nullptr,
 };
 
 static vfs_node_t g_gpu0_node = {

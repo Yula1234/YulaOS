@@ -50,7 +50,52 @@ static int fb0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     return (int)sizeof(fb_info_t);
 }
 
-static vfs_ops_t fb0_ops = { .read = fb0_vfs_read };
+static uint32_t fb0_get_phys_page(vfs_node_t* node, uint32_t offset) {
+    (void)node;
+
+    uint32_t fb_phys = 0u;
+    uint32_t fb_size = 0u;
+
+    if (virtio_gpu_is_active()) {
+        const virtio_gpu_fb_t* fb = virtio_gpu_get_fb();
+        if (!fb || fb->fb_phys == 0u || fb->size_bytes == 0u) {
+            return 0u;
+        }
+
+        fb_phys = fb->fb_phys;
+        fb_size = fb->size_bytes;
+    } else {
+        if (!fb_ptr || fb_pitch == 0u || fb_height == 0u) {
+            return 0u;
+        }
+
+        const uint64_t size64 = (uint64_t)fb_pitch * (uint64_t)fb_height;
+        if (size64 == 0u || size64 > 0xFFFFFFFFull) {
+            return 0u;
+        }
+
+        fb_phys = (uint32_t)fb_ptr;
+        fb_size = (uint32_t)size64;
+    }
+
+    if (offset >= fb_size) {
+        return 0u;
+    }
+
+    const uint32_t base = fb_phys & ~0xFFFu;
+    const uint32_t off = offset & ~0xFFFu;
+
+    if (off > 0xFFFFFFFFu - base) {
+        return 0u;
+    }
+
+    return base + off;
+}
+
+static vfs_ops_t fb0_ops = {
+    .read = fb0_vfs_read,
+    .get_phys_page = fb0_get_phys_page,
+};
 static vfs_node_t fb0_node = { .name = "fb0", .ops = &fb0_ops, .size = sizeof(fb_info_t) };
 
 uint32_t fb_get_owner_pid(void) {

@@ -314,6 +314,7 @@ static vfs_ops_t ipc_listen_ops = {
     .open = 0,
     .close = ipc_listen_close,
     .ioctl = 0,
+    .get_phys_page = nullptr,
 };
 
 struct vfs_node* ipc_listen_create(const char* name) {

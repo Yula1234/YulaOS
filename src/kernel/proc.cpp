@@ -1016,10 +1016,6 @@ static void proc_mem_release(proc_mem_t* mem) {
     }
 
     mem->mem_pages = 0;
-    mem->fbmap_pages = 0;
-    mem->fbmap_user_ptr = 0;
-    mem->fbmap_size_bytes = 0;
-    mem->fbmap_is_virtio = 0;
 
     kfree(mem);
 }
