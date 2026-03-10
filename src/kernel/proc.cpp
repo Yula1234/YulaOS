@@ -1386,87 +1386,48 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
 }
 
 static void proc_add_mmap_region(task_t* t, vfs_node_t* node, uint32_t vaddr, uint32_t size, uint32_t file_size, uint32_t offset) {
-    mmap_area_t* area = static_cast<mmap_area_t*>(kmalloc(sizeof(mmap_area_t)));
-    if (!area) return;
-
-    uint32_t aligned_vaddr = vaddr & ~proc::detail::page_mask;
-    
-    uint32_t diff = vaddr - aligned_vaddr;
-    
-    uint32_t aligned_offset = offset - diff;
-    
-    uint32_t aligned_size = (size + diff + proc::detail::page_mask) & ~proc::detail::page_mask;
-
-    uint32_t aligned_file_size = file_size;
-    if (aligned_file_size > 0xFFFFFFFFu - diff) aligned_file_size = 0xFFFFFFFFu;
-    else aligned_file_size += diff;
-    if (aligned_file_size > aligned_size) aligned_file_size = aligned_size;
-
-    area->vaddr_start = aligned_vaddr;
-    area->vaddr_end   = aligned_vaddr + aligned_size;
-    area->file_offset = aligned_offset;
-    area->length      = size;
-    area->file_size   = aligned_file_size;
-    area->map_flags   = MAP_PRIVATE;
-    area->file        = node;
-    
-    if (t->mem) {
-        vfs_node_retain(node);
-        area->next = t->mem->mmap_list;
-        t->mem->mmap_list = area;
-    } else {
-        kfree(area);
-    }
-}
-
-static int proc_mem_has_mmap_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl) {
-    if (!mem || end_excl <= start) return 0;
-
-    mmap_area_t* m = mem->mmap_list;
-    while (m) {
-        uint32_t a_start = m->vaddr_start;
-        uint32_t a_end_excl = m->vaddr_end;
-
-        if (a_start < end_excl && start < a_end_excl) {
-            return 1;
-        }
-
-        m = m->next;
+    if (!t || !t->mem) {
+        return;
     }
 
-    return 0;
+    vma_create(t->mem, vaddr, size, node, offset, file_size, VMA_MAP_PRIVATE);
 }
 
 static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom, uint32_t stack_top) {
-    if (!mem || !mem->page_dir) return 0;
-    if (stack_top <= stack_bottom) return 0;
+    if (!mem || !mem->page_dir) {
+        return 0;
+    }
+
+    if (stack_top <= stack_bottom) {
+        return 0;
+    }
 
     uint32_t start = stack_bottom & ~proc::detail::page_mask;
     uint32_t end_excl = (stack_top + proc::detail::page_mask) & ~proc::detail::page_mask;
 
-    if (end_excl <= start) return 0;
-    if (start < proc::detail::user_stack_addr_min || end_excl > proc::detail::user_stack_addr_max) return 0;
+    if (end_excl <= start) {
+        return 0;
+    }
 
-    if (proc_mem_has_mmap_overlap(mem, start, end_excl)) {
+    if (start < proc::detail::user_stack_addr_min || end_excl > proc::detail::user_stack_addr_max) {
+        return 0;
+    }
+
+    if (vma_has_overlap(mem, start, end_excl)) {
         return 1;
     }
 
-    mmap_area_t* area = static_cast<mmap_area_t*>(kmalloc(sizeof(*area)));
-    if (!area) return 0;
+    vma_region_t* region = vma_create(
+        mem,
+        start,
+        stack_top - stack_bottom,
+        nullptr,
+        0u,
+        0u,
+        VMA_MAP_PRIVATE | VMA_MAP_STACK
+    );
 
-    memset(area, 0, sizeof(*area));
-    area->vaddr_start = start;
-    area->vaddr_end = end_excl;
-    area->file_offset = 0;
-    area->length = stack_top - stack_bottom;
-    area->file_size = 0;
-    area->map_flags = MAP_PRIVATE | MAP_STACK;
-    area->file = 0;
-
-    area->next = mem->mmap_list;
-    mem->mmap_list = area;
-
-    return 1;
+    return region ? 1 : 0;
 }
 
 task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {

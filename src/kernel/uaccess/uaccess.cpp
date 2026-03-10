@@ -5,6 +5,8 @@
 
 #include <kernel/proc.h>
 
+#include <mm/vma.h>
+
 #include <stdint.h>
 
 namespace {
@@ -23,23 +25,6 @@ static int check_user_range_basic(task_t* task, uintptr_t start, uintptr_t end_e
     }
 
     return 1;
-}
-
-static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
-    if (!t || !t->mem) {
-        return nullptr;
-    }
-
-    mmap_area_t* m = t->mem->mmap_list;
-    while (m) {
-        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) {
-            return m;
-        }
-
-        m = m->next;
-    }
-
-    return nullptr;
 }
 
 static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
@@ -75,20 +60,16 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
             continue;
         }
 
-        mmap_area_t* m = mmap_find_area(t, v);
-        if (!m) {
+        vma_region_t* region = vma_find(t->mem, v);
+        if (!region) {
             return 0;
         }
 
-        if (m->vaddr_start >= m->vaddr_end) {
+        if (region->vaddr_start >= region->vaddr_end) {
             return 0;
         }
 
-        if (v < m->vaddr_start || v >= m->vaddr_end) {
-            return 0;
-        }
-
-        uintptr_t lim = (uintptr_t)m->vaddr_end;
+        uintptr_t lim = (uintptr_t)region->vaddr_end;
         cur = (end_excl < lim) ? end_excl : lim;
     }
 

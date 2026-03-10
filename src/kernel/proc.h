@@ -11,6 +11,8 @@
 #include <lib/rbtree.h>
 #include <yos/proc.h>
 
+#include <mm/vma.h>
+
 #include <stdint.h>
 
 #define KSTACK_SIZE 32768
@@ -40,25 +42,13 @@ typedef enum {
 #define SIGSEGV 11
 #define SIGTERM 15
 
-#define MAP_SHARED  1
-#define MAP_PRIVATE 2
-
-#define MAP_STACK   4
+#define MAP_SHARED  VMA_MAP_SHARED
+#define MAP_PRIVATE VMA_MAP_PRIVATE
+#define MAP_STACK   VMA_MAP_STACK
 
 typedef void (*sig_handler_t)(int);
 
-typedef struct mmap_area {
-    uint32_t vaddr_start;
-    uint32_t vaddr_end;
-    uint32_t file_offset;
-    uint32_t length;
-    uint32_t file_size; 
-    uint32_t map_flags;
-    
-    struct vfs_node* file;
-    
-    struct mmap_area* next;
-} mmap_area_t;
+typedef vma_region_t mmap_area_t;
 
 typedef struct proc_mem {
     uint32_t* page_dir;

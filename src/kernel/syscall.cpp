@@ -29,6 +29,7 @@
 
 #include <mm/pmm.h>
 #include <mm/heap.h>
+#include <mm/vma.h>
 
 #include <kernel/uaccess/uaccess.h>
 #include <kernel/futex/futex.h>
@@ -67,7 +68,6 @@ static inline void irq_restore(uint32_t flags) {
     __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory", "cc");
 }
 
-static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr);
 static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size);
 
 static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
@@ -107,16 +107,6 @@ static int copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, con
     return uaccess_copy_user_str_bounded(task, dst, dst_size, user_src);
 }
 
-static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
-    if (!t || !t->mem) return 0;
-    mmap_area_t* m = t->mem->mmap_list;
-    while (m) {
-        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) return m;
-        m = m->next;
-    }
-    return 0;
-}
-
 static inline uint32_t align_down_4k_u32(uint32_t v) {
     return v & ~0xFFFu;
 }
@@ -125,22 +115,9 @@ static inline uint32_t align_up_4k_u32(uint32_t v) {
     return (v + 0xFFFu) & ~0xFFFu;
 }
 
-static inline int ranges_overlap_u32(uint32_t a_start, uint32_t a_end_excl, uint32_t b_start, uint32_t b_end_excl) {
-    return (a_start < b_end_excl) && (b_start < a_end_excl);
+static inline int ranges_overlap_u32(uint32_t a_start, uint32_t a_end, uint32_t b_start, uint32_t b_end) {
+    return (a_start < b_end) && (b_start < a_end);
 }
-
-static mmap_area_t* mmap_find_overlap(task_t* t, uint32_t start, uint32_t end_excl) {
-    if (!t || !t->mem) return 0;
-    mmap_area_t* m = t->mem->mmap_list;
-    while (m) {
-        if (ranges_overlap_u32(start, end_excl, m->vaddr_start, m->vaddr_end)) return m;
-        m = m->next;
-    }
-    return 0;
-}
-
-
-#define MAX_TASKS 32
 
 typedef struct {
     uint32_t type;
@@ -318,7 +295,7 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
             }
         }
 
-        if (mmap_find_overlap(curr, chk_start, chk_end_excl)) {
+        if (vma_find_overlap(curr->mem, chk_start, chk_end_excl)) {
             regs->eax = (uint32_t)-1;
             return;
         }
@@ -687,86 +664,23 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
         return;
     }
 
-    uint32_t size_aligned = (size + 4095u) & ~4095u;
-    uint32_t vaddr = align_up_4k_u32(curr->mem->mmap_top);
-
-    if (curr->mem->heap_start < curr->mem->prog_break) {
-        uint64_t need64 = (uint64_t)curr->mem->prog_break + 0x100000ull;
-        if (need64 < 0xC0000000ull) {
-            uint32_t need = align_up_4k_u32((uint32_t)need64);
-            if (vaddr < need) vaddr = need;
-        }
-    }
-
-    int found = 0;
-    for (int iter = 0; iter < 256; iter++) {
-        uint32_t end_excl = vaddr + size_aligned;
-        if (end_excl < vaddr || end_excl > 0xC0000000u) {
-            regs->eax = 0;
-            return;
-        }
-
-        if (curr->stack_bottom < curr->stack_top) {
-            if (ranges_overlap_u32(vaddr, end_excl, curr->stack_bottom, curr->stack_top)) {
-                regs->eax = 0;
-                return;
-            }
-        }
-
-        if (curr->mem->heap_start < curr->mem->prog_break) {
-            if (ranges_overlap_u32(vaddr, end_excl, curr->mem->heap_start, curr->mem->prog_break)) {
-                vaddr = align_up_4k_u32(curr->mem->prog_break + 0x100000u);
-                continue;
-            }
-        }
-
-        mmap_area_t* ov = mmap_find_overlap(curr, vaddr, end_excl);
-        if (ov) {
-            vaddr = align_up_4k_u32(ov->vaddr_end);
-            continue;
-        }
-
-        found = 1;
-        break;
-    }
-
-    if (!found) {
+    uint32_t vaddr = 0;
+    if (!vma_alloc_slot(curr->mem, size, &vaddr)) {
         file_desc_release(d);
         regs->eax = 0;
         return;
     }
 
-    if (!curr->mem) {
-        regs->eax = 0;
-        return;
-    }
+    uint32_t file_size = (d->node->size < size) ? d->node->size : size;
 
-    mmap_area_t* area = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
-    if (!area) {
+    vma_region_t* region = vma_create(curr->mem, vaddr, size, d->node, 0u, file_size, map_kind);
+    if (!region) {
         file_desc_release(d);
         regs->eax = 0;
         return;
     }
-
-    area->vaddr_start = vaddr;
-    area->vaddr_end = vaddr + size_aligned;
-    area->file_offset = 0;
-    area->length = size;
-    area->file = d->node;
-    vfs_node_retain(area->file);
-    area->file_size = (d->node->size < size) ? d->node->size : size;
-    area->map_flags = map_kind;
 
     file_desc_release(d);
-
-    if (vaddr + size_aligned < vaddr || vaddr + size_aligned > 0xC0000000u) {
-        regs->eax = 0;
-        return;
-    }
-
-    area->next = curr->mem->mmap_list;
-    curr->mem->mmap_list = area;
-    curr->mem->mmap_top = vaddr + size_aligned;
 
     regs->eax = vaddr;
 }
@@ -780,173 +694,7 @@ static void syscall_munmap(registers_t* regs, task_t* curr) {
         return;
     }
 
-    if (vaddr & 0xFFFu) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
-    if (len == 0) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
-    if (vaddr + len < vaddr) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
-
-    uint32_t aligned_len = (len + 4095u) & ~4095u;
-    uint32_t vaddr_end = vaddr + aligned_len;
-
-    uint32_t scan = vaddr;
-    while (scan < vaddr_end) {
-        mmap_area_t* a = mmap_find_area(curr, scan);
-        if (!a || a->vaddr_end <= scan) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-        scan = a->vaddr_end;
-    }
-
-    int result = 0;
-    mmap_area_t* prev = 0;
-    mmap_area_t* m = curr->mem->mmap_list;
-
-    while (m) {
-        mmap_area_t* next_node = m->next;
-
-        uint32_t u_start = vaddr;
-        uint32_t u_end = vaddr_end;
-        uint32_t m_start = m->vaddr_start;
-        uint32_t m_end = m->vaddr_end;
-
-        if (u_end <= m_start || u_start >= m_end) {
-            prev = m;
-            m = next_node;
-            continue;
-        }
-
-        result = 0;
-        uint32_t o_start = (u_start > m_start) ? u_start : m_start;
-        uint32_t o_end = (u_end < m_end) ? u_end : m_end;
-
-        if (o_start > m_start && o_end < m_end) {
-            mmap_area_t* new_right = (mmap_area_t*)kmalloc(sizeof(mmap_area_t));
-            if (!new_right) {
-                result = -1;
-                break;
-            }
-
-            uint32_t orig_file_size = m->file_size;
-            uint32_t left_len = o_start - m_start;
-            uint32_t right_len = m_end - o_end;
-            uint32_t cut_before_right = o_end - m_start;
-
-            new_right->vaddr_start = o_end;
-            new_right->vaddr_end = m_end;
-            new_right->length = right_len;
-            new_right->file = m->file;
-            new_right->map_flags = m->map_flags;
-            new_right->next = m->next;
-
-            if (m->file) {
-                new_right->file_offset = m->file_offset + cut_before_right;
-                vfs_node_retain(m->file);
-            } else {
-                new_right->file_offset = 0;
-            }
-
-            uint32_t right_file_size = 0;
-            if (orig_file_size > cut_before_right) right_file_size = orig_file_size - cut_before_right;
-            if (right_file_size > right_len) right_file_size = right_len;
-            new_right->file_size = right_file_size;
-
-            m->vaddr_end = o_start;
-            m->length = left_len;
-
-            uint32_t left_file_size = orig_file_size;
-            if (left_file_size > left_len) left_file_size = left_len;
-            m->file_size = left_file_size;
-
-            m->next = new_right;
-
-            for (uint32_t curr_v = o_start; curr_v < o_end; curr_v += 4096u) {
-                uint32_t pte;
-                if (!paging_get_present_pte(curr->mem->page_dir, curr_v, &pte)) continue;
-                if ((pte & 4u) == 0) continue;
-
-                paging_map(curr->mem->page_dir, curr_v, 0, 0);
-
-                uint32_t phys = pte & ~0xFFFu;
-                if ((pte & 0x200u) == 0 && curr->mem->mem_pages > 0) curr->mem->mem_pages--;
-                if (phys && (pte & 0x200u) == 0) {
-                    pmm_free_block((void*)phys);
-                }
-            }
-
-            prev = new_right;
-            m = new_right->next;
-            continue;
-        }
-
-        for (uint32_t curr_v = o_start; curr_v < o_end; curr_v += 4096u) {
-            uint32_t pte;
-            if (!paging_get_present_pte(curr->mem->page_dir, curr_v, &pte)) continue;
-            if ((pte & 4u) == 0) continue;
-
-            paging_map(curr->mem->page_dir, curr_v, 0, 0);
-
-            uint32_t phys = pte & ~0xFFFu;
-            if ((pte & 0x200u) == 0 && curr->mem->mem_pages > 0) curr->mem->mem_pages--;
-            if (phys && (pte & 0x200u) == 0) {
-                pmm_free_block((void*)phys);
-            }
-        }
-
-        if (o_start == m_start && o_end == m_end) {
-            if (prev) prev->next = next_node;
-            else curr->mem->mmap_list = next_node;
-
-            if (m->file) {
-                vfs_node_release(m->file);
-            }
-            kfree(m);
-
-            m = next_node;
-            continue;
-        }
-
-        if (o_start == m_start && o_end < m_end) {
-            uint32_t cut_len = o_end - m_start;
-            uint32_t new_len = m_end - o_end;
-
-            m->vaddr_start = o_end;
-            m->length = new_len;
-
-            if (m->file) m->file_offset += cut_len;
-            if (m->file_size > cut_len) m->file_size -= cut_len;
-            else m->file_size = 0;
-            if (m->file_size > new_len) m->file_size = new_len;
-
-            prev = m;
-            m = next_node;
-            continue;
-        }
-
-        if (o_start > m_start && o_end == m_end) {
-            uint32_t new_len = o_start - m_start;
-
-            m->vaddr_end = o_start;
-            m->length = new_len;
-
-            if (m->file_size > new_len) m->file_size = new_len;
-
-            prev = m;
-            m = next_node;
-            continue;
-        }
-
-        prev = m;
-        m = next_node;
-    }
+    int result = vma_remove(curr->mem, vaddr, len);
 
     regs->eax = (uint32_t)result;
 }
