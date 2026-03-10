@@ -11,6 +11,7 @@
 #include <kernel/uaccess/uaccess.h>
 
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/dlist.h>
 #include <lib/cpp/intrusive_ref.h>
 
 #include <lib/hash_map.h>
@@ -193,19 +194,21 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
     {
         kernel::SpinLockSafeGuard guard(entry->lock);
 
-        while (woken < max_wake && !dlist_empty(&entry->wait_list)) {
-            task_t* t = container_of(entry->wait_list.next, task_t, sem_node);
+        kernel::CDBLinkedListView<task_t, &task_t::sem_node> waiters(entry->wait_list);
 
-            dlist_del(&t->sem_node);
-            t->sem_node.next = 0;
-            t->sem_node.prev = 0;
+        while (woken < max_wake && !waiters.empty()) {
+            task_t& t = waiters.front();
 
-            t->blocked_on_sem = 0;
+            if (!dlist_unlink_consistent(&t.sem_node)) {
+                panic("FUTEX: waiter unlink failed");
+            }
 
-            if (t->state != TASK_ZOMBIE) {
-                t->state = TASK_RUNNABLE;
+            t.blocked_on_sem = 0;
 
-                sched_add(t);
+            if (t.state != TASK_ZOMBIE) {
+                t.state = TASK_RUNNABLE;
+
+                sched_add(&t);
             }
 
             woken++;
