@@ -123,6 +123,58 @@ static void futex_release_entry(futex_entry_t* entry) {
     }
 }
 
+class FutexEntryRef {
+public:
+    explicit FutexEntryRef(futex_entry_t* entry)
+        : entry_(entry) {
+    }
+
+    FutexEntryRef(const FutexEntryRef&) = delete;
+    FutexEntryRef& operator=(const FutexEntryRef&) = delete;
+
+    FutexEntryRef(FutexEntryRef&& other) noexcept
+        : entry_(other.entry_) {
+        other.entry_ = nullptr;
+    }
+
+    FutexEntryRef& operator=(FutexEntryRef&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        reset();
+
+        entry_ = other.entry_;
+        other.entry_ = nullptr;
+
+        return *this;
+    }
+
+    ~FutexEntryRef() {
+        reset();
+    }
+
+    futex_entry_t* get() const {
+        return entry_;
+    }
+
+    explicit operator bool() const {
+        return entry_ != nullptr;
+    }
+
+private:
+    void reset() {
+        if (!entry_) {
+            return;
+        }
+
+        futex_release_entry(entry_);
+        entry_ = nullptr;
+    }
+
+    futex_entry_t* entry_ = nullptr;
+};
+
 static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, uint32_t expected) {
     if (!entry || !uaddr) {
         return -1;
@@ -194,27 +246,23 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
 }
 
 extern "C" int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t expected) {
-    futex_entry_t* entry = futex_acquire_entry(key, true);
-    if (!entry) {
+    FutexEntryRef entry_ref(futex_acquire_entry(key, true));
+    if (!entry_ref) {
         return -1;
     }
 
-    const int rc = futex_do_wait(entry, uaddr, expected);
-
-    futex_release_entry(entry);
+    const int rc = futex_do_wait(entry_ref.get(), uaddr, expected);
 
     return rc;
 }
 
 extern "C" int futex_wake(uint32_t key, uint32_t max_wake) {
-    futex_entry_t* entry = futex_acquire_entry(key, false);
-    if (!entry) {
+    FutexEntryRef entry_ref(futex_acquire_entry(key, false));
+    if (!entry_ref) {
         return 0;
     }
 
-    const int rc = futex_do_wake(entry, max_wake);
-
-    futex_release_entry(entry);
+    const int rc = futex_do_wake(entry_ref.get(), max_wake);
 
     return rc;
 }
