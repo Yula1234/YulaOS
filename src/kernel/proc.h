@@ -54,6 +54,8 @@ typedef struct proc_mem {
     uint32_t* page_dir;
     uint32_t prog_break;
     uint32_t heap_start;
+
+    spinlock_t mmap_lock;
     mmap_area_t* mmap_list;
     uint32_t mmap_top;
     uint32_t mem_pages;

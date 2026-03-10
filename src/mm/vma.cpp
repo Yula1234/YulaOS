@@ -13,6 +13,8 @@
 
 #include <lib/cpp/new.h>
 
+#include <lib/cpp/lock_guard.h>
+
 #include <string.h>
 
 namespace {
@@ -36,6 +38,42 @@ static inline uint32_t align_up_4k(uint32_t v) noexcept {
 
 static inline bool ranges_overlap(uint32_t a_start, uint32_t a_end, uint32_t b_start, uint32_t b_end) noexcept {
     return (a_start < b_end) && (b_start < a_end);
+}
+
+static vma_region_t* vma_find_unlocked(proc_mem_t* mem, uint32_t vaddr) noexcept {
+    if (!mem) {
+        return nullptr;
+    }
+
+    vma_region_t* curr = mem->mmap_list;
+
+    while (curr) {
+        if (vaddr >= curr->vaddr_start && vaddr < curr->vaddr_end) {
+            return curr;
+        }
+
+        curr = curr->next;
+    }
+
+    return nullptr;
+}
+
+static vma_region_t* vma_find_overlap_unlocked(proc_mem_t* mem, uint32_t start, uint32_t end_excl) noexcept {
+    if (!mem) {
+        return nullptr;
+    }
+
+    vma_region_t* curr = mem->mmap_list;
+
+    while (curr) {
+        if (ranges_overlap(start, end_excl, curr->vaddr_start, curr->vaddr_end)) {
+            return curr;
+        }
+
+        curr = curr->next;
+    }
+
+    return nullptr;
 }
 
 static void unmap_range(uint32_t* page_dir, uint32_t start, uint32_t end) noexcept {
@@ -85,6 +123,8 @@ extern "C" void vma_init(proc_mem_t* mem) {
         return;
     }
 
+    spinlock_init(&mem->mmap_lock);
+
     mem->mmap_list = nullptr;
     mem->mmap_top = user_addr_min;
 }
@@ -94,7 +134,12 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
         return;
     }
 
-    vma_region_t* curr = mem->mmap_list;
+    vma_region_t* curr = nullptr;
+    {
+        kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+        curr = mem->mmap_list;
+        mem->mmap_list = nullptr;
+    }
 
     while (curr) {
         vma_region_t* next = curr->next;
@@ -158,8 +203,27 @@ extern "C" vma_region_t* vma_create(
         region->file = file;
     }
 
-    region->next = mem->mmap_list;
-    mem->mmap_list = region;
+    bool has_overlap = false;
+
+    {
+        kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+
+        has_overlap = vma_find_overlap_unlocked(mem, region->vaddr_start, region->vaddr_end) != nullptr;
+
+        if (!has_overlap) {
+            region->next = mem->mmap_list;
+            mem->mmap_list = region;
+
+            if (mem->mmap_top < region->vaddr_end) {
+                mem->mmap_top = region->vaddr_end;
+            }
+        }
+    }
+
+    if (has_overlap) {
+        free_region(region);
+        return nullptr;
+    }
 
     return region;
 }
@@ -169,17 +233,8 @@ extern "C" vma_region_t* vma_find(proc_mem_t* mem, uint32_t vaddr) {
         return nullptr;
     }
 
-    vma_region_t* curr = mem->mmap_list;
-
-    while (curr) {
-        if (vaddr >= curr->vaddr_start && vaddr < curr->vaddr_end) {
-            return curr;
-        }
-
-        curr = curr->next;
-    }
-
-    return nullptr;
+    kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+    return vma_find_unlocked(mem, vaddr);
 }
 
 extern "C" vma_region_t* vma_find_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl) {
@@ -187,17 +242,8 @@ extern "C" vma_region_t* vma_find_overlap(proc_mem_t* mem, uint32_t start, uint3
         return nullptr;
     }
 
-    vma_region_t* curr = mem->mmap_list;
-
-    while (curr) {
-        if (ranges_overlap(start, end_excl, curr->vaddr_start, curr->vaddr_end)) {
-            return curr;
-        }
-
-        curr = curr->next;
-    }
-
-    return nullptr;
+    kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+    return vma_find_overlap_unlocked(mem, start, end_excl);
 }
 
 extern "C" int vma_has_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl) {
@@ -208,6 +254,8 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
     if (!mem || !mem->page_dir) {
         return -1;
     }
+
+    kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
 
     if (vaddr & page_mask) {
         return -1;
@@ -226,7 +274,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
     uint32_t scan = vaddr;
     while (scan < vaddr_end) {
-        vma_region_t* region = vma_find(mem, scan);
+        vma_region_t* region = vma_find_unlocked(mem, scan);
 
         if (!region || region->vaddr_end <= scan) {
             return -1;
@@ -376,6 +424,8 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
         return 0;
     }
 
+    kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+
     if (end_excl <= start) {
         return 1;
     }
@@ -387,7 +437,7 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
     uint32_t cur = start;
 
     while (cur < end_excl) {
-        vma_region_t* region = vma_find(mem, cur);
+        vma_region_t* region = vma_find_unlocked(mem, cur);
 
         if (!region) {
             return 0;
@@ -409,12 +459,15 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         return 0;
     }
 
+    kernel::SpinLockNativeSafeGuard guard(mem->mmap_lock);
+
     if (size == 0u) {
         return 0;
     }
 
     uint32_t aligned_size = align_up_4k(size);
-    uint32_t vaddr = align_up_4k(mem->mmap_top);
+
+    uint32_t vaddr = align_up_4k(0x80000000u);
 
     if (mem->heap_start < mem->prog_break) {
         uint64_t need64 = (uint64_t)mem->prog_break + 0x100000ull;
@@ -428,17 +481,31 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         }
     }
 
-    for (int iter = 0; iter < 256; iter++) {
+    uint32_t alloc_limit = 0xB0000000u;
+
+    if (mem->fbmap_user_ptr != 0u) {
+        const uint32_t fb_start = align_down_4k(mem->fbmap_user_ptr);
+
+        if (fb_start >= user_addr_min && fb_start < alloc_limit) {
+            alloc_limit = fb_start;
+        }
+    }
+
+    while (vaddr < alloc_limit) {
         uint32_t end_excl = vaddr + aligned_size;
 
-        if (end_excl < vaddr || end_excl > user_addr_max) {
+        if (end_excl < vaddr || end_excl > alloc_limit) {
             return 0;
         }
 
-        vma_region_t* overlap = vma_find_overlap(mem, vaddr, end_excl);
+        vma_region_t* overlap = vma_find_overlap_unlocked(mem, vaddr, end_excl);
 
         if (!overlap) {
             *out_vaddr = vaddr;
+
+            if (end_excl > mem->mmap_top) {
+                mem->mmap_top = end_excl;
+            }
             return 1;
         }
 

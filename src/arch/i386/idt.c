@@ -15,6 +15,7 @@
 #include <kernel/cpu.h>
 #include <kernel/shm.h>
 #include <kernel/panic.h>
+#include <kernel/output/kprintf.h>
 
 #ifdef KERNEL_PROFILE
 #include <kernel/profiler.h>
@@ -137,13 +138,46 @@ static inline uint32_t get_cr3() {
     return val;
 }
 
-static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
-    if (!t || !t->mem) return 0;
-    mmap_area_t* m = t->mem->mmap_list;
+typedef struct {
+    uint32_t vaddr_start;
+    uint32_t vaddr_end;
+    uint32_t file_offset;
+    uint32_t file_size;
+    uint32_t map_flags;
+    vfs_node_t* file;
+} mmap_pf_info_t;
+
+static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
+    if (!t || !t->mem || !out) {
+        return 0;
+    }
+
+    proc_mem_t* mem = t->mem;
+
+    const uint32_t flags = spinlock_acquire_safe(&mem->mmap_lock);
+
+    mmap_area_t* m = mem->mmap_list;
     while (m) {
-        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) return m;
+        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) {
+            out->vaddr_start = m->vaddr_start;
+            out->vaddr_end = m->vaddr_end;
+            out->file_offset = m->file_offset;
+            out->file_size = m->file_size;
+            out->map_flags = m->map_flags;
+            out->file = m->file;
+
+            if (out->file) {
+                vfs_node_retain(out->file);
+            }
+
+            spinlock_release_safe(&mem->mmap_lock, flags);
+            return 1;
+        }
+
         m = m->next;
     }
+
+    spinlock_release_safe(&mem->mmap_lock, flags);
     return 0;
 }
 
@@ -265,60 +299,78 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     if (!curr || !curr->mem || !curr->mem->page_dir) return 0;
 
     uint32_t vaddr = cr2 & ~0xFFFu;
-    mmap_area_t* m = mmap_find_area(curr, vaddr);
-    if (!m) return 0;
+    mmap_pf_info_t info;
+    if (!mmap_pf_lookup(curr, vaddr, &info)) {
+        return 0;
+    }
 
-    if ((m->map_flags & MAP_SHARED) && m->file && (m->file->flags & VFS_FLAG_SHM) && m->file->private_data) {
-        uint32_t rel = vaddr - m->vaddr_start;
+    if ((info.map_flags & MAP_SHARED) && info.file && (info.file->flags & VFS_FLAG_SHM) && info.file->private_data) {
+        uint32_t rel = vaddr - info.vaddr_start;
         uint32_t page_idx = rel / 4096u;
 
         const uint32_t* pages = 0;
         uint32_t page_count = 0u;
 
-        if (!shm_get_phys_pages(m->file, &pages, &page_count)) {
+        if (!shm_get_phys_pages(info.file, &pages, &page_count)) {
+            vfs_node_release(info.file);
             return -1;
         }
 
         if (!pages || page_idx >= page_count) {
+            vfs_node_release(info.file);
             return -1;
         }
 
         const uint32_t phys = pages[page_idx];
         if (!phys) {
+            vfs_node_release(info.file);
             return -1;
         }
 
         paging_map(curr->mem->page_dir, vaddr, phys, 7 | 0x200u);
+
+        vfs_node_release(info.file);
         return 1;
     }
 
     void* new_page = pmm_alloc_block();
-    if (!new_page) return -1;
+    if (!new_page) {
+        if (info.file) {
+            vfs_node_release(info.file);
+        }
+        return -1;
+    }
 
     memset(new_page, 0, 4096);
 
-    uint32_t rel = vaddr - m->vaddr_start;
+    uint32_t rel = vaddr - info.vaddr_start;
 
-    if ((m->map_flags & MAP_STACK) == 0 &&
-        m->file &&
-        m->file->ops &&
-        m->file->ops->read &&
-        rel < m->file_size) {
+    if ((info.map_flags & MAP_STACK) == 0 &&
+        info.file &&
+        info.file->ops &&
+        info.file->ops->read &&
+        rel < info.file_size) {
 
-        uint32_t bytes = m->file_size - rel;
+        uint32_t bytes = info.file_size - rel;
         if (bytes > 4096) bytes = 4096;
 
-        if (m->file_offset > 0xFFFFFFFFu - rel) {
+        if (info.file_offset > 0xFFFFFFFFu - rel) {
+            vfs_node_release(info.file);
             pmm_free_block(new_page);
             return -1;
         }
 
-        int r = m->file->ops->read(m->file, m->file_offset + rel, bytes, new_page);
+        int r = info.file->ops->read(info.file, info.file_offset + rel, bytes, new_page);
 
         if (r < 0) {
+            vfs_node_release(info.file);
             pmm_free_block(new_page);
             return -1;
         }
+    }
+
+    if (info.file) {
+        vfs_node_release(info.file);
     }
 
     paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
@@ -498,9 +550,24 @@ void isr_handler(registers_t* regs) {
                 } else {
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
+                        kprintf(
+                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                            curr->pid,
+                            regs->eip,
+                            cr2,
+                            regs->err_code
+                        );
                         maybe_deliver_pending_signal(curr, regs);
                         goto out;
                     }
+
+                    kprintf(
+                        "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                        curr->pid,
+                        regs->eip,
+                        cr2,
+                        regs->err_code
+                    );
                     proc_kill(curr);
                     sched_yield();
                     goto out;
@@ -518,9 +585,24 @@ void isr_handler(registers_t* regs) {
                 } else {
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
+                        kprintf(
+                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                            curr->pid,
+                            regs->eip,
+                            cr2,
+                            regs->err_code
+                        );
                         maybe_deliver_pending_signal(curr, regs);
                         goto out;
                     }
+
+                    kprintf(
+                        "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                        curr->pid,
+                        regs->eip,
+                        cr2,
+                        regs->err_code
+                    );
                     proc_kill(curr);
                     sched_yield();
                     goto out;
@@ -534,9 +616,24 @@ void isr_handler(registers_t* regs) {
                 } else if (r < 0) {
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
+                        kprintf(
+                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                            curr->pid,
+                            regs->eip,
+                            cr2,
+                            regs->err_code
+                        );
                         maybe_deliver_pending_signal(curr, regs);
                         goto out;
                     }
+
+                    kprintf(
+                        "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                        curr->pid,
+                        regs->eip,
+                        cr2,
+                        regs->err_code
+                    );
                     proc_kill(curr);
                     sched_yield();
                     goto out;
@@ -575,8 +672,22 @@ void isr_handler(registers_t* regs) {
 
                     curr->pending_signals |= (1u << SIGSEGV);
                     if (regs->cs == 0x1B) {
+                        kprintf(
+                            "SEGFAULT: pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                            curr->pid,
+                            regs->eip,
+                            cr2,
+                            regs->err_code
+                        );
                         maybe_deliver_pending_signal(curr, regs);
                     } else {
+                        kprintf(
+                            "KILLED (KERNEL FAULT ON USER MEM): pid=%d, eip=0x%x, cr2=0x%x, err=%d\n",
+                            curr->pid,
+                            regs->eip,
+                            cr2,
+                            regs->err_code
+                        );
                         proc_kill(curr);
                         sched_yield();
                     }

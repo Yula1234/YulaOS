@@ -9,6 +9,8 @@
 
 #include <mm/vma.h>
 
+#include <lib/cpp/lock_guard.h>
+
 #include <stdint.h>
 
 namespace {
@@ -62,16 +64,38 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
             continue;
         }
 
-        vma_region_t* region = vma_find(t->mem, v);
-        if (!region) {
+        if (t->mem->fbmap_user_ptr != 0u && t->mem->fbmap_pages != 0u) {
+            const uint32_t fb_start = (uint32_t)t->mem->fbmap_user_ptr & ~0xFFFu;
+            const uint32_t fb_end = fb_start + t->mem->fbmap_pages * 4096u;
+
+            if (v >= fb_start && v < fb_end) {
+                uintptr_t lim = (uintptr_t)fb_end;
+                cur = (end_excl < lim) ? end_excl : lim;
+                continue;
+            }
+        }
+
+        uint32_t region_end = 0u;
+
+        {
+            kernel::SpinLockNativeSafeGuard guard(t->mem->mmap_lock);
+
+            vma_region_t* region = t->mem->mmap_list;
+            while (region) {
+                if (v >= region->vaddr_start && v < region->vaddr_end) {
+                    region_end = region->vaddr_end;
+                    break;
+                }
+
+                region = region->next;
+            }
+        }
+
+        if (region_end == 0u) {
             return 0;
         }
 
-        if (region->vaddr_start >= region->vaddr_end) {
-            return 0;
-        }
-
-        uintptr_t lim = (uintptr_t)region->vaddr_end;
+        uintptr_t lim = (uintptr_t)region_end;
         cur = (end_excl < lim) ? end_excl : lim;
     }
 

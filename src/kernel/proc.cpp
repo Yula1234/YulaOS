@@ -934,6 +934,9 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
     mem->leader_pid = leader_pid;
     mem->refcount = 1;
     mem->mmap_top = proc::detail::default_mmap_top;
+
+    spinlock_init(&mem->mmap_lock);
+
     mem->page_dir = paging_clone_directory();
     if (!mem->page_dir) {
         return 0;
