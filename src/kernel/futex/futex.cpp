@@ -20,108 +20,131 @@
 
 namespace {
 
+class FutexTable;
+
 struct futex_entry_t {
     uint32_t key;
     uint32_t refs;
 
     kernel::SpinLock lock;
     dlist_head_t wait_list;
+
+    FutexTable* table;
+
     void release();
 };
 
-static __cacheline_aligned kernel::SpinLock futex_table_lock;
-static __attribute__((unused)) uint8_t futex_table_lock_pad[HAL_CACHELINE_SIZE - sizeof(kernel::SpinLock)];
+class FutexTable {
+public:
+    kernel::IntrusiveRef<futex_entry_t> acquire_entry(uint32_t key, bool create) {
+        kernel::SpinLockSafeGuard guard(lock_);
 
-static HashMap<uint32_t, futex_entry_t*> futex_map;
+        futex_entry_t* entry = nullptr;
+        if (map_.try_get(key, entry)) {
+            if (!entry->table) {
+                entry->table = this;
+            } else if (entry->table != this) {
+                panic("FUTEX: entry table mismatch");
+            }
 
-static kernel::IntrusiveRef<futex_entry_t> futex_acquire_entry(uint32_t key, bool create) {
-    kernel::SpinLockSafeGuard guard(futex_table_lock);
+            entry->refs++;
 
-    futex_entry_t* entry = nullptr;
+            return kernel::IntrusiveRef<futex_entry_t>::adopt(entry);
+        }
 
-    if (futex_map.try_get(key, entry)) {
-        entry->refs++;
+        if (!create) {
+            return {};
+        }
+
+        entry = new (kernel::nothrow) futex_entry_t();
+        if (!entry) {
+            return {};
+        }
+
+        entry->key = key;
+        entry->refs = 1u;
+        entry->table = this;
+
+        dlist_init(&entry->wait_list);
+
+        const bool inserted = map_.insert_unique(key, entry);
+        if (!inserted) {
+            delete entry;
+            return {};
+        }
 
         return kernel::IntrusiveRef<futex_entry_t>::adopt(entry);
     }
 
-    if (!create) {
-        return {};
+    void release_entry(futex_entry_t& entry) {
+        bool maybe_free = false;
+
+        {
+            kernel::SpinLockSafeGuard guard(lock_);
+
+            if (entry.refs == 0u) {
+                panic("FUTEX: entry ref underflow");
+            }
+
+            entry.refs--;
+            maybe_free = (entry.refs == 0u);
+        }
+
+        if (!maybe_free) {
+            return;
+        }
+
+        if (!entry_is_unused(entry)) {
+            return;
+        }
+
+        futex_entry_t* removed = nullptr;
+
+        {
+            kernel::SpinLockSafeGuard guard(lock_);
+
+            futex_entry_t* current = nullptr;
+            if (!map_.try_get(entry.key, current) || current != &entry) {
+                return;
+            }
+
+            if (entry.refs != 0u) {
+                return;
+            }
+
+            if (!entry_is_unused(entry)) {
+                return;
+            }
+
+            (void)map_.remove_and_get(entry.key, removed);
+        }
+
+        if (removed) {
+            delete removed;
+        }
     }
 
-    entry = new (kernel::nothrow) futex_entry_t();
-    if (!entry) {
-        return {};
+private:
+    static bool entry_is_unused(futex_entry_t& entry) {
+        kernel::SpinLockSafeGuard guard(entry.lock);
+
+        const bool unused = dlist_empty(&entry.wait_list);
+
+        return unused;
     }
 
-    entry->key = key;
-    entry->refs = 1u;
+    kernel::SpinLock lock_;
+    HashMap<uint32_t, futex_entry_t*> map_;
+};
 
-    dlist_init(&entry->wait_list);
-
-    const bool inserted = futex_map.insert_unique(key, entry);
-    if (!inserted) {
-        delete entry;
-        return {};
-    }
-
-    return kernel::IntrusiveRef<futex_entry_t>::adopt(entry);
-}
-
-static bool futex_entry_is_unused(futex_entry_t& entry) {
-    kernel::SpinLockSafeGuard guard(entry.lock);
-
-    const bool unused = dlist_empty(&entry.wait_list);
-
-    return unused;
-}
+static __cacheline_aligned FutexTable futex_table;
 
 void futex_entry_t::release() {
-    bool maybe_free = false;
-
-    {
-        kernel::SpinLockSafeGuard guard(futex_table_lock);
-
-        if (refs == 0u) {
-            panic("FUTEX: entry ref underflow");
-        }
-
-        refs--;
-        maybe_free = (refs == 0u);
+    if (!table) {
+        panic("FUTEX: entry missing table");
     }
 
-    if (!maybe_free) {
-        return;
-    }
-
-    if (!futex_entry_is_unused(*this)) {
-        return;
-    }
-
-    futex_entry_t* removed = nullptr;
-
-    {
-        kernel::SpinLockSafeGuard guard(futex_table_lock);
-
-        futex_entry_t* current = nullptr;
-        if (!futex_map.try_get(key, current) || current != this) {
-            return;
-        }
-
-        if (refs != 0u) {
-            return;
-        }
-
-        if (!futex_entry_is_unused(*this)) {
-            return;
-        }
-
-        (void)futex_map.remove_and_get(key, removed);
-    }
-
-    if (removed) {
-        delete removed;
-    }
+    table->release_entry(*this);
 }
 
 static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, uint32_t expected) {
@@ -195,7 +218,7 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
 }
 
 extern "C" int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t expected) {
-    kernel::IntrusiveRef<futex_entry_t> entry_ref = futex_acquire_entry(key, true);
+    kernel::IntrusiveRef<futex_entry_t> entry_ref = futex_table.acquire_entry(key, true);
     if (!entry_ref) {
         return -1;
     }
@@ -206,7 +229,7 @@ extern "C" int futex_wait(uint32_t key, volatile const uint32_t* uaddr, uint32_t
 }
 
 extern "C" int futex_wake(uint32_t key, uint32_t max_wake) {
-    kernel::IntrusiveRef<futex_entry_t> entry_ref = futex_acquire_entry(key, false);
+    kernel::IntrusiveRef<futex_entry_t> entry_ref = futex_table.acquire_entry(key, false);
     if (!entry_ref) {
         return 0;
     }
