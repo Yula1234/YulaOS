@@ -30,8 +30,8 @@
 #include <mm/pmm.h>
 #include <mm/heap.h>
 
-#include <lib/hash_map.h>
-#include <lib/cpp/new.h>
+#include <kernel/uaccess/uaccess.h>
+#include <kernel/futex/futex.h>
 
 #include "clipboard.h"
 #include "syscall.h"
@@ -45,147 +45,12 @@ extern uint32_t* paging_get_dir(void);
 
 extern "C" int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h);
 
-typedef struct {
-    uint32_t key;
-    uint32_t refs;
-    semaphore_t sem;
-} futex_entry_t;
-
-static __cacheline_aligned spinlock_t futex_table_lock;
-static __attribute__((unused)) uint8_t futex_table_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
-
-static HashMap<uint32_t, futex_entry_t*> futex_map;
-
-static futex_entry_t* futex_acquire_entry(uint32_t key, bool create) {
-    uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
-
-    futex_entry_t* entry = nullptr;
-    if (futex_map.try_get(key, entry)) {
-        entry->refs++;
-        spinlock_release_safe(&futex_table_lock, flags);
-        return entry;
-    }
-
-    if (!create) {
-        spinlock_release_safe(&futex_table_lock, flags);
-        return nullptr;
-    }
-
-    entry = new (kernel::nothrow) futex_entry_t();
-    if (!entry) {
-        spinlock_release_safe(&futex_table_lock, flags);
-        return nullptr;
-    }
-
-    entry->key = key;
-    entry->refs = 1u;
-    sem_init(&entry->sem, 0);
-
-    const bool inserted = futex_map.insert_unique(key, entry);
-    if (!inserted) {
-        delete entry;
-        spinlock_release_safe(&futex_table_lock, flags);
-        return nullptr;
-    }
-
-    spinlock_release_safe(&futex_table_lock, flags);
-    return entry;
-}
-
-static bool futex_entry_is_unused(futex_entry_t& entry) {
-    semaphore_t* sem = &entry.sem;
-    const uint32_t sflags = spinlock_acquire_safe(&sem->lock);
-    const bool unused = (sem->count == 0) && dlist_empty(&sem->wait_list);
-    spinlock_release_safe(&sem->lock, sflags);
-
-    return unused;
-}
-
-static void futex_release_entry(futex_entry_t* entry) {
-    if (!entry) {
-        return;
-    }
-
-    bool maybe_free = false;
-
-    {
-        const uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
-
-        if (entry->refs == 0u) {
-            panic("FUTEX: entry ref underflow");
-        }
-
-        entry->refs--;
-        maybe_free = (entry->refs == 0u);
-
-        spinlock_release_safe(&futex_table_lock, flags);
-    }
-
-    if (!maybe_free) {
-        return;
-    }
-
-    if (!futex_entry_is_unused(*entry)) {
-        return;
-    }
-
-    const uint32_t flags = spinlock_acquire_safe(&futex_table_lock);
-
-    futex_entry_t* current = nullptr;
-    const bool still_present = futex_map.try_get(entry->key, current);
-    if (!still_present || current != entry) {
-        spinlock_release_safe(&futex_table_lock, flags);
-        return;
-    }
-
-    if (entry->refs != 0u) {
-        spinlock_release_safe(&futex_table_lock, flags);
-        return;
-    }
-
-    if (!futex_entry_is_unused(*entry)) {
-        spinlock_release_safe(&futex_table_lock, flags);
-        return;
-    }
-
-    futex_entry_t* removed = nullptr;
-    (void)futex_map.remove_and_get(entry->key, removed);
-
-    spinlock_release_safe(&futex_table_lock, flags);
-
-    if (removed) {
-        delete removed;
-    }
-}
-
 static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
-    if (!buf) return 0;
-    if (size == 0) return 1;
-
-    uint32_t start = (uint32_t)buf;
-    uint32_t end = start + size;
-
-    if (end < start) return 0; 
-    if (start < 0x08000000 || end > 0xC0000000) return 0; 
-
-    if (!task || !task->mem || !task->mem->page_dir) return 0;
-
-    return 1;
+    return uaccess_check_user_buffer(task, buf, size);
 }
 
 static void prefault_user_read(const void* p, uint32_t len) {
-    if (!p || len == 0) return;
-
-    uintptr_t addr = (uintptr_t)p;
-    uintptr_t end = addr + (uintptr_t)len - 1u;
-    if (end < addr) return;
-
-    for (uintptr_t cur = addr; cur <= end;) {
-        (void)*(volatile const uint8_t*)cur;
-        uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
-        if (next <= cur) break;
-        cur = next;
-    }
+    uaccess_prefault_user_read(p, len);
 }
 
 static uint8_t fb_present_fpu_tmp[MAX_CPUS][4096] __attribute__((aligned(64)));
@@ -206,50 +71,11 @@ static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr);
 static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size);
 
 static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
-    if (!t || !t->mem || !t->mem->page_dir) return 0;
-    if (end_excl <= start) return 0;
-
-    if (start < 0x08000000u || end_excl > 0xC0000000u) return 0;
-
-    uintptr_t cur = start;
-    while (cur < end_excl) {
-        uint32_t v = (uint32_t)cur;
-
-        if (t->stack_bottom < t->stack_top && v >= t->stack_bottom && v < t->stack_top) {
-            uintptr_t lim = (uintptr_t)t->stack_top;
-            cur = (end_excl < lim) ? end_excl : lim;
-            continue;
-        }
-
-        if (t->mem->heap_start < t->mem->prog_break && v >= t->mem->heap_start && v < t->mem->prog_break) {
-            uintptr_t lim = (uintptr_t)t->mem->prog_break;
-            cur = (end_excl < lim) ? end_excl : lim;
-            continue;
-        }
-
-        mmap_area_t* m = mmap_find_area(t, v);
-        if (!m) return 0;
-        if (m->vaddr_start >= m->vaddr_end) return 0;
-        if (v < m->vaddr_start || v >= m->vaddr_end) return 0;
-
-        uintptr_t lim = (uintptr_t)m->vaddr_end;
-        cur = (end_excl < lim) ? end_excl : lim;
-    }
-    return 1;
+    return uaccess_user_range_mappable(t, start, end_excl);
 }
 
 static int ensure_user_buffer_writable_mappable(task_t* task, void* buf, uint32_t size) {
-    if (!check_user_buffer(task, buf, size)) return 0;
-    if (size == 0) return 1;
-
-    uintptr_t start = (uintptr_t)buf;
-    uintptr_t end = start + (uintptr_t)size;
-    if (end < start) return 0;
-
-    if (!user_range_mappable(task, start, end)) return 0;
-
-    prefault_user_read((const void*)buf, size);
-    return check_user_buffer_writable_present(task, buf, size);
+    return uaccess_ensure_user_buffer_writable_mappable(task, buf, size);
 }
 
 static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
@@ -270,61 +96,15 @@ static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pt
 }
 
 static int check_user_buffer_present(task_t* task, const void* buf, uint32_t size) {
-    if (!check_user_buffer(task, buf, size)) return 0;
-    if (size == 0) return 1;
-
-    if (!task->mem || !task->mem->page_dir) return 0;
-
-    uint32_t start = (uint32_t)buf;
-    uint32_t end = start + size;
-    if (end < start) return 0;
-
-    uint32_t v = start & ~0xFFFu;
-    uint32_t v_end = (end + 0xFFFu) & ~0xFFFu;
-    for (; v < v_end; v += 4096u) {
-        uint32_t pte;
-        if (!paging_get_present_pte(task->mem->page_dir, v, &pte)) return 0;
-        if ((pte & 4u) == 0) return 0;
-    }
-    return 1;
+    return uaccess_check_user_buffer_present(task, buf, size);
 }
 
 static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size) {
-    if (!check_user_buffer(task, buf, size)) return 0;
-    if (size == 0) return 1;
-
-    if (!task->mem || !task->mem->page_dir) return 0;
-
-    uint32_t start = (uint32_t)buf;
-    uint32_t end = start + size;
-    if (end < start) return 0;
-
-    uint32_t v = start & ~0xFFFu;
-    uint32_t v_end = (end + 0xFFFu) & ~0xFFFu;
-    for (; v < v_end; v += 4096u) {
-        uint32_t pte;
-        if (!paging_get_present_pte(task->mem->page_dir, v, &pte)) return 0;
-        if ((pte & 4u) == 0) return 0;
-        if ((pte & 2u) == 0) return 0;
-    }
-    return 1;
+    return uaccess_check_user_buffer_writable_present(task, buf, size);
 }
 
 static int copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, const char* user_src) {
-    if (!task || !dst || dst_size == 0 || !user_src) return -1;
-
-    if (!check_user_buffer(task, user_src, 1)) return -1;
-
-    for (uint32_t i = 0; i < dst_size; i++) {
-        const void* p = (const void*)((uint32_t)user_src + i);
-        if (!check_user_buffer(task, p, 1)) return -1;
-        prefault_user_read(p, 1);
-        char c = *(volatile const char*)p;
-        dst[i] = c;
-        if (c == '\0') return 0;
-    }
-
-    return -1;
+    return uaccess_copy_user_str_bounded(task, dst, dst_size, user_src);
 }
 
 static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
@@ -357,75 +137,6 @@ static mmap_area_t* mmap_find_overlap(task_t* t, uint32_t start, uint32_t end_ex
         m = m->next;
     }
     return 0;
-}
-
-
-
-static int futex_sem_wait(semaphore_t* sem, volatile const uint32_t* uaddr, uint32_t expected) {
-    if (!sem || !uaddr) return -1;
-
-    for (;;) {
-        prefault_user_read((const void*)uaddr, 4u);
-        uint32_t v = *(volatile const uint32_t*)uaddr;
-        if (v != expected) return 0;
-
-        uint32_t flags = spinlock_acquire_safe(&sem->lock);
-
-        v = *(volatile const uint32_t*)uaddr;
-        if (v != expected) {
-            spinlock_release_safe(&sem->lock, flags);
-            return 0;
-        }
-
-        if (sem->count > 0) {
-            const int new_count = sem->count - 1;
-            sem->count = new_count;
-            task_t* curr = proc_current();
-            if (curr) curr->blocked_on_sem = 0;
-            spinlock_release_safe(&sem->lock, flags);
-            return 0;
-        }
-
-        task_t* curr = proc_current();
-        if (!curr) {
-            spinlock_release_safe(&sem->lock, flags);
-            return -1;
-        }
-
-        curr->blocked_on_sem = (void*)sem;
-        dlist_add_tail(&curr->sem_node, &sem->wait_list);
-        curr->state = TASK_WAITING;
-
-        spinlock_release_safe(&sem->lock, flags);
-        sched_yield();
-    }
-}
-
-static int futex_sem_wake(semaphore_t* sem, uint32_t max_wake) {
-    if (!sem || max_wake == 0) return 0;
-
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-
-    uint32_t woken = 0;
-    while (woken < max_wake && !dlist_empty(&sem->wait_list)) {
-        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
-
-        dlist_del(&t->sem_node);
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
-
-        const int new_count = sem->count + 1;
-        sem->count = new_count;
-        if (t->state != TASK_ZOMBIE) {
-            t->state = TASK_RUNNABLE;
-            sched_add(t);
-        }
-        woken++;
-    }
-
-    spinlock_release_safe(&sem->lock, flags);
-    return (int)woken;
 }
 
 
@@ -1969,18 +1680,7 @@ static void syscall_futex_wait(registers_t* regs, task_t* curr) {
     }
     uint32_t key = phys & ~3u;
 
-    futex_entry_t* entry = futex_acquire_entry(key, true);
-    if (!entry) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
-
-    semaphore_t* sem = &entry->sem;
-
-    regs->eax = (uint32_t)futex_sem_wait(sem, uaddr, expected);
-
-    futex_release_entry(entry);
-    return;
+    regs->eax = (uint32_t)futex_wait(key, uaddr, expected);
 }
 
 static void syscall_futex_wake(registers_t* regs, task_t* curr) {
@@ -2009,18 +1709,7 @@ static void syscall_futex_wake(registers_t* regs, task_t* curr) {
     }
     uint32_t key = phys & ~3u;
 
-    futex_entry_t* entry = futex_acquire_entry(key, false);
-    if (!entry) {
-        regs->eax = 0;
-        return;
-    }
-
-    semaphore_t* sem = &entry->sem;
-
-    regs->eax = (uint32_t)futex_sem_wake(sem, max_wake);
-
-    futex_release_entry(entry);
-    return;
+    regs->eax = (uint32_t)futex_wake(key, max_wake);
 }
 
 static void syscall_ioctl(registers_t* regs, task_t* curr) {

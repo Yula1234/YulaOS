@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 Yula1234
+
+#include <kernel/uaccess/uaccess.h>
+
+#include <kernel/proc.h>
+
+#include <stdint.h>
+
+namespace {
+
+static int check_user_range_basic(task_t* task, uintptr_t start, uintptr_t end_excl) {
+    if (!task || !task->mem || !task->mem->page_dir) {
+        return 0;
+    }
+
+    if (end_excl < start) {
+        return 0;
+    }
+
+    if (start < 0x08000000u || end_excl > 0xC0000000u) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static mmap_area_t* mmap_find_area(task_t* t, uint32_t vaddr) {
+    if (!t || !t->mem) {
+        return nullptr;
+    }
+
+    mmap_area_t* m = t->mem->mmap_list;
+    while (m) {
+        if (vaddr >= m->vaddr_start && vaddr < m->vaddr_end) {
+            return m;
+        }
+
+        m = m->next;
+    }
+
+    return nullptr;
+}
+
+static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
+    if (!t || !t->mem || !t->mem->page_dir) {
+        return 0;
+    }
+
+    if (end_excl <= start) {
+        return 0;
+    }
+
+    if (start < 0x08000000u || end_excl > 0xC0000000u) {
+        return 0;
+    }
+
+    uintptr_t cur = start;
+    while (cur < end_excl) {
+        uint32_t v = (uint32_t)cur;
+
+        if (t->stack_bottom < t->stack_top && v >= t->stack_bottom && v < t->stack_top) {
+            uintptr_t lim = (uintptr_t)t->stack_top;
+            cur = (end_excl < lim) ? end_excl : lim;
+            continue;
+        }
+
+        if (t->mem->heap_start < t->mem->prog_break && v >= t->mem->heap_start && v < t->mem->prog_break) {
+            uintptr_t lim = (uintptr_t)t->mem->prog_break;
+            cur = (end_excl < lim) ? end_excl : lim;
+            continue;
+        }
+
+        mmap_area_t* m = mmap_find_area(t, v);
+        if (!m) {
+            return 0;
+        }
+
+        if (m->vaddr_start >= m->vaddr_end) {
+            return 0;
+        }
+
+        if (v < m->vaddr_start || v >= m->vaddr_end) {
+            return 0;
+        }
+
+        uintptr_t lim = (uintptr_t)m->vaddr_end;
+        cur = (end_excl < lim) ? end_excl : lim;
+    }
+
+    return 1;
+}
+
+static int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte) {
+    if (!dir) {
+        return 0;
+    }
+
+    uint32_t pd_idx = virt >> 22;
+    uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+
+    uint32_t pde = dir[pd_idx];
+    if ((pde & 1u) == 0) {
+        return 0;
+    }
+
+    uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+    uint32_t pte = pt[pt_idx];
+    if ((pte & 1u) == 0) {
+        return 0;
+    }
+
+    if (out_pte) {
+        *out_pte = pte;
+    }
+
+    return 1;
+}
+
+static int check_user_buffer_present_impl(task_t* task, uintptr_t start, uintptr_t end_excl, int require_writable) {
+    if (!task || !task->mem || !task->mem->page_dir) {
+        return 0;
+    }
+
+    if (end_excl <= start) {
+        return 1;
+    }
+
+    uint32_t v = (uint32_t)start & ~0xFFFu;
+    uint32_t v_end = ((uint32_t)end_excl + 0xFFFu) & ~0xFFFu;
+
+    for (; v < v_end; v += 4096u) {
+        uint32_t pte;
+        if (!paging_get_present_pte(task->mem->page_dir, v, &pte)) {
+            return 0;
+        }
+
+        if ((pte & 4u) == 0u) {
+            return 0;
+        }
+
+        if (require_writable && ((pte & 2u) == 0u)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+}
+
+extern "C" int uaccess_check_user_buffer(task_t* task, const void* buf, uint32_t size) {
+    if (!buf) {
+        return 0;
+    }
+
+    if (size == 0u) {
+        return 1;
+    }
+
+    uintptr_t start = (uintptr_t)buf;
+    uintptr_t end_excl = start + (uintptr_t)size;
+    if (end_excl < start) {
+        return 0;
+    }
+
+    return check_user_range_basic(task, start, end_excl);
+}
+
+extern "C" void uaccess_prefault_user_read(const void* p, uint32_t len) {
+    if (!p || len == 0u) {
+        return;
+    }
+
+    uintptr_t addr = (uintptr_t)p;
+    uintptr_t end = addr + (uintptr_t)len - 1u;
+    if (end < addr) {
+        return;
+    }
+
+    for (uintptr_t cur = addr; cur <= end;) {
+        (void)*(volatile const uint8_t*)cur;
+
+        uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
+        if (next <= cur) {
+            break;
+        }
+
+        cur = next;
+    }
+}
+
+extern "C" int uaccess_check_user_buffer_present(task_t* task, const void* buf, uint32_t size) {
+    if (!uaccess_check_user_buffer(task, buf, size)) {
+        return 0;
+    }
+
+    if (size == 0u) {
+        return 1;
+    }
+
+    uintptr_t start = (uintptr_t)buf;
+    uintptr_t end_excl = start + (uintptr_t)size;
+
+    return check_user_buffer_present_impl(task, start, end_excl, 0);
+}
+
+extern "C" int uaccess_check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size) {
+    if (!uaccess_check_user_buffer(task, buf, size)) {
+        return 0;
+    }
+
+    if (size == 0u) {
+        return 1;
+    }
+
+    uintptr_t start = (uintptr_t)buf;
+    uintptr_t end_excl = start + (uintptr_t)size;
+
+    return check_user_buffer_present_impl(task, start, end_excl, 1);
+}
+
+extern "C" int uaccess_ensure_user_buffer_writable_mappable(task_t* task, void* buf, uint32_t size) {
+    if (!uaccess_check_user_buffer(task, buf, size)) {
+        return 0;
+    }
+
+    if (size == 0u) {
+        return 1;
+    }
+
+    uintptr_t start = (uintptr_t)buf;
+    uintptr_t end_excl = start + (uintptr_t)size;
+    if (end_excl < start) {
+        return 0;
+    }
+
+    if (!user_range_mappable(task, start, end_excl)) {
+        return 0;
+    }
+
+    uaccess_prefault_user_read((const void*)buf, size);
+    return uaccess_check_user_buffer_writable_present(task, buf, size);
+}
+
+extern "C" int uaccess_user_range_mappable(task_t* task, uintptr_t start, uintptr_t end_excl) {
+    return user_range_mappable(task, start, end_excl);
+}
+
+extern "C" int uaccess_copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, const char* user_src) {
+    if (!task || !dst || dst_size == 0u || !user_src) {
+        return -1;
+    }
+
+    if (!uaccess_check_user_buffer(task, user_src, 1u)) {
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < dst_size; i++) {
+        const void* p = (const void*)((uintptr_t)user_src + (uintptr_t)i);
+        if (!uaccess_check_user_buffer(task, p, 1u)) {
+            return -1;
+        }
+
+        uaccess_prefault_user_read(p, 1u);
+
+        const char c = *(volatile const char*)p;
+        dst[i] = c;
+
+        if (c == '\0') {
+            return 0;
+        }
+    }
+
+    return -1;
+}
