@@ -87,20 +87,23 @@ static inline void uart_write8(uint16_t ofs, uint8_t v) {
     outb(port_reg(ofs), v);
 }
 
-static inline uint8_t uart_get_ier(void) {
-    return uart_read8(kRegIer);
-}
+static uint8_t g_cached_ier = 0;
 
-static inline void uart_set_ier(uint8_t v) {
+static inline void uart_set_ier_cached(uint8_t v) {
+    if (g_cached_ier == v) {
+        return;
+    }
+
+    g_cached_ier = v;
     uart_write8(kRegIer, v);
 }
 
 static inline void uart_enable_thre_irq(void) {
-    uart_set_ier(static_cast<uint8_t>(uart_get_ier() | kIerBitThre));
+    uart_set_ier_cached(static_cast<uint8_t>(g_cached_ier | kIerBitThre));
 }
 
 static inline void uart_disable_thre_irq(void) {
-    uart_set_ier(static_cast<uint8_t>(uart_get_ier() & ~kIerBitThre));
+    uart_set_ier_cached(static_cast<uint8_t>(g_cached_ier & (uint8_t)~kIerBitThre));
 }
 
 static void pump_rx_unlocked(void) {
@@ -153,6 +156,8 @@ extern "C" void serial_core_init(uint16_t port) {
     g_port = static_cast<NS16550::Port>(port);
     g_rx = Ring{};
     g_tx = Ring{};
+
+    g_cached_ier = uart_read8(kRegIer);
 
     pump_rx_unlocked();
 

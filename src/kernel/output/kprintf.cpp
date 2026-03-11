@@ -4,6 +4,8 @@
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/mutex.h>
 
+#include <lib/string.h>
+
 #include <lib/types.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -17,6 +19,10 @@ class ConsoleSink {
 public:
     ConsoleSink() = default;
 
+    ~ConsoleSink() {
+        flush();
+    }
+
     ConsoleSink(const ConsoleSink&) = delete;
     ConsoleSink& operator=(const ConsoleSink&) = delete;
 
@@ -24,7 +30,10 @@ public:
     ConsoleSink& operator=(ConsoleSink&&) = delete;
 
     void putc(char c) {
-        console_putc(c);
+        buf_[pos_++] = c;
+        if (pos_ == sizeof(buf_)) {
+            flush();
+        }
         written_++;
     }
 
@@ -35,9 +44,25 @@ public:
     }
 
     void write(const char* s, size_t len) {
-        for (size_t i = 0; i < len; i++) {
-            putc(s[i]);
+        if (!s || len == 0) {
+            return;
         }
+
+        size_t i = 0;
+        while (i < len) {
+            if (pos_ == sizeof(buf_)) {
+                flush();
+            }
+
+            const size_t space = sizeof(buf_) - pos_;
+            const size_t chunk = (len - i < space) ? (len - i) : space;
+
+            memcpy(&buf_[pos_], &s[i], chunk);
+            pos_ += chunk;
+            i += chunk;
+        }
+
+        written_ += static_cast<int>(len);
     }
 
     int written() const {
@@ -45,6 +70,17 @@ public:
     }
 
 private:
+    void flush() {
+        if (pos_ == 0) {
+            return;
+        }
+
+        console_write(buf_, pos_);
+        pos_ = 0;
+    }
+
+    char buf_[256] = {};
+    size_t pos_ = 0;
     int written_ = 0;
 };
 
