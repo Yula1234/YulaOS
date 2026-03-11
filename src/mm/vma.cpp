@@ -62,13 +62,17 @@ static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept;
 
 static void free_region(vma_region_t* region) noexcept;
 
-static void vma_region_recalc(vma_region_t* region) noexcept {
+static bool vma_region_recalc(vma_region_t* region) noexcept {
     if (!region) {
-        return;
+        return false;
     }
 
     vma_region_t* left = rb_to_region(region->rb_node.rb_left);
     vma_region_t* right = rb_to_region(region->rb_node.rb_right);
+
+    const uint32_t old_min_start = region->subtree_min_start;
+    const uint32_t old_max_end = region->subtree_max_end;
+    const uint32_t old_max_gap = region->subtree_max_gap;
 
     uint32_t min_start = region->vaddr_start;
     uint32_t max_end = region->vaddr_end;
@@ -87,8 +91,9 @@ static void vma_region_recalc(vma_region_t* region) noexcept {
             max_gap = left->subtree_max_gap;
         }
 
-        if (left->subtree_max_end < region->vaddr_start) {
-            uint32_t gap = region->vaddr_start - left->subtree_max_end;
+        const uint32_t pred_end = left->subtree_max_end;
+        if (pred_end < region->vaddr_start) {
+            const uint32_t gap = region->vaddr_start - pred_end;
             if (gap > max_gap) {
                 max_gap = gap;
             }
@@ -108,8 +113,9 @@ static void vma_region_recalc(vma_region_t* region) noexcept {
             max_gap = right->subtree_max_gap;
         }
 
-        if (region->vaddr_end < right->subtree_min_start) {
-            uint32_t gap = right->subtree_min_start - region->vaddr_end;
+        const uint32_t succ_start = right->subtree_min_start;
+        if (region->vaddr_end < succ_start) {
+            const uint32_t gap = succ_start - region->vaddr_end;
             if (gap > max_gap) {
                 max_gap = gap;
             }
@@ -119,11 +125,22 @@ static void vma_region_recalc(vma_region_t* region) noexcept {
     region->subtree_min_start = min_start;
     region->subtree_max_end = max_end;
     region->subtree_max_gap = max_gap;
+
+    return old_min_start != min_start
+        || old_max_end != max_end
+        || old_max_gap != max_gap;
 }
 
 static void vma_region_propagate(rb_node* node, rb_node* stop) {
     for (rb_node* cur = node; cur && cur != stop; cur = rb_parent(cur)) {
-        vma_region_recalc(rb_to_region(cur));
+        vma_region_t* region = rb_to_region(cur);
+        if (!region) {
+            continue;
+        }
+
+        if (!vma_region_recalc(region)) {
+            break;
+        }
     }
 }
 
@@ -140,8 +157,8 @@ static void vma_region_copy(rb_node* old, rb_node* new_node) {
 }
 
 static void vma_region_rotate(rb_node* old, rb_node* new_node) {
-    vma_region_recalc(rb_to_region(old));
-    vma_region_recalc(rb_to_region(new_node));
+    (void)vma_region_recalc(rb_to_region(old));
+    (void)vma_region_recalc(rb_to_region(new_node));
 }
 
 static const rb_augment_callbacks vma_rb_callbacks = {
