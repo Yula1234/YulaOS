@@ -144,6 +144,134 @@ void rwlock_release_read(rwlock_t* rw);
 void rwlock_acquire_write(rwlock_t* rw);
 void rwlock_release_write(rwlock_t* rw);
 
+typedef struct {
+    volatile uint32_t state;
+} rwspinlock_t;
+
+static inline void rwspinlock_init(rwspinlock_t* rw) {
+    rw->state = 0u;
+}
+
+static inline void rwspinlock_acquire_read(rwspinlock_t* rw) {
+    uint32_t backoff = 1;
+
+    for (;;) {
+        uint32_t s = __atomic_load_n(&rw->state, __ATOMIC_ACQUIRE);
+        if ((s & 0x80000000u) != 0u) {
+            for (uint32_t i = 0; i < backoff; i++) {
+                __asm__ volatile("pause" ::: "memory");
+            }
+
+            if (backoff < 1024u) {
+                backoff <<= 1;
+            }
+
+            continue;
+        }
+
+        if ((s & 0x7FFFFFFFu) == 0x7FFFFFFFu) {
+            __asm__ volatile("pause" ::: "memory");
+            continue;
+        }
+
+        if (__atomic_compare_exchange_n(
+                &rw->state,
+                &s,
+                s + 1u,
+                0,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE
+            )) {
+            return;
+        }
+    }
+}
+
+static inline void rwspinlock_release_read(rwspinlock_t* rw) {
+    __atomic_fetch_sub(&rw->state, 1u, __ATOMIC_RELEASE);
+}
+
+static inline void rwspinlock_acquire_write(rwspinlock_t* rw) {
+    uint32_t backoff = 1;
+
+    for (;;) {
+        uint32_t expected = 0u;
+
+        if (__atomic_compare_exchange_n(
+                &rw->state,
+                &expected,
+                0x80000000u,
+                0,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE
+            )) {
+            return;
+        }
+
+        for (uint32_t i = 0; i < backoff; i++) {
+            __asm__ volatile("pause" ::: "memory");
+        }
+
+        if (backoff < 1024u) {
+            backoff <<= 1;
+        }
+    }
+}
+
+static inline void rwspinlock_release_write(rwspinlock_t* rw) {
+    __atomic_store_n(&rw->state, 0u, __ATOMIC_RELEASE);
+}
+
+static inline uint32_t rwspinlock_acquire_read_safe(rwspinlock_t* rw) {
+    uint32_t flags;
+
+    __asm__ volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "memory"
+    );
+
+    rwspinlock_acquire_read(rw);
+
+    return flags;
+}
+
+static inline void rwspinlock_release_read_safe(rwspinlock_t* rw, uint32_t flags) {
+    rwspinlock_release_read(rw);
+
+    if (flags & 0x200u) {
+        __asm__ volatile("sti");
+    }
+}
+
+static inline uint32_t rwspinlock_acquire_write_safe(rwspinlock_t* rw) {
+    uint32_t flags;
+
+    __asm__ volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "memory"
+    );
+
+    rwspinlock_acquire_write(rw);
+
+    return flags;
+}
+
+static inline void rwspinlock_release_write_safe(rwspinlock_t* rw, uint32_t flags) {
+    rwspinlock_release_write(rw);
+
+    if (flags & 0x200u) {
+        __asm__ volatile("sti");
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

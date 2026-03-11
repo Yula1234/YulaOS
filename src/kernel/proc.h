@@ -55,7 +55,7 @@ typedef struct proc_mem {
     uint32_t prog_break;
     uint32_t heap_start;
 
-    spinlock_t mmap_lock;
+    rwspinlock_t mmap_lock;
     struct rb_root mmap_tree;
     dlist_head_t mmap_regions;
     uint32_t mmap_top;
