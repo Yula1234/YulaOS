@@ -204,6 +204,7 @@ typedef struct {
     virtio_pci_dev_t dev;
     virtqueue_t ctrlq;
     mutex_t lock;
+    int ctrlq_async_failed;
     uint32_t scanout_id;
     uint32_t scanout_bound_resource_id;
     virtio_gpu_rect_t scanout_bound_rect;
@@ -214,6 +215,7 @@ typedef struct {
     void* ctrl_resp;
     uint32_t ctrl_cmd_phys;
     uint32_t ctrl_resp_phys;
+    void* async_ctrl_slots;
     virtio_gpu_fb_t fb;
     vgpu_attached_set_t attached;
 } virtio_gpu_state_t;
@@ -224,8 +226,115 @@ static virtio_gpu_state_t g_vgpu;
 #define VGPU_CTRLQ_TIMEOUT_TICKS 30000u
 #define VGPU_CTRLQ_TIMEOUT_SPINS 20000000u
 
+#define VGPU_CTRLQ_ASYNC_SLOTS 16u
+
+typedef struct {
+    void* cmd;
+    void* resp;
+    uint32_t cmd_phys;
+    uint32_t resp_phys;
+    uint32_t expected_resp_type;
+    uint8_t in_use;
+    uint8_t _pad[3];
+} vgpu_ctrlq_async_slot_t;
+
 static void vgpu_mark_inactive_locked(void);
 static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_t expected_resp_type);
+
+static void vgpu_ctrlq_async_complete(virtqueue_token_t* token, void* ctx) {
+    (void)token;
+
+    vgpu_ctrlq_async_slot_t* slot = (vgpu_ctrlq_async_slot_t*)ctx;
+    if (!slot || !slot->resp) {
+        return;
+    }
+
+    const virtio_gpu_ctrl_hdr_t* rhdr = (const virtio_gpu_ctrl_hdr_t*)slot->resp;
+    if (rhdr->type != slot->expected_resp_type) {
+        __atomic_store_n(&g_vgpu.ctrlq_async_failed, 1, __ATOMIC_RELAXED);
+    }
+
+    __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+}
+
+static vgpu_ctrlq_async_slot_t* vgpu_ctrlq_async_try_acquire_slot_locked(void) {
+    if (!g_vgpu.async_ctrl_slots) {
+        return 0;
+    }
+
+    vgpu_ctrlq_async_slot_t* slots = (vgpu_ctrlq_async_slot_t*)g_vgpu.async_ctrl_slots;
+
+    for (uint32_t i = 0; i < VGPU_CTRLQ_ASYNC_SLOTS; i++) {
+        vgpu_ctrlq_async_slot_t* s = &slots[i];
+
+        uint8_t expected = 0;
+        if (__atomic_compare_exchange_n(&s->in_use, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return s;
+        }
+    }
+
+    return 0;
+}
+
+static int vgpu_ctrlq_submit_async_locked(const void* cmd, uint32_t cmd_len, uint32_t expected_resp_type) {
+    if (!cmd || cmd_len == 0u) {
+        return 0;
+    }
+
+    if (!g_vgpu.ctrlq.ring_mem) {
+        return 0;
+    }
+
+    vgpu_ctrlq_async_slot_t* slot = vgpu_ctrlq_async_try_acquire_slot_locked();
+    if (!slot) {
+        return 1;
+    }
+
+    if (!slot->cmd || !slot->resp || slot->cmd_phys == 0u || slot->resp_phys == 0u) {
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+        return 0;
+    }
+
+    if (cmd_len > PAGE_SIZE) {
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+        return 0;
+    }
+
+    memcpy(slot->cmd, cmd, cmd_len);
+    memset(slot->resp, 0, sizeof(virtio_gpu_ctrl_hdr_t));
+    slot->expected_resp_type = expected_resp_type;
+
+    uint64_t addrs[2] = {
+        (uint64_t)slot->cmd_phys,
+        (uint64_t)slot->resp_phys,
+    };
+
+    uint32_t lens[2] = {
+        cmd_len,
+        (uint32_t)sizeof(virtio_gpu_ctrl_hdr_t),
+    };
+
+    uint16_t flags[2] = {
+        0,
+        VRING_DESC_F_WRITE,
+    };
+
+    if (!virtqueue_submit_cb(
+            &g_vgpu.ctrlq,
+            addrs,
+            lens,
+            flags,
+            2,
+            vgpu_ctrlq_async_complete,
+            slot,
+            1
+        )) {
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+        return 1;
+    }
+
+    return 1;
+}
 
 static int vgpu_ctrlq_can_sleep(void) {
     uint32_t eflags;
@@ -428,6 +537,30 @@ static void vgpu_cleanup_state(void) {
         pmm_free_block(g_vgpu.ctrl_resp);
         g_vgpu.ctrl_resp = 0;
         g_vgpu.ctrl_resp_phys = 0;
+    }
+
+    if (g_vgpu.async_ctrl_slots) {
+        vgpu_ctrlq_async_slot_t* slots = (vgpu_ctrlq_async_slot_t*)g_vgpu.async_ctrl_slots;
+
+        for (uint32_t i = 0; i < VGPU_CTRLQ_ASYNC_SLOTS; i++) {
+            if (slots[i].cmd) {
+                pmm_free_block(slots[i].cmd);
+                slots[i].cmd = 0;
+                slots[i].cmd_phys = 0;
+            }
+
+            if (slots[i].resp) {
+                pmm_free_block(slots[i].resp);
+                slots[i].resp = 0;
+                slots[i].resp_phys = 0;
+            }
+
+            slots[i].expected_resp_type = 0;
+            slots[i].in_use = 0;
+        }
+
+        kfree(g_vgpu.async_ctrl_slots);
+        g_vgpu.async_ctrl_slots = 0;
     }
 
     if (g_vgpu.fb.fb_ptr) {
@@ -674,6 +807,34 @@ int virtio_gpu_init(void) {
     g_vgpu.ctrl_cmd_phys = (uint32_t)(uintptr_t)g_vgpu.ctrl_cmd;
     g_vgpu.ctrl_resp_phys = (uint32_t)(uintptr_t)g_vgpu.ctrl_resp;
 
+    g_vgpu.async_ctrl_slots = kzalloc((size_t)VGPU_CTRLQ_ASYNC_SLOTS * sizeof(vgpu_ctrlq_async_slot_t));
+    if (!g_vgpu.async_ctrl_slots) {
+        vgpu_cleanup_state();
+        return 0;
+    }
+
+    {
+        vgpu_ctrlq_async_slot_t* slots = (vgpu_ctrlq_async_slot_t*)g_vgpu.async_ctrl_slots;
+
+        for (uint32_t i = 0; i < VGPU_CTRLQ_ASYNC_SLOTS; i++) {
+            slots[i].cmd = pmm_alloc_block();
+            slots[i].resp = pmm_alloc_block();
+
+            if (!slots[i].cmd || !slots[i].resp) {
+                vgpu_cleanup_state();
+                return 0;
+            }
+
+            memset(slots[i].cmd, 0, PAGE_SIZE);
+            memset(slots[i].resp, 0, PAGE_SIZE);
+
+            slots[i].cmd_phys = (uint32_t)(uintptr_t)slots[i].cmd;
+            slots[i].resp_phys = (uint32_t)(uintptr_t)slots[i].resp;
+            slots[i].expected_resp_type = 0;
+            slots[i].in_use = 0;
+        }
+    }
+
     uint32_t w = 0;
     uint32_t h = 0;
     uint32_t scanout = 0;
@@ -804,6 +965,12 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
         return -1;
     }
 
+    if (__atomic_load_n(&g_vgpu.ctrlq_async_failed, __ATOMIC_RELAXED)) {
+        vgpu_mark_inactive_locked();
+        mutex_unlock(&g_vgpu.lock);
+        return -1;
+    }
+
     if (g_vgpu.scanout_bound_resource_id != g_vgpu.resource_id ||
         g_vgpu.scanout_bound_rect.x != 0u ||
         g_vgpu.scanout_bound_rect.y != 0u ||
@@ -872,13 +1039,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
     t->offset = offset64;
     t->resource_id = g_vgpu.resource_id;
 
-    if (!vgpu_ctrlq_submit_locked(sizeof(*t), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
-        g_vgpu.active = 0;
-        g_vgpu.scanout_bound_resource_id = 0;
-        memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
-        mutex_unlock(&g_vgpu.lock);
-        return -1;
-    }
+    (void)vgpu_ctrlq_submit_async_locked(t, sizeof(*t), VIRTIO_GPU_RESP_OK_NODATA);
 
     virtio_gpu_resource_flush_t* f = (virtio_gpu_resource_flush_t*)g_vgpu.ctrl_cmd;
     memset(f, 0, sizeof(*f));
@@ -889,13 +1050,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
     f->r.height = (uint32_t)(y2 - y1);
     f->resource_id = g_vgpu.resource_id;
 
-    if (!vgpu_ctrlq_submit_locked(sizeof(*f), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
-        g_vgpu.active = 0;
-        g_vgpu.scanout_bound_resource_id = 0;
-        memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
-        mutex_unlock(&g_vgpu.lock);
-        return -1;
-    }
+    (void)vgpu_ctrlq_submit_async_locked(f, sizeof(*f), VIRTIO_GPU_RESP_OK_NODATA);
 
     mutex_unlock(&g_vgpu.lock);
     return 0;

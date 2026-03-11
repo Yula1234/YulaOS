@@ -39,6 +39,11 @@ typedef struct virtqueue_token {
     semaphore_t sem;
     uint32_t used_len;
 
+    void (*on_complete)(struct virtqueue_token* token, void* ctx);
+    void* on_complete_ctx;
+    uint8_t auto_destroy;
+    uint8_t _pad[3];
+
     struct virtqueue* owner_vq;
     uint16_t pool_index;
 } virtqueue_token_t;
@@ -83,6 +88,15 @@ int virtqueue_submit(virtqueue_t* vq,
                      uint16_t count,
                      uint16_t* out_head,
                      virtqueue_token_t** out_token);
+
+int virtqueue_submit_cb(virtqueue_t* vq,
+                        const uint64_t* addrs,
+                        const uint32_t* lens,
+                        const uint16_t* flags,
+                        uint16_t count,
+                        void (*on_complete)(virtqueue_token_t*, void*),
+                        void* on_complete_ctx,
+                        uint8_t auto_destroy);
 
 uint32_t virtqueue_token_wait(virtqueue_token_t* token);
 uint32_t virtqueue_token_wait_timeout(virtqueue_token_t* token, uint32_t deadline_tick);

@@ -61,6 +61,11 @@ static void virtqueue_tokens_init(virtqueue_t* vq) {
 
         sem_init(&t->sem, 0);
         t->used_len = 0;
+
+        t->on_complete = 0;
+        t->on_complete_ctx = 0;
+        t->auto_destroy = 0;
+
         t->owner_vq = vq;
         t->pool_index = i;
 
@@ -90,6 +95,10 @@ static virtqueue_token_t* virtqueue_token_alloc_locked(virtqueue_t* vq) {
     token->used_len = 0;
     sem_reset(&token->sem, 0);
 
+    token->on_complete = 0;
+    token->on_complete_ctx = 0;
+    token->auto_destroy = 0;
+
     return token;
 }
 
@@ -105,6 +114,10 @@ static void virtqueue_token_free_locked(virtqueue_t* vq, virtqueue_token_t* toke
 
     token->used_len = 0;
     sem_reset(&token->sem, 0);
+
+    token->on_complete = 0;
+    token->on_complete_ctx = 0;
+    token->auto_destroy = 0;
 
     vq->token_next[idx] = vq->token_free_head;
     vq->token_free_head = idx;
@@ -328,6 +341,83 @@ int virtqueue_submit(virtqueue_t* vq,
     return 1;
 }
 
+int virtqueue_submit_cb(virtqueue_t* vq,
+                        const uint64_t* addrs,
+                        const uint32_t* lens,
+                        const uint16_t* flags,
+                        uint16_t count,
+                        void (*on_complete)(virtqueue_token_t*, void*),
+                        void* on_complete_ctx,
+                        uint8_t auto_destroy) {
+    if (!vq || !addrs || !lens || !flags || count == 0 || count > vq->size) {
+        return 0;
+    }
+
+    uint32_t iflags = spinlock_acquire_safe(&vq->lock);
+
+    virtqueue_token_t* token = virtqueue_token_alloc_locked(vq);
+    if (!token) {
+        spinlock_release_safe(&vq->lock, iflags);
+        return 0;
+    }
+
+    token->on_complete = on_complete;
+    token->on_complete_ctx = on_complete_ctx;
+    token->auto_destroy = auto_destroy;
+
+    uint16_t head;
+    if (!virtqueue_alloc_desc_chain(vq, count, &head)) {
+        virtqueue_token_free_locked(vq, token);
+        spinlock_release_safe(&vq->lock, iflags);
+        return 0;
+    }
+
+    if (vq->pending && vq->pending[head]) {
+        virtqueue_free_desc_chain(vq, head);
+        virtqueue_token_free_locked(vq, token);
+        spinlock_release_safe(&vq->lock, iflags);
+        return 0;
+    }
+
+    vq->pending[head] = token;
+
+    uint16_t cur = head;
+    for (uint16_t i = 0; i < count; i++) {
+        uint16_t next = vq->desc[cur].next;
+
+        vq->desc[cur].addr = addrs[i];
+        vq->desc[cur].len = lens[i];
+        uint16_t f = flags[i];
+
+        if (i + 1u < count) {
+            vq->desc[cur].next = next;
+            f |= VRING_DESC_F_NEXT;
+            vq->desc[cur].flags = f;
+            cur = next;
+        } else {
+            vq->desc[cur].next = 0;
+            f &= (uint16_t)~VRING_DESC_F_NEXT;
+            vq->desc[cur].flags = f;
+        }
+    }
+
+    uint16_t avail_slot = vq_mod(vq->avail_idx, vq->size);
+    vq->avail->ring[avail_slot] = head;
+
+    __sync_synchronize();
+    vq->avail_idx++;
+    vq->avail->idx = vq->avail_idx;
+
+    __sync_synchronize();
+
+    if (vq->notify_addr) {
+        *vq->notify_addr = vq->queue_index;
+    }
+
+    spinlock_release_safe(&vq->lock, iflags);
+    return 1;
+}
+
 uint32_t virtqueue_token_wait(virtqueue_token_t* token) {
     if (!token) return 0;
     sem_wait(&token->sem);
@@ -364,6 +454,16 @@ void virtqueue_token_destroy(virtqueue_token_t* token) {
 void virtqueue_handle_irq(virtqueue_t* vq) {
     if (!vq) return;
 
+    typedef struct {
+        virtqueue_token_t* token;
+        void (*on_complete)(virtqueue_token_t*, void*);
+        void* on_complete_ctx;
+        uint8_t auto_destroy;
+    } completion_t;
+
+    completion_t completions[32];
+    uint32_t completion_count = 0;
+
     uint32_t iflags = spinlock_acquire_safe(&vq->lock);
 
     __sync_synchronize();
@@ -381,6 +481,15 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
                 vq->pending[head] = 0;
                 virtqueue_free_desc_chain(vq, head);
                 sem_signal(&token->sem);
+
+                if (token->on_complete && completion_count < (sizeof(completions) / sizeof(completions[0]))) {
+                    completions[completion_count++] = (completion_t){
+                        .token = token,
+                        .on_complete = token->on_complete,
+                        .on_complete_ctx = token->on_complete_ctx,
+                        .auto_destroy = token->auto_destroy,
+                    };
+                }
             } else {
                 virtqueue_free_desc_chain(vq, head);
             }
@@ -390,4 +499,14 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
     }
 
     spinlock_release_safe(&vq->lock, iflags);
+
+    for (uint32_t i = 0; i < completion_count; i++) {
+        completion_t* c = &completions[i];
+
+        c->on_complete(c->token, c->on_complete_ctx);
+
+        if (c->auto_destroy) {
+            virtqueue_token_destroy(c->token);
+        }
+    }
 }
