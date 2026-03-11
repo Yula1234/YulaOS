@@ -8,10 +8,18 @@
 
 typedef void (*irq_handler_t)(registers_t*);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void irq_install_handler(int irq_no, irq_handler_t handler);
 
 void irq_install_vector_handler(int vector, irq_handler_t handler);
 
 void irq_set_legacy_pic_enabled(int enabled);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
