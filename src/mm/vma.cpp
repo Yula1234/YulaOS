@@ -920,65 +920,103 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
 
         uint32_t limit = align_down_4k(top);
 
-        auto find_slot_rec = [&](auto&& self, rb_node* node, uint32_t pred_end, uint32_t succ_start) -> uint32_t {
-            if (!node) {
-                uint32_t base = (pred_end > floor) ? pred_end : floor;
-                if (succ_start < base + aligned_size) {
-                    return 0u;
-                }
-
-                uint32_t start = align_down_4k(succ_start - aligned_size);
-                return (start >= base) ? start : 0u;
-            }
-
-            vma_region_t* cur = rb_to_region(node);
-            if (!cur) {
-                return 0u;
-            }
-
-            if (cur->vaddr_start >= succ_start) {
-                return self(self, node->rb_left, pred_end, succ_start);
-            }
-
-            if (rb_node* right_node = node->rb_right) {
-                vma_region_t* right = rb_to_region(right_node);
-                if (right && subtree_can_fit(right, cur->vaddr_end, succ_start)) {
-                    if (uint32_t found = self(self, right_node, cur->vaddr_end, succ_start)) {
-                        return found;
-                    }
-                }
-            }
-
-            uint32_t gap_end = succ_start;
-            uint32_t gap_base = cur->vaddr_end;
-            if (gap_base < floor) {
-                gap_base = floor;
-            }
-
-            if (gap_end >= gap_base + aligned_size) {
-                uint32_t start = align_down_4k(gap_end - aligned_size);
-                if (start >= gap_base) {
-                    return start;
-                }
-            }
-
-            if (rb_node* left_node = node->rb_left) {
-                vma_region_t* left = rb_to_region(left_node);
-                if (left && subtree_can_fit(left, pred_end, cur->vaddr_start)) {
-                    if (uint32_t found = self(self, left_node, pred_end, cur->vaddr_start)) {
-                        return found;
-                    }
-                }
-            }
-
-            return 0u;
-        };
-
         if (!subtree_can_fit(rb_to_region(mem->mmap_tree.rb_node), floor, limit)) {
             return 0u;
         }
 
-        return find_slot_rec(find_slot_rec, mem->mmap_tree.rb_node, floor, limit);
+        struct frame_t {
+            rb_node* node;
+            uint32_t pred_end;
+            uint32_t succ_start;
+            uint8_t state;
+        };
+
+        frame_t stack[64] = {};
+        uint32_t sp = 0u;
+
+        stack[sp++] = frame_t{mem->mmap_tree.rb_node, floor, limit, 0u};
+
+        while (sp != 0u) {
+            frame_t& f = stack[sp - 1u];
+
+            if (!f.node) {
+                const uint32_t base = (f.pred_end > floor) ? f.pred_end : floor;
+                if (f.succ_start >= base + aligned_size) {
+                    const uint32_t start = align_down_4k(f.succ_start - aligned_size);
+                    if (start >= base) {
+                        return start;
+                    }
+                }
+
+                sp--;
+                continue;
+            }
+
+            vma_region_t* cur = rb_to_region(f.node);
+            if (!cur) {
+                sp--;
+                continue;
+            }
+
+            if (cur->vaddr_start >= f.succ_start) {
+                f.node = f.node->rb_left;
+                f.state = 0u;
+                continue;
+            }
+
+            if (f.state == 0u) {
+                rb_node* right_node = f.node->rb_right;
+                if (right_node) {
+                    vma_region_t* right = rb_to_region(right_node);
+                    if (right && subtree_can_fit(right, cur->vaddr_end, f.succ_start)) {
+                        f.state = 1u;
+                        if (sp < 64u) {
+                            stack[sp++] = frame_t{right_node, cur->vaddr_end, f.succ_start, 0u};
+                            continue;
+                        }
+                    }
+                }
+
+                f.state = 1u;
+            }
+
+            if (f.state == 1u) {
+                const uint32_t gap_end = f.succ_start;
+                uint32_t gap_base = cur->vaddr_end;
+                if (gap_base < floor) {
+                    gap_base = floor;
+                }
+
+                if (gap_end >= gap_base + aligned_size) {
+                    const uint32_t start = align_down_4k(gap_end - aligned_size);
+                    if (start >= gap_base) {
+                        return start;
+                    }
+                }
+
+                f.state = 2u;
+            }
+
+            if (f.state == 2u) {
+                rb_node* left_node = f.node->rb_left;
+                if (left_node) {
+                    vma_region_t* left = rb_to_region(left_node);
+                    if (left && subtree_can_fit(left, f.pred_end, cur->vaddr_start)) {
+                        f.state = 3u;
+                        if (sp < 64u) {
+                            stack[sp++] = frame_t{left_node, f.pred_end, cur->vaddr_start, 0u};
+                            continue;
+                        }
+                    }
+                }
+
+                f.state = 3u;
+            }
+
+            sp--;
+        }
+
+        return 0u;
     };
 
     uint32_t start = try_top_down(search_top);
