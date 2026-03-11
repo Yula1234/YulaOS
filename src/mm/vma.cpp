@@ -48,6 +48,72 @@ static inline const vma_region_t* rb_to_region(const rb_node* node) noexcept {
     return node ? rb_entry(node, const vma_region_t, rb_node) : nullptr;
 }
 
+static inline uint32_t region_span(const vma_region_t* region) noexcept {
+    return region ? (region->vaddr_end - region->vaddr_start) : 0u;
+}
+
+static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept;
+
+static void free_region(vma_region_t* region) noexcept;
+
+static bool regions_are_mergeable(const vma_region_t* left, const vma_region_t* right) noexcept {
+    if (!left || !right) {
+        return false;
+    }
+
+    if (left->vaddr_end != right->vaddr_start) {
+        return false;
+    }
+
+    if (left->map_flags != right->map_flags) {
+        return false;
+    }
+
+    if (left->file != right->file) {
+        return false;
+    }
+
+    if (left->file) {
+        uint32_t left_span = region_span(left);
+
+        if (left->file_offset + left_span != right->file_offset) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_region_t* right) noexcept {
+    if (!mem || !left || !right) {
+        return;
+    }
+
+    uint32_t left_span = region_span(left);
+    uint32_t right_span = region_span(right);
+    uint32_t merged_span = left_span + right_span;
+
+    left->vaddr_end = right->vaddr_end;
+    left->length = merged_span;
+
+    uint32_t merged_file_size = 0u;
+    if (left->file) {
+        if (left->file_size > 0xFFFFFFFFu - right->file_size) {
+            merged_file_size = 0xFFFFFFFFu;
+        } else {
+            merged_file_size = left->file_size + right->file_size;
+        }
+        if (merged_file_size > merged_span) {
+            merged_file_size = merged_span;
+        }
+    }
+    left->file_size = merged_file_size;
+
+    dlist_del(&right->list_node);
+    tree_erase(mem, right);
+    free_region(right);
+}
+
 static vma_region_t* tree_find_leq(proc_mem_t* mem, uint32_t vaddr) noexcept {
     if (!mem) {
         return nullptr;
@@ -74,7 +140,7 @@ static vma_region_t* tree_find_leq(proc_mem_t* mem, uint32_t vaddr) noexcept {
     return best;
 }
 
-static vma_region_t* tree_first_ge(proc_mem_t* mem, uint32_t vaddr) noexcept {
+[[maybe_unused]] static vma_region_t* tree_first_ge(proc_mem_t* mem, uint32_t vaddr) noexcept {
     if (!mem) {
         return nullptr;
     }
@@ -334,6 +400,30 @@ extern "C" vma_region_t* vma_create(
                 has_overlap = true;
             } else {
                 dlist_add_tail(&region->list_node, &mem->mmap_regions);
+
+                vma_region_t* merged = region;
+
+                if (vma_region_t* prev = rb_to_region(rb_prev(&merged->rb_node))) {
+                    if (regions_are_mergeable(prev, merged)) {
+                        merge_regions_into_left(mem, prev, merged);
+                        merged = prev;
+                    }
+                }
+
+                while (true) {
+                    vma_region_t* next = rb_to_region(rb_next(&merged->rb_node));
+                    if (!next) {
+                        break;
+                    }
+
+                    if (!regions_are_mergeable(merged, next)) {
+                        break;
+                    }
+
+                    merge_regions_into_left(mem, merged, next);
+                }
+
+                region = merged;
             }
 
             if (mem->mmap_top < region->vaddr_end) {
