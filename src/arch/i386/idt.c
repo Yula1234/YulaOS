@@ -183,7 +183,7 @@ static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
 
     proc_mem_t* mem = t->mem;
 
-    const uint32_t flags = rwspinlock_acquire_read_safe(&mem->mmap_lock);
+    rwlock_acquire_read(&mem->mmap_lock);
 
     mmap_area_t* m = mmap_find_area_locked(mem, vaddr);
     if (m) {
@@ -198,11 +198,11 @@ static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
             vfs_node_retain(out->file);
         }
 
-        rwspinlock_release_read_safe(&mem->mmap_lock, flags);
+        rwlock_release_read(&mem->mmap_lock);
         return 1;
     }
 
-    rwspinlock_release_read_safe(&mem->mmap_lock, flags);
+    rwlock_release_read(&mem->mmap_lock);
     return 0;
 }
 

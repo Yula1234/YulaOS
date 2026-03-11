@@ -392,7 +392,7 @@ extern "C" void vma_init(proc_mem_t* mem) {
         return;
     }
 
-    rwspinlock_init(&mem->mmap_lock);
+    rwlock_init(&mem->mmap_lock);
 
     mem->mmap_tree = RB_ROOT;
     dlist_init(&mem->mmap_regions);
@@ -415,7 +415,7 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
         vma_region_t* victim = nullptr;
 
         {
-            kernel::RwSpinLockNativeWriteSafeGuard guard(mem->mmap_lock);
+            kernel::RwLockNativeWriteGuard guard(mem->mmap_lock);
 
             if (dlist_empty(&mem->mmap_regions)) {
                 mem->mmap_tree = RB_ROOT;
@@ -497,7 +497,7 @@ extern "C" vma_region_t* vma_create(
     bool has_overlap = false;
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(mem->mmap_lock);
+        kernel::RwLockNativeWriteGuard guard(mem->mmap_lock);
 
         has_overlap = vma_find_overlap_unlocked(mem, region->vaddr_start, region->vaddr_end) != nullptr;
 
@@ -551,7 +551,7 @@ extern "C" vma_region_t* vma_find(proc_mem_t* mem, uint32_t vaddr) {
         return nullptr;
     }
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(mem->mmap_lock);
+    kernel::RwLockNativeReadGuard guard(mem->mmap_lock);
     return vma_find_unlocked(mem, vaddr);
 }
 
@@ -560,7 +560,7 @@ extern "C" vma_region_t* vma_find_overlap(proc_mem_t* mem, uint32_t start, uint3
         return nullptr;
     }
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(mem->mmap_lock);
+    kernel::RwLockNativeReadGuard guard(mem->mmap_lock);
     return vma_find_overlap_unlocked(mem, start, end_excl);
 }
 
@@ -605,7 +605,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
     uint32_t vaddr_end = vaddr + aligned_len;
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(mem->mmap_lock);
+        kernel::RwLockNativeWriteGuard guard(mem->mmap_lock);
 
         uint32_t need_spans = 0u;
 
@@ -815,7 +815,7 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
         return 0;
     }
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(mem->mmap_lock);
+    kernel::RwLockNativeReadGuard guard(mem->mmap_lock);
 
     if (end_excl <= start) {
         return 1;
@@ -850,7 +850,7 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         return 0;
     }
 
-    kernel::RwSpinLockNativeWriteSafeGuard guard(mem->mmap_lock);
+    kernel::RwLockNativeWriteGuard guard(mem->mmap_lock);
 
     if (size == 0u) {
         return 0;

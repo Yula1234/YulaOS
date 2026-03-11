@@ -241,6 +241,52 @@ private:
     mutex_t* lock_;
 };
 
+class RwLockNativeReadGuard {
+public:
+    explicit RwLockNativeReadGuard(rwlock_t& lock)
+        : lock_(&lock) {
+        rwlock_acquire_read(lock_);
+    }
+
+    RwLockNativeReadGuard(const RwLockNativeReadGuard&) = delete;
+    RwLockNativeReadGuard& operator=(const RwLockNativeReadGuard&) = delete;
+
+    RwLockNativeReadGuard(RwLockNativeReadGuard&&) = delete;
+    RwLockNativeReadGuard& operator=(RwLockNativeReadGuard&&) = delete;
+
+    ~RwLockNativeReadGuard() {
+        if (lock_) {
+            rwlock_release_read(lock_);
+        }
+    }
+
+private:
+    rwlock_t* lock_ = nullptr;
+};
+
+class RwLockNativeWriteGuard {
+public:
+    explicit RwLockNativeWriteGuard(rwlock_t& lock)
+        : lock_(&lock) {
+        rwlock_acquire_write(lock_);
+    }
+
+    RwLockNativeWriteGuard(const RwLockNativeWriteGuard&) = delete;
+    RwLockNativeWriteGuard& operator=(const RwLockNativeWriteGuard&) = delete;
+
+    RwLockNativeWriteGuard(RwLockNativeWriteGuard&&) = delete;
+    RwLockNativeWriteGuard& operator=(RwLockNativeWriteGuard&&) = delete;
+
+    ~RwLockNativeWriteGuard() {
+        if (lock_) {
+            rwlock_release_write(lock_);
+        }
+    }
+
+private:
+    rwlock_t* lock_ = nullptr;
+};
+
 class RwSpinLockNativeReadSafeGuard {
 public:
     explicit RwSpinLockNativeReadSafeGuard(rwspinlock_t& lock)

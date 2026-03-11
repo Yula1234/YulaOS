@@ -67,7 +67,7 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
         uint32_t region_end = 0u;
 
         {
-            kernel::RwSpinLockNativeReadSafeGuard guard(t->mem->mmap_lock);
+            kernel::RwLockNativeReadGuard guard(t->mem->mmap_lock);
 
             rb_node* node = t->mem->mmap_tree.rb_node;
             vma_region_t* best = nullptr;
