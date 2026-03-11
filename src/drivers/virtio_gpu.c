@@ -2,6 +2,7 @@
 #include <drivers/virtio_pci.h>
 #include <drivers/virtqueue.h>
 #include <hal/lock.h>
+#include <kernel/proc.h>
 #include <lib/string.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
@@ -225,6 +226,17 @@ static virtio_gpu_state_t g_vgpu;
 
 static void vgpu_mark_inactive_locked(void);
 static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_t expected_resp_type);
+
+static int vgpu_ctrlq_can_sleep(void) {
+    uint32_t eflags;
+    __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
+
+    if (!proc_current()) {
+        return 0;
+    }
+
+    return (eflags & 0x200u) != 0u;
+}
 
 static uint32_t vgpu_hash_u32(uint32_t x) {
     x ^= x >> 16;
@@ -460,20 +472,27 @@ static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_
         return 0;
     }
 
-    uint32_t start_ticks = timer_ticks;
-    for (uint32_t spins = 0;; spins++) {
-        virtqueue_handle_irq(&g_vgpu.ctrlq);
-
-        if (sem_try_acquire(&token->sem)) {
-            break;
-        }
-
-        if ((uint32_t)(timer_ticks - start_ticks) > VGPU_CTRLQ_TIMEOUT_TICKS || spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
+    if (vgpu_ctrlq_can_sleep()) {
+        uint32_t deadline = timer_ticks + VGPU_CTRLQ_TIMEOUT_TICKS;
+        if (!virtqueue_token_wait_timeout(token, deadline)) {
             virtqueue_destroy(&g_vgpu.ctrlq);
             return 0;
         }
+    } else {
+        for (uint32_t spins = 0;; spins++) {
+            virtqueue_handle_irq(&g_vgpu.ctrlq);
 
-        __asm__ volatile("pause");
+            if (sem_try_acquire(&token->sem)) {
+                break;
+            }
+
+            if (spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
+                virtqueue_destroy(&g_vgpu.ctrlq);
+                return 0;
+            }
+
+            __asm__ volatile("pause");
+        }
     }
 
     virtqueue_token_destroy(token);
@@ -505,20 +524,27 @@ static int vgpu_ctrlq_submit_sg_locked(const uint64_t* addrs,
         return 0;
     }
 
-    uint32_t start_ticks = timer_ticks;
-    for (uint32_t spins = 0;; spins++) {
-        virtqueue_handle_irq(&g_vgpu.ctrlq);
-
-        if (sem_try_acquire(&token->sem)) {
-            break;
-        }
-
-        if ((uint32_t)(timer_ticks - start_ticks) > VGPU_CTRLQ_TIMEOUT_TICKS || spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
+    if (vgpu_ctrlq_can_sleep()) {
+        uint32_t deadline = timer_ticks + VGPU_CTRLQ_TIMEOUT_TICKS;
+        if (!virtqueue_token_wait_timeout(token, deadline)) {
             virtqueue_destroy(&g_vgpu.ctrlq);
             return 0;
         }
+    } else {
+        for (uint32_t spins = 0;; spins++) {
+            virtqueue_handle_irq(&g_vgpu.ctrlq);
 
-        __asm__ volatile("pause");
+            if (sem_try_acquire(&token->sem)) {
+                break;
+            }
+
+            if (spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
+                virtqueue_destroy(&g_vgpu.ctrlq);
+                return 0;
+            }
+
+            __asm__ volatile("pause");
+        }
     }
 
     virtqueue_token_destroy(token);

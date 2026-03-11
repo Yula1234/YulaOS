@@ -453,6 +453,70 @@ void sem_wait(semaphore_t* sem) {
     }
 }
 
+int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
+    if (!sem) {
+        return 0;
+    }
+
+    while (1) {
+        if (sem_try_acquire_fast(sem)) {
+            task_t* curr = proc_current();
+            if (curr) {
+                proc_sleep_remove(curr);
+                curr->blocked_on_sem = nullptr;
+            }
+            return 1;
+        }
+
+        if ((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u) {
+            return 0;
+        }
+
+        task_t* curr = proc_current();
+        if (!curr) {
+            while (!sem_try_acquire_fast(sem)) {
+                if ((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u) {
+                    return 0;
+                }
+                __asm__ volatile("pause" ::: "memory");
+            }
+            return 1;
+        }
+
+        {
+            kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
+            if (sem->count > 0) {
+                __atomic_fetch_sub(&sem->count, 1, __ATOMIC_ACQUIRE);
+                proc_sleep_remove(curr);
+                curr->blocked_on_sem = nullptr;
+                return 1;
+            }
+
+            curr->blocked_on_sem = static_cast<void*>(sem);
+            dlist_add_tail(&curr->sem_node, &sem->wait_list);
+
+            curr->state = TASK_WAITING;
+        }
+
+        if (curr->blocked_on_sem != sem) {
+            continue;
+        }
+
+        proc_sleep_add(curr, deadline_tick);
+
+        if (curr->blocked_on_sem != sem) {
+            continue;
+        }
+
+        if ((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u) {
+            sem_remove_task(curr);
+            proc_sleep_remove(curr);
+            return 0;
+        }
+    }
+}
+
 void sem_signal(semaphore_t* sem) {
     kernel::SpinLockNativeSafeGuard guard(sem->lock);
 

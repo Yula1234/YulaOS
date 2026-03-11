@@ -108,6 +108,7 @@ typedef struct {
 void sem_init(semaphore_t* sem, int init_count);
 void sem_reset(semaphore_t* sem, int value);
 void sem_wait(semaphore_t* sem);
+int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick);
 void sem_signal(semaphore_t* sem);
 void sem_signal_all(semaphore_t* sem);
 int sem_try_acquire(semaphore_t* sem);

@@ -85,6 +85,7 @@ int virtqueue_submit(virtqueue_t* vq,
                      virtqueue_token_t** out_token);
 
 uint32_t virtqueue_token_wait(virtqueue_token_t* token);
+uint32_t virtqueue_token_wait_timeout(virtqueue_token_t* token, uint32_t deadline_tick);
 void virtqueue_token_destroy(virtqueue_token_t* token);
 
 void virtqueue_handle_irq(virtqueue_t* vq);

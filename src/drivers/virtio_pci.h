@@ -20,6 +20,7 @@ typedef struct {
 
     uint8_t irq_line;
     int msi_enabled;
+    uint8_t msi_vector;
 
     volatile void* common_cfg;
     volatile void* notify_base;

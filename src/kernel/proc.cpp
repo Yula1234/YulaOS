@@ -1911,6 +1911,8 @@ void proc_check_sleepers(uint32_t current_tick) {
             
             t.state = TASK_RUNNABLE;
             t.wake_tick = 0;
+
+            sem_remove_task(&t);
             
             sched_add(&t);
         }

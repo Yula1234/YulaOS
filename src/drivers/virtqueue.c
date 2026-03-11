@@ -334,6 +334,18 @@ uint32_t virtqueue_token_wait(virtqueue_token_t* token) {
     return token->used_len;
 }
 
+uint32_t virtqueue_token_wait_timeout(virtqueue_token_t* token, uint32_t deadline_tick) {
+    if (!token) {
+        return 0;
+    }
+
+    if (!sem_wait_timeout(&token->sem, deadline_tick)) {
+        return 0;
+    }
+
+    return token->used_len;
+}
+
 void virtqueue_token_destroy(virtqueue_token_t* token) {
     if (!token) {
         return;
