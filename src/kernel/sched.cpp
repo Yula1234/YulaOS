@@ -250,10 +250,22 @@ void sched_start(task_t* first) {
 }
 
 void sched_yield(void) {
-    kernel::ScopedIrqDisable irq_guard;
-
     cpu_t* me = cpu_current();
     task_t* prev = me->current_task;
+
+    if (prev && prev->state == TASK_RUNNING && prev->pid != 0) {
+        task_t* leftmost = me->runq_leftmost;
+
+        if (!leftmost) {
+            return;
+        }
+
+        if (prev->vruntime <= leftmost->vruntime) {
+            return;
+        }
+    }
+
+    kernel::ScopedIrqDisable irq_guard;
     
     if (prev && prev->state == TASK_RUNNING) {
         prev->state = TASK_RUNNABLE;
