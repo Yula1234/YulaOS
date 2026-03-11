@@ -58,6 +58,7 @@ typedef struct proc_mem {
     rwlock_t mmap_lock;
     struct rb_root mmap_tree;
     dlist_head_t mmap_regions;
+    vma_region_t* mmap_cache;
     uint32_t mmap_top;
     uint32_t free_area_cache;
     uint32_t mem_pages;

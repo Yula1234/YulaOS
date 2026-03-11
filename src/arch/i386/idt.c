@@ -150,6 +150,11 @@ static mmap_area_t* mmap_find_area_locked(proc_mem_t* mem, uint32_t vaddr) {
         return 0;
     }
 
+    mmap_area_t* cached = __atomic_load_n(&mem->mmap_cache, __ATOMIC_RELAXED);
+    if (cached && vaddr >= cached->vaddr_start && vaddr < cached->vaddr_end) {
+        return cached;
+    }
+
     struct rb_node* node = mem->mmap_tree.rb_node;
     mmap_area_t* best = 0;
 
@@ -170,6 +175,7 @@ static mmap_area_t* mmap_find_area_locked(proc_mem_t* mem, uint32_t vaddr) {
     }
 
     if (vaddr >= best->vaddr_start && vaddr < best->vaddr_end) {
+        __atomic_store_n(&mem->mmap_cache, best, __ATOMIC_RELAXED);
         return best;
     }
 

@@ -319,6 +319,11 @@ static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept {
         return;
     }
 
+    vma_region_t* cached = __atomic_load_n(&mem->mmap_cache, __ATOMIC_RELAXED);
+    if (cached == region) {
+        __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
+    }
+
     rb_erase_augmented(&region->rb_node, &mem->mmap_tree, &vma_rb_callbacks);
     region->rb_node.__parent_color = 0;
     region->rb_node.rb_left = nullptr;
@@ -326,12 +331,22 @@ static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept {
 }
 
 static vma_region_t* vma_find_unlocked(proc_mem_t* mem, uint32_t vaddr) noexcept {
+    if (!mem) {
+        return nullptr;
+    }
+
+    vma_region_t* cached = __atomic_load_n(&mem->mmap_cache, __ATOMIC_RELAXED);
+    if (cached && vaddr >= cached->vaddr_start && vaddr < cached->vaddr_end) {
+        return cached;
+    }
+
     vma_region_t* cand = tree_find_leq(mem, vaddr);
     if (!cand) {
         return nullptr;
     }
 
     if (vaddr >= cand->vaddr_start && vaddr < cand->vaddr_end) {
+        __atomic_store_n(&mem->mmap_cache, cand, __ATOMIC_RELAXED);
         return cand;
     }
 
@@ -433,6 +448,8 @@ extern "C" void vma_init(proc_mem_t* mem) {
     mem->mmap_tree = RB_ROOT;
     dlist_init(&mem->mmap_regions);
 
+    __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
+
     if (mem->mmap_top == 0u) {
         mem->mmap_top = user_addr_min;
     }
@@ -446,6 +463,8 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
     if (!mem) {
         return;
     }
+
+    __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
 
     while (true) {
         vma_region_t* victim = nullptr;
@@ -579,6 +598,8 @@ extern "C" vma_region_t* vma_create(
         return nullptr;
     }
 
+    __atomic_store_n(&mem->mmap_cache, region, __ATOMIC_RELAXED);
+
     return region;
 }
 
@@ -608,6 +629,8 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
     if (!mem || !mem->page_dir) {
         return -1;
     }
+
+    __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
 
     struct unmap_span_t {
         uint32_t start;
