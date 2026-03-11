@@ -56,6 +56,94 @@ static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept;
 
 static void free_region(vma_region_t* region) noexcept;
 
+static void vma_region_recalc(vma_region_t* region) noexcept {
+    if (!region) {
+        return;
+    }
+
+    vma_region_t* left = rb_to_region(region->rb_node.rb_left);
+    vma_region_t* right = rb_to_region(region->rb_node.rb_right);
+
+    uint32_t min_start = region->vaddr_start;
+    uint32_t max_end = region->vaddr_end;
+    uint32_t max_gap = 0u;
+
+    if (left) {
+        if (left->subtree_min_start < min_start) {
+            min_start = left->subtree_min_start;
+        }
+
+        if (left->subtree_max_end > max_end) {
+            max_end = left->subtree_max_end;
+        }
+
+        if (left->subtree_max_gap > max_gap) {
+            max_gap = left->subtree_max_gap;
+        }
+
+        if (left->subtree_max_end < region->vaddr_start) {
+            uint32_t gap = region->vaddr_start - left->subtree_max_end;
+            if (gap > max_gap) {
+                max_gap = gap;
+            }
+        }
+    }
+
+    if (right) {
+        if (right->subtree_min_start < min_start) {
+            min_start = right->subtree_min_start;
+        }
+
+        if (right->subtree_max_end > max_end) {
+            max_end = right->subtree_max_end;
+        }
+
+        if (right->subtree_max_gap > max_gap) {
+            max_gap = right->subtree_max_gap;
+        }
+
+        if (region->vaddr_end < right->subtree_min_start) {
+            uint32_t gap = right->subtree_min_start - region->vaddr_end;
+            if (gap > max_gap) {
+                max_gap = gap;
+            }
+        }
+    }
+
+    region->subtree_min_start = min_start;
+    region->subtree_max_end = max_end;
+    region->subtree_max_gap = max_gap;
+}
+
+static void vma_region_propagate(rb_node* node, rb_node* stop) {
+    for (rb_node* cur = node; cur && cur != stop; cur = rb_parent(cur)) {
+        vma_region_recalc(rb_to_region(cur));
+    }
+}
+
+static void vma_region_copy(rb_node* old, rb_node* new_node) {
+    vma_region_t* src = rb_to_region(old);
+    vma_region_t* dst = rb_to_region(new_node);
+    if (!src || !dst) {
+        return;
+    }
+
+    dst->subtree_min_start = src->subtree_min_start;
+    dst->subtree_max_end = src->subtree_max_end;
+    dst->subtree_max_gap = src->subtree_max_gap;
+}
+
+static void vma_region_rotate(rb_node* old, rb_node* new_node) {
+    vma_region_recalc(rb_to_region(old));
+    vma_region_recalc(rb_to_region(new_node));
+}
+
+static const rb_augment_callbacks vma_rb_callbacks = {
+    .propagate = vma_region_propagate,
+    .copy = vma_region_copy,
+    .rotate = vma_region_rotate,
+};
+
 static bool regions_are_mergeable(const vma_region_t* left, const vma_region_t* right) noexcept {
     if (!left || !right) {
         return false;
@@ -108,6 +196,8 @@ static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_reg
         }
     }
     left->file_size = merged_file_size;
+
+    vma_region_propagate(&left->rb_node, nullptr);
 
     dlist_del(&right->list_node);
     tree_erase(mem, right);
@@ -192,7 +282,12 @@ static int tree_insert(proc_mem_t* mem, vma_region_t* region) noexcept {
     }
 
     rb_link_node(&region->rb_node, parent, link);
-    rb_insert_color(&region->rb_node, &mem->mmap_tree);
+
+    region->subtree_min_start = region->vaddr_start;
+    region->subtree_max_end = region->vaddr_end;
+    region->subtree_max_gap = 0u;
+
+    rb_insert_color_augmented(&region->rb_node, &mem->mmap_tree, &vma_rb_callbacks);
     return 1;
 }
 
@@ -201,7 +296,7 @@ static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept {
         return;
     }
 
-    rb_erase(&region->rb_node, &mem->mmap_tree);
+    rb_erase_augmented(&region->rb_node, &mem->mmap_tree, &vma_rb_callbacks);
     region->rb_node.__parent_color = 0;
     region->rb_node.rb_left = nullptr;
     region->rb_node.rb_right = nullptr;
@@ -377,6 +472,10 @@ extern "C" vma_region_t* vma_create(
     region->map_flags = flags;
     region->file = nullptr;
 
+    region->subtree_min_start = region->vaddr_start;
+    region->subtree_max_end = region->vaddr_end;
+    region->subtree_max_gap = 0u;
+
     region->rb_node.__parent_color = 0;
     region->rb_node.rb_left = nullptr;
     region->rb_node.rb_right = nullptr;
@@ -531,6 +630,10 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             new_right->length = right_len;
             new_right->map_flags = curr->map_flags;
 
+            new_right->subtree_min_start = new_right->vaddr_start;
+            new_right->subtree_max_end = new_right->vaddr_end;
+            new_right->subtree_max_gap = 0u;
+
             new_right->rb_node.__parent_color = 0;
             new_right->rb_node.rb_left = nullptr;
             new_right->rb_node.rb_right = nullptr;
@@ -571,6 +674,8 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
             dlist_add_tail(&new_right->list_node, &mem->mmap_regions);
 
+            vma_region_propagate(&curr->rb_node, nullptr);
+
             unmap_range(mem->page_dir, o_start, o_end);
             scan = o_end;
             continue;
@@ -610,9 +715,13 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                 curr->file_size = new_len;
             }
 
+            vma_region_propagate(&curr->rb_node, nullptr);
+
             if (!tree_insert(mem, curr)) {
                 return -1;
             }
+
+            vma_region_propagate(&curr->rb_node, nullptr);
 
             scan = o_end;
             continue;
@@ -705,6 +814,38 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         return 0;
     }
 
+    auto subtree_can_fit = [&](const vma_region_t* region, uint32_t pred_end, uint32_t succ_start) -> bool {
+        if (!region) {
+            uint32_t base = (pred_end > floor) ? pred_end : floor;
+            return succ_start >= base + aligned_size;
+        }
+
+        if (succ_start < floor + aligned_size) {
+            return false;
+        }
+
+        uint32_t best = region->subtree_max_gap;
+
+        uint32_t right_gap = 0u;
+        if (region->subtree_max_end < succ_start) {
+            right_gap = succ_start - region->subtree_max_end;
+        }
+        if (right_gap > best) {
+            best = right_gap;
+        }
+
+        uint32_t base = (pred_end > floor) ? pred_end : floor;
+        uint32_t left_gap = 0u;
+        if (base < region->subtree_min_start) {
+            left_gap = region->subtree_min_start - base;
+        }
+        if (left_gap > best) {
+            best = left_gap;
+        }
+
+        return best >= aligned_size;
+    };
+
     auto try_top_down = [&](uint32_t top) -> uint32_t {
         if (top > mmap_base) {
             top = mmap_base;
@@ -714,42 +855,67 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
             return 0u;
         }
 
-        uint32_t cur_top = align_down_4k(top);
+        uint32_t limit = align_down_4k(top);
 
-        vma_region_t* left = tree_find_leq(mem, cur_top - 1u);
-        if (!left) {
-            uint32_t start = align_down_4k(cur_top - aligned_size);
-            return (start >= floor) ? start : 0u;
-        }
+        auto find_slot_rec = [&](auto&& self, rb_node* node, uint32_t pred_end, uint32_t succ_start) -> uint32_t {
+            if (!node) {
+                uint32_t base = (pred_end > floor) ? pred_end : floor;
+                if (succ_start < base + aligned_size) {
+                    return 0u;
+                }
 
-        for (vma_region_t* region = left; region; region = rb_to_region(rb_prev(&region->rb_node))) {
-            if (region->vaddr_end > cur_top) {
-                cur_top = align_down_4k(region->vaddr_start);
+                uint32_t start = align_down_4k(succ_start - aligned_size);
+                return (start >= base) ? start : 0u;
             }
 
-            if (cur_top < floor + aligned_size) {
+            vma_region_t* cur = rb_to_region(node);
+            if (!cur) {
                 return 0u;
             }
 
-            uint32_t gap_start = region->vaddr_end;
-            if (gap_start < floor) {
-                gap_start = floor;
+            if (cur->vaddr_start >= succ_start) {
+                return self(self, node->rb_left, pred_end, succ_start);
             }
 
-            uint32_t start = align_down_4k(cur_top - aligned_size);
-            if (start >= gap_start) {
-                return start;
+            if (rb_node* right_node = node->rb_right) {
+                vma_region_t* right = rb_to_region(right_node);
+                if (right && subtree_can_fit(right, cur->vaddr_end, succ_start)) {
+                    if (uint32_t found = self(self, right_node, cur->vaddr_end, succ_start)) {
+                        return found;
+                    }
+                }
             }
 
-            cur_top = align_down_4k(region->vaddr_start);
-        }
+            uint32_t gap_end = succ_start;
+            uint32_t gap_base = cur->vaddr_end;
+            if (gap_base < floor) {
+                gap_base = floor;
+            }
 
-        if (cur_top < floor + aligned_size) {
+            if (gap_end >= gap_base + aligned_size) {
+                uint32_t start = align_down_4k(gap_end - aligned_size);
+                if (start >= gap_base) {
+                    return start;
+                }
+            }
+
+            if (rb_node* left_node = node->rb_left) {
+                vma_region_t* left = rb_to_region(left_node);
+                if (left && subtree_can_fit(left, pred_end, cur->vaddr_start)) {
+                    if (uint32_t found = self(self, left_node, pred_end, cur->vaddr_start)) {
+                        return found;
+                    }
+                }
+            }
+
+            return 0u;
+        };
+
+        if (!subtree_can_fit(rb_to_region(mem->mmap_tree.rb_node), floor, limit)) {
             return 0u;
         }
 
-        uint32_t start = align_down_4k(cur_top - aligned_size);
-        return (start >= floor) ? start : 0u;
+        return find_slot_rec(find_slot_rec, mem->mmap_tree.rb_node, floor, limit);
     };
 
     uint32_t start = try_top_down(search_top);

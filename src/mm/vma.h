@@ -32,6 +32,10 @@ struct vma_region {
 
     struct vfs_node* file;
 
+    uint32_t subtree_min_start;
+    uint32_t subtree_max_end;
+    uint32_t subtree_max_gap;
+
     struct rb_node rb_node;
     dlist_head_t list_node;
 };
