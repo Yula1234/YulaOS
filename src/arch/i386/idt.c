@@ -26,6 +26,8 @@
 #include "paging.h"
 #include "idt.h"
 
+#include <mm/vma.h>
+
 /*
  * IDT gate descriptor (32-bit interrupt/trap gate).
  *
@@ -145,43 +147,6 @@ typedef struct {
     vfs_node_t* file;
 } mmap_pf_info_t;
 
-static mmap_area_t* mmap_find_area_locked(proc_mem_t* mem, uint32_t vaddr) {
-    if (!mem) {
-        return 0;
-    }
-
-    mmap_area_t* cached = __atomic_load_n(&mem->mmap_cache, __ATOMIC_RELAXED);
-    if (cached && vaddr >= cached->vaddr_start && vaddr < cached->vaddr_end) {
-        return cached;
-    }
-
-    struct rb_node* node = mem->mmap_tree.rb_node;
-    mmap_area_t* best = 0;
-
-    while (node) {
-        mmap_area_t* cur = rb_entry(node, mmap_area_t, rb_node);
-
-        if (vaddr < cur->vaddr_start) {
-            node = node->rb_left;
-            continue;
-        }
-
-        best = cur;
-        node = node->rb_right;
-    }
-
-    if (!best) {
-        return 0;
-    }
-
-    if (vaddr >= best->vaddr_start && vaddr < best->vaddr_end) {
-        __atomic_store_n(&mem->mmap_cache, best, __ATOMIC_RELAXED);
-        return best;
-    }
-
-    return 0;
-}
-
 static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
     if (!t || !t->mem || !out) {
         return 0;
@@ -189,9 +154,7 @@ static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
 
     proc_mem_t* mem = t->mem;
 
-    rwlock_acquire_read(&mem->mmap_lock);
-
-    mmap_area_t* m = mmap_find_area_locked(mem, vaddr);
+    mmap_area_t* m = vma_find(mem, vaddr);
     if (m) {
         out->vaddr_start = m->vaddr_start;
         out->vaddr_end = m->vaddr_end;
@@ -204,11 +167,8 @@ static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
             vfs_node_retain(out->file);
         }
 
-        rwlock_release_read(&mem->mmap_lock);
         return 1;
     }
-
-    rwlock_release_read(&mem->mmap_lock);
     return 0;
 }
 
