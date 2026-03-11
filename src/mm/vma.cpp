@@ -11,6 +11,8 @@
 
 #include <mm/pmm.h>
 
+#include <mm/heap.h>
+
 #include <lib/cpp/new.h>
 
 #include <lib/cpp/lock_guard.h>
@@ -29,6 +31,8 @@ constexpr uint32_t user_addr_max = 0xC0000000u;
 
 constexpr uint32_t user_stack_addr_min = 0x60000000u;
 constexpr uint32_t user_stack_addr_max = 0x80000000u;
+
+static kmem_cache_t* g_vma_region_cache = nullptr;
 
 static inline uint32_t align_down_4k(uint32_t v) noexcept {
     return v & ~page_mask;
@@ -375,13 +379,24 @@ static void release_region_file(vma_region_t* region) noexcept {
 }
 
 static vma_region_t* alloc_region() noexcept {
-    return new (kernel::nothrow) vma_region_t{};
+    if (!g_vma_region_cache) {
+        return nullptr;
+    }
+
+    void* obj = kmem_cache_alloc(g_vma_region_cache);
+    if (!obj) {
+        return nullptr;
+    }
+
+    vma_region_t* region = new (obj) vma_region_t{};
+    return region;
 }
 
 static void free_region(vma_region_t* region) noexcept {
     if (region) {
         release_region_file(region);
-        delete region;
+        region->~vma_region_t();
+        kmem_cache_free(g_vma_region_cache, region);
     }
 }
 
@@ -390,6 +405,10 @@ static void free_region(vma_region_t* region) noexcept {
 extern "C" void vma_init(proc_mem_t* mem) {
     if (!mem) {
         return;
+    }
+
+    if (!g_vma_region_cache) {
+        g_vma_region_cache = kmem_cache_create("vma", sizeof(vma_region_t), 0u, 0u);
     }
 
     rwlock_init(&mem->mmap_lock);
