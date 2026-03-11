@@ -232,6 +232,10 @@ extern "C" void vma_init(proc_mem_t* mem) {
     if (mem->mmap_top == 0u) {
         mem->mmap_top = user_addr_min;
     }
+
+    if (mem->free_area_cache == 0u) {
+        mem->free_area_cache = 0xB0000000u;
+    }
 }
 
 extern "C" void vma_destroy(proc_mem_t* mem) {
@@ -590,70 +594,96 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         return 0;
     }
 
-    uint32_t aligned_size = align_up_4k(size);
+    const uint32_t aligned_size = align_up_4k(size);
 
-    uint32_t vaddr = align_up_4k(0x80000000u);
+    const uint32_t mmap_base = 0xB0000000u;
+    uint32_t search_top = mem->free_area_cache;
+    if (search_top == 0u || search_top > mmap_base) {
+        search_top = mmap_base;
+    }
 
+    uint32_t floor = user_addr_min;
     if (mem->heap_start < mem->prog_break) {
         uint64_t need64 = (uint64_t)mem->prog_break + 0x100000ull;
-
         if (need64 < user_addr_max) {
-            uint32_t need = align_up_4k((uint32_t)need64);
-
-            if (vaddr < need) {
-                vaddr = need;
-            }
+            floor = align_up_4k((uint32_t)need64);
         }
     }
 
-    const uint32_t alloc_limit = 0xB0000000u;
-
-    if (vaddr >= alloc_limit) {
+    if (floor >= mmap_base || aligned_size == 0u) {
+        mem->free_area_cache = mmap_base;
         return 0;
     }
 
-    uint32_t cur = vaddr;
-
-    vma_region_t* left = tree_find_leq(mem, cur);
-    if (left && left->vaddr_end > cur) {
-        cur = align_up_4k(left->vaddr_end);
-    }
-
-    vma_region_t* right = tree_first_ge(mem, cur);
-
-    while (cur < alloc_limit) {
-        uint32_t gap_end = alloc_limit;
-
-        if (right) {
-            gap_end = right->vaddr_start;
+    auto try_top_down = [&](uint32_t top) -> uint32_t {
+        if (top > mmap_base) {
+            top = mmap_base;
         }
 
-        uint32_t end_excl = cur + aligned_size;
-
-        if (end_excl < cur) {
-            return 0;
+        if (top < floor + aligned_size) {
+            return 0u;
         }
 
-        if (end_excl <= gap_end) {
-            *out_vaddr = cur;
+        uint32_t cur_top = align_down_4k(top);
 
-            if (end_excl > mem->mmap_top) {
-                mem->mmap_top = end_excl;
+        vma_region_t* left = tree_find_leq(mem, cur_top - 1u);
+        if (!left) {
+            uint32_t start = align_down_4k(cur_top - aligned_size);
+            return (start >= floor) ? start : 0u;
+        }
+
+        for (vma_region_t* region = left; region; region = rb_to_region(rb_prev(&region->rb_node))) {
+            if (region->vaddr_end > cur_top) {
+                cur_top = align_down_4k(region->vaddr_start);
             }
 
-            return 1;
+            if (cur_top < floor + aligned_size) {
+                return 0u;
+            }
+
+            uint32_t gap_start = region->vaddr_end;
+            if (gap_start < floor) {
+                gap_start = floor;
+            }
+
+            uint32_t start = align_down_4k(cur_top - aligned_size);
+            if (start >= gap_start) {
+                return start;
+            }
+
+            cur_top = align_down_4k(region->vaddr_start);
         }
 
-        if (!right) {
-            return 0;
+        if (cur_top < floor + aligned_size) {
+            return 0u;
         }
 
-        if (right->vaddr_end > cur) {
-            cur = align_up_4k(right->vaddr_end);
-        }
+        uint32_t start = align_down_4k(cur_top - aligned_size);
+        return (start >= floor) ? start : 0u;
+    };
 
-        right = rb_to_region(rb_next(&right->rb_node));
+    uint32_t start = try_top_down(search_top);
+    if (start == 0u && search_top != mmap_base) {
+        start = try_top_down(mmap_base);
     }
 
-    return 0;
+    if (start == 0u) {
+        mem->free_area_cache = mmap_base;
+        return 0;
+    }
+
+    uint32_t end_excl = start + aligned_size;
+    if (end_excl < start) {
+        mem->free_area_cache = mmap_base;
+        return 0;
+    }
+
+    *out_vaddr = start;
+    mem->free_area_cache = start;
+
+    if (end_excl > mem->mmap_top) {
+        mem->mmap_top = end_excl;
+    }
+
+    return 1;
 }
