@@ -8,7 +8,9 @@ namespace kernel {
 class RbTree {
 public:
     static void InsertColor(struct rb_node* node, struct rb_root* root);
+    static void InsertColorAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks);
     static void Erase(struct rb_node* node, struct rb_root* root);
+    static void EraseAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks);
     static struct rb_node* Next(const struct rb_node* node);
     static struct rb_node* Prev(const struct rb_node* node);
     static struct rb_node* First(const struct rb_root* root);
@@ -52,7 +54,15 @@ private:
 
     static void RotateLeft(struct rb_node* node, struct rb_root* root);
     static void RotateRight(struct rb_node* node, struct rb_root* root);
+    static void RotateLeftAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks);
+    static void RotateRightAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks);
     static void EraseColor(struct rb_node* node, struct rb_node* parent, struct rb_root* root);
+    static void EraseColorAugmented(
+        struct rb_node* node,
+        struct rb_node* parent,
+        struct rb_root* root,
+        const rb_augment_callbacks* callbacks
+    );
 };
 
 void RbTree::RotateLeft(struct rb_node* node, struct rb_root* root) {
@@ -76,6 +86,15 @@ void RbTree::RotateLeft(struct rb_node* node, struct rb_root* root) {
     SetParent(node, right);
 }
 
+void RbTree::RotateLeftAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks) {
+    struct rb_node* old_right = node->rb_right;
+    RotateLeft(node, root);
+
+    if (callbacks && callbacks->rotate) {
+        callbacks->rotate(node, old_right);
+    }
+}
+
 void RbTree::RotateRight(struct rb_node* node, struct rb_root* root) {
     struct rb_node* left = node->rb_left;
     struct rb_node* parent = Parent(node);
@@ -95,6 +114,15 @@ void RbTree::RotateRight(struct rb_node* node, struct rb_root* root) {
         root->rb_node = left;
     }
     SetParent(node, left);
+}
+
+void RbTree::RotateRightAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks) {
+    struct rb_node* old_left = node->rb_left;
+    RotateRight(node, root);
+
+    if (callbacks && callbacks->rotate) {
+        callbacks->rotate(node, old_left);
+    }
 }
 
 void RbTree::InsertColor(struct rb_node* node, struct rb_root* root) {
@@ -155,6 +183,68 @@ void RbTree::InsertColor(struct rb_node* node, struct rb_root* root) {
     SetBlack(root->rb_node);
 }
 
+void RbTree::InsertColorAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks) {
+    struct rb_node *parent, *gparent;
+
+    while ((parent = Parent(node)) && IsRed(parent)) {
+        gparent = Parent(parent);
+
+        if (parent == gparent->rb_left) {
+            {
+                struct rb_node* uncle = gparent->rb_right;
+                if (uncle && IsRed(uncle)) {
+                    SetBlack(uncle);
+                    SetBlack(parent);
+                    SetRed(gparent);
+                    node = gparent;
+                    continue;
+                }
+            }
+
+            if (parent->rb_right == node) {
+                struct rb_node* tmp;
+                RotateLeftAugmented(parent, root, callbacks);
+                tmp = parent;
+                parent = node;
+                node = tmp;
+            }
+
+            SetBlack(parent);
+            SetRed(gparent);
+            RotateRightAugmented(gparent, root, callbacks);
+        } else {
+            {
+                struct rb_node* uncle = gparent->rb_left;
+                if (uncle && IsRed(uncle)) {
+                    SetBlack(uncle);
+                    SetBlack(parent);
+                    SetRed(gparent);
+                    node = gparent;
+                    continue;
+                }
+            }
+
+            if (parent->rb_left == node) {
+                struct rb_node* tmp;
+                RotateRightAugmented(parent, root, callbacks);
+                tmp = parent;
+                parent = node;
+                node = tmp;
+            }
+
+            SetBlack(parent);
+            SetRed(gparent);
+            RotateLeftAugmented(gparent, root, callbacks);
+        }
+    }
+
+    SetBlack(root->rb_node);
+
+    if (callbacks && callbacks->propagate) {
+        callbacks->propagate(node, 0);
+    }
+}
+
 void RbTree::EraseColor(struct rb_node* node, struct rb_node* parent, struct rb_root* root) {
     struct rb_node* other;
 
@@ -210,6 +300,75 @@ void RbTree::EraseColor(struct rb_node* node, struct rb_node* parent, struct rb_
                 SetBlack(parent);
                 SetBlack(other->rb_left);
                 RotateRight(parent, root);
+                node = root->rb_node;
+                break;
+            }
+        }
+    }
+    if (node)
+        SetBlack(node);
+}
+
+void RbTree::EraseColorAugmented(
+    struct rb_node* node,
+    struct rb_node* parent,
+    struct rb_root* root,
+    const rb_augment_callbacks* callbacks
+) {
+    struct rb_node* other;
+
+    while ((!node || IsBlack(node)) && node != root->rb_node) {
+        if (parent->rb_left == node) {
+            other = parent->rb_right;
+            if (IsRed(other)) {
+                SetBlack(other);
+                SetRed(parent);
+                RotateLeftAugmented(parent, root, callbacks);
+                other = parent->rb_right;
+            }
+            if ((!other->rb_left || IsBlack(other->rb_left)) &&
+                (!other->rb_right || IsBlack(other->rb_right))) {
+                SetRed(other);
+                node = parent;
+                parent = Parent(node);
+            } else {
+                if (!other->rb_right || IsBlack(other->rb_right)) {
+                    SetBlack(other->rb_left);
+                    SetRed(other);
+                    RotateRightAugmented(other, root, callbacks);
+                    other = parent->rb_right;
+                }
+                SetColor(other, Color(parent));
+                SetBlack(parent);
+                SetBlack(other->rb_right);
+                RotateLeftAugmented(parent, root, callbacks);
+                node = root->rb_node;
+                break;
+            }
+        } else {
+            other = parent->rb_left;
+            if (IsRed(other)) {
+                SetBlack(other);
+                SetRed(parent);
+                RotateRightAugmented(parent, root, callbacks);
+                other = parent->rb_left;
+            }
+            if ((!other->rb_left || IsBlack(other->rb_left)) &&
+                (!other->rb_right || IsBlack(other->rb_right))) {
+                SetRed(other);
+                node = parent;
+                parent = Parent(node);
+            } else {
+                if (!other->rb_left || IsBlack(other->rb_left)) {
+                    SetBlack(other->rb_right);
+                    SetRed(other);
+                    RotateLeftAugmented(other, root, callbacks);
+                    other = parent->rb_left;
+                }
+                SetColor(other, Color(parent));
+                SetBlack(parent);
+                SetBlack(other->rb_left);
+                RotateRightAugmented(parent, root, callbacks);
                 node = root->rb_node;
                 break;
             }
@@ -282,6 +441,82 @@ color:
         EraseColor(child, parent, root);
 }
 
+void RbTree::EraseAugmented(struct rb_node* node, struct rb_root* root, const rb_augment_callbacks* callbacks) {
+    struct rb_node *child, *parent;
+    uintptr_t color;
+    rb_node* rebalance = 0;
+
+    if (!node->rb_left)
+        child = node->rb_right;
+    else if (!node->rb_right)
+        child = node->rb_left;
+    else {
+        struct rb_node *old = node, *left;
+
+        node = node->rb_right;
+        while ((left = node->rb_left) != 0)
+            node = left;
+
+        if (Parent(old)) {
+            if (Parent(old)->rb_left == old)
+                Parent(old)->rb_left = node;
+            else
+                Parent(old)->rb_right = node;
+        } else
+            root->rb_node = node;
+
+        child = node->rb_right;
+        parent = Parent(node);
+        color = Color(node);
+
+        if (parent == old) {
+            parent = node;
+        } else {
+            if (child)
+                SetParent(child, parent);
+            parent->rb_left = child;
+
+            node->rb_right = old->rb_right;
+            SetParent(old->rb_right, node);
+        }
+
+        node->__parent_color = old->__parent_color;
+        node->rb_left = old->rb_left;
+        SetParent(old->rb_left, node);
+
+        if (callbacks && callbacks->copy) {
+            callbacks->copy(old, node);
+        }
+
+        rebalance = parent;
+
+        goto color;
+    }
+
+    parent = Parent(node);
+    color = Color(node);
+
+    if (child)
+        SetParent(child, parent);
+    if (parent) {
+        if (parent->rb_left == node)
+            parent->rb_left = child;
+        else
+            parent->rb_right = child;
+    } else
+        root->rb_node = child;
+
+    rebalance = parent;
+
+color:
+    if (color == BLACK)
+        EraseColorAugmented(child, parent, root, callbacks);
+
+    if (callbacks && callbacks->propagate) {
+        callbacks->propagate(rebalance, 0);
+    }
+}
+
 struct rb_node* RbTree::First(const struct rb_root* root) {
     struct rb_node* n = root->rb_node;
     if (!n) return 0;
@@ -344,8 +579,34 @@ void rb_insert_color(struct rb_node *node, struct rb_root *root) {
     kernel::RbTree::InsertColor(node, root);
 }
 
+void rb_insert_color_augmented(
+    struct rb_node* node,
+    struct rb_root* root,
+    const struct rb_augment_callbacks* callbacks
+) {
+    if (!callbacks) {
+        kernel::RbTree::InsertColor(node, root);
+        return;
+    }
+
+    kernel::RbTree::InsertColorAugmented(node, root, callbacks);
+}
+
 void rb_erase(struct rb_node *node, struct rb_root *root) {
     kernel::RbTree::Erase(node, root);
+}
+
+void rb_erase_augmented(
+    struct rb_node* node,
+    struct rb_root* root,
+    const struct rb_augment_callbacks* callbacks
+) {
+    if (!callbacks) {
+        kernel::RbTree::Erase(node, root);
+        return;
+    }
+
+    kernel::RbTree::EraseAugmented(node, root, callbacks);
 }
 
 struct rb_node *rb_next(const struct rb_node *node) {

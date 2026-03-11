@@ -27,10 +27,32 @@ struct rb_root {
 void rb_insert_color(struct rb_node *node, struct rb_root *root);
 void rb_erase(struct rb_node *node, struct rb_root *root);
 
+struct rb_augment_callbacks {
+    void (*propagate)(struct rb_node* node, struct rb_node* stop);
+    void (*copy)(struct rb_node* old, struct rb_node* new_node);
+    void (*rotate)(struct rb_node* old, struct rb_node* new_node);
+};
+
+void rb_insert_color_augmented(
+    struct rb_node* node,
+    struct rb_root* root,
+    const struct rb_augment_callbacks* callbacks
+);
+
+void rb_erase_augmented(
+    struct rb_node* node,
+    struct rb_root* root,
+    const struct rb_augment_callbacks* callbacks
+);
+
 struct rb_node *rb_next(const struct rb_node *node);
 struct rb_node *rb_prev(const struct rb_node *node);
 struct rb_node *rb_first(const struct rb_root *root);
 struct rb_node *rb_last(const struct rb_root *root);
+
+static inline struct rb_node* rb_parent(const struct rb_node* node) {
+    return node ? (struct rb_node*)(node->__parent_color & ~3u) : 0;
+}
 
 static inline void rb_link_node(struct rb_node *node, struct rb_node *parent,
                                 struct rb_node **rb_link)
