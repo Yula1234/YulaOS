@@ -546,6 +546,8 @@ void isr_handler(registers_t* regs) {
             uint32_t cr2;
             __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 
+            __asm__ volatile("sti");
+
             int handled = 0;
 
             if (cr2 >= 0xC0000000) {
