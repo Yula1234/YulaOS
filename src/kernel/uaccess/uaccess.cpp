@@ -9,8 +9,6 @@
 
 #include <mm/vma.h>
 
-#include <lib/cpp/lock_guard.h>
-
 #include <stdint.h>
 
 namespace {
@@ -64,36 +62,13 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
             continue;
         }
 
-        uint32_t region_end = 0u;
+        vma_region_t* region = vma_find(t->mem, v);
 
-        {
-            kernel::RwLockNativeReadGuard guard(t->mem->mmap_lock);
-
-            rb_node* node = t->mem->mmap_tree.rb_node;
-            vma_region_t* best = nullptr;
-
-            while (node) {
-                vma_region_t* cur_region = rb_entry(node, vma_region_t, rb_node);
-
-                if (v < cur_region->vaddr_start) {
-                    node = node->rb_left;
-                    continue;
-                }
-
-                best = cur_region;
-                node = node->rb_right;
-            }
-
-            if (best && v >= best->vaddr_start && v < best->vaddr_end) {
-                region_end = best->vaddr_end;
-            }
-        }
-
-        if (region_end == 0u) {
+        if (!region) {
             return 0;
         }
 
-        uintptr_t lim = (uintptr_t)region_end;
+        uintptr_t lim = (uintptr_t)region->vaddr_end;
         cur = (end_excl < lim) ? end_excl : lim;
     }
 
