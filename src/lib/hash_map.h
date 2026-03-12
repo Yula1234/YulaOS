@@ -1040,6 +1040,26 @@ private:
         size_t fresh_count = 0u;
 
         while (1) {
+            if (resizing.load(kernel::memory_order::relaxed) == 0u) {
+                Bucket* local_buckets = buckets;
+                const size_t local_count = bucket_count;
+                const size_t local_mask = bucket_mask;
+
+                if (local_buckets && local_count > 0u) {
+                    active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+
+                    if (resizing.load(kernel::memory_order::acquire) != 0u) {
+                        active_ops.fetch_sub(1u, kernel::memory_order::seq_cst);
+                        kernel::cpu_relax();
+                        continue;
+                    }
+
+                    out_buckets = local_buckets;
+                    out_mask = local_mask;
+                    return true;
+                }
+            }
+
             {
                 kernel::SpinLockGuard lock(table_lock);
 
