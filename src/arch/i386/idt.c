@@ -648,12 +648,14 @@ void isr_handler(registers_t* regs) {
                         curr->last_fault_err = regs->err_code;
                         curr->last_fault_int = (uint8_t)regs->int_no;
 
-                        curr->pending_signals |= (1u << SIGSEGV);
                         if (regs->cs == 0x1B) {
+                            curr->pending_signals |= (1u << SIGSEGV);
                             maybe_deliver_pending_signal(curr, regs);
                         } else {
-                            proc_kill(curr);
-                            sched_yield();
+                            if (!g_fb_mapped) {
+                                early_exception_halt("Kernel/User Page Fault", regs, cr2);
+                            }
+                            kernel_panic("Kernel/User Page Fault", "idt.c", regs->int_no, regs);
                         }
                     } else {
                         if (!g_fb_mapped) {

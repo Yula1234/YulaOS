@@ -6,6 +6,8 @@
 
 #include <yos/ioctl.h>
 
+#include <kernel/uaccess/uaccess.h>
+
 namespace kernel {
 
 class IoctlDispatcher {
@@ -76,35 +78,57 @@ public:
 
     template<typename Ctx, typename T, int (*Fn)(Ctx&, T&)>
     static int adapt_inout(void* ctx, uint32_t req, void* arg) {
-        T* a = arg_as<T>(arg, req);
+        T* user_arg = arg_as<T>(arg, req);
 
-        if (!a || !ctx) {
+        if (!user_arg || !ctx) {
             return -1;
         }
 
-        return Fn(*(Ctx*)ctx, *a);
+        T karg;
+        if (uaccess_copy_from_user(&karg, user_arg, (uint32_t)sizeof(karg)) != 0) {
+            return -1;
+        }
+
+        const int r = Fn(*(Ctx*)ctx, karg);
+        if (r == 0) {
+            if (uaccess_copy_to_user(user_arg, &karg, (uint32_t)sizeof(karg)) != 0) {
+                return -1;
+            }
+        }
+
+        return r;
     }
 
     template<typename Ctx, typename T, int (*Fn)(Ctx&, const T&)>
     static int adapt_in(void* ctx, uint32_t req, void* arg) {
-        const T* a = arg_as_const<T>(arg, req);
+        const T* user_arg = arg_as_const<T>(arg, req);
 
-        if (!a || !ctx) {
+        if (!user_arg || !ctx) {
             return -1;
         }
 
-        return Fn(*(Ctx*)ctx, *a);
+        T karg;
+        if (uaccess_copy_from_user(&karg, user_arg, (uint32_t)sizeof(karg)) != 0) {
+            return -1;
+        }
+
+        return Fn(*(Ctx*)ctx, karg);
     }
 
     template<typename Ctx, typename T, int (*Fn)(Ctx&, T)>
     static int adapt_value_in(void* ctx, uint32_t req, void* arg) {
-        const T* a = arg_as_const<T>(arg, req);
+        const T* user_arg = arg_as_const<T>(arg, req);
 
-        if (!a || !ctx) {
+        if (!user_arg || !ctx) {
             return -1;
         }
 
-        return Fn(*(Ctx*)ctx, *a);
+        T v;
+        if (uaccess_copy_from_user(&v, user_arg, (uint32_t)sizeof(v)) != 0) {
+            return -1;
+        }
+
+        return Fn(*(Ctx*)ctx, v);
     }
 
     template<typename Ctx, int (*Fn)(Ctx&)>

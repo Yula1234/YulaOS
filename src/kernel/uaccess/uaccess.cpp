@@ -13,18 +13,6 @@
 
 namespace {
 
-typedef struct {
-    uint32_t fault_eip;
-    uint32_t fixup_eip;
-} uaccess_fixup_entry_t;
-
-#define UACCESS_FIXUP_ENTRY(fault_label, fixup_label) \
-    __attribute__((used, section(".uaccess_fixup"))) \
-    static const uaccess_fixup_entry_t __uaccess_fixup_##fault_label##_##fixup_label = { \
-        (uint32_t)(uintptr_t)&&fault_label, \
-        (uint32_t)(uintptr_t)&&fixup_label \
-    }
-
 __attribute__((no_instrument_function))
 static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32_t size) {
     if (size == 0u) {
@@ -40,13 +28,15 @@ static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32
 
     uint32_t n = size;
 
-fault_ld:
-    UACCESS_FIXUP_ENTRY(fault_ld, fixup);
-    __asm__ volatile(
-        "cld; rep movsb"
+    __asm__ volatile goto(
+        "1: cld; rep movsb\n"
+        ".pushsection .uaccess_fixup, \"a\"\n"
+        ".long 1b, %l[fixup]\n"
+        ".popsection\n"
         : "+D"(d), "+S"(s), "+c"(n)
         :
         : "memory", "cc"
+        : fixup
     );
 
     return 0;
@@ -70,13 +60,15 @@ static int uaccess_memcpy_to_user_impl(void* user_dst, const void* src, uint32_t
 
     uint32_t n = size;
 
-fault_st:
-    UACCESS_FIXUP_ENTRY(fault_st, fixup);
-    __asm__ volatile(
-        "cld; rep movsb"
+    __asm__ volatile goto(
+        "1: cld; rep movsb\n"
+        ".pushsection .uaccess_fixup, \"a\"\n"
+        ".long 1b, %l[fixup]\n"
+        ".popsection\n"
         : "+D"(d), "+S"(s), "+c"(n)
         :
         : "memory", "cc"
+        : fixup
     );
 
     return 0;
@@ -214,12 +206,15 @@ extern "C" void uaccess_prefault_user_read(const void* p, uint32_t len) {
         return;
     }
 
+    uint8_t tmp;
     for (uintptr_t cur = addr; cur <= end;) {
-        (void)*(volatile const uint8_t*)cur;
+        if (uaccess_copy_from_user(&tmp, (const void*)cur, 1u) != 0) {
+            return;
+        }
 
         const uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
         if (next <= cur) {
-            break;
+            return;
         }
 
         cur = next;
@@ -301,9 +296,10 @@ extern "C" int uaccess_copy_user_str_bounded(task_t* task, char* dst, uint32_t d
             return -1;
         }
 
-        uaccess_prefault_user_read(p, 1u);
-
-        const char c = *(volatile const char*)p;
+        char c = '\0';
+        if (uaccess_copy_from_user(&c, p, 1u) != 0) {
+            return -1;
+        }
         dst[i] = c;
 
         if (c == '\0') {
