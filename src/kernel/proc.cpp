@@ -87,51 +87,94 @@ static uint32_t total_tasks = 0;
 static kernel::atomic<uint32_t> g_next_pid{1u};
 
 static rwspinlock_t task_list_lock;
-static rwspinlock_t pgroup_lock;
 
 struct ProcGroup {
     uint32_t pgid = 0;
+    rwspinlock_t lock{};
     dlist_head_t members{};
+    kernel::atomic<uint32_t> refs{0u};
 };
 
 static HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS> pgroups;
+
+static inline void pgroup_ref(ProcGroup* g) {
+    if (!g) {
+        return;
+    }
+
+    g->refs.fetch_add(1u, kernel::memory_order::relaxed);
+}
+
+static inline void pgroup_put(ProcGroup* g) {
+    if (!g) {
+        return;
+    }
+
+    const uint32_t prev = g->refs.fetch_sub(1u, kernel::memory_order::acq_rel);
+    if (prev == 1u) {
+        kfree(g);
+    }
+}
+
+static ProcGroup* pgroup_acquire(uint32_t pgid) {
+    if (pgid == 0) {
+        return nullptr;
+    }
+
+    ProcGroup* g = nullptr;
+
+    {
+        auto locked = pgroups.find_ptr(pgid);
+        if (!locked) {
+            return nullptr;
+        }
+
+        auto* v = locked.value_ptr();
+        if (!v || !*v) {
+            return nullptr;
+        }
+
+        g = *v;
+        pgroup_ref(g);
+    }
+
+    return g;
+}
 
 static ProcGroup* pgroup_get_or_create(uint32_t pgid) {
     if (pgid == 0) {
         return nullptr;
     }
 
-    {
-        auto locked = pgroups.find_ptr(pgid);
-        if (locked) {
-            auto* v = locked.value_ptr();
-            if (v && *v) {
-                return *v;
-            }
+    for (;;) {
+        if (ProcGroup* existing = pgroup_acquire(pgid)) {
+            return existing;
         }
-    }
 
-    auto* group = static_cast<ProcGroup*>(kmalloc(sizeof(ProcGroup)));
-    if (!group) {
+        auto* group = static_cast<ProcGroup*>(kmalloc(sizeof(ProcGroup)));
+        if (!group) {
+            return nullptr;
+        }
+
+        memset(group, 0, sizeof(*group));
+        group->pgid = pgid;
+        rwspinlock_init(&group->lock);
+        dlist_init(&group->members);
+        group->refs.store(2u, kernel::memory_order::relaxed);
+
+        const auto res = pgroups.insert_unique_ex(pgid, group);
+        if (res == HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS>::InsertUniqueResult::Inserted) {
+            return group;
+        }
+
+        if (res == HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS>::InsertUniqueResult::AlreadyPresent) {
+            kfree(group);
+            continue;
+        }
+
+        kfree(group);
         return nullptr;
     }
-
-    memset(group, 0, sizeof(*group));
-    group->pgid = pgid;
-    dlist_init(&group->members);
-
-    pgroups.insert(pgid, group);
-    return group;
-}
-
-static ProcGroup* pgroup_find(uint32_t pgid) {
-    auto locked = pgroups.find_ptr(pgid);
-    if (!locked) {
-        return nullptr;
-    }
-
-    auto* v = locked.value_ptr();
-    return (v && *v) ? *v : nullptr;
 }
 
 static void pgroup_remove_if_empty_locked(ProcGroup* g) {
@@ -143,8 +186,24 @@ static void pgroup_remove_if_empty_locked(ProcGroup* g) {
         return;
     }
 
-    (void)pgroups.remove(g->pgid);
-    kfree(g);
+    const uint32_t refs = g->refs.load(kernel::memory_order::relaxed);
+    if (refs != 2u) {
+        return;
+    }
+
+    ProcGroup* removed = nullptr;
+    if (!pgroups.remove_and_get(g->pgid, removed)) {
+        return;
+    }
+
+    if (removed != g) {
+        if (removed) {
+            pgroups.insert(g->pgid, removed);
+        }
+        return;
+    }
+
+    pgroup_put(g);
 }
 
 static void task_pgroup_detach_locked(task_t* t) {
@@ -157,13 +216,21 @@ static void task_pgroup_detach_locked(task_t* t) {
     }
 
     if (t->pgid != 0) {
-        ProcGroup* g = pgroup_find(t->pgid);
-        dlist_del(&t->pgrp_node);
-        t->pgrp_node.next = nullptr;
-        t->pgrp_node.prev = nullptr;
+        ProcGroup* g = pgroup_acquire(t->pgid);
+        if (g) {
+            {
+                kernel::RwSpinLockNativeWriteSafeGuard group_guard(g->lock);
 
-        pgroup_remove_if_empty_locked(g);
-        return;
+                dlist_del(&t->pgrp_node);
+                t->pgrp_node.next = nullptr;
+                t->pgrp_node.prev = nullptr;
+
+                pgroup_remove_if_empty_locked(g);
+            }
+
+            pgroup_put(g);
+            return;
+        }
     }
 
     dlist_del(&t->pgrp_node);
@@ -217,8 +284,14 @@ static int task_set_pgid_locked(task_t* t, uint32_t pgid) {
         return -1;
     }
 
-    dlist_add_tail(&t->pgrp_node, &g->members);
-    t->pgid = pgid;
+    {
+        kernel::RwSpinLockNativeWriteSafeGuard group_guard(g->lock);
+
+        dlist_add_tail(&t->pgrp_node, &g->members);
+        t->pgid = pgid;
+    }
+
+    pgroup_put(g);
     return 0;
 }
 
@@ -261,8 +334,6 @@ int proc_setsid(task_t* t) {
         return -1;
     }
 
-    kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
-
     kernel::ScopedIrqDisable irq_guard;
 
     spinlock_acquire(&t->state_lock);
@@ -290,8 +361,11 @@ int proc_setpgid(task_t* t, uint32_t pgid) {
         return -1;
     }
 
-    kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::pgroup_lock);
-    return task_set_pgid_locked(t, pgid);
+    kernel::ScopedIrqDisable irq_guard;
+    spinlock_acquire(&t->state_lock);
+    const int rc = task_set_pgid_locked(t, pgid);
+    spinlock_release(&t->state_lock);
+    return rc;
 }
 
 uint32_t proc_getpgrp(task_t* t) {
@@ -307,11 +381,12 @@ int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
         return -1;
     }
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::pgroup_lock);
-    ProcGroup* g = pgroup_find(pgid);
+    ProcGroup* g = pgroup_acquire(pgid);
     if (!g) {
         return -1;
     }
+
+    kernel::RwSpinLockNativeReadSafeGuard group_guard(g->lock);
 
     int signaled = 0;
     for (dlist_head_t* it = g->members.next; it && it != &g->members; it = it->next) {
@@ -325,6 +400,7 @@ int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
         signaled++;
     }
 
+    pgroup_put(g);
     return signaled;
 }
 
@@ -333,12 +409,12 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
         return 0;
     }
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::pgroup_lock);
-
-    ProcGroup* g = pgroup_find(pgid);
+    ProcGroup* g = pgroup_acquire(pgid);
     if (!g) {
         return 0;
     }
+
+    kernel::RwSpinLockNativeReadSafeGuard group_guard(g->lock);
 
     for (dlist_head_t* it = g->members.next; it && it != &g->members; it = it->next) {
         task_t* m = container_of(it, task_t, pgrp_node);
@@ -351,10 +427,12 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
         }
 
         if (m->sid == sid) {
+            pgroup_put(g);
             return 1;
         }
     }
 
+    pgroup_put(g);
     return 0;
 }
 
@@ -646,7 +724,6 @@ void proc_init(void) {
     proc::detail::g_next_pid.store(1u, kernel::memory_order::relaxed);
 
     rwspinlock_init(&proc::detail::task_list_lock);
-    rwspinlock_init(&proc::detail::pgroup_lock);
 
     proc::detail::all_tasks.clear_links_unsafe();
 
@@ -1121,8 +1198,10 @@ static task_t* alloc_task(void) {
     t->sid = t->pid;
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::pgroup_lock);
+        kernel::ScopedIrqDisable irq_guard;
+        spinlock_acquire(&t->state_lock);
         (void)proc::detail::task_set_pgid_locked(t, t->pid);
+        spinlock_release(&t->state_lock);
     }
 
     {
@@ -1146,8 +1225,6 @@ void proc_free_resources(task_t* t) {
     }
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
-
         kernel::ScopedIrqDisable irq_guard;
         spinlock_acquire(&t->state_lock);
         proc::detail::task_pgroup_detach_locked(t);
@@ -1441,8 +1518,6 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     t->stack_top = stack_top;
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
-
         kernel::ScopedIrqDisable irq_guard;
 
         spinlock_acquire(&parent->state_lock);
@@ -1705,8 +1780,6 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         t->term_mode = curr->term_mode;
 
         {
-            kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
-
             kernel::ScopedIrqDisable irq_guard;
 
             spinlock_acquire(&curr->state_lock);
