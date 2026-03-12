@@ -23,6 +23,12 @@ typedef struct {
     
     struct rb_root runq_root;
     struct task* runq_leftmost;
+
+    struct rb_root sleep_root;
+    struct task* sleep_leftmost;
+
+    spinlock_t sleep_lock;
+    volatile uint32_t sleep_next_wake_tick;
     
     spinlock_t lock;
     struct task* idle_task;

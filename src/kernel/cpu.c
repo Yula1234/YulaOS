@@ -29,6 +29,12 @@ void cpu_init_system(void) {
         
         cpus[i].runq_root = RB_ROOT;
         cpus[i].runq_leftmost = 0;
+
+        cpus[i].sleep_root = RB_ROOT;
+        cpus[i].sleep_leftmost = 0;
+        cpus[i].sleep_next_wake_tick = 0xFFFFFFFFu;
+        spinlock_init(&cpus[i].sleep_lock);
+
         cpus[i].runq_count = 0;
         spinlock_init(&cpus[i].lock);
     }

@@ -23,7 +23,6 @@
 #include <lib/cpp/dlist.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
-#include <lib/cpp/rbtree.h>
 #include <lib/cpp/unique_ptr.h>
 
 #include "sched.h"
@@ -314,20 +313,68 @@ static void task_inherit_process_context_locked(task_t* child, const task_t* par
     }
 }
 
-struct SleepKey {
-    uint32_t wake_tick = 0;
-    uintptr_t tie = 0;
-};
-
-struct SleepKeyOfValue {
-    const SleepKey operator()(const task_t& t) const noexcept {
-        return SleepKey{
-            t.wake_tick,
-            reinterpret_cast<uintptr_t>(&t),
-        };
+static inline bool sleep_less(const task_t* a, const task_t* b) noexcept {
+    if (a->wake_tick != b->wake_tick) {
+        return a->wake_tick < b->wake_tick;
     }
 
-};
+    return reinterpret_cast<uintptr_t>(a) < reinterpret_cast<uintptr_t>(b);
+}
+
+static inline void cpu_sleep_update_next_wake_tick(cpu_t* cpu) noexcept {
+    if (!cpu || !cpu->sleep_leftmost) {
+        if (cpu) {
+            cpu->sleep_next_wake_tick = 0xFFFFFFFFu;
+        }
+
+        return;
+    }
+
+    cpu->sleep_next_wake_tick = cpu->sleep_leftmost->wake_tick;
+}
+
+static void cpu_sleep_insert_locked(cpu_t* cpu, task_t* t) noexcept {
+    struct rb_node** link = &cpu->sleep_root.rb_node;
+    struct rb_node* parent = nullptr;
+    task_t* entry = nullptr;
+    bool leftmost = true;
+
+    while (*link) {
+        parent = *link;
+        entry = rb_entry(parent, task_t, sleep_rb);
+
+        if (sleep_less(t, entry)) {
+            link = &parent->rb_left;
+        } else {
+            link = &parent->rb_right;
+            leftmost = false;
+        }
+    }
+
+    rb_link_node(&t->sleep_rb, parent, link);
+    rb_insert_color(&t->sleep_rb, &cpu->sleep_root);
+
+    if (leftmost) {
+        cpu->sleep_leftmost = t;
+    }
+
+    cpu_sleep_update_next_wake_tick(cpu);
+}
+
+static void cpu_sleep_remove_locked(cpu_t* cpu, task_t* t) noexcept {
+    if (!cpu || !t || t->wake_tick == 0) {
+        return;
+    }
+
+    if (cpu->sleep_leftmost == t) {
+        struct rb_node* next = rb_next(&t->sleep_rb);
+        cpu->sleep_leftmost = next ? rb_entry(next, task_t, sleep_rb) : nullptr;
+    }
+
+    rb_erase(&t->sleep_rb, &cpu->sleep_root);
+
+    cpu_sleep_update_next_wake_tick(cpu);
+}
 
 int proc_setsid(task_t* t) {
     if (!t) {
@@ -435,24 +482,6 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
     pgroup_put(g);
     return 0;
 }
-
-struct SleepKeyLess {
-    bool operator()(const SleepKey& a, const SleepKey& b) const noexcept {
-        if (a.wake_tick != b.wake_tick) {
-            return a.wake_tick < b.wake_tick;
-        }
-
-        return a.tie < b.tie;
-    }
-};
-
-using SleepHook = kernel::detail::RbMemberHook<task_t, offsetof(task_t, sleep_rb)>;
-using SleepingTree = kernel::IntrusiveRbTree<task_t, SleepHook, SleepKey, SleepKeyOfValue, SleepKeyLess>;
-
-static SleepingTree sleeping_tree;
-static kernel::SpinLock sleep_lock;
-
-static kernel::atomic<uint32_t> g_next_wake_tick{0xFFFFFFFFu};
 
 static kernel::atomic<task_t*> g_zombie_head{nullptr};
 
@@ -742,10 +771,6 @@ void proc_init(void) {
     rwspinlock_init(&proc::detail::task_list_lock);
 
     proc::detail::all_tasks.clear_links_unsafe();
-
-    proc::detail::sleeping_tree.clear();
-
-    spinlock_init(proc::detail::sleep_lock.native_handle());
 
     proc::detail::initial_fpu_state_size = fpu_state_size();
     kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> fpu_state_guard(
@@ -1216,6 +1241,7 @@ static task_t* alloc_task(void) {
 
     task_t* t = t_guard.get();
     memset(t, 0, sizeof(task_t));
+    t->sleep_cpu = -1;
 
     proc_fd_table_init(t);
 
@@ -2158,31 +2184,49 @@ task_t* proc_create_idle(int cpu_index) {
     return t;
 }
 
-static void insert_sleeper(task_t* t) {
+void proc_sleep_add(task_t* t, uint32_t wake_tick) {
     if (!t) {
         return;
     }
 
-    (void)proc::detail::sleeping_tree.insert_unique(*t);
-}
+    cpu_t* cpu = cpu_current();
+    if (!cpu) {
+        return;
+    }
 
-void proc_sleep_add(task_t* t, uint32_t wake_tick) {
-    {
-        kernel::SpinLockSafeGuard guard(proc::detail::sleep_lock);
+    const bool was_sleeping = (t->wake_tick != 0 && t->sleep_cpu >= 0 && t->sleep_cpu < MAX_CPUS);
+    cpu_t* old_cpu = was_sleeping ? &cpus[t->sleep_cpu] : nullptr;
 
-        if (t->wake_tick != 0) {
-            proc::detail::sleeping_tree.erase(*t);
+    if (!was_sleeping || old_cpu == cpu) {
+        kernel::SpinLockNativeSafeGuard guard(cpu->sleep_lock);
+
+        if (was_sleeping) {
+            proc::detail::cpu_sleep_remove_locked(cpu, t);
         }
 
         t->wake_tick = wake_tick;
         t->state = TASK_WAITING;
+        t->sleep_cpu = cpu->index;
 
-        insert_sleeper(t);
-
-        const uint32_t next = proc::detail::g_next_wake_tick.load(kernel::memory_order::relaxed);
-        if (wake_tick < next) {
-            proc::detail::g_next_wake_tick.store(wake_tick, kernel::memory_order::relaxed);
+        proc::detail::cpu_sleep_insert_locked(cpu, t);
+    } else {
+        cpu_t* first = old_cpu;
+        cpu_t* second = cpu;
+        if (first->index > second->index) {
+            first = cpu;
+            second = old_cpu;
         }
+
+        kernel::SpinLockNativeSafeGuard first_guard(first->sleep_lock);
+        kernel::SpinLockNativeSafeGuard second_guard(second->sleep_lock);
+
+        proc::detail::cpu_sleep_remove_locked(old_cpu, t);
+
+        t->wake_tick = wake_tick;
+        t->state = TASK_WAITING;
+        t->sleep_cpu = cpu->index;
+
+        proc::detail::cpu_sleep_insert_locked(cpu, t);
     }
 
     sched_yield();
@@ -2202,56 +2246,63 @@ void proc_usleep(uint32_t us) {
 }
 
 void proc_check_sleepers(uint32_t current_tick) {
-    if (current_tick < proc::detail::g_next_wake_tick.load(kernel::memory_order::relaxed)) {
+    cpu_t* cpu = cpu_current();
+    if (!cpu) {
         return;
     }
 
-    kernel::TrySpinLockGuard guard(proc::detail::sleep_lock);
-
-    if (guard) {
-        while (!proc::detail::sleeping_tree.empty()) {
-            task_t& t = *proc::detail::sleeping_tree.begin();
-            if (t.wake_tick > current_tick) {
-                break;
-            }
-
-            proc::detail::sleeping_tree.erase(t);
-            
-            t.state = TASK_RUNNABLE;
-            t.wake_tick = 0;
-
-            sem_remove_task(&t);
-            
-            sched_add(&t);
-        }
-
-        if (!proc::detail::sleeping_tree.empty()) {
-            proc::detail::g_next_wake_tick.store(
-                proc::detail::sleeping_tree.begin()->wake_tick,
-                kernel::memory_order::relaxed
-            );
-        } else {
-            proc::detail::g_next_wake_tick.store(0xFFFFFFFFu, kernel::memory_order::relaxed);
-        }
+    if (current_tick < cpu->sleep_next_wake_tick) {
+        return;
     }
+
+    if (!spinlock_try_acquire(&cpu->sleep_lock)) {
+        return;
+    }
+
+    while (cpu->sleep_leftmost) {
+        task_t* t = cpu->sleep_leftmost;
+        if (!t) {
+            break;
+        }
+
+        if (t->wake_tick > current_tick) {
+            break;
+        }
+
+        proc::detail::cpu_sleep_remove_locked(cpu, t);
+
+        t->state = TASK_RUNNABLE;
+        t->wake_tick = 0;
+        t->sleep_cpu = -1;
+
+        sem_remove_task(t);
+
+        sched_add(t);
+    }
+
+    spinlock_release(&cpu->sleep_lock);
 }
 
 void proc_sleep_remove(task_t* t) {
-    kernel::SpinLockSafeGuard guard(proc::detail::sleep_lock);
-    
-    if (t->wake_tick != 0) {
-        proc::detail::sleeping_tree.erase(*t);
-        
-        t->wake_tick = 0;
+    if (!t || t->wake_tick == 0) {
+        return;
+    }
 
-        if (!proc::detail::sleeping_tree.empty()) {
-            proc::detail::g_next_wake_tick.store(
-                proc::detail::sleeping_tree.begin()->wake_tick,
-                kernel::memory_order::relaxed
-            );
-        } else {
-            proc::detail::g_next_wake_tick.store(0xFFFFFFFFu, kernel::memory_order::relaxed);
-        }
+    const int cpu_idx = t->sleep_cpu;
+    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
+        t->wake_tick = 0;
+        t->sleep_cpu = -1;
+        return;
+    }
+
+    cpu_t* cpu = &cpus[cpu_idx];
+
+    kernel::SpinLockNativeSafeGuard guard(cpu->sleep_lock);
+
+    if (t->wake_tick != 0) {
+        proc::detail::cpu_sleep_remove_locked(cpu, t);
+        t->wake_tick = 0;
+        t->sleep_cpu = -1;
     }
 }
 

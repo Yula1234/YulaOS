@@ -109,6 +109,7 @@ typedef struct task {
 
     uint32_t wait_for_pid;
     uint32_t wake_tick;
+    int sleep_cpu;
     int is_blocked_on_kbd;
     
     uint32_t* esp;

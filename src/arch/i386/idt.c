@@ -451,9 +451,9 @@ void isr_handler(registers_t* regs) {
 
             if (cpu->index == 0) {
                 timer_ticks++;
-
-                proc_check_sleepers(timer_ticks);
             }
+
+            proc_check_sleepers(timer_ticks);
 
             cpu->stat_total_ticks++;
             if (curr == cpu->idle_task) {
