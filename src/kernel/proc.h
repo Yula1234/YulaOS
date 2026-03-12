@@ -86,7 +86,7 @@ typedef struct file_desc {
 
 typedef struct fd_table {
     uint32_t refs;
-    mutex_t lock;
+    rwspinlock_t lock;
     struct file_desc** fds;
     uint32_t max_fds;
     int fd_next;
