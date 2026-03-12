@@ -146,6 +146,9 @@ typedef struct task {
 
     uint32_t parent_pid;
 
+    dlist_head_t children_list;
+    dlist_head_t sibling_node;
+
     task_prio_t priority;
     uint32_t    quantum;
     uint32_t    ticks_left;

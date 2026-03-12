@@ -169,6 +169,36 @@ static void task_pgroup_detach_locked(task_t* t) {
     t->pgrp_node.prev = nullptr;
 }
 
+static void task_parent_detach_locked(task_t* t) {
+    if (!t) {
+        return;
+    }
+
+    if (!t->sibling_node.next || !t->sibling_node.prev) {
+        return;
+    }
+
+    dlist_del(&t->sibling_node);
+    t->sibling_node.next = nullptr;
+    t->sibling_node.prev = nullptr;
+}
+
+static void task_set_parent_locked(task_t* child, task_t* parent) {
+    if (!child) {
+        return;
+    }
+
+    task_parent_detach_locked(child);
+
+    if (parent && parent != child) {
+        dlist_add_tail(&child->sibling_node, &parent->children_list);
+        child->parent_pid = parent->pid;
+        return;
+    }
+
+    child->parent_pid = 0;
+}
+
 static int task_set_pgid_locked(task_t* t, uint32_t pgid) {
     if (!t || pgid == 0) {
         return -1;
@@ -1029,6 +1059,9 @@ static task_t* alloc_task(void) {
 
     dlist_init(&t->pgrp_node);
 
+    dlist_init(&t->children_list);
+    dlist_init(&t->sibling_node);
+
     if (!proc::detail::initial_fpu_state) {
         return 0;
     }
@@ -1082,6 +1115,8 @@ void proc_free_resources(task_t* t) {
         kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
 
         proc::detail::task_pgroup_detach_locked(t);
+
+        proc::detail::task_parent_detach_locked(t);
     }
 
     if (t->controlling_tty) {
@@ -1139,18 +1174,19 @@ void proc_kill(task_t* t) {
 
     {
         kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-        uint32_t pid_to_clean = (uint32_t)t->pid;
+        task_t* init = proc_find_by_pid(1);
 
-        for (task_t& child : proc::detail::all_tasks) {
-            if (child.parent_pid != pid_to_clean) {
+        task_t* child = nullptr;
+        task_t* next = nullptr;
+
+        dlist_for_each_entry_safe(child, next, &t->children_list, sibling_node) {
+            if (child->state == TASK_UNUSED) {
+                proc::detail::task_parent_detach_locked(child);
+                child->parent_pid = 0;
                 continue;
             }
 
-            if (child.state == TASK_UNUSED) {
-                continue;
-            }
-
-            child.parent_pid = 0;
+            proc::detail::task_set_parent_locked(child, init);
         }
     }
 
@@ -1322,7 +1358,6 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     if (!t) return 0;
 
     strlcpy(t->name, parent->name, sizeof(t->name));
-    t->parent_pid = parent->pid;
     t->cwd_inode = parent->cwd_inode;
     t->terminal = parent->terminal;
     t->term_mode = parent->term_mode;
@@ -1332,6 +1367,7 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
 
     {
         kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+        proc::detail::task_set_parent_locked(t, parent);
         proc::detail::task_inherit_process_context_locked(t, parent);
     }
 
@@ -1581,12 +1617,12 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
     task_t* curr = proc_current();
     if (curr) {
         t->cwd_inode = curr->cwd_inode;
-        t->parent_pid = curr->pid;
         t->terminal = curr->terminal;
         t->term_mode = curr->term_mode;
 
         {
             kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+            proc::detail::task_set_parent_locked(t, curr);
             proc::detail::task_inherit_process_context_locked(t, curr);
         }
     } else {
