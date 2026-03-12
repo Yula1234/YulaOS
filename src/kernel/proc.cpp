@@ -374,6 +374,8 @@ using SleepingTree = kernel::IntrusiveRbTree<task_t, SleepHook, SleepKey, SleepK
 static SleepingTree sleeping_tree;
 static kernel::SpinLock sleep_lock;
 
+static kernel::atomic<uint32_t> g_next_wake_tick{0xFFFFFFFFu};
+
 static dlist_head_t zombie_list;
 static kernel::SpinLock zombie_lock;
 
@@ -2012,6 +2014,11 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         t->state = TASK_WAITING;
 
         insert_sleeper(t);
+
+        const uint32_t next = proc::detail::g_next_wake_tick.load(kernel::memory_order::relaxed);
+        if (wake_tick < next) {
+            proc::detail::g_next_wake_tick.store(wake_tick, kernel::memory_order::relaxed);
+        }
     }
 
     sched_yield();
@@ -2031,6 +2038,10 @@ void proc_usleep(uint32_t us) {
 }
 
 void proc_check_sleepers(uint32_t current_tick) {
+    if (current_tick < proc::detail::g_next_wake_tick.load(kernel::memory_order::relaxed)) {
+        return;
+    }
+
     kernel::TrySpinLockGuard guard(proc::detail::sleep_lock);
 
     if (guard) {
@@ -2049,6 +2060,15 @@ void proc_check_sleepers(uint32_t current_tick) {
             
             sched_add(&t);
         }
+
+        if (!proc::detail::sleeping_tree.empty()) {
+            proc::detail::g_next_wake_tick.store(
+                proc::detail::sleeping_tree.begin()->wake_tick,
+                kernel::memory_order::relaxed
+            );
+        } else {
+            proc::detail::g_next_wake_tick.store(0xFFFFFFFFu, kernel::memory_order::relaxed);
+        }
     }
 }
 
@@ -2059,6 +2079,15 @@ void proc_sleep_remove(task_t* t) {
         proc::detail::sleeping_tree.erase(*t);
         
         t->wake_tick = 0;
+
+        if (!proc::detail::sleeping_tree.empty()) {
+            proc::detail::g_next_wake_tick.store(
+                proc::detail::sleeping_tree.begin()->wake_tick,
+                kernel::memory_order::relaxed
+            );
+        } else {
+            proc::detail::g_next_wake_tick.store(0xFFFFFFFFu, kernel::memory_order::relaxed);
+        }
     }
 }
 
