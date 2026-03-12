@@ -272,6 +272,125 @@ private:
     static_assert(is_integral_v<T>);
 };
 
+#if defined(__i386__)
+template<>
+class atomic<uint64_t> {
+public:
+    atomic() = default;
+
+    constexpr atomic(uint64_t value) noexcept
+        : value_(value) {
+    }
+
+    atomic(const atomic&) = delete;
+    atomic& operator=(const atomic&) = delete;
+
+    atomic& operator=(uint64_t desired) noexcept {
+        store(desired);
+        return *this;
+    }
+
+    bool is_lock_free() const noexcept {
+        return true;
+    }
+
+    void store(uint64_t desired, memory_order order = memory_order::seq_cst) noexcept {
+        (void)order;
+
+        uint64_t expected = load(memory_order::relaxed);
+        while (!compare_exchange_weak(expected, desired, memory_order::relaxed, memory_order::relaxed)) {
+        }
+    }
+
+    uint64_t load(memory_order order = memory_order::seq_cst) const noexcept {
+        (void)order;
+
+        uint32_t eax = 0;
+        uint32_t edx = 0;
+        uint32_t ebx = 0;
+        uint32_t ecx = 0;
+
+        __asm__ volatile(
+            "lock; cmpxchg8b %2"
+            : "+a"(eax), "+d"(edx), "+m"(value_)
+            : "b"(ebx), "c"(ecx)
+            : "cc", "memory"
+        );
+
+        return (static_cast<uint64_t>(edx) << 32) | eax;
+    }
+
+    operator uint64_t() const noexcept {
+        return load();
+    }
+
+    uint64_t exchange(uint64_t desired, memory_order order = memory_order::seq_cst) noexcept {
+        (void)order;
+
+        uint64_t expected = load(memory_order::relaxed);
+        while (!compare_exchange_weak(expected, desired, memory_order::relaxed, memory_order::relaxed)) {
+        }
+
+        return expected;
+    }
+
+    bool compare_exchange_weak(
+        uint64_t& expected,
+        uint64_t desired,
+        memory_order success,
+        memory_order failure
+    ) noexcept {
+        (void)success;
+        (void)failure;
+
+        uint32_t expected_lo = static_cast<uint32_t>(expected);
+        uint32_t expected_hi = static_cast<uint32_t>(expected >> 32);
+        uint32_t desired_lo = static_cast<uint32_t>(desired);
+        uint32_t desired_hi = static_cast<uint32_t>(desired >> 32);
+        uint8_t ok;
+
+        __asm__ volatile(
+            "lock; cmpxchg8b %1; sete %0"
+            : "=q"(ok), "+m"(value_), "+a"(expected_lo), "+d"(expected_hi)
+            : "b"(desired_lo), "c"(desired_hi)
+            : "memory"
+        );
+
+        expected = (static_cast<uint64_t>(expected_hi) << 32) | expected_lo;
+
+        return ok != 0;
+    }
+
+    bool compare_exchange_strong(
+        uint64_t& expected,
+        uint64_t desired,
+        memory_order success,
+        memory_order failure
+    ) noexcept {
+        return compare_exchange_weak(expected, desired, success, failure);
+    }
+
+    bool compare_exchange_weak(
+        uint64_t& expected,
+        uint64_t desired,
+        memory_order order = memory_order::seq_cst
+    ) noexcept {
+        return compare_exchange_weak(expected, desired, order, order);
+    }
+
+    bool compare_exchange_strong(
+        uint64_t& expected,
+        uint64_t desired,
+        memory_order order = memory_order::seq_cst
+    ) noexcept {
+        return compare_exchange_strong(expected, desired, order, order);
+    }
+
+private:
+    alignas(uint64_t) mutable uint64_t value_{};
+};
+#endif
+
 template<typename T>
 class atomic<T*> {
 public:

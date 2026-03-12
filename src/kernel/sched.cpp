@@ -12,6 +12,7 @@
 #include <kernel/panic.h>
 
 #include <lib/cpp/lock_guard.h>
+ #include <lib/cpp/atomic.h>
 
 #include "sched.h"
 #include "cpu.h"
@@ -35,10 +36,8 @@ static constexpr uint32_t u32_max = 0xFFFFFFFFu;
 
 }
 
-static int cached_best_cpu = -1;
-static uint32_t cache_tick = 0;
-static __cacheline_aligned spinlock_t cpu_cache_lock;
-static __attribute__((unused)) uint8_t cpu_cache_lock_pad[HAL_CACHELINE_SIZE - sizeof(spinlock_t)];
+static constexpr uint64_t cpu_cache_invalid = 0xFFFFFFFF00000000ull;
+static __cacheline_aligned kernel::atomic<uint64_t> g_cpu_cache{cpu_cache_invalid};
 
 uint32_t calc_weight(task_prio_t prio) {
     int nice = 10 - static_cast<int>(prio);
@@ -65,25 +64,24 @@ uint64_t calc_delta_vruntime(uint64_t delta_exec, uint32_t weight) {
 }
 
 void sched_init(void) {
-    cached_best_cpu = -1;
-    cache_tick = 0;
-    spinlock_init(&cpu_cache_lock);
+    g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
 }
 
 static int get_best_cpu(void) {
     uint32_t current_tick = timer_ticks;
     int active_cpus = 1 + ap_running_count;
 
-    {
-        kernel::SpinLockNativeSafeGuard guard(cpu_cache_lock);
+    uint64_t cache_val = g_cpu_cache.load(kernel::memory_order::relaxed);
+    int cached_cpu = static_cast<int>(cache_val >> 32);
+    uint32_t cached_tick = static_cast<uint32_t>(cache_val & 0xFFFFFFFFu);
 
-        int cache_valid = (cached_best_cpu >= 0 &&
-                           cache_tick != 0 &&
-                           current_tick - cache_tick < sched_detail::cpu_cache_invalidate_ticks);
-
-        if (cache_valid && active_cpus <= 1) {
-            return cached_best_cpu;
-        }
+    if (
+        cached_cpu >= 0 &&
+        cached_cpu < active_cpus &&
+        cached_tick != 0 &&
+        (current_tick - cached_tick) < sched_detail::cpu_cache_invalidate_ticks
+    ) {
+        return cached_cpu;
     }
 
     int best_cpu = 0;
@@ -113,13 +111,15 @@ static int get_best_cpu(void) {
             best_cpu = i;
         }
     }
-    
-    {
-        kernel::SpinLockNativeSafeGuard guard(cpu_cache_lock);
 
-        cached_best_cpu = best_cpu;
-        cache_tick = current_tick;
-    }
+    uint64_t new_cache = (static_cast<uint64_t>(static_cast<uint32_t>(best_cpu)) << 32) | current_tick;
+    uint64_t expected = cache_val;
+    g_cpu_cache.compare_exchange_weak(
+        expected,
+        new_cache,
+        kernel::memory_order::relaxed,
+        kernel::memory_order::relaxed
+    );
     
     return best_cpu;
 }
@@ -207,14 +207,8 @@ void sched_add(task_t* t) {
     __sync_fetch_and_add(&target->total_task_count, 1);
 
     enqueue_task(target, t);
-    
-    {
-        kernel::SpinLockNativeSafeGuard cache_guard(cpu_cache_lock);
 
-        if (cached_best_cpu == target_cpu_idx) {
-            cache_tick = 0;
-        }
-    }
+    g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
 }
 
 static task_t* pick_next_cfs(cpu_t* cpu) {
@@ -354,13 +348,7 @@ void sched_remove(task_t* t) {
         __sync_fetch_and_sub(&target->total_task_count, 1);
     }
 
-    {
-        kernel::SpinLockNativeSafeGuard cache_guard(cpu_cache_lock);
-
-        if (cached_best_cpu == cpu_idx) {
-            cache_tick = 0;
-        }
-    }
+    g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
 
     if (t->is_queued) {
         dequeue_task(target, t);
