@@ -454,8 +454,7 @@ static kernel::SpinLock sleep_lock;
 
 static kernel::atomic<uint32_t> g_next_wake_tick{0xFFFFFFFFu};
 
-static dlist_head_t zombie_list;
-static kernel::SpinLock zombie_lock;
+static kernel::atomic<task_t*> g_zombie_head{nullptr};
 
 static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
 
@@ -723,6 +722,8 @@ void proc_init(void) {
 
     proc::detail::g_next_pid.store(1u, kernel::memory_order::relaxed);
 
+    proc::detail::g_zombie_head.store(nullptr, kernel::memory_order::relaxed);
+
     rwspinlock_init(&proc::detail::task_list_lock);
 
     proc::detail::all_tasks.clear_links_unsafe();
@@ -730,10 +731,6 @@ void proc_init(void) {
     proc::detail::sleeping_tree.clear();
 
     spinlock_init(proc::detail::sleep_lock.native_handle());
-
-    dlist_init(&proc::detail::zombie_list);
-
-    spinlock_init(proc::detail::zombie_lock.native_handle());
 
     proc::detail::initial_fpu_state_size = fpu_state_size();
     kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> fpu_state_guard(
@@ -1349,10 +1346,15 @@ void proc_kill(task_t* t) {
 
     t->state = TASK_ZOMBIE;
 
-    {
-        kernel::SpinLockSafeGuard guard(proc::detail::zombie_lock);
-        dlist_add_tail(&t->zombie_node, &proc::detail::zombie_list);
-    }
+    task_t* old_head = proc::detail::g_zombie_head.load(kernel::memory_order::relaxed);
+    do {
+        t->zombie_next = old_head;
+    } while (!proc::detail::g_zombie_head.compare_exchange_weak(
+        old_head,
+        t,
+        kernel::memory_order::release,
+        kernel::memory_order::relaxed
+    ));
 
     sem_signal_all(&t->exit_sem);
 }
@@ -1981,43 +1983,47 @@ int proc_waitpid(uint32_t pid, int* out_status) {
 void reaper_task_func(void* arg) {
     (void)arg;
     while (1) {
-        int freed = 0;
+        task_t* list = proc::detail::g_zombie_head.exchange(nullptr, kernel::memory_order::acquire);
+        task_t* survivors = nullptr;
 
-        do {
-            freed = 0;
-            task_t* victim = 0;
+        while (list) {
+            task_t* curr = list;
+            list = curr->zombie_next;
+            curr->zombie_next = nullptr;
 
-            {
-                kernel::SpinLockSafeGuard guard(proc::detail::zombie_lock);
-
-                dlist_head_t* it = proc::detail::zombie_list.next;
-                while (it && it != &proc::detail::zombie_list) {
-                    task_t* curr = container_of(it, task_t, zombie_node);
-                    it = it->next;
-
-                    int still_running = 0;
-                    for (int i = 0; i < MAX_CPUS; i++) {
-                        if (cpus[i].current_task == curr) {
-                            still_running = 1;
-                            break;
-                        }
-                    }
-
-                    if (still_running || curr->exit_waiters > 0) {
-                        continue;
-                    }
-
-                    dlist_del(&curr->zombie_node);
-                    victim = curr;
+            int still_running = 0;
+            for (int i = 0; i < MAX_CPUS; i++) {
+                if (cpus[i].current_task == curr) {
+                    still_running = 1;
                     break;
                 }
             }
 
-            if (victim) {
-                proc_free_resources(victim);
-                freed = 1;
+            if (still_running || curr->exit_waiters > 0) {
+                curr->zombie_next = survivors;
+                survivors = curr;
+                continue;
             }
-        } while (freed);
+
+            proc_free_resources(curr);
+        }
+
+        if (survivors) {
+            task_t* tail = survivors;
+            while (tail->zombie_next) {
+                tail = tail->zombie_next;
+            }
+
+            task_t* old_head = proc::detail::g_zombie_head.load(kernel::memory_order::relaxed);
+            do {
+                tail->zombie_next = old_head;
+            } while (!proc::detail::g_zombie_head.compare_exchange_weak(
+                old_head,
+                survivors,
+                kernel::memory_order::release,
+                kernel::memory_order::relaxed
+            ));
+        }
 
         proc_usleep(50000);
     }

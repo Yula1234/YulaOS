@@ -168,6 +168,8 @@ typedef struct task {
     
     dlist_head_t zombie_node;
 
+    struct task* zombie_next;
+
     struct rb_node sleep_rb;
     spinlock_t poll_lock;
     dlist_head_t poll_waiters;
