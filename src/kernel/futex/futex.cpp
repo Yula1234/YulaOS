@@ -167,7 +167,10 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
 
         uaccess_prefault_user_read((const void*)uaddr, 4u);
 
-        uint32_t v = *(volatile const uint32_t*)uaddr;
+        uint32_t v = 0u;
+        if (uaccess_copy_from_user(&v, (const void*)uaddr, sizeof(v)) != 0) {
+            return -1;
+        }
 
         if (v != expected) {
             return 0;
@@ -175,12 +178,6 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
 
         {
             kernel::SpinLockSafeGuard guard(entry->lock);
-
-            v = *(volatile const uint32_t*)uaddr;
-
-            if (v != expected) {
-                return 0;
-            }
 
             if (!curr) {
                 return -1;
@@ -191,6 +188,24 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             dlist_add_tail(&curr->sem_node, &entry->wait_list);
 
             curr->state = TASK_WAITING;
+        }
+
+        v = 0u;
+        if (uaccess_copy_from_user(&v, (const void*)uaddr, sizeof(v)) != 0) {
+            return -1;
+        }
+
+        if (v != expected) {
+            kernel::SpinLockSafeGuard guard(entry->lock);
+
+            if (curr && curr->blocked_on_sem == entry) {
+                if (dlist_unlink_consistent(&curr->sem_node)) {
+                    curr->blocked_on_sem = 0;
+                    curr->state = TASK_RUNNING;
+                }
+            }
+
+            return 0;
         }
 
         sched_yield();
