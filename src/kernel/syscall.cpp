@@ -214,12 +214,12 @@ static void syscall_open(registers_t* regs, task_t* curr) {
     }
 }
 
-static void syscall_read(registers_t* regs, task_t* curr) {
+static void syscall_read(registers_t* regs, [[maybe_unused]] task_t* curr) {
     int res = vfs_read((int)regs->ebx, (void*)regs->ecx, (uint32_t)regs->edx);
     regs->eax = (uint32_t)res;
 }
 
-static void syscall_write(registers_t* regs, task_t* curr) {
+static void syscall_write(registers_t* regs, [[maybe_unused]] task_t* curr) {
     int res = vfs_write((int)regs->ebx, (const void*)regs->ecx, (uint32_t)regs->edx);
     regs->eax = (uint32_t)res;
 }
