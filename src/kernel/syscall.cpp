@@ -281,19 +281,34 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
         uint32_t start_free = (new_brk + 0xFFFu) & ~0xFFFu;
         uint32_t end_free = (old_brk + 0xFFFu) & ~0xFFFu;
 
-        for (uint32_t v = start_free; v < end_free; v += 4096u) {
-            uint32_t pte;
-            if (!paging_get_present_pte(curr->mem->page_dir, v, &pte)) continue;
-            if ((pte & 4u) == 0) continue;
+        struct SbrkUnmapCtx {
+            proc_mem_t* mem = nullptr;
+        } ctx{curr->mem};
 
-            paging_map(curr->mem->page_dir, v, 0, 0);
+        auto visitor = [](uint32_t /*virt*/, uint32_t pte, void* vctx) -> int {
+            if ((pte & 4u) == 0u) {
+                return 0;
+            }
+
+            auto* ctxp = static_cast<SbrkUnmapCtx*>(vctx);
+            if (!ctxp || !ctxp->mem) {
+                return 0;
+            }
 
             uint32_t phys = pte & ~0xFFFu;
-            if (curr->mem->mem_pages > 0) curr->mem->mem_pages--;
-            if (phys && (pte & 0x200u) == 0) {
+
+            if (ctxp->mem->mem_pages > 0u) {
+                ctxp->mem->mem_pages--;
+            }
+
+            if (phys != 0u && (pte & 0x200u) == 0u) {
                 pmm_free_block((void*)phys);
             }
-        }
+
+            return 1;
+        };
+
+        paging_unmap_range_ex(curr->mem->page_dir, start_free, end_free, visitor, &ctx);
     }
 
     curr->mem->prog_break = new_brk;

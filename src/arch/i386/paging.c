@@ -10,6 +10,7 @@
 #include "paging.h"
 
 extern void smp_tlb_shootdown(uint32_t virt);
+extern void smp_tlb_shootdown_range(uint32_t start, uint32_t end);
 
 extern void load_page_directory(uint32_t*);
 extern void enable_paging(void);
@@ -63,13 +64,118 @@ static inline uint32_t* paging_pt_virt(uint32_t* dir, uint32_t virt) {
         return 0;
     }
 
-    /*
-     * PDE points to a page table.
-     *
-     * This implementation assumes page tables are identity-mapped, so the
-     * physical address can be treated as a usable pointer.
-     */
+    if ((dir[pd_idx] & (1u << 7)) != 0u) {
+        return 0;
+    }
+
     return (uint32_t*)(dir[pd_idx] & ~0xFFFu);
+}
+
+static inline int paging_pde_pt_phys_valid(uint32_t pde);
+
+static inline void paging_tlb_flush_range_local(uint32_t start, uint32_t end) {
+    if (end <= start) {
+        return;
+    }
+
+    start &= ~0xFFFu;
+    end = (end + 0xFFFu) & ~0xFFFu;
+
+    const uint32_t pages = (end - start) >> 12;
+    if (pages > 16u) {
+        uint32_t cr3;
+        __asm__ volatile(
+            "mov %%cr3, %0\n\t"
+            "mov %0, %%cr3"
+            : "=r"(cr3)
+            :
+            : "memory"
+        );
+
+        return;
+    }
+
+    for (uint32_t addr = start; addr < end; addr += 0x1000u) {
+        __asm__ volatile("invlpg (%0)" :: "r" (addr) : "memory");
+    }
+}
+
+void paging_unmap_range_ex(
+    uint32_t* dir,
+    uint32_t start_vaddr,
+    uint32_t end_vaddr,
+    paging_unmap_visitor_t visitor,
+    void* visitor_ctx
+) {
+    if (!dir) {
+        return;
+    }
+
+    if (end_vaddr <= start_vaddr) {
+        return;
+    }
+
+    const uint32_t start = start_vaddr & ~0xFFFu;
+    const uint32_t end = (end_vaddr + 0xFFFu) & ~0xFFFu;
+
+    if (end <= start) {
+        return;
+    }
+
+    uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
+
+    int any_unmapped = 0;
+
+    for (uint32_t virt = start; virt < end; virt += 0x1000u) {
+        const uint32_t pd_idx = virt >> 22;
+
+        const uint32_t pde = dir[pd_idx];
+        if ((pde & 1u) == 0u) {
+            continue;
+        }
+
+        if ((pde & (1u << 7)) != 0u) {
+            continue;
+        }
+
+        if (!paging_pde_pt_phys_valid(pde)) {
+            continue;
+        }
+
+        uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+        const uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+
+        const uint32_t pte = pt[pt_idx];
+        if ((pte & 1u) == 0u) {
+            continue;
+        }
+
+        if (visitor) {
+            if (!visitor(virt, pte, visitor_ctx)) {
+                continue;
+            }
+        }
+
+        pt[pt_idx] = 0u;
+        any_unmapped = 1;
+    }
+
+    spinlock_release_safe(&paging_lock, int_flags);
+
+    if (!any_unmapped) {
+        return;
+    }
+
+    if (dir == kernel_page_directory) {
+        smp_tlb_shootdown_range(start, end);
+        return;
+    }
+
+    paging_tlb_flush_range_local(start, end);
+}
+
+void paging_unmap_range(uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr) {
+    paging_unmap_range_ex(dir, start_vaddr, end_vaddr, 0, 0);
 }
 
 static inline int paging_pde_pt_phys_valid(uint32_t pde) {

@@ -79,12 +79,19 @@ uint32_t* paging_clone_directory(void);
 void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags);
 
 void paging_map_ex(
-    uint32_t* dir,
-    uint32_t virt,
-    uint32_t phys,
-    uint32_t flags,
+    uint32_t* dir, uint32_t virt,
+    uint32_t phys, uint32_t flags,
     uint32_t map_flags
 );
+
+typedef int (*paging_unmap_visitor_t)(uint32_t virt, uint32_t pte, void* ctx);
+
+void paging_unmap_range_ex(
+    uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr,
+    paging_unmap_visitor_t visitor, void* visitor_ctx
+);
+
+void paging_unmap_range(uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr);
 
 /* Zero a physical page, using a temporary fixmap mapping once paging is on. */
 void paging_zero_phys_page(uint32_t phys);

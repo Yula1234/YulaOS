@@ -380,27 +380,32 @@ static void unmap_range(uint32_t* page_dir, uint32_t start, uint32_t end) noexce
     const uint32_t aligned_start = align_down_4k(start);
     const uint32_t aligned_end = align_up_4k(end);
 
-    for (uint32_t v = start; v < end; v += page_size) {
-        uint32_t pte;
+    struct UnmapCtx {
+        uint32_t freed_pages = 0u;
+    } ctx{};
 
-        if (!paging_get_present_pte(page_dir, v, &pte)) {
-            continue;
-        }
-
+    auto visitor = [](uint32_t /*virt*/, uint32_t pte, void* vctx) -> int {
         if ((pte & 4u) == 0u) {
-            continue;
+            return 0;
         }
-
-        paging_map_ex(page_dir, v, 0u, 0u, PAGING_MAP_NO_TLB_FLUSH);
 
         uint32_t phys = pte & ~page_mask;
-
-        if ((pte & 0x200u) == 0u) {
+        if (phys != 0u && (pte & 0x200u) == 0u) {
             pmm_free_block((void*)phys);
         }
-    }
 
-    smp_tlb_shootdown_range(aligned_start, aligned_end);
+        auto* ctxp = static_cast<UnmapCtx*>(vctx);
+        if (ctxp) {
+            ctxp->freed_pages++;
+        }
+
+        return 1;
+    };
+
+    paging_unmap_range_ex(page_dir, start, end, visitor, &ctx);
+
+    (void)aligned_start;
+    (void)aligned_end;
 }
 
 static void release_region_file(vma_region_t* region) noexcept {
