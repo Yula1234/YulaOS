@@ -21,6 +21,7 @@
 
 #include <lib/hash_map.h>
 #include <lib/cpp/dlist.h>
+#include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/rbtree.h>
 #include <lib/cpp/unique_ptr.h>
@@ -83,9 +84,10 @@ using AllTasksList = kernel::CDBLinkedList<task_t, &task_t::all_tasks_node>;
 static AllTasksList all_tasks;
 
 static uint32_t total_tasks = 0;
-static uint32_t next_pid = 1;
+static kernel::atomic<uint32_t> g_next_pid{1u};
 
-static kernel::SpinLock proc_lock;
+static rwspinlock_t task_list_lock;
+static rwspinlock_t pgroup_lock;
 
 struct ProcGroup {
     uint32_t pgid = 0;
@@ -259,9 +261,14 @@ int proc_setsid(task_t* t) {
         return -1;
     }
 
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
+
+    kernel::ScopedIrqDisable irq_guard;
+
+    spinlock_acquire(&t->state_lock);
 
     if (t->pid == t->pgid) {
+        spinlock_release(&t->state_lock);
         return -1;
     }
 
@@ -273,6 +280,8 @@ int proc_setsid(task_t* t) {
         t->controlling_tty = nullptr;
     }
 
+    spinlock_release(&t->state_lock);
+
     return (int)t->sid;
 }
 
@@ -281,7 +290,7 @@ int proc_setpgid(task_t* t, uint32_t pgid) {
         return -1;
     }
 
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::pgroup_lock);
     return task_set_pgid_locked(t, pgid);
 }
 
@@ -298,7 +307,7 @@ int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
         return -1;
     }
 
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::pgroup_lock);
     ProcGroup* g = pgroup_find(pgid);
     if (!g) {
         return -1;
@@ -324,7 +333,7 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
         return 0;
     }
 
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::pgroup_lock);
 
     ProcGroup* g = pgroup_find(pgid);
     if (!g) {
@@ -597,7 +606,8 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
 
     uint32_t count = 0;
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+
+    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
 
     for (task_t& t : proc::detail::all_tasks) {
         if (count >= cap) {
@@ -608,9 +618,17 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
             continue;
         }
 
+        uint32_t parent_pid;
+        {
+            kernel::ScopedIrqDisable irq_guard;
+            spinlock_acquire(&t.state_lock);
+            parent_pid = t.parent_pid;
+            spinlock_release(&t.state_lock);
+        }
+
         yos_proc_info_t* e = &out[count++];
         e->pid = t.pid;
-        e->parent_pid = t.parent_pid;
+        e->parent_pid = parent_pid;
         e->state = (uint32_t)t.state;
         e->priority = (uint32_t)t.priority;
         e->mem_pages = (t.mem) ? t.mem->mem_pages : 0;
@@ -622,9 +640,11 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
 
 void proc_init(void) {
     proc::detail::total_tasks = 0;
-    proc::detail::next_pid = 1;
 
-    spinlock_init(proc::detail::proc_lock.native_handle());
+    proc::detail::g_next_pid.store(1u, kernel::memory_order::relaxed);
+
+    rwspinlock_init(&proc::detail::task_list_lock);
+    rwspinlock_init(&proc::detail::pgroup_lock);
 
     proc::detail::all_tasks.clear_links_unsafe();
 
@@ -1040,8 +1060,6 @@ static void proc_mem_release(proc_mem_t* mem) {
 }
 
 static task_t* alloc_task(void) {
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-    
     kernel::unique_ptr<task_t, proc::detail::KfreeDeleter<task_t>> t_guard(
         static_cast<task_t*>(kmalloc_a(sizeof(task_t)))
     );
@@ -1062,6 +1080,8 @@ static task_t* alloc_task(void) {
     dlist_init(&t->children_list);
     dlist_init(&t->sibling_node);
 
+    spinlock_init(&t->state_lock);
+
     if (!proc::detail::initial_fpu_state) {
         return 0;
     }
@@ -1081,7 +1101,12 @@ static task_t* alloc_task(void) {
 
     t->blocked_on_sem = 0;
     t->is_queued = 0;
-    t->pid = proc::detail::next_pid++;
+
+    t->pid = proc::detail::g_next_pid.fetch_add(1u, kernel::memory_order::relaxed);
+    if (t->pid == 0u) {
+        t->pid = proc::detail::g_next_pid.fetch_add(1u, kernel::memory_order::relaxed);
+    }
+
     t->state = TASK_RUNNABLE;
     t->cwd_inode = 1;
     t->term_mode = 0;
@@ -1092,10 +1117,17 @@ static task_t* alloc_task(void) {
     proc::detail::pid_map_insert(t->pid, t);
 
     t->sid = t->pid;
-    (void)proc::detail::task_set_pgid_locked(t, t->pid);
 
-    proc::detail::all_tasks.push_back(*t);
-    proc::detail::total_tasks++;
+    {
+        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::pgroup_lock);
+        (void)proc::detail::task_set_pgid_locked(t, t->pid);
+    }
+
+    {
+        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        proc::detail::all_tasks.push_back(*t);
+        proc::detail::total_tasks++;
+    }
 
     return t_guard.release();
 }
@@ -1112,11 +1144,39 @@ void proc_free_resources(task_t* t) {
     }
 
     {
-        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+        kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
 
+        kernel::ScopedIrqDisable irq_guard;
+        spinlock_acquire(&t->state_lock);
         proc::detail::task_pgroup_detach_locked(t);
+        spinlock_release(&t->state_lock);
+    }
 
-        proc::detail::task_parent_detach_locked(t);
+    {
+        kernel::ScopedIrqDisable irq_guard;
+        spinlock_acquire(&t->state_lock);
+        uint32_t parent_pid = t->parent_pid;
+        spinlock_release(&t->state_lock);
+
+        if (parent_pid != 0) {
+            task_t* parent = proc_find_by_pid(parent_pid);
+            if (parent) {
+                spinlock_acquire(&parent->state_lock);
+                spinlock_acquire(&t->state_lock);
+
+                if (t->parent_pid == parent_pid) {
+                    proc::detail::task_parent_detach_locked(t);
+                    t->parent_pid = 0;
+                }
+
+                spinlock_release(&t->state_lock);
+                spinlock_release(&parent->state_lock);
+            }
+        } else {
+            spinlock_acquire(&t->state_lock);
+            proc::detail::task_parent_detach_locked(t);
+            spinlock_release(&t->state_lock);
+        }
     }
 
     if (t->controlling_tty) {
@@ -1146,7 +1206,7 @@ void proc_free_resources(task_t* t) {
     memset(t->name, 0, sizeof(t->name));
     
     {
-        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
 
         dlist_del(&t->all_tasks_node);
         if (proc::detail::total_tasks > 0) {
@@ -1172,22 +1232,32 @@ void proc_kill(task_t* t) {
         t->wait_for_pid = 0;
     }
 
-    {
-        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
-        task_t* init = proc_find_by_pid(1);
+    task_t* init = proc_find_by_pid(1);
+    if (init && init != t) {
+        kernel::ScopedIrqDisable irq_guard;
 
         task_t* child = nullptr;
         task_t* next = nullptr;
 
+        spinlock_acquire(&init->state_lock);
+        spinlock_acquire(&t->state_lock);
+
         dlist_for_each_entry_safe(child, next, &t->children_list, sibling_node) {
+            spinlock_acquire(&child->state_lock);
+
             if (child->state == TASK_UNUSED) {
                 proc::detail::task_parent_detach_locked(child);
                 child->parent_pid = 0;
+                spinlock_release(&child->state_lock);
                 continue;
             }
 
             proc::detail::task_set_parent_locked(child, init);
+            spinlock_release(&child->state_lock);
         }
+
+        spinlock_release(&t->state_lock);
+        spinlock_release(&init->state_lock);
     }
 
     sem_remove_task(t);
@@ -1258,6 +1328,8 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
 }
 
 task_t* proc_get_list_head() {
+    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+
     if (proc::detail::all_tasks.empty()) {
         return 0;
     }
@@ -1265,11 +1337,12 @@ task_t* proc_get_list_head() {
     return &proc::detail::all_tasks.front();
 }
 uint32_t proc_task_count(void) {
+    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
     return proc::detail::total_tasks;
 }
 
 task_t* proc_task_at(uint32_t idx) {
-    kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
 
     uint32_t i = 0;
     for (task_t& curr : proc::detail::all_tasks) {
@@ -1366,9 +1439,18 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     t->stack_top = stack_top;
 
     {
-        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+        kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
+
+        kernel::ScopedIrqDisable irq_guard;
+
+        spinlock_acquire(&parent->state_lock);
+        spinlock_acquire(&t->state_lock);
+
         proc::detail::task_set_parent_locked(t, parent);
         proc::detail::task_inherit_process_context_locked(t, parent);
+
+        spinlock_release(&t->state_lock);
+        spinlock_release(&parent->state_lock);
     }
 
     t->mem = parent->mem;
@@ -1621,13 +1703,28 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
         t->term_mode = curr->term_mode;
 
         {
-            kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+            kernel::RwSpinLockNativeWriteSafeGuard pgrp_guard(proc::detail::pgroup_lock);
+
+            kernel::ScopedIrqDisable irq_guard;
+
+            spinlock_acquire(&curr->state_lock);
+            spinlock_acquire(&t->state_lock);
+
             proc::detail::task_set_parent_locked(t, curr);
             proc::detail::task_inherit_process_context_locked(t, curr);
+
+            spinlock_release(&t->state_lock);
+            spinlock_release(&curr->state_lock);
         }
     } else {
         t->cwd_inode = 1;
-        t->parent_pid = 0;
+
+        {
+            kernel::ScopedIrqDisable irq_guard;
+            spinlock_acquire(&t->state_lock);
+            t->parent_pid = 0;
+            spinlock_release(&t->state_lock);
+        }
     }
 
     if (curr) {
@@ -1882,7 +1979,7 @@ task_t* proc_create_idle(int cpu_index) {
     t->esp = sp;
 
     {
-        kernel::SpinLockSafeGuard guard(proc::detail::proc_lock);
+        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
 
         dlist_del(&t->all_tasks_node);
         if (proc::detail::total_tasks > 0) {

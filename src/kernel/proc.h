@@ -144,6 +144,8 @@ typedef struct task {
     uint8_t last_fault_int;
     uint8_t last_fault_pad[3];
 
+    spinlock_t state_lock;
+
     uint32_t parent_pid;
 
     dlist_head_t children_list;
