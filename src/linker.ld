@@ -20,6 +20,13 @@ SECTIONS
         *(.rodata*)
     }
 
+    .uaccess_fixup : ALIGN(4)
+    {
+        __uaccess_fixup_start = .;
+        KEEP(*(.uaccess_fixup))
+        __uaccess_fixup_end = .;
+    }
+
     .yosdrivers : ALIGN(8)
     {
         __yosdrivers_start = .;

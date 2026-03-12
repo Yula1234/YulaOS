@@ -215,20 +215,13 @@ static void syscall_open(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_read(registers_t* regs, task_t* curr) {
-    if (ensure_user_buffer_writable_mappable(curr, (void*)regs->ecx, (uint32_t)regs->edx)) {
-        int res = vfs_read((int)regs->ebx, (void*)regs->ecx, (uint32_t)regs->edx);
-        regs->eax = (uint32_t)res;
-    } else {
-        regs->eax = (uint32_t)-1;
-    }
+    int res = vfs_read((int)regs->ebx, (void*)regs->ecx, (uint32_t)regs->edx);
+    regs->eax = (uint32_t)res;
 }
 
 static void syscall_write(registers_t* regs, task_t* curr) {
-    if (check_user_buffer(curr, (void*)regs->ecx, (uint32_t)regs->edx)) {
-        regs->eax = (uint32_t)vfs_write((int)regs->ebx, (void*)regs->ecx, (uint32_t)regs->edx);
-    } else {
-        regs->eax = (uint32_t)-1;
-    }
+    int res = vfs_write((int)regs->ebx, (const void*)regs->ecx, (uint32_t)regs->edx);
+    regs->eax = (uint32_t)res;
 }
 
 static void syscall_close(registers_t* regs, task_t* curr) {

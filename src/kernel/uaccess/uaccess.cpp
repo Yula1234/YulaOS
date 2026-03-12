@@ -13,6 +13,98 @@
 
 namespace {
 
+typedef struct {
+    uint32_t fault_eip;
+    uint32_t fixup_eip;
+} uaccess_fixup_entry_t;
+
+#define UACCESS_FIXUP_ENTRY(fault_label, fixup_label) \
+    __attribute__((used, section(".uaccess_fixup"))) \
+    static const uaccess_fixup_entry_t __uaccess_fixup_##fault_label##_##fixup_label = { \
+        (uint32_t)(uintptr_t)&&fault_label, \
+        (uint32_t)(uintptr_t)&&fixup_label \
+    }
+
+__attribute__((no_instrument_function))
+static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32_t size) {
+    if (size == 0u) {
+        return 0;
+    }
+
+    if (!dst || !user_src) {
+        return -1;
+    }
+
+    uint8_t* d = (uint8_t*)dst;
+    const uint8_t* s = (const uint8_t*)user_src;
+
+    uint32_t n = size;
+
+fault_ld:
+    UACCESS_FIXUP_ENTRY(fault_ld, fixup);
+    __asm__ volatile(
+        "cld; rep movsb"
+        : "+D"(d), "+S"(s), "+c"(n)
+        :
+        : "memory", "cc"
+    );
+
+    return 0;
+
+fixup:
+    return -1;
+}
+
+__attribute__((no_instrument_function))
+static int uaccess_memcpy_to_user_impl(void* user_dst, const void* src, uint32_t size) {
+    if (size == 0u) {
+        return 0;
+    }
+
+    if (!user_dst || !src) {
+        return -1;
+    }
+
+    uint8_t* d = (uint8_t*)user_dst;
+    const uint8_t* s = (const uint8_t*)src;
+
+    uint32_t n = size;
+
+fault_st:
+    UACCESS_FIXUP_ENTRY(fault_st, fixup);
+    __asm__ volatile(
+        "cld; rep movsb"
+        : "+D"(d), "+S"(s), "+c"(n)
+        :
+        : "memory", "cc"
+    );
+
+    return 0;
+
+fixup:
+    return -1;
+}
+
+extern "C" int uaccess_copy_from_user(void* dst, const void* user_src, uint32_t size) {
+    task_t* curr = proc_current();
+
+    if (!uaccess_check_user_buffer(curr, user_src, size)) {
+        return -1;
+    }
+
+    return uaccess_memcpy_from_user_impl(dst, user_src, size);
+}
+
+extern "C" int uaccess_copy_to_user(void* user_dst, const void* src, uint32_t size) {
+    task_t* curr = proc_current();
+
+    if (!uaccess_check_user_buffer(curr, user_dst, size)) {
+        return -1;
+    }
+
+    return uaccess_memcpy_to_user_impl(user_dst, src, size);
+}
+
 static int check_user_range_basic(task_t* task, uintptr_t start, uintptr_t end_excl) {
     if (!task || !task->mem || !task->mem->page_dir) {
         return 0;
@@ -80,29 +172,13 @@ static int check_user_buffer_present_impl(task_t* task, uintptr_t start, uintptr
         return 0;
     }
 
+    (void)require_writable;
+
     if (end_excl <= start) {
         return 1;
     }
 
-    uint32_t v = (uint32_t)start & ~0xFFFu;
-    const uint32_t v_end = ((uint32_t)end_excl + 0xFFFu) & ~0xFFFu;
-
-    for (; v < v_end; v += 4096u) {
-        uint32_t pte;
-        if (!paging_get_present_pte(task->mem->page_dir, v, &pte)) {
-            return 0;
-        }
-
-        if ((pte & 4u) == 0u) {
-            return 0;
-        }
-
-        if (require_writable && ((pte & 2u) == 0u)) {
-            return 0;
-        }
-    }
-
-    return 1;
+    return check_user_range_basic(task, start, end_excl);
 }
 
 }

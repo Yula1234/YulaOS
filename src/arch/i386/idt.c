@@ -28,6 +28,32 @@
 
 #include <mm/vma.h>
 
+typedef struct {
+    uint32_t fault_eip;
+    uint32_t fixup_eip;
+} uaccess_fixup_entry_t;
+
+extern uaccess_fixup_entry_t __uaccess_fixup_start[];
+extern uaccess_fixup_entry_t __uaccess_fixup_end[];
+
+static int uaccess_try_fixup_fault(registers_t* regs) {
+    if (!regs) {
+        return 0;
+    }
+
+    uaccess_fixup_entry_t* p = __uaccess_fixup_start;
+    uaccess_fixup_entry_t* e = __uaccess_fixup_end;
+    while (p < e) {
+        if (p->fault_eip == regs->eip) {
+            regs->eip = p->fixup_eip;
+            return 1;
+        }
+        p++;
+    }
+
+    return 0;
+}
+
 /*
  * IDT gate descriptor (32-bit interrupt/trap gate).
  *
@@ -584,6 +610,12 @@ void isr_handler(registers_t* regs) {
                         sched_yield();
                         goto out;
                     }
+                }
+            }
+
+            if (!handled && is_kernel_access_to_user) {
+                if (uaccess_try_fixup_fault(regs)) {
+                    handled = 1;
                 }
             }
 

@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include <kernel/proc.h>
+#include <kernel/uaccess/uaccess.h>
 #include <hal/lock.h>
 #include <mm/heap.h>
 
@@ -22,6 +23,19 @@ extern "C" {
 struct vfs_fs_instance;
 
 namespace {
+
+static int vfs_copy_to_user(void* user_dst, const void* src, uint32_t size) noexcept {
+    return uaccess_copy_to_user(user_dst, src, size);
+}
+
+static int vfs_copy_from_user(void* dst, const void* user_src, uint32_t size) noexcept {
+    return uaccess_copy_from_user(dst, user_src, size);
+}
+
+static uint32_t vfs_io_chunk_size(uint32_t remaining) noexcept {
+    const uint32_t max_chunk = 16u * 1024u;
+    return (remaining < max_chunk) ? remaining : max_chunk;
+}
 
 /*
  * Hold a proc file descriptor reference for the duration of a VFS operation.
@@ -2401,19 +2415,57 @@ extern "C" int vfs_read(int fd, void* buf, uint32_t size) {
         return -1;
     }
 
+    if (size != 0u && !buf) {
+        return -1;
+    }
+
     uint32_t off;
     {
         kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
         off = d.get()->offset;
     }
 
-    const int res = d.get()->node->ops->read(d.get()->node, off, size, buf);
-    if (res > 0) {
-        kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
-        d.get()->offset = off + (uint32_t)res;
+    uint8_t* kbuf = (uint8_t*)kmalloc(vfs_io_chunk_size(size));
+    if (!kbuf && size != 0u) {
+        return -1;
     }
 
-    return res;
+    int total = 0;
+    uint32_t done = 0;
+    while (done < size) {
+        const uint32_t chunk = vfs_io_chunk_size(size - done);
+
+        const int r = d.get()->node->ops->read(d.get()->node, off + done, chunk, kbuf);
+        if (r <= 0) {
+            if (total == 0) {
+                total = r;
+            }
+            break;
+        }
+
+        if (vfs_copy_to_user((uint8_t*)buf + done, kbuf, (uint32_t)r) != 0) {
+            total = -1;
+            break;
+        }
+
+        done += (uint32_t)r;
+        total += r;
+
+        if ((uint32_t)r < chunk) {
+            break;
+        }
+    }
+
+    if (kbuf) {
+        kfree(kbuf);
+    }
+
+    if (total > 0) {
+        kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
+        d.get()->offset = off + (uint32_t)total;
+    }
+
+    return total;
 }
 
 extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
@@ -2434,6 +2486,10 @@ extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
         return -1;
     }
 
+    if (size != 0u && !buf) {
+        return -1;
+    }
+
     uint32_t fflags;
     uint32_t off;
     {
@@ -2446,30 +2502,99 @@ extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
         vfs_fs_instance* inst = (vfs_fs_instance*)d.get()->node->fs_driver;
 
         if (inst && inst->type && inst->type->ops && inst->type->ops->append) {
-            uint32_t new_offset = 0;
+            uint8_t* kbuf = (uint8_t*)kmalloc(vfs_io_chunk_size(size));
+            if (!kbuf && size != 0u) {
+                return -1;
+            }
 
-            const int res = inst->type->ops->append(
-                inst, curr,
-                d.get()->node,
-                buf, size,
-                &new_offset
-            );
-            if (res > 0) {
+            int total = 0;
+            uint32_t done = 0;
+            uint32_t new_offset = off;
+            while (done < size) {
+                const uint32_t chunk = vfs_io_chunk_size(size - done);
+
+                if (vfs_copy_from_user(kbuf, (const uint8_t*)buf + done, chunk) != 0) {
+                    total = -1;
+                    break;
+                }
+
+                uint32_t chunk_new_offset = 0;
+                const int w = inst->type->ops->append(
+                    inst, curr,
+                    d.get()->node,
+                    kbuf, chunk,
+                    &chunk_new_offset
+                );
+                if (w <= 0) {
+                    if (total == 0) {
+                        total = w;
+                    }
+                    break;
+                }
+
+                done += (uint32_t)w;
+                total += w;
+                new_offset = chunk_new_offset;
+
+                if ((uint32_t)w < chunk) {
+                    break;
+                }
+            }
+
+            if (kbuf) {
+                kfree(kbuf);
+            }
+
+            if (total > 0) {
                 kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
                 d.get()->offset = new_offset;
             }
 
-            return res;
+            return total;
         }
     }
 
-    const int res = d.get()->node->ops->write(d.get()->node, off, size, buf);
-    if (res > 0) {
-        kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
-        d.get()->offset = off + (uint32_t)res;
+    uint8_t* kbuf = (uint8_t*)kmalloc(vfs_io_chunk_size(size));
+    if (!kbuf && size != 0u) {
+        return -1;
     }
 
-    return res;
+    int total = 0;
+    uint32_t done = 0;
+    while (done < size) {
+        const uint32_t chunk = vfs_io_chunk_size(size - done);
+
+        if (vfs_copy_from_user(kbuf, (const uint8_t*)buf + done, chunk) != 0) {
+            total = -1;
+            break;
+        }
+
+        const int w = d.get()->node->ops->write(d.get()->node, off + done, chunk, kbuf);
+        if (w <= 0) {
+            if (total == 0) {
+                total = w;
+            }
+            break;
+        }
+
+        done += (uint32_t)w;
+        total += w;
+
+        if ((uint32_t)w < chunk) {
+            break;
+        }
+    }
+
+    if (kbuf) {
+        kfree(kbuf);
+    }
+
+    if (total > 0) {
+        kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
+        d.get()->offset = off + (uint32_t)total;
+    }
+
+    return total;
 }
 
 extern "C" int vfs_ioctl(int fd, uint32_t req, void* arg) {
