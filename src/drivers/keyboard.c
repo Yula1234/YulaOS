@@ -82,7 +82,14 @@ int kbd_poll_ready(task_t* task) {
         if (focus_pid > 0 && task->pid != focus_pid) {
             task_t* focused_task = proc_find_by_pid(focus_pid);
             if (!kbd_should_handover_focus(task, focused_task)) {
+                if (focused_task) {
+                    proc_task_put(focused_task);
+                }
                 return 0;
+            }
+
+            if (focused_task) {
+                proc_task_put(focused_task);
             }
             input_focus_set_pid(task->pid);
         }
@@ -250,6 +257,7 @@ out_unlock:
 
         if (target_task) {
             if (target_task->term_mode == 0) {
+                proc_task_put(target_task);
                 send_key_to_focused(0x03);
                 return;
             }
@@ -261,6 +269,7 @@ out_unlock:
                     if (t) {
                         t->pending_signals |= (1 << 2);
                         proc_wake(t);
+                        proc_task_put(t);
                     }
                 } else {
                     target_task->pending_signals |= (1 << 2);
@@ -268,6 +277,8 @@ out_unlock:
                 }
                 send_key_to_focused(0x03);
             }
+
+            proc_task_put(target_task);
         }
         return;
     }
@@ -276,8 +287,13 @@ out_unlock:
         uint32_t focus_pid = input_focus_get_pid();
         task_t* target_task = proc_find_by_pid(focus_pid);
         if (target_task && target_task->term_mode == 0) {
+            proc_task_put(target_task);
             send_key_to_focused(send_code_term0);
             return;
+        }
+
+        if (target_task) {
+            proc_task_put(target_task);
         }
     }
 
@@ -336,9 +352,16 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
             if (focus_pid > 0 && curr && (int)curr->pid != focus_pid) {
                 task_t* focused_task = proc_find_by_pid((uint32_t)focus_pid);
                 if (!kbd_should_handover_focus(curr, focused_task)) {
+                    if (focused_task) {
+                        proc_task_put(focused_task);
+                    }
                     uint32_t target = timer_ticks + 5;
                     proc_sleep_add(curr, target);
                     continue;
+                }
+
+                if (focused_task) {
+                    proc_task_put(focused_task);
                 }
                 input_focus_set_pid(curr->pid);
             }
@@ -363,7 +386,14 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
                 }
 
                 if (!block_for_focus) {
+                    if (focused_task) {
+                        proc_task_put(focused_task);
+                    }
                     break;
+                }
+
+                if (focused_task) {
+                    proc_task_put(focused_task);
                 }
 
                 uint32_t target = timer_ticks + 5;
@@ -398,6 +428,10 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
                 curr->terminal &&
                 focused_task->terminal != curr->terminal) {
                 block_for_focus = 1;
+            }
+
+            if (focused_task) {
+                proc_task_put(focused_task);
             }
 
             if (block_for_focus) {

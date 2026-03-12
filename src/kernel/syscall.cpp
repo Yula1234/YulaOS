@@ -335,6 +335,7 @@ static void syscall_kill(registers_t* regs, task_t* curr) {
 
     if (t == curr) {
         proc_kill(t);
+        proc_task_put(t);
         sched_yield();
         regs->eax = 0;
         return;
@@ -355,10 +356,12 @@ static void syscall_kill(registers_t* regs, task_t* curr) {
         } else {
             regs->eax = (uint32_t)-1;
         }
+        proc_task_put(t);
         return;
     }
 
     proc_kill(t);
+    proc_task_put(t);
     regs->eax = 0;
 }
 
@@ -1553,16 +1556,19 @@ static void syscall_setpgid(registers_t* regs, task_t* curr) {
     }
 
     if (target->sid != curr->sid) {
+        proc_task_put(target);
         regs->eax = (uint32_t)-1;
         return;
     }
 
     if (target != curr && target->parent_pid != curr->pid) {
+        proc_task_put(target);
         regs->eax = (uint32_t)-1;
         return;
     }
 
     regs->eax = (uint32_t)proc_setpgid(target, pgid);
+    proc_task_put(target);
 }
 
 static void syscall_getpgrp(registers_t* regs, task_t* curr) {

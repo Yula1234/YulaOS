@@ -529,6 +529,10 @@ int ipc_accept(struct vfs_node* listen_node,
             if (!t || t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
                 ok = false;
             }
+
+            if (t) {
+                proc_task_put(t);
+            }
         }
 
         if (!ok) {

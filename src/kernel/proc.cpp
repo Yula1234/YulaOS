@@ -647,11 +647,26 @@ private:
 
 static void pid_map_insert(uint32_t pid, task_t* t) {
     if (!t) return;
-    (void)pid_map.insert_or_assign(pid, t);
+
+    if (!::proc_task_retain(t)) {
+        return;
+    }
+
+    const auto res = pid_map.insert_unique_ex(pid, t);
+    if (res != decltype(pid_map)::InsertUniqueResult::Inserted) {
+        ::proc_task_put(t);
+    }
 }
 
 static void pid_map_remove(uint32_t pid) {
-    (void)pid_map.remove(pid);
+    task_t* removed = nullptr;
+    if (!pid_map.remove_and_get(pid, removed)) {
+        return;
+    }
+
+    if (removed) {
+        ::proc_task_put(removed);
+    }
 }
 
 }
@@ -1042,11 +1057,67 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
 }
 
 task_t* proc_find_by_pid(uint32_t pid) {
-    task_t* t = 0;
-    if (!proc::detail::pid_map.try_get(pid, t)) {
+    task_t* out = nullptr;
+
+    if (!proc::detail::pid_map.with_value_locked(
+        pid,
+        [&out](task_t* t) -> bool {
+            if (!t || t->state == TASK_UNUSED) {
+                return false;
+            }
+
+            if (!proc_task_retain(t)) {
+                return false;
+            }
+            out = t;
+            return true;
+        }
+    )) {
+        return nullptr;
+    }
+
+    return out;
+}
+
+int proc_task_retain(task_t* t) {
+    if (!t) {
         return 0;
     }
-    return t;
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&t->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            return 0;
+        }
+
+        if (__atomic_compare_exchange_n(
+            &t->refs,
+            &expected,
+            expected + 1u,
+            0,
+            __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED
+        )) {
+            return 1;
+        }
+    }
+}
+
+void proc_task_put(task_t* t) {
+    if (!t) {
+        return;
+    }
+
+    const uint32_t old = __sync_fetch_and_sub(&t->refs, 1u);
+    if (old == 0u) {
+        __sync_fetch_and_add(&t->refs, 1u);
+        return;
+    }
+    if (old != 1u) {
+        return;
+    }
+
+    kfree(t);
 }
 
 static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
@@ -1178,6 +1249,8 @@ static task_t* alloc_task(void) {
     t->blocked_on_sem = 0;
     t->is_queued = 0;
 
+    t->refs = 1u;
+
     t->pid = proc::detail::g_next_pid.fetch_add(1u, kernel::memory_order::relaxed);
     if (t->pid == 0u) {
         t->pid = proc::detail::g_next_pid.fetch_add(1u, kernel::memory_order::relaxed);
@@ -1247,6 +1320,8 @@ void proc_free_resources(task_t* t) {
 
                 spinlock_release(&t->state_lock);
                 spinlock_release(&parent->state_lock);
+
+                proc_task_put(parent);
             }
         } else {
             spinlock_acquire(&t->state_lock);
@@ -1290,7 +1365,7 @@ void proc_free_resources(task_t* t) {
         }
     }
 
-    kfree(t);
+    proc_task_put(t);
 }
 
 void proc_kill(task_t* t) {
@@ -1304,6 +1379,8 @@ void proc_kill(task_t* t) {
             if (old == 0) {
                 __sync_fetch_and_add(&waited->exit_waiters, 1);
             }
+
+            proc_task_put(waited);
         }
         t->wait_for_pid = 0;
     }
@@ -1334,6 +1411,10 @@ void proc_kill(task_t* t) {
 
         spinlock_release(&t->state_lock);
         spinlock_release(&init->state_lock);
+    }
+
+    if (init) {
+        proc_task_put(init);
     }
 
     sem_remove_task(t);
@@ -1953,6 +2034,8 @@ void proc_wait(uint32_t pid) {
         waiter->wait_for_pid = 0;
     }
     __sync_fetch_and_sub(&target->exit_waiters, 1);
+
+    proc_task_put(target);
 }
 
 int proc_waitpid(uint32_t pid, int* out_status) {
@@ -1977,6 +2060,8 @@ int proc_waitpid(uint32_t pid, int* out_status) {
     }
 
     __sync_fetch_and_sub(&target->exit_waiters, 1);
+
+    proc_task_put(target);
     return 0;
 }
 

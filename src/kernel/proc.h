@@ -174,6 +174,8 @@ typedef struct task {
     spinlock_t poll_lock;
     dlist_head_t poll_waiters;
 
+    volatile uint32_t refs;
+
     volatile uint32_t exit_waiters;
     int exit_status;
     semaphore_t exit_sem; 
@@ -218,6 +220,9 @@ uint32_t proc_task_count(void);
 task_t* proc_task_at(uint32_t idx);
 task_t* proc_create_idle(int cpu_index);
 task_t* proc_find_by_pid(uint32_t pid);
+
+int proc_task_retain(task_t* t);
+void proc_task_put(task_t* t);
 
 void proc_sleep_remove(task_t* t);
 void proc_check_sleepers(uint32_t current_tick);
