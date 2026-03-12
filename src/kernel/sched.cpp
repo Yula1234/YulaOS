@@ -319,14 +319,16 @@ void sched_yield(void) {
 
             fpu_restore(next->fpu_state);
 
-            irq_guard.restore();
-
             if (prev) {
                 ctx_switch(&prev->esp, next->esp);
-            } else {
-                ctx_start(next->esp);
+                irq_guard.restore();
+                return;
             }
-            return;
+
+            irq_guard.restore();
+            
+            ctx_start(next->esp);
+            __builtin_unreachable();
         }
 
         me->current_task = nullptr;
