@@ -8,10 +8,13 @@
 #include "../drivers/vga.h"
 
 #include "../kernel/proc.h"
+#include "../kernel/panic.h"
+#include "../kernel/output/kprintf.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 
 #include <hal/lock.h>
+#include <lib/cpp/atomic.h>
 #include <lib/rbtree.h>
 
 #define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
@@ -35,6 +38,11 @@ public:
     struct State {
         static constexpr int inode_table_cache_slots = 4;
         static constexpr int scratch_slots = 4;
+
+        struct InodeRuntimeState {
+            kernel::atomic<uint32_t> open_refs{0};
+            kernel::atomic<uint32_t> runtime_flags{0};
+        };
 
         struct InodeTableCacheSlot {
             uint32_t lba;
@@ -65,6 +73,9 @@ public:
         uint8_t yfs_scratch[scratch_slots][YFS_BLOCK_SIZE];
         uint8_t yfs_scratch_used[scratch_slots];
         spinlock_t yfs_scratch_lock;
+
+        InodeRuntimeState* inode_state;
+        uint32_t inode_state_count;
     };
 
     void init();
@@ -162,6 +173,9 @@ static uint8_t (&yfs_scratch_used)[yfs::FileSystem::State::scratch_slots] =
     yfs_state.yfs_scratch_used;
 static spinlock_t& yfs_scratch_lock = yfs_state.yfs_scratch_lock;
 
+static yfs::FileSystem::State::InodeRuntimeState*& inode_state = yfs_state.inode_state;
+static uint32_t& inode_state_count = yfs_state.inode_state_count;
+
 static uint8_t* yfs_scratch_acquire(int* out_slot) {
     return yfs::g_fs.scratch_acquire(out_slot);
 }
@@ -192,6 +206,37 @@ static inline void clr_bit(uint8_t* map, int i) {
 
 static inline int chk_bit(uint8_t* map, int i) {
     return (map[i / 8] & (1u << (i % 8))) != 0u;
+}
+
+static inline yfs::FileSystem::State::InodeRuntimeState* inode_rt(yfs_ino_t ino) {
+    if (ino == 0 || ino >= inode_state_count || !inode_state) {
+        return nullptr;
+    }
+
+    return &inode_state[ino];
+}
+
+static void inode_state_init_or_panic(uint32_t total_inodes) {
+    if (total_inodes == 0) {
+        panic("yulafs: invalid inode_state size");
+    }
+
+    if (inode_state) {
+        kfree(inode_state);
+        inode_state = nullptr;
+        inode_state_count = 0;
+    }
+
+    inode_state = static_cast<yfs::FileSystem::State::InodeRuntimeState*>(
+        kmalloc(sizeof(*inode_state) * total_inodes)
+    );
+    if (!inode_state) {
+        kprintf("yulafs: OOM allocating inode runtime state (%u inodes)\n", total_inodes);
+        panic("yulafs: OOM allocating inode runtime state");
+    }
+
+    memset(inode_state, 0, sizeof(*inode_state) * total_inodes);
+    inode_state_count = total_inodes;
 }
 
 /* Stable ordering for (parent,name) keys. */
@@ -896,6 +941,103 @@ static void truncate_inode(yfs_inode_t* node) {
     node->size = 0;
 }
 
+static void clear_inode_to_free(yfs_ino_t ino, yfs_inode_t* node) {
+    if (!node) {
+        return;
+    }
+
+    memset(node, 0, sizeof(*node));
+    node->id = ino;
+    node->type = YFS_TYPE_FREE;
+}
+
+static int inode_finalize_deferred_delete_locked(yfs_ino_t ino, yfs_inode_t* node) {
+    if (!node) {
+        return -1;
+    }
+
+    truncate_inode(node);
+    clear_inode_to_free(ino, node);
+    sync_inode(ino, node, 1);
+
+    free_inode(ino);
+
+    flush_bitmap_cache();
+    flush_sb();
+
+    return 0;
+}
+
+static void orphan_inode_cleanup(void) {
+    if (!fs_mounted || sb.magic != YFS_MAGIC) {
+        return;
+    }
+
+    if (!inode_state || inode_state_count != sb.total_inodes) {
+        return;
+    }
+
+    const uint32_t bits_per_block = YFS_BLOCK_SIZE * 8u;
+    const uint32_t map_blocks = (sb.total_inodes + bits_per_block - 1u) / bits_per_block;
+
+    uint8_t* map = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!map) {
+        panic("yulafs: OOM during orphan cleanup");
+    }
+
+    int freed_any = 0;
+    for (uint32_t blk = 0; blk < map_blocks; blk++) {
+        if (!bcache_read(sb.map_inode_start + blk, map)) {
+            continue;
+        }
+
+        for (uint32_t bit = 0; bit < bits_per_block; bit++) {
+            const uint32_t ino_u32 = blk * bits_per_block + bit;
+            if (ino_u32 == 0 || ino_u32 >= sb.total_inodes) {
+                continue;
+            }
+
+            if (!chk_bit(map, (int)bit)) {
+                continue;
+            }
+
+            const yfs_ino_t ino = static_cast<yfs_ino_t>(ino_u32);
+            yfs_inode_t node;
+            if (!sync_inode(ino, &node, 0)) {
+                continue;
+            }
+
+            if ((node.flags & YFS_INODE_F_DEFERRED_DELETE) == 0u) {
+                continue;
+            }
+
+            rwlock_t* lock = get_inode_lock(ino);
+            rwlock_acquire_write(lock);
+
+            if (!sync_inode(ino, &node, 0)) {
+                rwlock_release_write(lock);
+                continue;
+            }
+
+            if ((node.flags & YFS_INODE_F_DEFERRED_DELETE) == 0u) {
+                rwlock_release_write(lock);
+                continue;
+            }
+
+            (void)inode_finalize_deferred_delete_locked(ino, &node);
+            rwlock_release_write(lock);
+
+            freed_any = 1;
+        }
+    }
+
+    kfree(map);
+
+    if (freed_any) {
+        bcache_sync();
+    }
+}
+
 static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
     /*
      * dir_find() runs unlocked; higher layers decide when to take inode locks.
@@ -991,8 +1133,8 @@ static int dir_link(yfs_ino_t dir_ino, yfs_ino_t child_ino, const char* name) {
 
 static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
     /*
-     * Unlink is destructive: truncate + free inode.
-     * No link count semantics.
+     * Unlink drops the directory entry.
+     * The inode may stay alive until the last open reference is released.
      */
     rwlock_t* lock = get_inode_lock(dir_ino);
     rwlock_acquire_write(lock);
@@ -1021,17 +1163,30 @@ static int dir_unlink(yfs_ino_t dir_ino, const char* name) {
         for (uint32_t j = 0; j < entries_per_block; j++) {
             if (entries[j].inode != 0 && strcmp(entries[j].name, name) == 0) {
                 yfs_ino_t child_id = entries[j].inode;
-                yfs_inode_t child;
-                sync_inode(child_id, &child, 0);
-
-                truncate_inode(&child);
-                free_inode(child_id);
-
                 entries[j].inode = 0;
+                memset(entries[j].name, 0, YFS_NAME_MAX);
                 bcache_write(lba, (uint8_t*)entries);
 
-                flush_bitmap_cache();
-                flush_sb();
+                yfs_inode_t child;
+
+                rwlock_t* child_lock = get_inode_lock(child_id);
+                rwlock_acquire_write(child_lock);
+
+                if (sync_inode(child_id, &child, 0)) {
+                    const yfs::FileSystem::State::InodeRuntimeState* rt = inode_rt(child_id);
+                    const uint32_t open_refs = rt
+                        ? rt->open_refs.load(kernel::memory_order::acquire)
+                        : 0u;
+
+                    if (open_refs == 0u) {
+                        (void)inode_finalize_deferred_delete_locked(child_id, &child);
+                    } else {
+                        child.flags |= YFS_INODE_F_DEFERRED_DELETE;
+                        sync_inode(child_id, &child, 1);
+                    }
+                }
+
+                rwlock_release_write(child_lock);
 
                 kfree(entries);
                 rwlock_release_write(lock);
@@ -1395,6 +1550,8 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     last_free_blk_hint = 0;
     last_free_ino_hint = 2;
 
+    inode_state_init_or_panic(sb.total_inodes);
+
     spinlock_init(&dcache_lock);
     if (dcache_root.rb_node) {
         rb_free_tree(dcache_root.rb_node);
@@ -1464,7 +1621,83 @@ void yfs::FileSystem::init() {
         fs_mounted = 1;
         last_free_blk_hint = 0;
         last_free_ino_hint = 1;
+
+        inode_state_init_or_panic(sb.total_inodes);
+        orphan_inode_cleanup();
     }
+}
+
+static void inode_get_open(yfs_ino_t ino) {
+    auto* rt = inode_rt(ino);
+    if (!rt) {
+        return;
+    }
+
+    rt->open_refs.fetch_add(1u, kernel::memory_order::acquire);
+}
+
+static uint32_t inode_put_open(yfs_ino_t ino) {
+    auto* rt = inode_rt(ino);
+    if (!rt) {
+        return 0;
+    }
+
+    const uint32_t prev = rt->open_refs.fetch_sub(1u, kernel::memory_order::release);
+    if (prev == 0u) {
+        panic("yulafs: inode open_refs underflow");
+    }
+
+    return prev - 1u;
+}
+
+static int inode_finalize_if_needed(yfs_ino_t ino) {
+    yfs_inode_t node;
+    if (!sync_inode(ino, &node, 0)) {
+        return -1;
+    }
+
+    if ((node.flags & YFS_INODE_F_DEFERRED_DELETE) == 0u) {
+        return 0;
+    }
+
+    rwlock_t* lock = get_inode_lock(ino);
+    rwlock_acquire_write(lock);
+
+    if (!sync_inode(ino, &node, 0)) {
+        rwlock_release_write(lock);
+        return -1;
+    }
+
+    if ((node.flags & YFS_INODE_F_DEFERRED_DELETE) == 0u) {
+        rwlock_release_write(lock);
+        return 0;
+    }
+
+    const int rc = inode_finalize_deferred_delete_locked(ino, &node);
+    rwlock_release_write(lock);
+    return rc;
+}
+
+int yulafs_inode_open(yfs_ino_t ino) {
+    if (!fs_mounted) {
+        return -1;
+    }
+
+    inode_get_open(ino);
+    return 0;
+}
+
+int yulafs_inode_close(yfs_ino_t ino) {
+    if (!fs_mounted) {
+        return -1;
+    }
+
+    const uint32_t refs = inode_put_open(ino);
+    if (refs == 0u) {
+        return inode_finalize_if_needed(ino);
+    }
+
+    return 0;
 }
 
 void yulafs_init(void) {

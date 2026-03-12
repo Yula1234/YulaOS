@@ -68,6 +68,8 @@ typedef struct {
     uint8_t padding[44];
 } __attribute__((packed)) yfs_inode_t;
 
+#define YFS_INODE_F_DEFERRED_DELETE 1u
+
 typedef struct {
     yfs_ino_t inode;
     char name[YFS_NAME_MAX];
@@ -109,6 +111,9 @@ int yulafs_lookup(const char* path);
 
 int yulafs_stat(yfs_ino_t ino, yfs_inode_t* out);
 void yulafs_resize(yfs_ino_t ino, uint32_t new_size);
+
+int yulafs_inode_open(yfs_ino_t ino);
+int yulafs_inode_close(yfs_ino_t ino);
 
 int yulafs_lookup_in_dir(yfs_ino_t dir_ino, const char* name);
 

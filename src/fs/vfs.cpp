@@ -847,11 +847,27 @@ static int yfs_write_wrapper(vfs_node_t* node, uint32_t offset, uint32_t size, c
     return yulafs_write(node->inode_idx, buffer, offset, size);
 }
 
+static int yfs_open_wrapper(vfs_node_t* node) {
+    if (!node) {
+        return -1;
+    }
+
+    return yulafs_inode_open((yfs_ino_t)node->inode_idx);
+}
+
+static int yfs_close_wrapper(vfs_node_t* node) {
+    if (!node) {
+        return -1;
+    }
+
+    return yulafs_inode_close((yfs_ino_t)node->inode_idx);
+}
+
 static vfs_ops_t yfs_vfs_ops = {
     yfs_read_wrapper,
     yfs_write_wrapper,
-    0,
-    0,
+    yfs_open_wrapper,
+    yfs_close_wrapper,
     0,
     0,
 };
@@ -2670,6 +2686,14 @@ extern "C" vfs_node_t* vfs_create_node_from_path(const char* path) {
 
     if (node) {
         vfs_node_bind_instance(node, resolved.mount->instance);
+
+        if (node->ops && node->ops->open) {
+            const int rc = node->ops->open(node);
+            if (rc != 0) {
+                vfs_node_release(node);
+                return nullptr;
+            }
+        }
     }
 
     return node;
