@@ -136,6 +136,7 @@ static inline int mutex_try_lock(mutex_t* m) {
 typedef struct {
     semaphore_t lock;
     semaphore_t write_sem;
+    semaphore_t turnstile;
     int readers;
 } rwlock_t;
 
@@ -149,6 +150,10 @@ typedef struct {
     volatile uint32_t state;
 } rwspinlock_t;
 
+#define RWSPINLOCK_WRITER_ACTIVE  0x80000000u
+#define RWSPINLOCK_WRITER_PENDING 0x40000000u
+#define RWSPINLOCK_READER_MASK    0x3FFFFFFFu
+
 static inline void rwspinlock_init(rwspinlock_t* rw) {
     rw->state = 0u;
 }
@@ -158,7 +163,7 @@ static inline void rwspinlock_acquire_read(rwspinlock_t* rw) {
 
     for (;;) {
         uint32_t s = __atomic_load_n(&rw->state, __ATOMIC_ACQUIRE);
-        if ((s & 0x80000000u) != 0u) {
+        if ((s & (RWSPINLOCK_WRITER_ACTIVE | RWSPINLOCK_WRITER_PENDING)) != 0u) {
             for (uint32_t i = 0; i < backoff; i++) {
                 __asm__ volatile("pause" ::: "memory");
             }
@@ -170,7 +175,7 @@ static inline void rwspinlock_acquire_read(rwspinlock_t* rw) {
             continue;
         }
 
-        if ((s & 0x7FFFFFFFu) == 0x7FFFFFFFu) {
+        if ((s & RWSPINLOCK_READER_MASK) == RWSPINLOCK_READER_MASK) {
             __asm__ volatile("pause" ::: "memory");
             continue;
         }
@@ -195,19 +200,23 @@ static inline void rwspinlock_release_read(rwspinlock_t* rw) {
 static inline void rwspinlock_acquire_write(rwspinlock_t* rw) {
     uint32_t backoff = 1;
 
+    __atomic_fetch_or(&rw->state, RWSPINLOCK_WRITER_PENDING, __ATOMIC_RELAXED);
+
     for (;;) {
-        uint32_t expected = 0u;
+        uint32_t expected = RWSPINLOCK_WRITER_PENDING;
 
         if (__atomic_compare_exchange_n(
                 &rw->state,
                 &expected,
-                0x80000000u,
+                RWSPINLOCK_WRITER_ACTIVE,
                 0,
                 __ATOMIC_ACQ_REL,
                 __ATOMIC_ACQUIRE
             )) {
             return;
         }
+
+        __atomic_fetch_or(&rw->state, RWSPINLOCK_WRITER_PENDING, __ATOMIC_RELAXED);
 
         for (uint32_t i = 0; i < backoff; i++) {
             __asm__ volatile("pause" ::: "memory");
@@ -220,7 +229,7 @@ static inline void rwspinlock_acquire_write(rwspinlock_t* rw) {
 }
 
 static inline void rwspinlock_release_write(rwspinlock_t* rw) {
-    __atomic_store_n(&rw->state, 0u, __ATOMIC_RELEASE);
+    __atomic_fetch_and(&rw->state, ~RWSPINLOCK_WRITER_ACTIVE, __ATOMIC_RELEASE);
 }
 
 static inline uint32_t rwspinlock_acquire_read_safe(rwspinlock_t* rw) {
