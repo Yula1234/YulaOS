@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
 
     close(fd);
     
-    print("\n");
+    puts("\n");
     
     return 0;
 }

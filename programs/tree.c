@@ -152,16 +152,16 @@ void print_tree(const char* path, const char* prefix) {
         strcat(line_prefix, prefix);
         strcat(line_prefix, is_last ? "`-- " : "|-- ");
 
-        print(ANSI_RESET);
-        print(ANSI_TREE);
-        print(line_prefix);
-        print(ANSI_RESET);
+        puts(ANSI_RESET);
+        puts(ANSI_TREE);
+        puts(line_prefix);
+        puts(ANSI_RESET);
 
         uint32_t col = get_color(list[i].name, list[i].is_dir);
-        print(color_to_ansi(col));
-        print(list[i].name);
-        print(ANSI_RESET);
-        print("\n");
+        puts(color_to_ansi(col));
+        puts(list[i].name);
+        puts(ANSI_RESET);
+        puts("\n");
 
         if (list[i].is_dir) {
             total_dirs++;
@@ -188,17 +188,17 @@ int main(int argc, char** argv) {
     const char* start_path = ".";
     if (argc > 1) start_path = argv[1];
 
-    print(ANSI_DIR);
-    print(start_path);
-    print("\n");
+    puts(ANSI_DIR);
+    puts(start_path);
+    puts("\n");
 
     print_tree(start_path, "");
 
-    print(ANSI_TREE);
-    print("\n");
-    print_dec(total_dirs); print(" directories, ");
-    print_dec(total_files); print(" files\n");
+    puts(ANSI_TREE);
+    puts("\n");
+    print_dec(total_dirs); puts(" directories, ");
+    print_dec(total_files); puts(" files\n");
     
-    print(ANSI_RESET);
+    puts(ANSI_RESET);
     return 0;
 }

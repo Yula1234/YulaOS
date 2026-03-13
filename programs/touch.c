@@ -22,9 +22,9 @@ int main(int argc, char** argv) {
             if (fd >= 0) {
                 close(fd);
             } else {
-                print("\x1b[91m");
+                puts("\x1b[91m");
                 printf("touch: cannot create '%s'\n", path);
-                print("\x1b[0m");
+                puts("\x1b[0m");
             }
         }
     }

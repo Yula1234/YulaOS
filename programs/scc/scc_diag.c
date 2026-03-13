@@ -4,7 +4,7 @@
 #include "scc_diag.h"
 
 void scc_fatal_at(const char* file, const char* src, int line, int col, const char* msg) {
-    print("\x1b[91m");
+    puts("\x1b[91m");
     printf("\n[SCC ERROR] %s:%d:%d: %s\n", file ? file : "<input>", line, col, msg ? msg : "error");
 
     if (src) {
@@ -24,6 +24,6 @@ void scc_fatal_at(const char* file, const char* src, int line, int col, const ch
         printf("^\n");
     }
 
-    print("\x1b[0m");
+    puts("\x1b[0m");
     exit(1);
 }

@@ -137,14 +137,14 @@ typedef struct {
 } LinkerCtx;
 
 void fatal(const char* fmt, ...) {
-    print("\x1b[91m");
+    puts("\x1b[91m");
     printf("\n[LINKER ERROR] ");
     va_list args;
     va_start(args, fmt);
     vprintf(fmt, args);
     va_end(args);
     printf("\n");
-    print("\x1b[0m");
+    puts("\x1b[0m");
     exit(1);
 }
 

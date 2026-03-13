@@ -15,9 +15,9 @@ int main(int argc, char** argv) {
     if (rename(src, dest) == 0) {
         return 0;
     } else {
-        print("\x1b[91m");
+        puts("\x1b[91m");
         printf("mv: failed to rename '%s' to '%s'\n", src, dest);
-        print("\x1b[0m");
+        puts("\x1b[0m");
         return 1;
     }
 }

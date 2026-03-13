@@ -55,7 +55,6 @@ int read(int fd, void* buf, uint32_t size);
 int write(int fd, const void* buf, uint32_t size);
 int close(int fd);
 
-void print(const char* s);
 void print_dec(int n);
 void print_hex(uint32_t n);
 

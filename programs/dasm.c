@@ -89,9 +89,9 @@ Symbol symbols[MAX_SYMBOLS];
 int sym_count = 0;
 
 void panic(const char* msg) {
-    print(ANSI_ERR);
+    puts(ANSI_ERR);
     printf("Error: %s\n", msg);
-    print(ANSI_RESET);
+    puts(ANSI_RESET);
     exit(1);
 }
 
@@ -386,26 +386,26 @@ void disasm_one(uint8_t* data, uint32_t vaddr, Instr* ins) {
 
 void print_hexdump(uint8_t* data, uint32_t size, uint32_t base_addr) {
     for (uint32_t i = 0; i < size; i += 16) {
-        print(ANSI_ADDR);
+        puts(ANSI_ADDR);
         printf("%08x: ", base_addr + i);
         
-        print(ANSI_BYTES);
+        puts(ANSI_BYTES);
         for (int j = 0; j < 16; j++) {
             if (i + j < size) printf("%02x ", data[i+j]);
-            else print("   ");
+            else puts("   ");
         }
         
-        print(ANSI_NUM);
-        print("|");
+        puts(ANSI_NUM);
+        puts("|");
         for (int j = 0; j < 16; j++) {
             if (i + j < size) {
                 char c = data[i+j];
                 if (c < 32 || c > 126) c = '.';
                 char s[2] = {c, 0};
-                print(s);
+                puts(s);
             }
         }
-        print("|\n");
+        puts("|\n");
     }
 }
 
@@ -413,7 +413,7 @@ void print_section(Elf32_Shdr* sh) {
     uint8_t* sec_data = file_buf + sh->sh_offset;
     const char* name = shstrtab + sh->sh_name;
     
-    print(ANSI_SECTION);
+    puts(ANSI_SECTION);
     printf("\nSection %s (Addr: %08x, Size: %d)\n", name, sh->sh_addr, sh->sh_size);
     
     if (sh->sh_flags & SHF_EXECINSTR) {
@@ -424,36 +424,36 @@ void print_section(Elf32_Shdr* sh) {
             
             const char* sym = find_symbol(vaddr);
             if (sym) {
-                print(ANSI_SYM);
+                puts(ANSI_SYM);
                 printf("\n<%s>:\n", sym);
             }
             
             disasm_one(sec_data + offset, vaddr, &ins);
             
-            print(ANSI_ADDR);
+            puts(ANSI_ADDR);
             printf("  %08x: ", vaddr);
             
-            print(ANSI_BYTES);
+            puts(ANSI_BYTES);
             for (int k=0; k<6; k++) {
                 if (k < ins.len) printf("%02x ", ins.bytes[k]);
-                else print("   ");
+                else puts("   ");
             }
             
-            print(ANSI_MNEM);
+            puts(ANSI_MNEM);
             printf(" %-6s ", ins.mnem);
             
-            print(ANSI_REG);
+            puts(ANSI_REG);
             if (ins.op1[0]) printf("%s", ins.op1);
             if (ins.op2[0]) printf(", %s", ins.op2);
             
-            print("\n");
+            puts("\n");
             offset += ins.len;
         }
     } else if (sh->sh_type == SHT_PROGBITS && (sh->sh_flags & SHF_ALLOC)) {
         print_hexdump(sec_data, sh->sh_size, sh->sh_addr);
     } else {
-        print(ANSI_BYTES);
-        print("  [No data to display]\n");
+        puts(ANSI_BYTES);
+        puts("  [No data to display]\n");
     }
 }
 
@@ -499,6 +499,6 @@ int main(int argc, char** argv) {
     }
     
     free(file_buf);
-    printf("\x1b[0m");
+    puts("\x1b[0m");
     return 0;
 }

@@ -124,21 +124,16 @@ static int stdio_ensure_wbuf(FILE* stream) {
     return 0;
 }
 
-
-void print(const char* s) {
-    fputs(s, stdout);
-}
-
 void print_dec(int n) {
     char buf[32];
     (void)snprintf(buf, sizeof(buf), "%d", n);
-    print(buf);
+    fputs(buf, stdout);
 }
 
 void print_hex(uint32_t n) {
     char buf[32];
     (void)snprintf(buf, sizeof(buf), "%x", n);
-    print(buf);
+    fputs(buf, stdout);
 }
 
 static char* number(char* str, char* end, long num, int base, int size, int precision, int type) {

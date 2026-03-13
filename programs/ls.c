@@ -18,21 +18,21 @@ static uint32_t name_color(const char* name, uint32_t type) {
 
 static void print_color(uint32_t rgb) {
     if (rgb == 0x569CD6u) {
-        print("\x1b[94m");
+        puts("\x1b[94m");
         return;
     }
 
     if (rgb == 0xB5CEA8u) {
-        print("\x1b[92m");
+        puts("\x1b[92m");
         return;
     }
 
     if (rgb == 0xCE9178u) {
-        print("\x1b[93m");
+        puts("\x1b[93m");
         return;
     }
 
-    print("\x1b[0m");
+    puts("\x1b[0m");
 }
 
 int main(int argc, char** argv) {
@@ -63,13 +63,13 @@ int main(int argc, char** argv) {
             uint32_t fg = name_color(d->name, d->type);
             print_color(fg);
 
-            print(d->name);
-            if (d->type == 2) print("/");
-            print("\n");
+            puts(d->name);
+            if (d->type == 2) puts("/");
+            puts("\n");
         }
     }
 
     close(fd);
-    print("\x1b[0m");
+    puts("\x1b[0m");
     return 0;
 }

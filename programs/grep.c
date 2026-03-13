@@ -26,38 +26,38 @@ void print_match_line(const char* filename, int line_num, const char* line, cons
     if (!match) return;
 
     if (opt_show_filename && filename) {
-        print(ANSI_FILE);
-        print(filename);
-        print(ANSI_SEP);
-        print(":");
+        puts(ANSI_FILE);
+        puts(filename);
+        puts(ANSI_SEP);
+        puts(":");
     }
 
     if (opt_line_number) {
-        print(ANSI_LNUM);
+        puts(ANSI_LNUM);
         print_dec(line_num);
-        print(ANSI_SEP);
-        print(":");
+        puts(ANSI_SEP);
+        puts(":");
     }
     
-    if ((opt_show_filename && filename) || opt_line_number) print(" ");
+    if ((opt_show_filename && filename) || opt_line_number) puts(" ");
 
     int pat_len = strlen(pattern);
     while ((match = strstr(ptr, pattern))) {
         while (ptr < match) {
             char tmp[2] = {*ptr++, 0};
-            print(ANSI_TEXT);
-            print(tmp);
+            puts(ANSI_TEXT);
+            puts(tmp);
         }
         
-        print(ANSI_MATCH);
-        print(pattern);
+        puts(ANSI_MATCH);
+        puts(pattern);
         ptr += pat_len;
     }
     
-    print(ANSI_TEXT);
-    print(ptr);
-    print(ANSI_RESET);
-    print("\n");
+    puts(ANSI_TEXT);
+    puts(ptr);
+    puts(ANSI_RESET);
+    puts("\n");
 }
 
 void grep_from_fd(int fd, const char* filename, const char* pattern) {
@@ -93,9 +93,9 @@ void grep_from_fd(int fd, const char* filename, const char* pattern) {
 void grep_file(const char* path, const char* pattern) {
     int fd = open(path, 0);
     if (fd < 0) {
-        print(ANSI_ERR);
+        puts(ANSI_ERR);
         printf("grep: %s: No such file or directory\n", path);
-        print(ANSI_RESET);
+        puts(ANSI_RESET);
         return;
     }
     grep_from_fd(fd, path, pattern);
@@ -110,9 +110,9 @@ typedef struct {
 void process_path(const char* path, const char* pattern) {
     stat_t st;
     if (stat(path, &st) != 0) {
-        print(ANSI_ERR);
+        puts(ANSI_ERR);
         printf("grep: %s: Cannot stat\n", path);
-        print(ANSI_RESET);
+        puts(ANSI_RESET);
         return;
     }
 
@@ -120,9 +120,9 @@ void process_path(const char* path, const char* pattern) {
         grep_file(path, pattern);
     } else if (st.type == 2) {
         if (!opt_recursive) {
-            print(ANSI_SEP);
+            puts(ANSI_SEP);
             printf("grep: %s: Is a directory\n", path);
-            print(ANSI_RESET);
+            puts(ANSI_RESET);
             return;
         }
         
@@ -177,6 +177,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    print(ANSI_RESET);
+    puts(ANSI_RESET);
     return 0;
 }

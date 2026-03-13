@@ -149,16 +149,6 @@ static void syscall_exit(registers_t* regs, task_t* curr) {
     sched_yield();
 }
 
-static void syscall_print(registers_t* regs, task_t* curr) {
-    char* s = (char*)regs->ebx;
-    if (curr->terminal) {
-        tty_handle_t* tty = (tty_handle_t*)curr->terminal;
-        tty_bridge_print(tty, s);
-    } else {
-        regs->eax = (uint32_t)-1;
-    }
-}
-
 static void syscall_getpid(registers_t* regs, task_t* curr) {
     regs->eax = curr->pid;
 }
@@ -1994,7 +1984,7 @@ static void syscall_invalid(registers_t* regs, task_t* curr) {
 
 static const syscall_fn_t syscall_table[] = {
     [0] = syscall_exit,
-    [1] = syscall_print,
+    [1] = syscall_removed,
     [2] = syscall_getpid,
     [3] = syscall_open,
     [4] = syscall_read,

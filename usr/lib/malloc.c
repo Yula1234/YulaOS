@@ -49,30 +49,30 @@ static void malloc_lock_release(void) {
 }
 
 static void panic(const char* msg, void* ptr) {
-    print("\n[MALLOC ERROR] ");
-    print(msg);
-    print(" pid=");
+    puts("\n[MALLOC ERROR] ");
+    puts(msg);
+    puts(" pid=");
     print_dec(getpid());
-    print(" at 0x");
+    puts(" at 0x");
     print_hex((uint32_t)ptr);
-    print("\n");
+    puts("\n");
     exit(1);
 }
 
 static void panic_block_link(const char* msg, Block* block, const void* user_ptr, const void* link_val) {
-    print("\n[MALLOC ERROR] ");
-    print(msg);
-    print(" pid=");
+    puts("\n[MALLOC ERROR] ");
+    puts(msg);
+    puts(" pid=");
     print_dec(getpid());
-    print(" block=0x");
+    puts(" block=0x");
     print_hex((uint32_t)block);
-    print(" user=0x");
+    puts(" user=0x");
     print_hex((uint32_t)user_ptr);
-    print(" size=");
+    puts(" size=");
     print_dec((int)(block ? block->size : 0));
-    print(" link=0x");
+    puts(" link=0x");
     print_hex((uint32_t)link_val);
-    print("\n");
+    puts("\n");
     exit(1);
 }
 
@@ -125,19 +125,19 @@ static void block_tail_set(Block* b) {
 }
 
 static void panic_block_overflow(const char* msg, Block* block, const void* user_ptr, uint32_t tail_val) {
-    print("\n[MALLOC ERROR] ");
-    print(msg);
-    print(" pid=");
+    puts("\n[MALLOC ERROR] ");
+    puts(msg);
+    puts(" pid=");
     print_dec(getpid());
-    print(" block=0x");
+    puts(" block=0x");
     print_hex((uint32_t)block);
-    print(" user=0x");
+    puts(" user=0x");
     print_hex((uint32_t)user_ptr);
-    print(" size=");
+    puts(" size=");
     print_dec((int)(block ? block->size : 0));
-    print(" tail=0x");
+    puts(" tail=0x");
     print_hex(tail_val);
-    print("\n");
+    puts("\n");
     exit(1);
 }
 
