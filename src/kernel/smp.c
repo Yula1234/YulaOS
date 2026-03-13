@@ -21,7 +21,7 @@ extern uint8_t smp_trampoline_end[];
 
 volatile int ap_running_count = 0;
 
-static volatile uint32_t tlb_shootdown_lock = 0;
+static spinlock_t tlb_shootdown_lock = {0};
 static volatile uint32_t tlb_shootdown_addr = 0;
 static volatile uint32_t tlb_shootdown_end = 0;
 static volatile uint32_t tlb_shootdown_pending = 0;
@@ -144,6 +144,105 @@ void smp_tlb_ipi_handler(void) {
     __sync_fetch_and_and(&tlb_shootdown_pending, ~bit);
 }
 
+static inline uint32_t smp_tlb_cpu_mask_for_page_dir(uint32_t* page_dir) {
+    if (!page_dir) {
+        return 0u;
+    }
+
+    cpu_t* me = cpu_current();
+    const int me_id = me ? me->id : -1;
+
+    uint32_t mask = 0u;
+
+    for (int i = 0; i < cpu_count; i++) {
+        cpu_t* c = &cpus[i];
+
+        if (!c->started) {
+            continue;
+        }
+
+        if (c->id < 0) {
+            continue;
+        }
+
+        if (c->id == me_id) {
+            continue;
+        }
+
+        task_t* t = c->current_task;
+        proc_mem_t* mem = t ? t->mem : 0;
+        uint32_t* dir = mem ? mem->page_dir : 0;
+
+        if (dir != page_dir) {
+            continue;
+        }
+
+        mask |= (1u << c->index);
+    }
+
+    return mask;
+}
+
+void smp_tlb_shootdown_range_dir(uint32_t* page_dir, uint32_t start, uint32_t end) {
+    if (end <= start) {
+        return;
+    }
+
+    if (cpu_count <= 1 || ap_running_count == 0) {
+        tlb_flush_range_local(start, end);
+        return;
+    }
+
+    if (!smp_interrupts_enabled()) {
+        tlb_flush_range_local(start, end);
+        return;
+    }
+
+    const uint32_t mask = smp_tlb_cpu_mask_for_page_dir(page_dir);
+    if (mask == 0u) {
+        tlb_flush_range_local(start, end);
+        return;
+    }
+
+    spinlock_acquire(&tlb_shootdown_lock);
+
+    if (cpu_count <= 1 || ap_running_count == 0 || !smp_interrupts_enabled()) {
+        spinlock_release(&tlb_shootdown_lock);
+        tlb_flush_range_local(start, end);
+        return;
+    }
+
+    tlb_shootdown_addr = start;
+    tlb_shootdown_end = end;
+
+    tlb_shootdown_pending = mask;
+    __sync_synchronize();
+
+    for (int i = 0; i < cpu_count; i++) {
+        cpu_t* c = &cpus[i];
+        const uint32_t bit = 1u << c->index;
+
+        if ((mask & bit) == 0u) {
+            continue;
+        }
+
+        if (c->id < 0) {
+            continue;
+        }
+
+        lapic_write(LAPIC_ICRHI, (uint32_t)c->id << 24);
+        lapic_write(LAPIC_ICRLO, (uint32_t)IPI_TLB_VECTOR | 0x00004000);
+    }
+
+    tlb_flush_range_local(start, end);
+
+    while (tlb_shootdown_pending != 0u) {
+        __asm__ volatile("pause");
+    }
+
+    spinlock_release(&tlb_shootdown_lock);
+}
+
 void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
     if (end <= start) {
         return;
@@ -159,12 +258,10 @@ void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
         return;
     }
 
-    while (__sync_lock_test_and_set(&tlb_shootdown_lock, 1)) {
-        __asm__ volatile("pause");
-    }
+    spinlock_acquire(&tlb_shootdown_lock);
 
     if (cpu_count <= 1 || ap_running_count == 0 || !smp_interrupts_enabled()) {
-        __sync_lock_release(&tlb_shootdown_lock);
+        spinlock_release(&tlb_shootdown_lock);
         tlb_flush_range_local(start, end);
         return;
     }
@@ -202,7 +299,7 @@ void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
         __asm__ volatile("pause");
     }
 
-    __sync_lock_release(&tlb_shootdown_lock);
+    spinlock_release(&tlb_shootdown_lock);
 }
 
 void smp_tlb_shootdown(uint32_t virt) {

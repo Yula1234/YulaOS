@@ -11,6 +11,7 @@
 
 extern void smp_tlb_shootdown(uint32_t virt);
 extern void smp_tlb_shootdown_range(uint32_t start, uint32_t end);
+extern void smp_tlb_shootdown_range_dir(uint32_t* page_dir, uint32_t start, uint32_t end);
 
 extern void load_page_directory(uint32_t*);
 extern void enable_paging(void);
@@ -171,7 +172,7 @@ void paging_unmap_range_ex(
         return;
     }
 
-    paging_tlb_flush_range_local(start, end);
+    smp_tlb_shootdown_range_dir(dir, start, end);
 }
 
 void paging_unmap_range(uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr) {
