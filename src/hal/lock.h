@@ -231,6 +231,15 @@ typedef struct {
 #define RWSPINLOCK_WRITER_PENDING 0x40000000u
 #define RWSPINLOCK_READER_MASK    0x3FFFFFFFu
 
+typedef struct {
+    volatile uint32_t writer_seq;
+
+    struct {
+        volatile uint32_t count;
+        uint8_t pad[HAL_CACHELINE_SIZE - sizeof(uint32_t)];
+    } __cacheline_aligned readers[MAX_CPUS];
+} percpu_rwspinlock_t;
+
 static inline void rwspinlock_init(rwspinlock_t* rw) {
     rw->state = 0u;
 }
@@ -307,6 +316,150 @@ static inline void rwspinlock_acquire_write(rwspinlock_t* rw) {
 
 static inline void rwspinlock_release_write(rwspinlock_t* rw) {
     __atomic_fetch_and(&rw->state, ~RWSPINLOCK_WRITER_ACTIVE, __ATOMIC_RELEASE);
+}
+
+static inline void percpu_rwspinlock_init(percpu_rwspinlock_t* rw) {
+    rw->writer_seq = 0u;
+
+    for (int i = 0; i < MAX_CPUS; i++) {
+        __atomic_store_n(&rw->readers[i].count, 0u, __ATOMIC_RELAXED);
+    }
+}
+
+static inline void percpu_rwspinlock_acquire_read(percpu_rwspinlock_t* rw) {
+    const int cpu = hal_cpu_index();
+    uint32_t backoff = 1;
+
+    for (;;) {
+        uint32_t seq = __atomic_load_n(&rw->writer_seq, __ATOMIC_ACQUIRE);
+        if ((seq & 1u) != 0u) {
+            for (uint32_t i = 0; i < backoff; i++) {
+                __asm__ volatile("pause" ::: "memory");
+            }
+
+            if (backoff < 1024u) {
+                backoff <<= 1;
+            }
+
+            continue;
+        }
+
+        __atomic_fetch_add(&rw->readers[cpu].count, 1u, __ATOMIC_ACQ_REL);
+
+        uint32_t seq2 = __atomic_load_n(&rw->writer_seq, __ATOMIC_ACQUIRE);
+        if (seq2 == seq && (seq2 & 1u) == 0u) {
+            return;
+        }
+
+        __atomic_fetch_sub(&rw->readers[cpu].count, 1u, __ATOMIC_RELEASE);
+    }
+}
+
+static inline void percpu_rwspinlock_release_read(percpu_rwspinlock_t* rw) {
+    const int cpu = hal_cpu_index();
+    __atomic_fetch_sub(&rw->readers[cpu].count, 1u, __ATOMIC_RELEASE);
+}
+
+static inline void percpu_rwspinlock_acquire_write(percpu_rwspinlock_t* rw) {
+    uint32_t backoff = 1;
+
+    for (;;) {
+        uint32_t seq = __atomic_load_n(&rw->writer_seq, __ATOMIC_ACQUIRE);
+        if ((seq & 1u) != 0u) {
+            for (uint32_t i = 0; i < backoff; i++) {
+                __asm__ volatile("pause" ::: "memory");
+            }
+
+            if (backoff < 1024u) {
+                backoff <<= 1;
+            }
+
+            continue;
+        }
+
+        uint32_t desired = seq + 1u;
+        if (__atomic_compare_exchange_n(
+                &rw->writer_seq,
+                &seq,
+                desired,
+                0,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE
+            )) {
+            break;
+        }
+    }
+
+    for (;;) {
+        int any = 0;
+
+        for (int i = 0; i < MAX_CPUS; i++) {
+            if (__atomic_load_n(&rw->readers[i].count, __ATOMIC_ACQUIRE) != 0u) {
+                any = 1;
+                break;
+            }
+        }
+
+        if (!any) {
+            return;
+        }
+
+        __asm__ volatile("pause" ::: "memory");
+    }
+}
+
+static inline void percpu_rwspinlock_release_write(percpu_rwspinlock_t* rw) {
+    __atomic_fetch_add(&rw->writer_seq, 1u, __ATOMIC_RELEASE);
+}
+
+static inline uint32_t percpu_rwspinlock_acquire_read_safe(percpu_rwspinlock_t* rw) {
+    uint32_t flags;
+
+    __asm__ volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "memory"
+    );
+
+    percpu_rwspinlock_acquire_read(rw);
+
+    return flags;
+}
+
+static inline void percpu_rwspinlock_release_read_safe(percpu_rwspinlock_t* rw, uint32_t flags) {
+    percpu_rwspinlock_release_read(rw);
+
+    if (flags & 0x200u) {
+        __asm__ volatile("sti");
+    }
+}
+
+static inline uint32_t percpu_rwspinlock_acquire_write_safe(percpu_rwspinlock_t* rw) {
+    uint32_t flags;
+
+    __asm__ volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "memory"
+    );
+
+    percpu_rwspinlock_acquire_write(rw);
+
+    return flags;
+}
+
+static inline void percpu_rwspinlock_release_write_safe(percpu_rwspinlock_t* rw, uint32_t flags) {
+    percpu_rwspinlock_release_write(rw);
+
+    if (flags & 0x200u) {
+        __asm__ volatile("sti");
+    }
 }
 
 static inline uint32_t rwspinlock_acquire_read_safe(rwspinlock_t* rw) {
