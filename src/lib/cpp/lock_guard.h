@@ -311,6 +311,29 @@ private:
     uint32_t flags_ = 0u;
 };
 
+class RwSpinLockNativeReadGuard {
+public:
+    explicit RwSpinLockNativeReadGuard(rwspinlock_t& lock)
+        : lock_(&lock) {
+        rwspinlock_acquire_read(lock_);
+    }
+
+    RwSpinLockNativeReadGuard(const RwSpinLockNativeReadGuard&) = delete;
+    RwSpinLockNativeReadGuard& operator=(const RwSpinLockNativeReadGuard&) = delete;
+
+    RwSpinLockNativeReadGuard(RwSpinLockNativeReadGuard&&) = delete;
+    RwSpinLockNativeReadGuard& operator=(RwSpinLockNativeReadGuard&&) = delete;
+
+    ~RwSpinLockNativeReadGuard() {
+        if (lock_) {
+            rwspinlock_release_read(lock_);
+        }
+    }
+
+private:
+    rwspinlock_t* lock_ = nullptr;
+};
+
 class RwSpinLockNativeWriteSafeGuard {
 public:
     explicit RwSpinLockNativeWriteSafeGuard(rwspinlock_t& lock)
@@ -333,6 +356,29 @@ public:
 private:
     rwspinlock_t* lock_ = nullptr;
     uint32_t flags_ = 0u;
+};
+
+class RwSpinLockNativeWriteGuard {
+public:
+    explicit RwSpinLockNativeWriteGuard(rwspinlock_t& lock)
+        : lock_(&lock) {
+        rwspinlock_acquire_write(lock_);
+    }
+
+    RwSpinLockNativeWriteGuard(const RwSpinLockNativeWriteGuard&) = delete;
+    RwSpinLockNativeWriteGuard& operator=(const RwSpinLockNativeWriteGuard&) = delete;
+
+    RwSpinLockNativeWriteGuard(RwSpinLockNativeWriteGuard&&) = delete;
+    RwSpinLockNativeWriteGuard& operator=(RwSpinLockNativeWriteGuard&&) = delete;
+
+    ~RwSpinLockNativeWriteGuard() {
+        if (lock_) {
+            rwspinlock_release_write(lock_);
+        }
+    }
+
+private:
+    rwspinlock_t* lock_ = nullptr;
 };
 
 }
