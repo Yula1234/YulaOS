@@ -27,6 +27,8 @@
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/rbtree.h>
 
+#include <kernel/cpu_limits.h>
+
 namespace kernel {
 
 class PmmState;
@@ -118,6 +120,13 @@ public:
 private:
     static constexpr uint32_t k_max_nodes = 4096u;
 
+    struct PerCpuVmmCache {
+        static constexpr size_t k_capacity = 64u;
+
+        uintptr_t free_pages[k_capacity]{};
+        size_t count = 0u;
+    };
+
     SpinLock lock_;
 
     PmmState* pmm_ = nullptr;
@@ -129,6 +138,8 @@ private:
     VmmSizeTree size_tree_{};
 
     atomic<size_t> used_pages_count_{0u};
+
+    PerCpuVmmCache pcp_caches_[MAX_CPUS]{};
 };
 
 [[nodiscard]] VmmState* vmm_state() noexcept;

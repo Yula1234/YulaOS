@@ -15,12 +15,23 @@
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 
+#include <hal/cpu.h>
+
 extern "C" {
 
 #include <arch/i386/paging.h>
 
 void smp_tlb_shootdown_range(uint32_t start, uint32_t end);
 
+}
+
+static inline int vmm_cpu_index() noexcept {
+    const int cpu = hal_cpu_index();
+    if (cpu < 0 || cpu >= MAX_CPUS) {
+        return 0;
+    }
+
+    return cpu;
 }
 
 namespace kernel {
@@ -336,6 +347,10 @@ void VmmState::init() noexcept {
 
     used_pages_count_.store(0u, kernel::memory_order::relaxed);
 
+    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        pcp_caches_[cpu].count = 0u;
+    }
+
     VmFreeBlock* initial = alloc_node(free_nodes_head_);
     if (kernel::unlikely(!initial)) {
         panic("VMM: Out of metadata nodes during init!");
@@ -355,6 +370,123 @@ void* VmmState::alloc_pages(size_t count) noexcept {
 
     if (kernel::unlikely(count > SIZE_MAX / PAGE_SIZE)) {
         return nullptr;
+    }
+
+    static constexpr size_t k_pcp_refill_pages = 32u;
+
+    if (count == 1u) {
+        uintptr_t virt = 0u;
+
+        {
+            kernel::ScopedIrqDisable irq_guard;
+
+            const int cpu = vmm_cpu_index();
+            PerCpuVmmCache& cache = pcp_caches_[cpu];
+
+            if (cache.count > 0u) {
+                virt = cache.free_pages[--cache.count];
+            }
+        }
+
+        if (virt != 0u) {
+            if (kernel::unlikely(!map_new_pages(virt, 1u, pmm_))) {
+                return nullptr;
+            }
+
+            used_pages_count_.fetch_add(1u, kernel::memory_order::relaxed);
+            return reinterpret_cast<void*>(virt);
+        }
+
+        uintptr_t carve_base = 0u;
+        size_t carve_pages = k_pcp_refill_pages;
+
+        {
+            kernel::SpinLockSafeGuard guard(lock_);
+
+            VmFreeBlock* block = find_best_fit(carve_pages * PAGE_SIZE, size_tree_);
+            if (kernel::unlikely(!block)) {
+                carve_pages = 1u;
+                block = find_best_fit(PAGE_SIZE, size_tree_);
+            }
+
+            if (kernel::unlikely(!block)) {
+                return nullptr;
+            }
+
+            carve_base = block->start;
+
+            tree_erase(*block, addr_tree_, size_tree_);
+
+            const size_t carved_bytes = carve_pages * PAGE_SIZE;
+            if (block->size == carved_bytes) {
+                free_node(*block, free_nodes_head_);
+            } else {
+                block->start += carved_bytes;
+                block->size -= carved_bytes;
+
+                tree_insert(*block, addr_tree_, size_tree_);
+            }
+        }
+
+        const uintptr_t out = carve_base;
+
+        if (carve_pages > 1u) {
+            kernel::ScopedIrqDisable irq_guard;
+
+            const int cpu = vmm_cpu_index();
+            PerCpuVmmCache& cache = pcp_caches_[cpu];
+
+            const size_t cache_free = PerCpuVmmCache::k_capacity - cache.count;
+            const size_t available = carve_pages - 1u;
+            const size_t to_cache = (cache_free < available) ? cache_free : available;
+
+            for (size_t i = 0; i < to_cache; i++) {
+                cache.free_pages[cache.count++] = carve_base + ((i + 1u) * PAGE_SIZE);
+            }
+
+            const size_t remaining = available - to_cache;
+            if (remaining != 0u) {
+                const uintptr_t rem_start = carve_base + ((to_cache + 1u) * PAGE_SIZE);
+                const size_t rem_size = remaining * PAGE_SIZE;
+
+                kernel::SpinLockSafeGuard guard(lock_);
+
+                VmFreeBlock* rem_block = alloc_node(free_nodes_head_);
+                if (kernel::unlikely(!rem_block)) {
+                    panic("VMM: Out of metadata nodes during alloc refill!");
+                    return nullptr;
+                }
+
+                rem_block->start = rem_start;
+                rem_block->size = rem_size;
+
+                tree_insert(*rem_block, addr_tree_, size_tree_);
+                merge_adjacent(*rem_block, addr_tree_, size_tree_, free_nodes_head_);
+            }
+        }
+
+        if (kernel::unlikely(!map_new_pages(out, 1u, pmm_))) {
+            const size_t rollback_size = carve_pages * PAGE_SIZE;
+
+            kernel::SpinLockSafeGuard guard(lock_);
+
+            VmFreeBlock* rollback = alloc_node(free_nodes_head_);
+            if (kernel::unlikely(!rollback)) {
+                panic("VMM: Out of metadata nodes during rollback!");
+                return nullptr;
+            }
+
+            rollback->start = carve_base;
+            rollback->size = rollback_size;
+
+            tree_insert(*rollback, addr_tree_, size_tree_);
+            merge_adjacent(*rollback, addr_tree_, size_tree_, free_nodes_head_);
+
+            return nullptr;
+        }
+
+        used_pages_count_.fetch_add(1u, kernel::memory_order::relaxed);
+        return reinterpret_cast<void*>(out);
     }
 
     const size_t size_bytes = count * PAGE_SIZE;
@@ -428,6 +560,116 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
     }
 
     const size_t size_bytes = count * PAGE_SIZE;
+
+    if (count == 1u) {
+        const uintptr_t virt = virt_base;
+
+        const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
+        if (kernel::likely(phys && pmm_)) {
+            page_t* page = pmm_->phys_to_page(phys);
+            if (kernel::unlikely(page && page->slab_cache)) {
+                panic("VMM: freeing slab page");
+            }
+        }
+
+        paging_map_ex(
+            kernel_page_directory,
+            static_cast<uint32_t>(virt),
+            0u,
+            0u,
+            PAGING_MAP_NO_TLB_FLUSH
+        );
+
+        smp_tlb_shootdown_range(
+            static_cast<uint32_t>(virt),
+            static_cast<uint32_t>(virt + PAGE_SIZE)
+        );
+
+        if (phys != 0u && pmm_) {
+            pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys)), 0u);
+        }
+
+        static constexpr size_t k_flush_pages = PerCpuVmmCache::k_capacity / 2u;
+
+        uintptr_t flush[k_flush_pages] = {};
+        size_t flush_count = 0u;
+
+        {
+            kernel::ScopedIrqDisable irq_guard;
+
+            const int cpu = vmm_cpu_index();
+            PerCpuVmmCache& cache = pcp_caches_[cpu];
+
+            if (cache.count < PerCpuVmmCache::k_capacity) {
+                cache.free_pages[cache.count++] = virt;
+            } else {
+                for (size_t i = 0; i < k_flush_pages; i++) {
+                    flush[i] = cache.free_pages[--cache.count];
+                }
+
+                flush_count = k_flush_pages;
+                cache.free_pages[cache.count++] = virt;
+            }
+        }
+
+        if (flush_count != 0u) {
+            for (size_t i = 1; i < flush_count; i++) {
+                uintptr_t key = flush[i];
+                size_t j = i;
+
+                while (j > 0u && flush[j - 1u] > key) {
+                    flush[j] = flush[j - 1u];
+                    j--;
+                }
+
+                flush[j] = key;
+            }
+
+            kernel::SpinLockSafeGuard guard(lock_);
+
+            uintptr_t run_start = flush[0];
+            uintptr_t run_end = run_start + PAGE_SIZE;
+
+            for (size_t i = 1; i < flush_count; i++) {
+                const uintptr_t a = flush[i];
+
+                if (a == run_end) {
+                    run_end += PAGE_SIZE;
+                    continue;
+                }
+
+                VmFreeBlock* block = alloc_node(free_nodes_head_);
+                if (kernel::unlikely(!block)) {
+                    panic("VMM: Out of metadata nodes during free!");
+                    return;
+                }
+
+                block->start = run_start;
+                block->size = run_end - run_start;
+
+                tree_insert(*block, addr_tree_, size_tree_);
+                merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+
+                run_start = a;
+                run_end = a + PAGE_SIZE;
+            }
+
+            VmFreeBlock* block = alloc_node(free_nodes_head_);
+            if (kernel::unlikely(!block)) {
+                panic("VMM: Out of metadata nodes during free!");
+                return;
+            }
+
+            block->start = run_start;
+            block->size = run_end - run_start;
+
+            tree_insert(*block, addr_tree_, size_tree_);
+            merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+        }
+
+        used_pages_count_.fetch_sub(1u, kernel::memory_order::relaxed);
+        return;
+    }
 
     static constexpr size_t k_batch = 128u;
 
