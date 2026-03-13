@@ -775,8 +775,6 @@ int VmmState::map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {
         return 0;
     }
 
-    kernel::SpinLockSafeGuard guard(lock_);
-
     paging_map(kernel_page_directory, virt, phys, flags);
 
     return 1;
