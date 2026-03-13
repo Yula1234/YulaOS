@@ -253,7 +253,7 @@ void wm_pump(wm_conn_t* w, comp_client_t* clients, int nclients, comp_input_stat
                     if (sr > 0) sent = 1;
 
                     if (!sent) {
-                        (void)syscall(9, pid, 0, 0);
+                        (void)syscall(8, pid, 0, 0);
                     }
                 }
 

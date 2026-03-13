@@ -1193,7 +1193,7 @@ __attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
     }
 
     if (wm_pid > 0) {
-        (void)syscall(9, wm_pid, 0, 0);
+        (void)syscall(8, wm_pid, 0, 0);
         wm_pid = -1;
     }
 

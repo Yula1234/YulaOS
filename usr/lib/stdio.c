@@ -31,14 +31,14 @@ static int stdio_flush_wbuf(FILE* stream);
 static int fflush_unlocked(FILE* stream);
 
 int open(const char* path, int flags) {
-    return syscall(3, (int)path, flags, 0);
+    return syscall(2, (int)path, flags, 0);
 }
 
 static int read_unlocked(int fd, void* buf, uint32_t size) {
     if (fd == 0 && stdout && stdout->wbuf_mode == _IOLBF && stdout->wbuf_len) {
         (void)stdio_flush_wbuf(stdout);
     }
-    return syscall(4, fd, (int)buf, size);
+    return syscall(3, fd, (int)buf, size);
 }
 
 int read(int fd, void* buf, uint32_t size) {
@@ -50,11 +50,11 @@ int read(int fd, void* buf, uint32_t size) {
 }
 
 int write(int fd, const void* buf, uint32_t size) {
-    return syscall(5, fd, (int)buf, size);
+    return syscall(4, fd, (int)buf, size);
 }
 
 int close(int fd) {
-    return syscall(6, fd, 0, 0);
+    return syscall(5, fd, 0, 0);
 }
 
 
@@ -625,11 +625,11 @@ char* fgets(char* s, int size, FILE* stream) {
 }
 
 int remove(const char* filename) {
-    return syscall(14, (int)filename, 0, 0);
+    return syscall(12, (int)filename, 0, 0);
 }
 
 int rename(const char* oldname, const char* newname) {
-    return syscall(35, (int)oldname, (int)newname, 0);
+    return syscall(25, (int)oldname, (int)newname, 0);
 }
 
 int fflush(FILE* stream) {

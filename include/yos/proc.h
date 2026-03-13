@@ -18,7 +18,7 @@ typedef struct {
     char name[YOS_PROC_NAME_MAX];
 } __attribute__((packed)) yos_proc_info_t;
 
-#define YOS_SYS_CLONE 20
+#define YOS_SYS_CLONE 17
 
 typedef void (*yos_thread_fn_t)(void*);
 

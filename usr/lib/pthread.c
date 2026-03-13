@@ -84,11 +84,11 @@ static int pthread_validate_stack_size(uint32_t size) {
 }
 
 static int pthread_futex_wait(volatile uint32_t* uaddr, uint32_t expected) {
-    return syscall(54, (int)(uintptr_t)uaddr, (int)expected, 0);
+    return syscall(44, (int)(uintptr_t)uaddr, (int)expected, 0);
 }
 
 static int pthread_futex_wake(volatile uint32_t* uaddr, uint32_t max_wake) {
-    return syscall(55, (int)(uintptr_t)uaddr, (int)max_wake, 0);
+    return syscall(45, (int)(uintptr_t)uaddr, (int)max_wake, 0);
 }
 
 static int pthread_prepare_stack(const pthread_attr_t* attr, void** out_base, uint32_t* out_size, int* out_owns) {
@@ -154,7 +154,7 @@ static void pthread_trampoline(void* arg) {
     pthread_internal_t* t = (pthread_internal_t*)arg;
     void* res = 0;
     if (t) {
-        t->pid = syscall(2, 0, 0, 0);
+        t->pid = syscall(1, 0, 0, 0);
         pthread_list_add(t);
     }
     if (t && t->start_routine) {
@@ -252,7 +252,7 @@ int pthread_join(pthread_t thread, void** retval) {
     if (!t) return -1;
     if (t->detached) return -1;
 
-    int wait_res = syscall(37, thread.pid, 0, 0);
+    int wait_res = syscall(27, thread.pid, 0, 0);
     if (wait_res < 0) {
         while (t->state == PTHREAD_STATE_RUNNING) {
             pthread_futex_wait(&t->state, PTHREAD_STATE_RUNNING);
@@ -279,14 +279,14 @@ int pthread_detach(pthread_t thread) {
 }
 
 void pthread_exit(void* retval) {
-    int pid = syscall(2, 0, 0, 0);
+    int pid = syscall(1, 0, 0, 0);
     pthread_internal_t* t = pthread_list_find_by_pid(pid);
     pthread_finish_internal(t, retval);
 }
 
 pthread_t pthread_self(void) {
     pthread_t t;
-    t.pid = syscall(2, 0, 0, 0);
+    t.pid = syscall(1, 0, 0, 0);
     t.internal = 0;
     return t;
 }

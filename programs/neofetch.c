@@ -433,7 +433,7 @@ int main(int argc, char** argv) {
 
     uint32_t used_kib = 0;
     uint32_t free_kib = 0;
-    (void)syscall(12, (int)(uintptr_t)&used_kib, (int)(uintptr_t)&free_kib, 0);
+    (void)syscall(10, (int)(uintptr_t)&used_kib, (int)(uintptr_t)&free_kib, 0);
 
     char up[64];
     fmt_uptime(up, sizeof(up), uptime_ms());
