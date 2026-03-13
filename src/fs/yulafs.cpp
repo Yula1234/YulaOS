@@ -19,6 +19,8 @@
 #include <lib/cpp/unique_ptr.h>
 #include <lib/rbtree.h>
 
+#include <lib/hash_map.h>
+
 #define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
 
 /*
@@ -27,11 +29,17 @@
  */
 namespace yfs {
 
-struct DcacheEntry {
-    struct rb_node node;
+struct DcacheKey {
     yfs_ino_t parent_ino;
     char name[YFS_NAME_MAX];
-    yfs_ino_t target_ino;
+
+    bool operator==(const DcacheKey& other) const noexcept {
+        if (parent_ino != other.parent_ino) {
+            return false;
+        }
+
+        return strcmp(name, other.name) == 0;
+    }
 };
 
 class FileSystem {
@@ -65,8 +73,7 @@ public:
         uint32_t bmap_cache_lba;
         int bmap_cache_dirty;
 
-        struct rb_root dcache_root;
-        spinlock_t dcache_lock;
+        HashMap<DcacheKey, yfs_ino_t, 1024> dcache{};
 
         InodeTableCacheSlot inode_table_cache[inode_table_cache_slots];
         spinlock_t inode_table_cache_lock;
@@ -138,6 +145,25 @@ static FileSystem g_fs;
 
 }
 
+namespace kernel {
+
+template<>
+struct HashTraits<yfs::DcacheKey> {
+    static uint32_t hash(const yfs::DcacheKey& key) {
+        uint32_t h = HashTraits<uint32_t>::hash(static_cast<uint32_t>(key.parent_ino));
+
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(key.name);
+        for (; *p != 0u; ++p) {
+            h ^= *p;
+            h *= 16777619u;
+        }
+
+        return h;
+    }
+};
+
+}
+
 static inline yfs::FileSystem::State::InodeRuntimeState* inode_rt(yfs_ino_t ino);
 
 /* Local aliases reduce noise at call sites. */
@@ -169,9 +195,6 @@ static uint32_t& last_free_ino_hint = yfs_state.last_free_ino_hint;
 static uint8_t (&bmap_cache_data)[YFS_BLOCK_SIZE] = yfs_state.bmap_cache_data;
 static uint32_t& bmap_cache_lba = yfs_state.bmap_cache_lba;
 static int& bmap_cache_dirty = yfs_state.bmap_cache_dirty;
-
-static struct rb_root& dcache_root = yfs_state.dcache_root;
-static spinlock_t& dcache_lock = yfs_state.dcache_lock;
 
 static yfs::FileSystem::State::InodeTableCacheSlot (&inode_table_cache)[
     yfs::FileSystem::State::inode_table_cache_slots
@@ -270,19 +293,6 @@ static void inode_state_init_or_panic(uint32_t total_inodes) {
     inode_state_count = total_inodes;
 }
 
-/* Stable ordering for (parent,name) keys. */
-static int rb_compare(yfs_ino_t p1, const char* n1, yfs_ino_t p2, const char* n2) {
-    if (p1 < p2) {
-        return -1;
-    }
-
-    if (p1 > p2) {
-        return 1;
-    }
-
-    return strcmp(n1, n2);
-}
-
 rwlock_t* yfs::FileSystem::inode_lock(yfs_ino_t ino) {
     return get_inode_lock(ino);
 }
@@ -326,127 +336,41 @@ void yfs::FileSystem::dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_
      * Only cache hits.
      * Skipping misses avoids extra invalidation rules on create/unlink.
      */
-    spinlock_acquire(&state_.dcache_lock);
-
-    struct rb_node** new_node = &state_.dcache_root.rb_node;
-    struct rb_node* parent_node = 0;
-
-    while (*new_node) {
-        DcacheEntry* this_entry = rb_entry(*new_node, DcacheEntry, node);
-        parent_node = *new_node;
-        int cmp = rb_compare(parent, name, this_entry->parent_ino, this_entry->name);
-        if (cmp == 0) {
-            this_entry->target_ino = target;
-            spinlock_release(&state_.dcache_lock);
-            return;
-        }
-
-        if (cmp < 0) {
-            new_node = &(*new_node)->rb_left;
-        } else {
-            new_node = &(*new_node)->rb_right;
-        }
-    }
-
-    spinlock_release(&state_.dcache_lock);
-
-    DcacheEntry* entry = (DcacheEntry*)kmalloc(sizeof(DcacheEntry));
-    if (!entry) {
+    if (!name || name[0] == '\0') {
         return;
     }
 
-    entry->parent_ino = parent;
-    strlcpy(entry->name, name, YFS_NAME_MAX);
-    entry->target_ino = target;
+    DcacheKey key{};
+    key.parent_ino = parent;
+    strlcpy(key.name, name, sizeof(key.name));
 
-    spinlock_acquire(&state_.dcache_lock);
-
-    new_node = &state_.dcache_root.rb_node;
-    parent_node = 0;
-
-    while (*new_node) {
-        DcacheEntry* this_entry = rb_entry(*new_node, DcacheEntry, node);
-        parent_node = *new_node;
-        int cmp = rb_compare(parent, name, this_entry->parent_ino, this_entry->name);
-        if (cmp == 0) {
-            this_entry->target_ino = target;
-            spinlock_release(&state_.dcache_lock);
-            kfree(entry);
-            return;
-        }
-
-        if (cmp < 0) {
-            new_node = &(*new_node)->rb_left;
-        } else {
-            new_node = &(*new_node)->rb_right;
-        }
-    }
-
-    rb_link_node(&entry->node, parent_node, new_node);
-    rb_insert_color(&entry->node, &state_.dcache_root);
-
-    spinlock_release(&state_.dcache_lock);
+    state_.dcache.insert_or_assign(key, target);
 }
 
 yfs_ino_t yfs::FileSystem::dcache_lookup(yfs_ino_t parent, const char* name) {
     /* 0 is a safe miss value (inode 0 is reserved). */
-    spinlock_acquire(&state_.dcache_lock);
-
-    struct rb_node* node = state_.dcache_root.rb_node;
-    while (node) {
-        DcacheEntry* entry = rb_entry(node, DcacheEntry, node);
-        int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
-
-        if (cmp == 0) {
-            yfs_ino_t res = entry->target_ino;
-            spinlock_release(&state_.dcache_lock);
-            return res;
-        }
-
-        if (cmp < 0) {
-            node = node->rb_left;
-        } else {
-            node = node->rb_right;
-        }
+    if (!name || name[0] == '\0') {
+        return 0;
     }
 
-    spinlock_release(&state_.dcache_lock);
-    return 0;
+    DcacheKey key{};
+    key.parent_ino = parent;
+    strlcpy(key.name, name, sizeof(key.name));
+
+    yfs_ino_t out = 0;
+    return state_.dcache.try_get(key, out) ? out : 0;
 }
 
 void yfs::FileSystem::dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
-    spinlock_acquire(&state_.dcache_lock);
-
-    struct rb_node* node = state_.dcache_root.rb_node;
-    while (node) {
-        DcacheEntry* entry = rb_entry(node, DcacheEntry, node);
-        int cmp = rb_compare(parent, name, entry->parent_ino, entry->name);
-        if (cmp == 0) {
-            rb_erase(&entry->node, &state_.dcache_root);
-            kfree(entry);
-            break;
-        }
-
-        if (cmp < 0) {
-            node = node->rb_left;
-        } else {
-            node = node->rb_right;
-        }
-    }
-
-    spinlock_release(&state_.dcache_lock);
-}
-
-static void rb_free_tree(struct rb_node* node) {
-    if (!node) {
+    if (!name || name[0] == '\0') {
         return;
     }
 
-    rb_free_tree(node->rb_left);
-    rb_free_tree(node->rb_right);
+    DcacheKey key{};
+    key.parent_ino = parent;
+    strlcpy(key.name, name, sizeof(key.name));
 
-    yfs::DcacheEntry* entry = rb_entry(node, yfs::DcacheEntry, node);
-    kfree(entry);
+    state_.dcache.remove(key);
 }
 
 static void flush_sb(void) {
@@ -1652,11 +1576,7 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
 
     inode_state_init_or_panic(sb.total_inodes);
 
-    spinlock_init(&dcache_lock);
-    if (dcache_root.rb_node) {
-        rb_free_tree(dcache_root.rb_node);
-        dcache_root = RB_ROOT;
-    }
+    yfs_state.dcache.clear();
 
     yulafs_mkdir("/bin");
     yulafs_mkdir("/home");
@@ -1675,7 +1595,6 @@ void yulafs_format(uint32_t disk_blocks_4k) {
 void yfs::FileSystem::init() {
     /* Mount on valid magic, otherwise format. */
     bcache_init();
-    spinlock_init(&dcache_lock);
     spinlock_init(&inode_table_cache_lock);
 
     inode_table_cache_stamp = 0;
@@ -1692,7 +1611,7 @@ void yfs::FileSystem::init() {
 
     bmap_cache_lba = 0;
     bmap_cache_dirty = 0;
-    dcache_root = RB_ROOT;
+    state_.dcache.clear();
 
     uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     if (!buf) {
