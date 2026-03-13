@@ -22,6 +22,8 @@ namespace {
 
 class FutexTable;
 
+struct FutexShard;
+
 struct futex_entry_t {
     uint32_t key;
     uint32_t refs;
@@ -29,23 +31,31 @@ struct futex_entry_t {
     kernel::SpinLock lock;
     dlist_head_t wait_list;
 
-    FutexTable* table;
+    FutexShard* shard;
 
     void release();
 };
 
+struct FutexShard {
+    kernel::SpinLock lock;
+    
+    HashMap<uint32_t, futex_entry_t*> map;
+} __cacheline_aligned;
+
 class FutexTable {
 public:
     kernel::IntrusiveRef<futex_entry_t> acquire_entry(uint32_t key, bool create) {
-        kernel::SpinLockSafeGuard guard(lock_);
+        FutexShard& shard = shard_for(key);
+
+        kernel::SpinLockSafeGuard guard(shard.lock);
 
         futex_entry_t* entry = nullptr;
 
-        if (map_.try_get(key, entry)) {
-            if (!entry->table) {
-                entry->table = this;
-            } else if (entry->table != this) {
-                panic("FUTEX: entry table mismatch");
+        if (shard.map.try_get(key, entry)) {
+            if (!entry->shard) {
+                entry->shard = &shard;
+            } else if (entry->shard != &shard) {
+                panic("FUTEX: entry shard mismatch");
             }
 
             entry->refs++;
@@ -65,11 +75,11 @@ public:
 
         entry->key = key;
         entry->refs = 1u;
-        entry->table = this;
+        entry->shard = &shard;
 
         dlist_init(&entry->wait_list);
 
-        const bool inserted = map_.insert_unique(key, entry);
+        const bool inserted = shard.map.insert_unique(key, entry);
 
         if (!inserted) {
             delete entry;
@@ -83,8 +93,13 @@ public:
     void release_entry(futex_entry_t& entry) {
         bool maybe_free = false;
 
+        FutexShard* shard = entry.shard;
+        if (!shard) {
+            panic("FUTEX: entry missing shard");
+        }
+
         {
-            kernel::SpinLockSafeGuard guard(lock_);
+            kernel::SpinLockSafeGuard guard(shard->lock);
 
             if (entry.refs == 0u) {
                 panic("FUTEX: entry ref underflow");
@@ -106,11 +121,11 @@ public:
         futex_entry_t* removed = nullptr;
 
         {
-            kernel::SpinLockSafeGuard guard(lock_);
+            kernel::SpinLockSafeGuard guard(shard->lock);
 
             futex_entry_t* current = nullptr;
 
-            if (!map_.try_get(entry.key, current) || current != &entry) {
+            if (!shard->map.try_get(entry.key, current) || current != &entry) {
                 return;
             }
 
@@ -122,7 +137,7 @@ public:
                 return;
             }
 
-            (void)map_.remove_and_get(entry.key, removed);
+            (void)shard->map.remove_and_get(entry.key, removed);
         }
 
         if (removed) {
@@ -139,18 +154,25 @@ private:
         return unused;
     }
 
-    kernel::SpinLock lock_;
-    HashMap<uint32_t, futex_entry_t*> map_;
+    static constexpr uint32_t kShards = 64u;
+
+    static FutexShard& shard_for(uint32_t key) {
+        return shards_[key & (kShards - 1u)];
+    }
+
+    static FutexShard shards_[kShards];
 };
 
 static __cacheline_aligned FutexTable futex_table;
 
+FutexShard FutexTable::shards_[FutexTable::kShards];
+
 void futex_entry_t::release() {
-    if (!table) {
-        panic("FUTEX: entry missing table");
+    if (!shard) {
+        panic("FUTEX: entry missing shard");
     }
 
-    table->release_entry(*this);
+    futex_table.release_entry(*this);
 }
 
 static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, uint32_t expected) {
