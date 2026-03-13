@@ -15,6 +15,8 @@
 
 #include <hal/lock.h>
 #include <lib/cpp/atomic.h>
+#include <lib/cpp/semaphore.h>
+#include <lib/cpp/unique_ptr.h>
 #include <lib/rbtree.h>
 
 #define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
@@ -47,7 +49,8 @@ public:
         struct InodeTableCacheSlot {
             uint32_t lba;
             uint32_t stamp;
-            uint8_t valid;
+            kernel::atomic<uint32_t> flags;
+            kernel::Semaphore io_done;
             uint8_t data[YFS_BLOCK_SIZE];
         };
 
@@ -166,6 +169,17 @@ static spinlock_t& inode_table_cache_lock = yfs_state.inode_table_cache_lock;
 static uint32_t& inode_table_cache_stamp = yfs_state.inode_table_cache_stamp;
 
 #define INODE_TABLE_CACHE_SLOTS (yfs::FileSystem::State::inode_table_cache_slots)
+
+static constexpr uint32_t k_inode_cache_valid = 1u << 0;
+static constexpr uint32_t k_inode_cache_inflight = 1u << 1;
+
+struct KfreeDeleter {
+    void operator()(uint8_t* ptr) const noexcept {
+        if (ptr) {
+            kfree(ptr);
+        }
+    }
+};
 
 #define YFS_SCRATCH_SLOTS (yfs::FileSystem::State::scratch_slots)
 
@@ -650,61 +664,130 @@ static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
 
     yfs_blk_t lba = sb.inode_table_start + block_idx;
 
-    spinlock_acquire(&inode_table_cache_lock);
-
-    inode_table_cache_stamp++;
-    uint32_t stamp = inode_table_cache_stamp;
-
-    int slot = -1;
-    for (int i = 0; i < INODE_TABLE_CACHE_SLOTS; i++) {
-        if (inode_table_cache[i].valid && inode_table_cache[i].lba == lba) {
-            slot = i;
-            break;
-        }
+    uint8_t* io_buf = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!io_buf) {
+        return 0;
     }
 
-    if (slot < 0) {
-        uint32_t best_stamp = 0xFFFFFFFF;
+    auto io_buf_guard = kernel::unique_ptr<uint8_t, KfreeDeleter>(io_buf);
+
+    for (;;) {
+        spinlock_acquire(&inode_table_cache_lock);
+
+        inode_table_cache_stamp++;
+        const uint32_t stamp = inode_table_cache_stamp;
+
+        int slot = -1;
         for (int i = 0; i < INODE_TABLE_CACHE_SLOTS; i++) {
-            if (!inode_table_cache[i].valid) {
+            const uint32_t flags = inode_table_cache[i].flags.load(kernel::memory_order::acquire);
+            if ((flags & k_inode_cache_valid) != 0u && inode_table_cache[i].lba == lba) {
                 slot = i;
                 break;
             }
+        }
+
+        if (slot >= 0) {
+            inode_table_cache[slot].stamp = stamp;
+
+            const uint32_t flags = inode_table_cache[slot].flags.load(kernel::memory_order::acquire);
+            if ((flags & k_inode_cache_inflight) != 0u) {
+                spinlock_release(&inode_table_cache_lock);
+                inode_table_cache[slot].io_done.wait();
+                continue;
+            }
+
+            if (offset * sizeof(yfs_inode_t) + sizeof(yfs_inode_t) > YFS_BLOCK_SIZE) {
+                spinlock_release(&inode_table_cache_lock);
+                return 0;
+            }
+
+            if (!write) {
+                const yfs_inode_t* table = (const yfs_inode_t*)inode_table_cache[slot].data;
+                memcpy(data, &table[offset], sizeof(yfs_inode_t));
+                spinlock_release(&inode_table_cache_lock);
+                return 1;
+            }
+
+            inode_table_cache[slot].flags.store(k_inode_cache_valid | k_inode_cache_inflight, kernel::memory_order::release);
+            memcpy(io_buf_guard.get(), inode_table_cache[slot].data, YFS_BLOCK_SIZE);
+            spinlock_release(&inode_table_cache_lock);
+
+            yfs_inode_t* table = (yfs_inode_t*)io_buf_guard.get();
+            memcpy(&table[offset], data, sizeof(yfs_inode_t));
+
+            const int ok = bcache_write(lba, io_buf_guard.get());
+
+            spinlock_acquire(&inode_table_cache_lock);
+
+            if (inode_table_cache[slot].lba == lba) {
+                if (ok) {
+                    memcpy(inode_table_cache[slot].data, io_buf_guard.get(), YFS_BLOCK_SIZE);
+                    inode_table_cache[slot].flags.store(k_inode_cache_valid, kernel::memory_order::release);
+                } else {
+                    inode_table_cache[slot].flags.store(0u, kernel::memory_order::release);
+                }
+
+                inode_table_cache[slot].io_done.signal_all();
+            }
+
+            spinlock_release(&inode_table_cache_lock);
+
+            return ok ? 1 : 0;
+        }
+
+        uint32_t best_stamp = 0xFFFFFFFFu;
+        for (int i = 0; i < INODE_TABLE_CACHE_SLOTS; i++) {
+            const uint32_t flags = inode_table_cache[i].flags.load(kernel::memory_order::acquire);
+            if ((flags & k_inode_cache_inflight) != 0u) {
+                continue;
+            }
+
+            if ((flags & k_inode_cache_valid) == 0u) {
+                slot = i;
+                break;
+            }
+
             if (inode_table_cache[i].stamp < best_stamp) {
                 best_stamp = inode_table_cache[i].stamp;
                 slot = i;
             }
         }
 
-        inode_table_cache[slot].lba = lba;
-        inode_table_cache[slot].valid = 1;
-        inode_table_cache[slot].stamp = stamp;
-
-        if (!bcache_read(lba, inode_table_cache[slot].data)) {
-            inode_table_cache[slot].valid = 0;
+        if (slot < 0) {
+            inode_table_cache[0].flags.load(kernel::memory_order::acquire);
             spinlock_release(&inode_table_cache_lock);
+            inode_table_cache[0].io_done.wait();
+            continue;
+        }
+
+        inode_table_cache[slot].lba = lba;
+        inode_table_cache[slot].stamp = stamp;
+        inode_table_cache[slot].flags.store(k_inode_cache_inflight, kernel::memory_order::release);
+        inode_table_cache[slot].io_done.init(0);
+
+        spinlock_release(&inode_table_cache_lock);
+
+        const int ok = bcache_read(lba, io_buf_guard.get());
+
+        spinlock_acquire(&inode_table_cache_lock);
+
+        if (inode_table_cache[slot].lba == lba) {
+            if (ok) {
+                memcpy(inode_table_cache[slot].data, io_buf_guard.get(), YFS_BLOCK_SIZE);
+                inode_table_cache[slot].flags.store(k_inode_cache_valid, kernel::memory_order::release);
+            } else {
+                inode_table_cache[slot].flags.store(0u, kernel::memory_order::release);
+            }
+
+            inode_table_cache[slot].io_done.signal_all();
+        }
+
+        spinlock_release(&inode_table_cache_lock);
+
+        if (!ok) {
             return 0;
         }
-    } else {
-        inode_table_cache[slot].stamp = stamp;
     }
-
-    yfs_inode_t* table = (yfs_inode_t*)inode_table_cache[slot].data;
-
-    if (offset * sizeof(yfs_inode_t) + sizeof(yfs_inode_t) > YFS_BLOCK_SIZE) {
-        spinlock_release(&inode_table_cache_lock);
-        return 0;
-    }
-
-    if (write) {
-        memcpy(&table[offset], data, sizeof(yfs_inode_t));
-        bcache_write(lba, inode_table_cache[slot].data);
-    } else {
-        memcpy(data, &table[offset], sizeof(yfs_inode_t));
-    }
-
-    spinlock_release(&inode_table_cache_lock);
-    return 1;
 }
 
 static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc) {
@@ -1579,7 +1662,13 @@ void yfs::FileSystem::init() {
     spinlock_init(&inode_table_cache_lock);
 
     inode_table_cache_stamp = 0;
-    memset(inode_table_cache, 0, sizeof(inode_table_cache));
+    for (int i = 0; i < INODE_TABLE_CACHE_SLOTS; i++) {
+        inode_table_cache[i].lba = 0;
+        inode_table_cache[i].stamp = 0;
+        inode_table_cache[i].flags.store(0u, kernel::memory_order::relaxed);
+        inode_table_cache[i].io_done.init(0);
+        memset(inode_table_cache[i].data, 0, sizeof(inode_table_cache[i].data));
+    }
 
     spinlock_init(&yfs_scratch_lock);
     memset(yfs_scratch_used, 0, sizeof(yfs_scratch_used));
