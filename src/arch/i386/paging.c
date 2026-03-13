@@ -47,6 +47,28 @@ static spinlock_t paging_fixmap_lock;
 
 __attribute__((noreturn)) static void paging_halt(const char* msg);
 
+static inline spinlock_t* paging_select_dir_lock(uint32_t* dir) {
+    if (dir != kernel_page_directory) {
+        cpu_t* cpu = cpu_current();
+        task_t* t = cpu ? cpu->current_task : 0;
+        proc_mem_t* mem = t ? t->mem : 0;
+
+        if (mem && mem->page_dir == dir) {
+            return &mem->pt_lock;
+        }
+    }
+
+    return &paging_lock;
+}
+
+static inline uint32_t paging_lock_dir_safe(uint32_t* dir) {
+    return spinlock_acquire_safe(paging_select_dir_lock(dir));
+}
+
+static inline void paging_unlock_dir_safe(uint32_t* dir, uint32_t flags) {
+    spinlock_release_safe(paging_select_dir_lock(dir), flags);
+}
+
 /*
  * Fixmap.
  *
@@ -123,7 +145,7 @@ void paging_unmap_range_ex(
         return;
     }
 
-    uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
+    uint32_t int_flags = paging_lock_dir_safe(dir);
 
     int any_unmapped = 0;
 
@@ -161,7 +183,7 @@ void paging_unmap_range_ex(
         any_unmapped = 1;
     }
 
-    spinlock_release_safe(&paging_lock, int_flags);
+    paging_unlock_dir_safe(dir, int_flags);
 
     if (!any_unmapped) {
         return;
@@ -505,29 +527,39 @@ void paging_map_ex(
      * The implementation allocates page tables on demand. Page directories and
      * page tables are assumed to live in identity-mapped memory at this stage.
      */
-    uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
-
     uint32_t pd_idx = virt >> 22;
     uint32_t pt_idx = (virt >> 12) & 0x3FF;
 
-    if (!(dir[pd_idx] & 1)) {
-        void* new_pt_phys = pmm_alloc_block();
+    void* new_pt_phys = 0;
+    uint32_t int_flags = paging_lock_dir_safe(dir);
+
+    if ((dir[pd_idx] & 1u) == 0u) {
+        paging_unlock_dir_safe(dir, int_flags);
+
+        new_pt_phys = pmm_alloc_block();
         if (!new_pt_phys) {
-            spinlock_release_safe(&paging_lock, int_flags);
             paging_halt("pmm_alloc_block failed in paging_map");
         }
 
         paging_zero_phys_page((uint32_t)new_pt_phys);
 
-        /* Present + RW + USER: kernel and userspace can share PDEs policy-wise. */
-        dir[pd_idx] = ((uint32_t)new_pt_phys) | 7;
+        int_flags = paging_lock_dir_safe(dir);
+        if ((dir[pd_idx] & 1u) == 0u) {
+            /* Present + RW + USER: kernel and userspace can share PDEs policy-wise. */
+            dir[pd_idx] = ((uint32_t)new_pt_phys) | 7u;
+            new_pt_phys = 0;
+        }
     }
 
     /* PT address comes from the PDE. This assumes identity-mapped tables. */
-    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
-    pt[pt_idx] = (phys & ~0xFFF) | flags;
+    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFFu);
+    pt[pt_idx] = (phys & ~0xFFFu) | flags;
 
-    spinlock_release_safe(&paging_lock, int_flags);
+    paging_unlock_dir_safe(dir, int_flags);
+
+    if (new_pt_phys) {
+        pmm_free_block(new_pt_phys);
+    }
 
     if ((map_flags & PAGING_MAP_NO_TLB_FLUSH) != 0u) {
         return;
@@ -558,18 +590,28 @@ static void paging_allocate_table(uint32_t virt) {
      * This is used to pre-create the fixmap tables and a kernel window used by
      * higher-level allocators.
      */
-    uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
-    
     uint32_t pd_idx = virt >> 22;
-    if (!(kernel_page_directory[pd_idx] & 1)) {
-        void* new_pt_phys = pmm_alloc_block();
-        if (new_pt_phys) {
-            paging_zero_phys_page((uint32_t)new_pt_phys);
-            kernel_page_directory[pd_idx] = ((uint32_t)new_pt_phys) | 7;
-        }
+    if ((kernel_page_directory[pd_idx] & 1u) != 0u) {
+        return;
     }
-    
+
+    void* new_pt_phys = pmm_alloc_block();
+    if (!new_pt_phys) {
+        return;
+    }
+
+    paging_zero_phys_page((uint32_t)new_pt_phys);
+
+    uint32_t int_flags = spinlock_acquire_safe(&paging_lock);
+    if ((kernel_page_directory[pd_idx] & 1u) == 0u) {
+        kernel_page_directory[pd_idx] = ((uint32_t)new_pt_phys) | 7u;
+        new_pt_phys = 0;
+    }
     spinlock_release_safe(&paging_lock, int_flags);
+
+    if (new_pt_phys) {
+        pmm_free_block(new_pt_phys);
+    }
 }
 
 void paging_init(uint32_t ram_size_bytes) {

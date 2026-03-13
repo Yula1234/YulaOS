@@ -1153,6 +1153,9 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
 
     proc_mem_t* mem = mem_guard.get();
     memset(mem, 0, sizeof(*mem));
+
+    spinlock_init(&mem->pt_lock);
+
     mem->leader_pid = leader_pid;
     mem->refcount = 1;
     mem->mmap_top = proc::detail::default_mmap_top;
