@@ -2,7 +2,6 @@
 /* Copyright (C) 2025 Yula1234 */
 
 #include <lib/cpp/hash_traits.h>
-#include <lib/cpp/rwlock.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/dlist.h>
 #include <lib/cpp/lock_guard.h>
@@ -112,7 +111,7 @@ struct BcacheEntry {
     kernel::atomic<uint32_t> refcnt{0};
     kernel::atomic<uint32_t> flags{0};
 
-    kernel::RwLock data_lock{};
+    rwspinlock_t data_lock{};
     BcacheIoEvent io_done{};
 
     uint8_t* data = nullptr;
@@ -123,6 +122,7 @@ struct BcacheEntry {
     dlist_head_t dirty_node{};
 
     BcacheEntry() {
+        rwspinlock_init(&data_lock);
         io_done.init();
     }
 
@@ -532,7 +532,7 @@ struct BcacheShard {
      * lives under entry->data_lock. When both are required, take meta_lock
      * first, otherwise a writer can deadlock against a flusher.
      */
-    kernel::RwLock meta_lock{};
+    rwspinlock_t meta_lock{};
     HashMap<uint32_t, BcacheEntry*, BCACHE_SHARD_BUCKETS> map{};
 
     kernel::CDBLinkedList<BcacheEntry, &BcacheEntry::dirty_node> dirty_list{};
@@ -709,7 +709,7 @@ struct BcacheShard {
 
             flags = cand->flags.load(kernel::memory_order::acquire);
             if ((flags & k_flag_dirty) != 0u) {
-                kernel::ReadGuard data_guard(cand->data_lock);
+                kernel::RwSpinLockNativeReadGuard data_guard(cand->data_lock);
 
                 if (cand->data) {
                     memcpy(out.data, cand->data, BLOCK_SIZE);
@@ -744,7 +744,7 @@ struct BcacheShard {
             EvictedBlock ev{};
 
             {
-                kernel::WriteGuard meta_guard(meta_lock);
+                kernel::RwSpinLockNativeWriteGuard meta_guard(meta_lock);
 
                 if (entries < max_entries) {
                     break;
@@ -778,7 +778,7 @@ struct BcacheShard {
          * minimal.
          */
         {
-            kernel::ReadGuard meta_guard(meta_lock);
+            kernel::RwSpinLockNativeReadGuard meta_guard(meta_lock);
 
             if (lookup_locked(block_idx)) {
                 return nullptr;
@@ -792,7 +792,7 @@ struct BcacheShard {
         BcacheEntry* created = nullptr;
 
         {
-            kernel::WriteGuard meta_guard(meta_lock);
+            kernel::RwSpinLockNativeWriteGuard meta_guard(meta_lock);
 
             if (lookup_locked(block_idx)) {
                 return nullptr;
@@ -857,19 +857,20 @@ struct BcacheShard {
         const uint8_t* write_buf
     ) {
         /*
-         * The double lookup is intentional.
+         * Ensure the caller sees a single shared entry.
          *
-         * Avoid taking the exclusive lock on cache hits, but re-check under the
-         * writer lock before allocating to keep a racing creator from producing
+         * First check under read lock so that hits never block each other.
+         * The write lock phase repeats the lookup to avoid creating
          * two entries for the same block.
          */
         {
-            kernel::ReadGuard meta_guard(meta_lock);
+            kernel::RwSpinLockNativeReadGuard meta_guard(meta_lock);
 
             BcacheEntry* e = lookup_locked(block_idx);
             if (e) {
-                e->get();
-                return e;
+                if (e->try_get_not_evicting()) {
+                    return e;
+                }
             }
         }
 
@@ -880,12 +881,13 @@ struct BcacheShard {
         BcacheEntry* created = nullptr;
 
         {
-            kernel::WriteGuard meta_guard(meta_lock);
+            kernel::RwSpinLockNativeWriteGuard meta_guard(meta_lock);
 
             BcacheEntry* race = lookup_locked(block_idx);
             if (race) {
-                race->get();
-                return race;
+                if (race->try_get_not_evicting()) {
+                    return race;
+                }
             }
 
             void* mem = nullptr;
@@ -935,7 +937,7 @@ struct BcacheShard {
             }
 
             if (for_write) {
-                kernel::WriteGuard data_guard(created->data_lock);
+                kernel::RwSpinLockNativeWriteGuard data_guard(created->data_lock);
 
                 /*
                  * Copy the payload while the entry is still private.
@@ -968,7 +970,7 @@ struct BcacheShard {
         DiskIo::read_4k(block_idx, tmp);
 
         {
-            kernel::WriteGuard data_guard(created->data_lock);
+            kernel::RwSpinLockNativeWriteGuard data_guard(created->data_lock);
 
             memcpy(created->data, tmp, BLOCK_SIZE);
         }
@@ -992,13 +994,6 @@ struct BcacheShard {
 static BcacheShard g_shards[BCACHE_SHARDS]{};
 
 static void bcache_prefetch_worker(void*) {
-    /*
-     * Keep a separate worker so the synchronous read path never blocks on
-     * readahead.
-     *
-     * The extra reference is mandatory: the worker must keep the entry alive
-     * from enqueue until I/O completes, even if the block becomes cold.
-     */
     for (;;) {
         BcacheEntry* e = g_prefetch.pop_blocking();
         if (!e) {
@@ -1010,7 +1005,7 @@ static void bcache_prefetch_worker(void*) {
         DiskIo::read_4k(e->block_idx, tmp);
 
         {
-            kernel::WriteGuard data_guard(e->data_lock);
+            kernel::RwSpinLockNativeWriteGuard data_guard(e->data_lock);
 
             memcpy(e->data, tmp, BLOCK_SIZE);
         }
@@ -1036,11 +1031,6 @@ void bcache_init(void) {
         g_entry_cache = kmem_cache_create("bcache_e", sizeof(BcacheEntry), 0, 0);
     }
 
-    /*
-     * Size by RAM to avoid hardcoding cache behavior across machines.
-     * Keep a minimum of one entry per shard to avoid pathological empty shards.
-     */
-
     const uint64_t total_ram_bytes =
         (uint64_t)pmm_get_total_blocks() * (uint64_t)BLOCK_SIZE;
     const uint64_t target_bytes = total_ram_bytes / 50u;
@@ -1057,7 +1047,9 @@ void bcache_init(void) {
         (uint32_t)(target_entries / (uint64_t)BCACHE_SHARDS);
 
     for (uint32_t i = 0; i < BCACHE_SHARDS; i++) {
-        kernel::WriteGuard meta_guard(g_shards[i].meta_lock);
+        rwspinlock_init(&g_shards[i].meta_lock);
+
+        kernel::RwSpinLockNativeWriteGuard meta_guard(g_shards[i].meta_lock);
 
         g_shards[i].map.clear();
         g_shards[i].clock_hand = nullptr;
@@ -1073,14 +1065,9 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
         return 0;
     }
 
-    /*
-     * Hot-cache hit must avoid shard locks.
-     * The point of this path is to keep contention down when a single block is
-     * hammered by one CPU.
-     */
     if (BcacheEntry* hot = g_hot_cache.try_get(block_idx)) {
         {
-            kernel::ReadGuard data_guard(hot->data_lock);
+            kernel::RwSpinLockNativeReadGuard data_guard(hot->data_lock);
 
             memcpy(buf, hot->data, BLOCK_SIZE);
         }
@@ -1095,24 +1082,16 @@ int bcache_read(uint32_t block_idx, uint8_t* buf) {
 
     BcacheEntry* e = shard.get_or_create(block_idx, false, nullptr);
     if (!e) {
-        /*
-         * Under cache pressure a miss is not an error.
-         * Fall back to direct I/O and keep the filesystem moving.
-         */
         return DiskIo::try_read_4k(block_idx, buf) ? 1 : 0;
     }
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
     if ((flags & k_flag_io_inflight) != 0u) {
-        /*
-         * Avoid duplicating disk reads.
-         * If a creator is already fetching this block, wait for it.
-         */
         e->io_done.wait();
     }
 
     {
-        kernel::ReadGuard data_guard(e->data_lock);
+        kernel::RwSpinLockNativeReadGuard data_guard(e->data_lock);
 
         memcpy(buf, e->data, BLOCK_SIZE);
     }
@@ -1133,7 +1112,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 
     if (BcacheEntry* hot = g_hot_cache.try_get(block_idx)) {
         {
-            kernel::WriteGuard data_guard(hot->data_lock);
+            kernel::RwSpinLockNativeWriteGuard data_guard(hot->data_lock);
 
             memcpy(hot->data, buf, BLOCK_SIZE);
         }
@@ -1146,7 +1125,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
         if ((prev_flags & k_flag_dirty) == 0u) {
             BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
 
-            kernel::WriteGuard meta_guard(shard.meta_lock);
+            kernel::RwSpinLockNativeWriteGuard meta_guard(shard.meta_lock);
 
             shard.dirty_mark_locked(*hot);
         }
@@ -1159,24 +1138,16 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 
     BcacheEntry* e = shard.get_or_create(block_idx, true, buf);
     if (!e) {
-        /*
-         * Refuse to hide allocation/eviction failure.
-         * A write-through fallback is not always acceptable at this layer.
-         */
         return 0;
     }
 
     const uint32_t flags = e->flags.load(kernel::memory_order::acquire);
     if ((flags & k_flag_io_inflight) != 0u) {
-        /*
-         * Preserve single-I/O semantics.
-         * Writing into a buffer that is being filled would publish torn data.
-         */
         e->io_done.wait();
     }
 
     {
-        kernel::WriteGuard data_guard(e->data_lock);
+        kernel::RwSpinLockNativeWriteGuard data_guard(e->data_lock);
 
         memcpy(e->data, buf, BLOCK_SIZE);
     }
@@ -1187,7 +1158,7 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
     );
 
     if ((prev_flags & k_flag_dirty) == 0u) {
-        kernel::WriteGuard meta_guard(shard.meta_lock);
+        kernel::RwSpinLockNativeWriteGuard meta_guard(shard.meta_lock);
 
         shard.dirty_mark_locked(*e);
     }
@@ -1200,12 +1171,6 @@ int bcache_write(uint32_t block_idx, const uint8_t* buf) {
 }
 
 void bcache_sync(void) {
-    /*
-     * Drain dirty_list per shard.
-     *
-     * Do not hold meta_lock during disk writes. Take a reference, clear dirty,
-     * snapshot the data, then release the lock and flush.
-     */
     for (uint32_t si = 0; si < BCACHE_SHARDS; si++) {
         BcacheShard& shard = g_shards[si];
 
@@ -1218,7 +1183,7 @@ void bcache_sync(void) {
             bool do_flush = false;
 
             {
-                kernel::WriteGuard meta_guard(shard.meta_lock);
+                kernel::RwSpinLockNativeWriteGuard meta_guard(shard.meta_lock);
 
                 if (shard.dirty_list.empty()) {
                     break;
@@ -1237,23 +1202,14 @@ void bcache_sync(void) {
 
                 cur.get();
 
-                /*
-                 * Clear dirty under meta_lock before I/O.
-                 * If the write fails, the caller is not told anyway; do not
-                 * risk an infinite retry loop by leaving the same entry dirty.
-                 */
                 cur.flags.fetch_and(
                     ~k_flag_dirty,
                     kernel::memory_order::acq_rel
                 );
 
                 {
-                    kernel::ReadGuard data_guard(cur.data_lock);
+                    kernel::RwSpinLockNativeReadGuard data_guard(cur.data_lock);
 
-                    /*
-                     * Snapshot under data_lock.
-                     * Do not hold meta_lock here longer than necessary.
-                     */
                     memcpy(tmp, cur.data, BLOCK_SIZE);
                 }
 
@@ -1274,12 +1230,6 @@ void bcache_sync(void) {
 }
 
 void bcache_flush_block(uint32_t block_idx) {
-    /*
-     * Block-level flush is advisory.
-     *
-     * If the block is not cached or not dirty, return quickly. This call must
-     * not force a cache fill.
-     */
     BcacheShard& shard = g_shards[BcacheShard::index_for(block_idx)];
 
     uint8_t tmp[BLOCK_SIZE];
@@ -1288,7 +1238,7 @@ void bcache_flush_block(uint32_t block_idx) {
     BcacheEntry* e = nullptr;
 
     {
-        kernel::WriteGuard meta_guard(shard.meta_lock);
+        kernel::RwSpinLockNativeWriteGuard meta_guard(shard.meta_lock);
 
         e = shard.lookup_locked(block_idx);
         if (!e) {
@@ -1305,10 +1255,6 @@ void bcache_flush_block(uint32_t block_idx) {
 
         shard.dirty_unmark_locked(*e);
 
-        /*
-         * Clear dirty while holding meta_lock.
-         * bcache_sync and flush_block must not race and emit two writebacks.
-         */
         e->flags.fetch_and(
             ~k_flag_dirty,
             kernel::memory_order::acq_rel
@@ -1316,7 +1262,7 @@ void bcache_flush_block(uint32_t block_idx) {
     }
 
     {
-        kernel::ReadGuard data_guard(e->data_lock);
+        kernel::RwSpinLockNativeReadGuard data_guard(e->data_lock);
 
         memcpy(tmp, e->data, BLOCK_SIZE);
     }
@@ -1343,12 +1289,6 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         count = 8;
     }
 
-    /*
-     * Limit the amount of speculative work.
-     * A large sequential hint is common; creating too many entries would just
-     * evict useful cache lines and amplify I/O.
-     */
-
     for (uint32_t i = 1; i <= count; i++) {
         const uint32_t block_idx = start_block + i;
 
@@ -1360,28 +1300,16 @@ void bcache_readahead(uint32_t start_block, uint32_t count) {
         }
 
         if (!g_prefetch.try_push(*e)) {
-            /*
-             * If enqueue fails, roll back the created entry.
-             *
-             * Readahead must not leak entries into the map without a worker
-             * reference. The double put is intentional: one drops the caller
-             * reference, the other drops the shard/map reference after unlink.
-             */
             BcacheShard& rollback_shard =
                 g_shards[BcacheShard::index_for(e->block_idx)];
 
             bool unlinked = false;
 
             {
-                kernel::WriteGuard meta_guard(rollback_shard.meta_lock);
+                kernel::RwSpinLockNativeWriteGuard meta_guard(rollback_shard.meta_lock);
 
                 BcacheEntry* cur = rollback_shard.lookup_locked(e->block_idx);
                 if (cur == e) {
-                    /*
-                     * Mark evicting before unlink.
-                     * Anybody that races and already holds a reference must
-                     * not see the entry as reusable.
-                     */
                     e->flags.fetch_or(
                         k_flag_evicting,
                         kernel::memory_order::acq_rel
