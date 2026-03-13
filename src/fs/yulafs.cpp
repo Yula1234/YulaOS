@@ -20,7 +20,6 @@
 #include <lib/rbtree.h>
 
 #define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
-#define INODE_LOCK_BUCKETS 128
 
 /*
  * YFS keeps the on-disk format small.
@@ -44,6 +43,8 @@ public:
         struct InodeRuntimeState {
             kernel::atomic<uint32_t> open_refs{0};
             kernel::atomic<uint32_t> runtime_flags{0};
+
+            __cacheline_aligned rwlock_t lock{};
         };
 
         struct InodeTableCacheSlot {
@@ -59,8 +60,6 @@ public:
 
         uint32_t last_free_blk_hint;
         uint32_t last_free_ino_hint;
-
-        rwlock_t inode_locks[INODE_LOCK_BUCKETS];
 
         uint8_t bmap_cache_data[YFS_BLOCK_SIZE];
         uint32_t bmap_cache_lba;
@@ -139,9 +138,24 @@ static FileSystem g_fs;
 
 }
 
+static inline yfs::FileSystem::State::InodeRuntimeState* inode_rt(yfs_ino_t ino);
+
 /* Local aliases reduce noise at call sites. */
 static inline rwlock_t* get_inode_lock(yfs_ino_t ino) {
-    return &yfs::g_fs.state().inode_locks[ino % INODE_LOCK_BUCKETS];
+    static rwlock_t fallback;
+    static int fallback_inited = 0;
+
+    if (!fallback_inited) {
+        rwlock_init(&fallback);
+        fallback_inited = 1;
+    }
+
+    auto* rt = inode_rt(ino);
+    if (!rt) {
+        return &fallback;
+    }
+
+    return &rt->lock;
 }
 
 static yfs::FileSystem::State& yfs_state = yfs::g_fs.state();
@@ -151,8 +165,6 @@ static int& fs_mounted = yfs_state.mounted;
 
 static uint32_t& last_free_blk_hint = yfs_state.last_free_blk_hint;
 static uint32_t& last_free_ino_hint = yfs_state.last_free_ino_hint;
-
-static rwlock_t (&inode_locks)[INODE_LOCK_BUCKETS] = yfs_state.inode_locks;
 
 static uint8_t (&bmap_cache_data)[YFS_BLOCK_SIZE] = yfs_state.bmap_cache_data;
 static uint32_t& bmap_cache_lba = yfs_state.bmap_cache_lba;
@@ -250,6 +262,11 @@ static void inode_state_init_or_panic(uint32_t total_inodes) {
     }
 
     memset(inode_state, 0, sizeof(*inode_state) * total_inodes);
+
+    for (uint32_t i = 0; i < total_inodes; i++) {
+        rwlock_init(&inode_state[i].lock);
+    }
+
     inode_state_count = total_inodes;
 }
 
@@ -267,7 +284,7 @@ static int rb_compare(yfs_ino_t p1, const char* n1, yfs_ino_t p2, const char* n2
 }
 
 rwlock_t* yfs::FileSystem::inode_lock(yfs_ino_t ino) {
-    return &state_.inode_locks[ino % INODE_LOCK_BUCKETS];
+    return get_inode_lock(ino);
 }
 
 uint8_t* yfs::FileSystem::scratch_acquire(int* out_slot) {
@@ -1690,10 +1707,6 @@ void yfs::FileSystem::init() {
     memcpy(&sb, buf, sizeof(sb));
 
     kfree(buf);
-
-    for (int i = 0; i < INODE_LOCK_BUCKETS; i++) {
-        rwlock_init(&inode_locks[i]);
-    }
 
     if (sb.magic != YFS_MAGIC) {
         uint64_t capacity_sectors = 0;
