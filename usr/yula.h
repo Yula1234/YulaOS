@@ -130,11 +130,37 @@ static inline int get_event(int win_id, yula_event_t* ev) {
 }
 
 static inline int clipboard_copy(const char* text) {
-    return syscall(25, (int)text, strlen(text), 0);
+    if (!text) {
+        return -1;
+    }
+
+    const int fd = open("/dev/clipboard", VFS_OPEN_WRITE | VFS_OPEN_TRUNC);
+    if (fd < 0) {
+        return -1;
+    }
+
+    const uint32_t len = (uint32_t)strlen(text);
+    const int rc = write(fd, text, len);
+    (void)close(fd);
+
+    return rc;
 }
 
 static inline int clipboard_paste(char* buf, int max_len) {
-    return syscall(26, (int)buf, max_len, 0);
+    if (!buf || max_len <= 0) {
+        return -1;
+    }
+
+    const int fd = open("/dev/clipboard", 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    const uint32_t size = (uint32_t)max_len;
+    const int rc = read(fd, buf, size);
+    (void)close(fd);
+
+    return rc;
 }
 
 static inline void set_term_mode(int mode) {

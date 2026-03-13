@@ -35,7 +35,6 @@
 #include <kernel/uaccess/uaccess.h>
 #include <kernel/futex/futex.h>
 
-#include "clipboard.h"
 #include "syscall.h"
 #include "sched.h"
 #include "proc.h"
@@ -453,26 +452,6 @@ static void syscall_sigreturn(registers_t* regs, task_t* curr) {
 static void syscall_removed(registers_t* regs, task_t* curr) {
     (void)curr;
     regs->eax = (uint32_t)-1;
-}
-
-static void syscall_set_clipboard(registers_t* regs, task_t* curr) {
-    char* buf = (char*)regs->ebx;
-    int len = (int)regs->ecx;
-    if (check_user_buffer(curr, buf, (uint32_t)len)) {
-        regs->eax = (uint32_t)clipboard_set(buf, len);
-    } else {
-        regs->eax = (uint32_t)-1;
-    }
-}
-
-static void syscall_get_clipboard(registers_t* regs, task_t* curr) {
-    char* buf = (char*)regs->ebx;
-    int max_len = (int)regs->ecx;
-    if (check_user_buffer(curr, buf, (uint32_t)max_len)) {
-        regs->eax = (uint32_t)clipboard_get(buf, max_len);
-    } else {
-        regs->eax = (uint32_t)-1;
-    }
 }
 
 static void syscall_set_term_mode(registers_t* regs, task_t* curr) {
@@ -2050,8 +2029,8 @@ static const syscall_fn_t syscall_table[] = {
     [22] = syscall_removed,
     [23] = syscall_removed,
     [24] = syscall_invalid,
-    [25] = syscall_set_clipboard,
-    [26] = syscall_get_clipboard,
+    [25] = syscall_removed,
+    [26] = syscall_removed,
     [27] = syscall_set_term_mode,
     [28] = syscall_set_console_color,
     [29] = syscall_pipe,

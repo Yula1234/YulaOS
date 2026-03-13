@@ -28,7 +28,6 @@
 
 #include <drivers/driver.h>
 
-#include <kernel/clipboard.h>
 #include <kernel/boot.h>
 #include <kernel/init.h>
 #include <kernel/tty/tty.h>
@@ -282,8 +281,6 @@ static void kmain_devices_init(void) {
 
     serial_core_init(NS16550_COM1);
     console_set_writer(serial_core_console_write, 0);
-
-    clipboard_init();
 
     kbd_init();
     mouse_init();
