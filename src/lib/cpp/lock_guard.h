@@ -334,6 +334,52 @@ private:
     rwspinlock_t* lock_ = nullptr;
 };
 
+class PerCpuRwSpinLockNativeReadGuard {
+public:
+    explicit PerCpuRwSpinLockNativeReadGuard(percpu_rwspinlock_t& lock)
+        : lock_(&lock) {
+        percpu_rwspinlock_acquire_read(lock_);
+    }
+
+    PerCpuRwSpinLockNativeReadGuard(const PerCpuRwSpinLockNativeReadGuard&) = delete;
+    PerCpuRwSpinLockNativeReadGuard& operator=(const PerCpuRwSpinLockNativeReadGuard&) = delete;
+
+    PerCpuRwSpinLockNativeReadGuard(PerCpuRwSpinLockNativeReadGuard&&) = delete;
+    PerCpuRwSpinLockNativeReadGuard& operator=(PerCpuRwSpinLockNativeReadGuard&&) = delete;
+
+    ~PerCpuRwSpinLockNativeReadGuard() {
+        if (lock_) {
+            percpu_rwspinlock_release_read(lock_);
+        }
+    }
+
+private:
+    percpu_rwspinlock_t* lock_ = nullptr;
+};
+
+class PerCpuRwSpinLockNativeWriteGuard {
+public:
+    explicit PerCpuRwSpinLockNativeWriteGuard(percpu_rwspinlock_t& lock)
+        : lock_(&lock) {
+        percpu_rwspinlock_acquire_write(lock_);
+    }
+
+    PerCpuRwSpinLockNativeWriteGuard(const PerCpuRwSpinLockNativeWriteGuard&) = delete;
+    PerCpuRwSpinLockNativeWriteGuard& operator=(const PerCpuRwSpinLockNativeWriteGuard&) = delete;
+
+    PerCpuRwSpinLockNativeWriteGuard(PerCpuRwSpinLockNativeWriteGuard&&) = delete;
+    PerCpuRwSpinLockNativeWriteGuard& operator=(PerCpuRwSpinLockNativeWriteGuard&&) = delete;
+
+    ~PerCpuRwSpinLockNativeWriteGuard() {
+        if (lock_) {
+            percpu_rwspinlock_release_write(lock_);
+        }
+    }
+
+private:
+    percpu_rwspinlock_t* lock_ = nullptr;
+};
+
 class RwSpinLockNativeWriteSafeGuard {
 public:
     explicit RwSpinLockNativeWriteSafeGuard(rwspinlock_t& lock)
