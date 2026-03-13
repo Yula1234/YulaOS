@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include <kernel/cpu_limits.h>
+#include <kernel/panic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +23,7 @@ typedef struct {
     volatile uint32_t locked;
 } spinlock_qnode_t;
 
-#define SPINLOCK_QNODE_DEPTH 64
+#define SPINLOCK_QNODE_DEPTH 128
 
 extern spinlock_qnode_t g_spinlock_qnodes[MAX_CPUS][SPINLOCK_QNODE_DEPTH];
 extern volatile uint32_t g_spinlock_qnode_tops[MAX_CPUS];
@@ -48,7 +49,7 @@ static inline spinlock_qnode_t* spinlock_qnode_alloc(void) {
 
     uint32_t idx = __atomic_fetch_add(&g_spinlock_qnode_tops[cpu], 1u, __ATOMIC_RELAXED);
     if (idx >= SPINLOCK_QNODE_DEPTH) {
-        __builtin_trap();
+        kernel_panic("spinlock qnode depth overflow", "lock.h", __LINE__, 0);
     }
 
     return &g_spinlock_qnodes[cpu][idx];
@@ -59,7 +60,7 @@ static inline spinlock_qnode_t* spinlock_qnode_current(void) {
     uint32_t idx = __atomic_load_n(&g_spinlock_qnode_tops[cpu], __ATOMIC_RELAXED);
 
     if (idx == 0u) {
-        __builtin_trap();
+        kernel_panic("spinlock qnode underflow", "lock.h", __LINE__, 0);
     }
 
     return &g_spinlock_qnodes[cpu][idx - 1u];

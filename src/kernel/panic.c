@@ -40,6 +40,12 @@ static void panic_print_hex(int x, int y, uint32_t val) {
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs) {
     __asm__ volatile("cli");
 
+    if (!fb_ptr || fb_width == 0 || fb_height == 0 || !g_fb_mapped || !fb_kernel_can_render()) {
+        while (1) {
+            __asm__ volatile("hlt");
+        }
+    }
+
     uint32_t total_pixels = fb_width * fb_height;
     for (uint32_t i = 0; i < total_pixels; i++) {
         fb_ptr[i] = 0xFF0000AA;
