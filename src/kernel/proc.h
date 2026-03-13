@@ -57,7 +57,7 @@ typedef struct proc_mem {
 
     spinlock_t pt_lock;
 
-    rwlock_t mmap_lock;
+    rwspinlock_t mmap_lock;
     struct rb_root mmap_tree;
     dlist_head_t mmap_regions;
     vma_region_t* mmap_cache;
