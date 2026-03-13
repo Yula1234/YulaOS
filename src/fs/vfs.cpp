@@ -14,8 +14,11 @@ extern "C" {
 #include <hal/lock.h>
 #include <mm/heap.h>
 
+#include <lib/cpp/hash_traits.h>
+#include <lib/cpp/rwlock.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/dlist.h>
 #include <lib/cpp/lock_guard.h>
-#include <lib/cpp/mutex.h>
 #include <lib/cpp/string.h>
 #include <lib/hash_map.h>
 #include <lib/string.h>
@@ -879,7 +882,7 @@ static vfs_ops_t yfs_vfs_ops = {
     0,
 };
 
-static kernel::Mutex g_mount_lock;
+static kernel::RwLock g_mount_lock;
 static HashMap<kernel::string, vfs_mount_entry*, 32> g_mounts;
 
 /*
@@ -1197,7 +1200,7 @@ static int vfs_resolve_mount(
          * match, but the returned out_mount pointer is still borrowed and must
          * not be stored long-term.
          */
-        kernel::MutexGuard guard(g_mount_lock);
+        kernel::ReadGuard guard(g_mount_lock);
 
         if (!is_abs) {
             vfs_mount_entry* root = vfs_mount_table_find_locked("/");
@@ -1459,7 +1462,7 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
     }
 
     {
-        kernel::MutexGuard guard(g_mount_lock);
+        kernel::WriteGuard guard(g_mount_lock);
         if (vfs_mount_table_find_locked(mountpoint)) {
             return -1;
         }
@@ -1486,7 +1489,7 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
     }
 
     {
-        kernel::MutexGuard guard(g_mount_lock);
+        kernel::WriteGuard guard(g_mount_lock);
         if (vfs_mount_table_insert_locked(mountpoint, instance) != 0) {
             (void)type->umount(instance);
 
@@ -1514,7 +1517,7 @@ static int vfs_umount_impl(const char* mountpoint) {
 
     vfs_mount_entry* entry = nullptr;
     {
-        kernel::MutexGuard guard(g_mount_lock);
+        kernel::WriteGuard guard(g_mount_lock);
         if (vfs_mount_table_remove_locked(mountpoint, &entry) != 0
             || !entry) {
             return -1;
@@ -1540,7 +1543,7 @@ static int vfs_umount_impl(const char* mountpoint) {
 
 static void vfs_init_impl(void) {
     {
-        kernel::MutexGuard guard(g_mount_lock);
+        kernel::WriteGuard guard(g_mount_lock);
         g_mounts.clear();
     }
 
@@ -3035,7 +3038,7 @@ extern "C" int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, ui
 
     const vfs_mount_entry* root = nullptr;
     {
-        kernel::MutexGuard guard(g_mount_lock);
+        kernel::ReadGuard guard(g_mount_lock);
         root = vfs_mount_table_find_locked("/");
     }
 
