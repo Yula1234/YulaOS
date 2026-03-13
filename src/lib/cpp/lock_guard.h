@@ -357,6 +357,30 @@ private:
     percpu_rwspinlock_t* lock_ = nullptr;
 };
 
+class PerCpuRwSpinLockNativeReadSafeGuard {
+public:
+    explicit PerCpuRwSpinLockNativeReadSafeGuard(percpu_rwspinlock_t& lock)
+        : lock_(&lock),
+          flags_(percpu_rwspinlock_acquire_read_safe(lock_)) {
+    }
+
+    PerCpuRwSpinLockNativeReadSafeGuard(const PerCpuRwSpinLockNativeReadSafeGuard&) = delete;
+    PerCpuRwSpinLockNativeReadSafeGuard& operator=(const PerCpuRwSpinLockNativeReadSafeGuard&) = delete;
+
+    PerCpuRwSpinLockNativeReadSafeGuard(PerCpuRwSpinLockNativeReadSafeGuard&&) = delete;
+    PerCpuRwSpinLockNativeReadSafeGuard& operator=(PerCpuRwSpinLockNativeReadSafeGuard&&) = delete;
+
+    ~PerCpuRwSpinLockNativeReadSafeGuard() {
+        if (lock_) {
+            percpu_rwspinlock_release_read_safe(lock_, flags_);
+        }
+    }
+
+private:
+    percpu_rwspinlock_t* lock_ = nullptr;
+    uint32_t flags_ = 0u;
+};
+
 class PerCpuRwSpinLockNativeWriteGuard {
 public:
     explicit PerCpuRwSpinLockNativeWriteGuard(percpu_rwspinlock_t& lock)
@@ -378,6 +402,30 @@ public:
 
 private:
     percpu_rwspinlock_t* lock_ = nullptr;
+};
+
+class PerCpuRwSpinLockNativeWriteSafeGuard {
+public:
+    explicit PerCpuRwSpinLockNativeWriteSafeGuard(percpu_rwspinlock_t& lock)
+        : lock_(&lock),
+          flags_(percpu_rwspinlock_acquire_write_safe(lock_)) {
+    }
+
+    PerCpuRwSpinLockNativeWriteSafeGuard(const PerCpuRwSpinLockNativeWriteSafeGuard&) = delete;
+    PerCpuRwSpinLockNativeWriteSafeGuard& operator=(const PerCpuRwSpinLockNativeWriteSafeGuard&) = delete;
+
+    PerCpuRwSpinLockNativeWriteSafeGuard(PerCpuRwSpinLockNativeWriteSafeGuard&&) = delete;
+    PerCpuRwSpinLockNativeWriteSafeGuard& operator=(PerCpuRwSpinLockNativeWriteSafeGuard&&) = delete;
+
+    ~PerCpuRwSpinLockNativeWriteSafeGuard() {
+        if (lock_) {
+            percpu_rwspinlock_release_write_safe(lock_, flags_);
+        }
+    }
+
+private:
+    percpu_rwspinlock_t* lock_ = nullptr;
+    uint32_t flags_ = 0u;
 };
 
 class RwSpinLockNativeWriteSafeGuard {

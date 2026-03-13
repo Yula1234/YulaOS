@@ -86,7 +86,7 @@ static AllTasksList all_tasks;
 static uint32_t total_tasks = 0;
 static kernel::atomic<uint32_t> g_next_pid{1u};
 
-static rwspinlock_t task_list_lock;
+static percpu_rwspinlock_t task_list_lock;
 
 struct ProcGroup {
     uint32_t pgid = 0;
@@ -731,7 +731,7 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
 
     uint32_t count = 0;
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
 
     for (task_t& t : proc::detail::all_tasks) {
         if (count >= cap) {
@@ -769,7 +769,7 @@ void proc_init(void) {
 
     proc::detail::g_zombie_head.store(nullptr, kernel::memory_order::relaxed);
 
-    rwspinlock_init(&proc::detail::task_list_lock);
+    percpu_rwspinlock_init(&proc::detail::task_list_lock);
 
     proc::detail::all_tasks.clear_links_unsafe();
 
@@ -1309,7 +1309,7 @@ static task_t* alloc_task(void) {
     }
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
         proc::detail::all_tasks.push_back(*t);
         proc::detail::total_tasks++;
     }
@@ -1391,7 +1391,7 @@ void proc_free_resources(task_t* t) {
     memset(t->name, 0, sizeof(t->name));
     
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
 
         dlist_del(&t->all_tasks_node);
         if (proc::detail::total_tasks > 0) {
@@ -1524,7 +1524,7 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
 }
 
 task_t* proc_get_list_head() {
-    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
 
     if (proc::detail::all_tasks.empty()) {
         return 0;
@@ -1533,12 +1533,12 @@ task_t* proc_get_list_head() {
     return &proc::detail::all_tasks.front();
 }
 uint32_t proc_task_count(void) {
-    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
     return proc::detail::total_tasks;
 }
 
 task_t* proc_task_at(uint32_t idx) {
-    kernel::RwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
 
     uint32_t i = 0;
     for (task_t& curr : proc::detail::all_tasks) {
@@ -2179,7 +2179,7 @@ task_t* proc_create_idle(int cpu_index) {
     t->esp = sp;
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
 
         dlist_del(&t->all_tasks_node);
         if (proc::detail::total_tasks > 0) {
