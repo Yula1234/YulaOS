@@ -761,15 +761,22 @@ extern "C" int vfs_getdents(int fd, void* buf, uint32_t size) {
         return -1;
     }
 
-    int rc;
+    uint32_t off;
     {
         kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
+        off = d.get()->offset;
+    }
 
-        rc = inst->type->ops->getdents(
-            inst, curr,
-            node, &d.get()->offset,
-            (yfs_dirent_info_t*)buf, size
-        );
+    uint32_t new_off = off;
+    const int rc = inst->type->ops->getdents(
+        inst, curr,
+        node, &new_off,
+        (yfs_dirent_info_t*)buf, size
+    );
+
+    if (rc > 0) {
+        kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
+        d.get()->offset = new_off;
     }
 
     return rc;
