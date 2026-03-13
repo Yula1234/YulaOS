@@ -593,14 +593,23 @@ static void syscall_mmap(registers_t* regs, task_t* curr) {
         }
     } else {
         if (map_kind == MAP_SHARED) {
-            file_desc_release(d);
-            regs->eax = 0;
-            return;
-        }
-        if (!d->node->ops || !d->node->ops->read) {
-            file_desc_release(d);
-            regs->eax = 0;
-            return;
+            if (!d->node->ops || !d->node->ops->get_phys_page) {
+                file_desc_release(d);
+                regs->eax = 0;
+                return;
+            }
+
+            if (size > d->node->size) {
+                file_desc_release(d);
+                regs->eax = 0;
+                return;
+            }
+        } else {
+            if (!d->node->ops || !d->node->ops->read) {
+                file_desc_release(d);
+                regs->eax = 0;
+                return;
+            }
         }
     }
 
@@ -891,78 +900,6 @@ static uint32_t fb_expected_user_ptr(void) {
     (void)size_bytes;
 
     return user_vaddr_start + page_off;
-}
-
-static void syscall_fb_map(registers_t* regs, task_t* curr) {
-    if (!curr->mem || !curr->mem->page_dir) {
-        regs->eax = 0;
-        return;
-    }
-
-    if (fb_get_owner_pid() != curr->pid) {
-        regs->eax = 0;
-        return;
-    }
-
-    const uint32_t user_vaddr_start = 0xB1000000u;
-
-    uint32_t fb_phys = 0u;
-    uint32_t fb_size = 0u;
-    uint32_t page_off = 0u;
-
-    if (!fb_get_mapping_params(&fb_phys, &fb_size, &page_off)) {
-        regs->eax = 0;
-        return;
-    }
-
-    if (fb_size > 0xFFFFFFFFu - page_off) {
-        regs->eax = 0;
-        return;
-    }
-
-    const uint32_t map_size = fb_size + page_off;
-
-    vma_region_t* existing = vma_find(curr->mem, user_vaddr_start);
-    if (existing && existing->vaddr_start == user_vaddr_start) {
-        const uint32_t old_len = existing->vaddr_end - existing->vaddr_start;
-        (void)vma_remove(curr->mem, existing->vaddr_start, old_len);
-    }
-
-    vfs_node_t* fb_node = devfs_clone("fb0");
-    if (!fb_node) {
-        regs->eax = 0;
-        return;
-    }
-
-    vma_region_t* region = vma_create(curr->mem, user_vaddr_start, map_size, fb_node, 0u, map_size, MAP_SHARED);
-    vfs_node_release(fb_node);
-
-    if (!region) {
-        regs->eax = 0;
-        return;
-    }
-
-    (void)fb_phys;
-
-    regs->eax = user_vaddr_start + page_off;
-}
-
-static void syscall_fb_acquire(registers_t* regs, task_t* curr) {
-    regs->eax = (uint32_t)fb_acquire(curr->pid);
-}
-
-static void syscall_fb_release(registers_t* regs, task_t* curr) {
-    const uint32_t user_vaddr_start = 0xB1000000u;
-
-    if (curr->mem && curr->mem->page_dir) {
-        vma_region_t* region = vma_find(curr->mem, user_vaddr_start);
-        if (region && region->vaddr_start == user_vaddr_start) {
-            const uint32_t len = region->vaddr_end - region->vaddr_start;
-            (void)vma_remove(curr->mem, region->vaddr_start, len);
-        }
-    }
-
-    regs->eax = (uint32_t)fb_release(curr->pid);
 }
 
 static void syscall_shm_create(registers_t* regs, task_t* curr) {
@@ -2003,36 +1940,33 @@ static const syscall_fn_t syscall_table[] = {
     [27] = syscall_waitpid,
     [28] = syscall_getdents,
     [29] = syscall_fstatat,
-    [30] = syscall_fb_map,
-    [31] = syscall_fb_acquire,
-    [32] = syscall_fb_release,
-    [33] = syscall_shm_create,
-    [34] = syscall_pipe_try_read,
-    [35] = syscall_pipe_try_write,
-    [36] = syscall_kbd_try_read,
-    [37] = syscall_ipc_listen,
-    [38] = syscall_ipc_accept,
-    [39] = syscall_ipc_connect,
-    [40] = syscall_fb_present,
-    [41] = syscall_shm_create_named,
-    [42] = syscall_shm_open_named,
-    [43] = syscall_shm_unlink_named,
-    [44] = syscall_futex_wait,
-    [45] = syscall_futex_wake,
-    [46] = syscall_poll,
-    [47] = syscall_ioctl,
-    [48] = syscall_chdir,
-    [49] = syscall_getcwd,
-    [50] = syscall_uptime_ms,
-    [51] = syscall_proc_list,
-    [52] = syscall_setsid,
-    [53] = syscall_setpgid,
-    [54] = syscall_getpgrp,
-    [55] = syscall_openat,
-    [56] = syscall_mkdirat,
-    [57] = syscall_unlinkat,
-    [58] = syscall_statat,
-    [59] = syscall_renameat,
+    [30] = syscall_shm_create,
+    [31] = syscall_pipe_try_read,
+    [32] = syscall_pipe_try_write,
+    [33] = syscall_kbd_try_read,
+    [34] = syscall_ipc_listen,
+    [35] = syscall_ipc_accept,
+    [36] = syscall_ipc_connect,
+    [37] = syscall_fb_present,
+    [38] = syscall_shm_create_named,
+    [39] = syscall_shm_open_named,
+    [40] = syscall_shm_unlink_named,
+    [41] = syscall_futex_wait,
+    [42] = syscall_futex_wake,
+    [43] = syscall_poll,
+    [44] = syscall_ioctl,
+    [45] = syscall_chdir,
+    [46] = syscall_getcwd,
+    [47] = syscall_uptime_ms,
+    [48] = syscall_proc_list,
+    [49] = syscall_setsid,
+    [50] = syscall_setpgid,
+    [51] = syscall_getpgrp,
+    [52] = syscall_openat,
+    [53] = syscall_mkdirat,
+    [54] = syscall_unlinkat,
+    [55] = syscall_statat,
+    [56] = syscall_renameat,
 };
 
 extern "C" void syscall_handler(registers_t* regs) {

@@ -84,11 +84,11 @@ static int pthread_validate_stack_size(uint32_t size) {
 }
 
 static int pthread_futex_wait(volatile uint32_t* uaddr, uint32_t expected) {
-    return syscall(44, (int)(uintptr_t)uaddr, (int)expected, 0);
+    return syscall(41, (int)(uintptr_t)uaddr, (int)expected, 0);
 }
 
 static int pthread_futex_wake(volatile uint32_t* uaddr, uint32_t max_wake) {
-    return syscall(45, (int)(uintptr_t)uaddr, (int)max_wake, 0);
+    return syscall(42, (int)(uintptr_t)uaddr, (int)max_wake, 0);
 }
 
 static int pthread_prepare_stack(const pthread_attr_t* attr, void** out_base, uint32_t* out_size, int* out_owns) {

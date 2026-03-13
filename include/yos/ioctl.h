@@ -110,4 +110,17 @@ typedef struct {
 
 #define YOS_NET_GET_MAC _YOS_IOR('N', 0x01, yos_net_mac_t)
 
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t stride;
+    uint32_t bpp;
+    uint32_t size_bytes;
+} yos_fb_info_t;
+
+#define YOS_FB_GET_INFO _YOS_IOR('F', 0x01, yos_fb_info_t)
+#define YOS_FB_ACQUIRE  _YOS_IO('F', 0x02)
+#define YOS_FB_RELEASE  _YOS_IO('F', 0x03)
+
 #endif

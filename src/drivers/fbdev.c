@@ -5,7 +5,11 @@
 #include <hal/lock.h>
 #include <kernel/input_focus.h>
 
+#include <kernel/proc.h>
+
 #include <kernel/tty/tty_bridge.h>
+
+#include <yos/ioctl.h>
 
 #include "fbdev.h"
 
@@ -22,8 +26,6 @@ static uint32_t fb_owner_pid;
 static int fb_prev_focus_pid;
 
 static int fb0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
-    (void)node;
-
     if (!buffer) return -1;
     if (offset != 0) return 0;
     if (size < sizeof(fb_info_t)) return -1;
@@ -46,8 +48,61 @@ static int fb0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     info.bpp = 32;
     info.size_bytes = info.pitch * info.height;
 
+    if (node) {
+        node->size = info.size_bytes;
+    }
+
     *(fb_info_t*)buffer = info;
     return (int)sizeof(fb_info_t);
+}
+
+static int fb0_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
+    if (!node) {
+        return -1;
+    }
+
+    if (req == YOS_FB_GET_INFO) {
+        if (!arg) {
+            return -1;
+        }
+
+        fb_info_t tmp;
+        int r = fb0_vfs_read(node, 0u, (uint32_t)sizeof(tmp), &tmp);
+        if (r != (int)sizeof(tmp)) {
+            return -1;
+        }
+
+        yos_fb_info_t out;
+        out.width = tmp.width;
+        out.height = tmp.height;
+        out.pitch = tmp.pitch;
+        out.stride = tmp.stride;
+        out.bpp = tmp.bpp;
+        out.size_bytes = tmp.size_bytes;
+
+        *(yos_fb_info_t*)arg = out;
+        return 0;
+    }
+
+    if (req == YOS_FB_ACQUIRE) {
+        task_t* curr = proc_current();
+        if (!curr) {
+            return -1;
+        }
+
+        return fb_acquire(curr->pid);
+    }
+
+    if (req == YOS_FB_RELEASE) {
+        task_t* curr = proc_current();
+        if (!curr) {
+            return -1;
+        }
+
+        return fb_release(curr->pid);
+    }
+
+    return -1;
 }
 
 static uint32_t fb0_get_phys_page(vfs_node_t* node, uint32_t offset) {
@@ -94,9 +149,10 @@ static uint32_t fb0_get_phys_page(vfs_node_t* node, uint32_t offset) {
 
 static vfs_ops_t fb0_ops = {
     .read = fb0_vfs_read,
+    .ioctl = fb0_vfs_ioctl,
     .get_phys_page = fb0_get_phys_page,
 };
-static vfs_node_t fb0_node = { .name = "fb0", .ops = &fb0_ops, .size = sizeof(fb_info_t) };
+static vfs_node_t fb0_node = { .name = "fb0", .ops = &fb0_ops, .size = 0u };
 
 uint32_t fb_get_owner_pid(void) {
     uint32_t flags = spinlock_acquire_safe(&fb_owner_lock);
