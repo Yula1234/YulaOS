@@ -460,17 +460,6 @@ static void syscall_set_term_mode(registers_t* regs, task_t* curr) {
     regs->eax = 0;
 }
 
-static void syscall_set_console_color(registers_t* regs, task_t* curr) {
-    uint32_t fg = (uint32_t)regs->ebx;
-    uint32_t bg = (uint32_t)regs->ecx;
-
-    if (curr->terminal) {
-        tty_handle_t* tty = (tty_handle_t*)curr->terminal;
-        tty_bridge_set_colors(tty, fg, bg);
-    }
-    regs->eax = 0;
-}
-
 static void syscall_pipe(registers_t* regs, task_t* curr) {
     int* user_fds = (int*)regs->ebx;
     if (!ensure_user_buffer_writable_mappable(curr, user_fds, (uint32_t)sizeof(int) * 2u)) {
@@ -2032,7 +2021,7 @@ static const syscall_fn_t syscall_table[] = {
     [25] = syscall_removed,
     [26] = syscall_removed,
     [27] = syscall_set_term_mode,
-    [28] = syscall_set_console_color,
+    [28] = syscall_removed,
     [29] = syscall_pipe,
     [30] = syscall_dup2,
     [31] = syscall_mmap,

@@ -5,12 +5,12 @@
 
 #define MAX_PATH 256
 
-#define C_DIR     0x569CD6
-#define C_FILE    0xD4D4D4
-#define C_EXE     0xB5CEA8
-#define C_ASM     0xCE9178
-#define C_TREE    0x606060
-#define C_BG      0x141414
+#define ANSI_RESET "\x1b[0m"
+#define ANSI_DIR   "\x1b[94m"
+#define ANSI_FILE  "\x1b[0m"
+#define ANSI_EXE   "\x1b[92m"
+#define ANSI_ASM   "\x1b[93m"
+#define ANSI_TREE  "\x1b[90m"
 
 typedef struct {
     uint32_t inode;
@@ -27,14 +27,27 @@ int total_dirs = 0;
 int total_files = 0;
 
 uint32_t get_color(const char* name, int is_dir) {
-    if (is_dir) return C_DIR;
+    if (is_dir) return 1u;
     
     int len = strlen(name);
-    if (len > 4 && strcmp(name + len - 4, ".exe") == 0) return C_EXE;
-    if (len > 4 && strcmp(name + len - 4, ".asm") == 0) return C_ASM;
-    if (len > 2 && strcmp(name + len - 2, ".c") == 0) return C_ASM;
+    if (len > 4 && strcmp(name + len - 4, ".exe") == 0) return 2u;
+    if (len > 4 && strcmp(name + len - 4, ".asm") == 0) return 3u;
+    if (len > 2 && strcmp(name + len - 2, ".c") == 0) return 3u;
     
-    return C_FILE;
+    return 0u;
+}
+
+static const char* color_to_ansi(uint32_t c) {
+    switch (c) {
+        case 1u:
+            return ANSI_DIR;
+        case 2u:
+            return ANSI_EXE;
+        case 3u:
+            return ANSI_ASM;
+        default:
+            return ANSI_FILE;
+    }
 }
 
 void sort_entries(Entry* list, int count) {
@@ -139,17 +152,16 @@ void print_tree(const char* path, const char* prefix) {
         strcat(line_prefix, prefix);
         strcat(line_prefix, is_last ? "`-- " : "|-- ");
 
-        set_console_color(C_TREE, C_BG);
+        print(ANSI_RESET);
+        print(ANSI_TREE);
         print(line_prefix);
+        print(ANSI_RESET);
 
         uint32_t col = get_color(list[i].name, list[i].is_dir);
-        set_console_color(col, C_BG);
-
-        char name_line[MAX_PATH + 2];
-        name_line[0] = 0;
-        strcat(name_line, list[i].name);
-        strcat(name_line, "\n");
-        print(name_line);
+        print(color_to_ansi(col));
+        print(list[i].name);
+        print(ANSI_RESET);
+        print("\n");
 
         if (list[i].is_dir) {
             total_dirs++;
@@ -176,17 +188,17 @@ int main(int argc, char** argv) {
     const char* start_path = ".";
     if (argc > 1) start_path = argv[1];
 
-    set_console_color(C_DIR, C_BG);
+    print(ANSI_DIR);
     print(start_path);
     print("\n");
 
     print_tree(start_path, "");
 
-    set_console_color(C_TREE, C_BG);
+    print(ANSI_TREE);
     print("\n");
     print_dec(total_dirs); print(" directories, ");
     print_dec(total_files); print(" files\n");
     
-    set_console_color(C_FILE, C_BG);
+    print(ANSI_RESET);
     return 0;
 }

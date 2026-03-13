@@ -7,15 +7,15 @@
 #define MAX_FILE_SIZE   (1024 * 1024) 
 #define MAX_SYMBOLS     4096
 
-#define C_RESET         0xD4D4D4
-#define C_ADDR          0x569CD6
-#define C_BYTES         0x606060
-#define C_MNEM          0xC586C0
-#define C_REG           0x9CDCFE
-#define C_NUM           0xB5CEA8
-#define C_SYM           0xCE9178
-#define C_SECTION       0x4EC9B0
-#define C_BG            0x1E1E1E
+#define ANSI_RESET      "\x1b[0m"
+#define ANSI_ADDR       "\x1b[94m"
+#define ANSI_BYTES      "\x1b[90m"
+#define ANSI_MNEM       "\x1b[95m"
+#define ANSI_REG        "\x1b[96m"
+#define ANSI_NUM        "\x1b[92m"
+#define ANSI_SYM        "\x1b[93m"
+#define ANSI_SECTION    "\x1b[96m"
+#define ANSI_ERR        "\x1b[91m"
 
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
@@ -89,9 +89,9 @@ Symbol symbols[MAX_SYMBOLS];
 int sym_count = 0;
 
 void panic(const char* msg) {
-    set_console_color(0xF44747, C_BG);
+    print(ANSI_ERR);
     printf("Error: %s\n", msg);
-    set_console_color(C_RESET, C_BG);
+    print(ANSI_RESET);
     exit(1);
 }
 
@@ -386,16 +386,16 @@ void disasm_one(uint8_t* data, uint32_t vaddr, Instr* ins) {
 
 void print_hexdump(uint8_t* data, uint32_t size, uint32_t base_addr) {
     for (uint32_t i = 0; i < size; i += 16) {
-        set_console_color(C_ADDR, C_BG);
+        print(ANSI_ADDR);
         printf("%08x: ", base_addr + i);
         
-        set_console_color(C_BYTES, C_BG);
+        print(ANSI_BYTES);
         for (int j = 0; j < 16; j++) {
             if (i + j < size) printf("%02x ", data[i+j]);
             else print("   ");
         }
         
-        set_console_color(C_NUM, C_BG);
+        print(ANSI_NUM);
         print("|");
         for (int j = 0; j < 16; j++) {
             if (i + j < size) {
@@ -413,7 +413,7 @@ void print_section(Elf32_Shdr* sh) {
     uint8_t* sec_data = file_buf + sh->sh_offset;
     const char* name = shstrtab + sh->sh_name;
     
-    set_console_color(C_SECTION, C_BG);
+    print(ANSI_SECTION);
     printf("\nSection %s (Addr: %08x, Size: %d)\n", name, sh->sh_addr, sh->sh_size);
     
     if (sh->sh_flags & SHF_EXECINSTR) {
@@ -424,25 +424,25 @@ void print_section(Elf32_Shdr* sh) {
             
             const char* sym = find_symbol(vaddr);
             if (sym) {
-                set_console_color(C_SYM, C_BG);
+                print(ANSI_SYM);
                 printf("\n<%s>:\n", sym);
             }
             
             disasm_one(sec_data + offset, vaddr, &ins);
             
-            set_console_color(C_ADDR, C_BG);
+            print(ANSI_ADDR);
             printf("  %08x: ", vaddr);
             
-            set_console_color(C_BYTES, C_BG);
+            print(ANSI_BYTES);
             for (int k=0; k<6; k++) {
                 if (k < ins.len) printf("%02x ", ins.bytes[k]);
                 else print("   ");
             }
             
-            set_console_color(C_MNEM, C_BG);
+            print(ANSI_MNEM);
             printf(" %-6s ", ins.mnem);
             
-            set_console_color(C_REG, C_BG);
+            print(ANSI_REG);
             if (ins.op1[0]) printf("%s", ins.op1);
             if (ins.op2[0]) printf(", %s", ins.op2);
             
@@ -452,7 +452,7 @@ void print_section(Elf32_Shdr* sh) {
     } else if (sh->sh_type == SHT_PROGBITS && (sh->sh_flags & SHF_ALLOC)) {
         print_hexdump(sec_data, sh->sh_size, sh->sh_addr);
     } else {
-        set_console_color(C_BYTES, C_BG);
+        print(ANSI_BYTES);
         print("  [No data to display]\n");
     }
 }
@@ -499,6 +499,6 @@ int main(int argc, char** argv) {
     }
     
     free(file_buf);
-    set_console_color(C_RESET, C_BG);
+    printf("\x1b[0m");
     return 0;
 }

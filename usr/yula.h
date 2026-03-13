@@ -167,10 +167,6 @@ static inline void set_term_mode(int mode) {
     syscall(27, mode, 0, 0);
 }
 
-static inline void set_console_color(uint32_t fg, uint32_t bg) {
-    syscall(28, (int)fg, (int)bg, 0);
-}
-
 static inline int pipe(int fds[2]) {
     return syscall(29, (int)fds, 0, 0);
 }

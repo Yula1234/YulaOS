@@ -16,6 +16,25 @@ static uint32_t name_color(const char* name, uint32_t type) {
     return 0xD4D4D4u;
 }
 
+static void print_color(uint32_t rgb) {
+    if (rgb == 0x569CD6u) {
+        print("\x1b[94m");
+        return;
+    }
+
+    if (rgb == 0xB5CEA8u) {
+        print("\x1b[92m");
+        return;
+    }
+
+    if (rgb == 0xCE9178u) {
+        print("\x1b[93m");
+        return;
+    }
+
+    print("\x1b[0m");
+}
+
 int main(int argc, char** argv) {
     const char* path = (argc > 1) ? argv[1] : ".";
 
@@ -24,8 +43,6 @@ int main(int argc, char** argv) {
         printf("ls: cannot open '%s'\n", path);
         return 1;
     }
-
-    const uint32_t C_BG = 0x141414u;
 
     yfs_dirent_info_t dents[64];
     for (;;) {
@@ -44,7 +61,7 @@ int main(int argc, char** argv) {
             if (strcmp(d->name, ".") == 0 || strcmp(d->name, "..") == 0) continue;
 
             uint32_t fg = name_color(d->name, d->type);
-            set_console_color(fg, C_BG);
+            print_color(fg);
 
             print(d->name);
             if (d->type == 2) print("/");
@@ -53,6 +70,6 @@ int main(int argc, char** argv) {
     }
 
     close(fd);
-    set_console_color(0xD4D4D4u, C_BG);
+    print("\x1b[0m");
     return 0;
 }

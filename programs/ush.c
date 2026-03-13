@@ -736,13 +736,22 @@ fail:
     return -1;
 }
 
+static int term_is_ansi(int fd);
+
 static void ush_print_prompt(int fd_out) {
     char cwd[256];
     int n = getcwd(cwd, (uint32_t)sizeof(cwd));
     if (n > 0) {
+        if (term_is_ansi(fd_out)) {
+            write_str(fd_out, "\x1b[0m");
+        }
         write_str(fd_out, cwd);
         write_str(fd_out, " > ");
         return;
+    }
+
+    if (term_is_ansi(fd_out)) {
+        write_str(fd_out, "\x1b[0m");
     }
     write_str(fd_out, "> ");
 }
@@ -880,16 +889,12 @@ static int ush_make_prompt(char* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
     char cwd[256];
     int n = getcwd(cwd, (uint32_t)sizeof(cwd));
+
     if (n > 0) {
-        int r = snprintf(out, (size_t)cap, "%s > ", cwd);
-        if (r < 0) return 0;
-        if ((uint32_t)r >= cap) r = (int)cap - 1;
-        return r;
+        return snprintf(out, (size_t)cap, "%s > ", cwd);
     }
-    int r = snprintf(out, (size_t)cap, "> ");
-    if (r < 0) return 0;
-    if ((uint32_t)r >= cap) r = (int)cap - 1;
-    return r;
+
+    return snprintf(out, (size_t)cap, "> ");
 }
 
 static int read_byte_blocking(int fd_in, char* out) {
@@ -1052,6 +1057,8 @@ static void ansi_redraw_line(
     const int cursor_col = cursor_abs % cols;
 
     const int clear_rows = (rows > prev_rows) ? rows : prev_rows;
+
+    (void)write_all(fd_out, "\x1b[0m", 4u);
 
     (void)write_all(fd_out, "\r", 1u);
     ansi_write_csi_num(fd_out, 'A', prev_cursor_row);

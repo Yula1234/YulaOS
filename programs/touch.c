@@ -5,7 +5,7 @@
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Usage: touch <file>...\n");
+        printf("\x1b[91mUsage: touch <file>...\x1b[0m\n");
         return 1;
     }
 
@@ -22,9 +22,9 @@ int main(int argc, char** argv) {
             if (fd >= 0) {
                 close(fd);
             } else {
-                set_console_color(0xF44747, 0x141414);
+                print("\x1b[91m");
                 printf("touch: cannot create '%s'\n", path);
-                set_console_color(0xD4D4D4, 0x141414);
+                print("\x1b[0m");
             }
         }
     }

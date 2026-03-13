@@ -137,14 +137,14 @@ typedef struct {
 } LinkerCtx;
 
 void fatal(const char* fmt, ...) {
-    set_console_color(0xF44747, 0x141414);
+    print("\x1b[91m");
     printf("\n[LINKER ERROR] ");
     va_list args;
     va_start(args, fmt);
     vprintf(fmt, args);
     va_end(args);
     printf("\n");
-    set_console_color(0xD4D4D4, 0x141414);
+    print("\x1b[0m");
     exit(1);
 }
 
@@ -531,9 +531,9 @@ int main(int argc, char** argv) {
 
     build_image(ctx, outfile);
     
-    set_console_color(0x00FF00, 0x141414);
+    printf("\x1b[92m");
     printf("Success: Linked %s\n", outfile);
-    set_console_color(0xD4D4D4, 0x141414);
+    printf("\x1b[0m");
 
     free(ctx);
     return 0;

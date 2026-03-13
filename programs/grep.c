@@ -7,13 +7,13 @@
 #define PATH_MAX    256
 #define MAX_LINE    2048
 
-#define C_BG        0x141414
-#define C_TEXT      0xD4D4D4
-#define C_MATCH     0xF44747
-#define C_FILE      0x569CD6
-#define C_LNUM      0x6A9955
-#define C_SEP       0x606060
-#define C_ERR       0xF44747
+#define ANSI_RESET  "\x1b[0m"
+#define ANSI_TEXT   "\x1b[0m"
+#define ANSI_MATCH  "\x1b[91m"
+#define ANSI_FILE   "\x1b[94m"
+#define ANSI_LNUM   "\x1b[92m"
+#define ANSI_SEP    "\x1b[90m"
+#define ANSI_ERR    "\x1b[91m"
 
 int opt_recursive = 0;
 int opt_show_filename = 1;
@@ -26,16 +26,16 @@ void print_match_line(const char* filename, int line_num, const char* line, cons
     if (!match) return;
 
     if (opt_show_filename && filename) {
-        set_console_color(C_FILE, C_BG);
+        print(ANSI_FILE);
         print(filename);
-        set_console_color(C_SEP, C_BG);
+        print(ANSI_SEP);
         print(":");
     }
 
     if (opt_line_number) {
-        set_console_color(C_LNUM, C_BG);
+        print(ANSI_LNUM);
         print_dec(line_num);
-        set_console_color(C_SEP, C_BG);
+        print(ANSI_SEP);
         print(":");
     }
     
@@ -45,17 +45,18 @@ void print_match_line(const char* filename, int line_num, const char* line, cons
     while ((match = strstr(ptr, pattern))) {
         while (ptr < match) {
             char tmp[2] = {*ptr++, 0};
-            set_console_color(C_TEXT, C_BG);
+            print(ANSI_TEXT);
             print(tmp);
         }
         
-        set_console_color(C_MATCH, C_BG);
+        print(ANSI_MATCH);
         print(pattern);
         ptr += pat_len;
     }
     
-    set_console_color(C_TEXT, C_BG);
+    print(ANSI_TEXT);
     print(ptr);
+    print(ANSI_RESET);
     print("\n");
 }
 
@@ -92,9 +93,9 @@ void grep_from_fd(int fd, const char* filename, const char* pattern) {
 void grep_file(const char* path, const char* pattern) {
     int fd = open(path, 0);
     if (fd < 0) {
-        set_console_color(C_ERR, C_BG);
+        print(ANSI_ERR);
         printf("grep: %s: No such file or directory\n", path);
-        set_console_color(C_TEXT, C_BG);
+        print(ANSI_RESET);
         return;
     }
     grep_from_fd(fd, path, pattern);
@@ -109,9 +110,9 @@ typedef struct {
 void process_path(const char* path, const char* pattern) {
     stat_t st;
     if (stat(path, &st) != 0) {
-        set_console_color(C_ERR, C_BG);
+        print(ANSI_ERR);
         printf("grep: %s: Cannot stat\n", path);
-        set_console_color(C_TEXT, C_BG);
+        print(ANSI_RESET);
         return;
     }
 
@@ -119,9 +120,9 @@ void process_path(const char* path, const char* pattern) {
         grep_file(path, pattern);
     } else if (st.type == 2) {
         if (!opt_recursive) {
-            set_console_color(C_SEP, C_BG);
+            print(ANSI_SEP);
             printf("grep: %s: Is a directory\n", path);
-            set_console_color(C_TEXT, C_BG);
+            print(ANSI_RESET);
             return;
         }
         
@@ -176,6 +177,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    set_console_color(C_TEXT, C_BG);
+    print(ANSI_RESET);
     return 0;
 }
