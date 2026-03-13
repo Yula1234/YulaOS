@@ -184,6 +184,7 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             }
 
             curr->blocked_on_sem = (void*)entry;
+            curr->blocked_kind = TASK_BLOCK_FUTEX;
 
             dlist_add_tail(&curr->sem_node, &entry->wait_list);
 
@@ -201,6 +202,7 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             if (curr && curr->blocked_on_sem == entry) {
                 if (dlist_unlink_consistent(&curr->sem_node)) {
                     curr->blocked_on_sem = 0;
+                    curr->blocked_kind = TASK_BLOCK_NONE;
                     curr->state = TASK_RUNNING;
                 }
             }
@@ -232,6 +234,7 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
             }
 
             t.blocked_on_sem = 0;
+            t.blocked_kind = TASK_BLOCK_NONE;
 
             if (t.state != TASK_ZOMBIE) {
                 t.state = TASK_RUNNABLE;

@@ -415,6 +415,7 @@ void sem_wait(semaphore_t* sem) {
             task_t* curr = proc_current();
             if (curr) {
                 curr->blocked_on_sem = nullptr;
+                curr->blocked_kind = TASK_BLOCK_NONE;
             }
             return;
         }
@@ -435,6 +436,7 @@ void sem_wait(semaphore_t* sem) {
                 task_t* curr = proc_current();
                 if (curr) {
                     curr->blocked_on_sem = nullptr;
+                    curr->blocked_kind = TASK_BLOCK_NONE;
                 }
                 return;
             }
@@ -445,6 +447,7 @@ void sem_wait(semaphore_t* sem) {
             }
 
             curr->blocked_on_sem = static_cast<void*>(sem);
+            curr->blocked_kind = TASK_BLOCK_SEM;
 
             dlist_add_tail(&curr->sem_node, &sem->wait_list);
 
@@ -466,6 +469,7 @@ int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
             if (curr) {
                 proc_sleep_remove(curr);
                 curr->blocked_on_sem = nullptr;
+                curr->blocked_kind = TASK_BLOCK_NONE;
             }
             return 1;
         }
@@ -492,10 +496,12 @@ int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
                 __atomic_fetch_sub(&sem->count, 1, __ATOMIC_ACQUIRE);
                 proc_sleep_remove(curr);
                 curr->blocked_on_sem = nullptr;
+                curr->blocked_kind = TASK_BLOCK_NONE;
                 return 1;
             }
 
             curr->blocked_on_sem = static_cast<void*>(sem);
+            curr->blocked_kind = TASK_BLOCK_SEM;
             dlist_add_tail(&curr->sem_node, &sem->wait_list);
 
             curr->state = TASK_WAITING;
@@ -535,6 +541,7 @@ void sem_signal(semaphore_t* sem) {
     t->sem_node.next = nullptr;
     t->sem_node.prev = nullptr;
     t->blocked_on_sem = nullptr;
+    t->blocked_kind = TASK_BLOCK_NONE;
 
     if (t->state == TASK_ZOMBIE) {
         return;
@@ -555,6 +562,7 @@ void sem_signal_all(semaphore_t* sem) {
         t->sem_node.next = nullptr;
         t->sem_node.prev = nullptr;
         t->blocked_on_sem = nullptr;
+        t->blocked_kind = TASK_BLOCK_NONE;
 
         __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
@@ -566,7 +574,13 @@ void sem_signal_all(semaphore_t* sem) {
 }
 
 void sem_remove_task(task_t* t) {
-    if (!t->blocked_on_sem) return;
+    if (!t || !t->blocked_on_sem) {
+        return;
+    }
+
+    if (t->blocked_kind != TASK_BLOCK_SEM) {
+        return;
+    }
     
     semaphore_t* sem = static_cast<semaphore_t*>(t->blocked_on_sem);
 
@@ -584,6 +598,7 @@ void sem_remove_task(task_t* t) {
         }
 
         t->blocked_on_sem = nullptr;
+        t->blocked_kind = TASK_BLOCK_NONE;
     }
 }
 

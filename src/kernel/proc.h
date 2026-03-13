@@ -86,6 +86,12 @@ typedef struct file_desc {
     spinlock_t lock;
 } file_desc_t;
 
+typedef enum {
+    TASK_BLOCK_NONE = 0,
+    TASK_BLOCK_SEM = 1,
+    TASK_BLOCK_FUTEX = 2,
+} task_block_kind_t;
+
 typedef struct fd_table {
     uint32_t refs;
     rwspinlock_t lock;
@@ -168,6 +174,7 @@ typedef struct task {
 
     dlist_head_t sem_node;
     void* blocked_on_sem;
+    task_block_kind_t blocked_kind;
     
     dlist_head_t zombie_node;
 
