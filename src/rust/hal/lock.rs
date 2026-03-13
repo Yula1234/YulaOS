@@ -1,14 +1,12 @@
-use core::arch::asm;
-
 #[repr(C)]
 pub struct SpinlockNative {
-    locked: u32,
+    tail: u32,
 }
 
 impl SpinlockNative {
     pub const fn new() -> Self {
         Self {
-            locked: 0,
+            tail: 0,
         }
     }
 }
@@ -25,23 +23,29 @@ impl SpinLock {
     }
 
     pub fn acquire(&self) {
-        spinlock_acquire(&self.native);
+        unsafe {
+            spinlock_acquire_native(spinlock_ptr(&self.native));
+        }
     }
 
     pub fn release(&self) {
-        spinlock_release(&self.native);
+        unsafe {
+            spinlock_release_native(spinlock_ptr(&self.native));
+        }
     }
 
     pub fn acquire_safe(&self) -> u32 {
-        spinlock_acquire_safe(&self.native)
+        unsafe { spinlock_acquire_safe_native(spinlock_ptr(&self.native)) }
     }
 
     pub fn release_safe(&self, flags: u32) {
-        spinlock_release_safe(&self.native, flags);
+        unsafe {
+            spinlock_release_safe_native(spinlock_ptr(&self.native), flags);
+        }
     }
 
     pub fn try_acquire(&self) -> bool {
-        spinlock_try_acquire(&self.native)
+        unsafe { spinlock_try_acquire_native(spinlock_ptr(&self.native)) != 0 }
     }
 
     pub fn native_handle(&self) -> *const SpinlockNative {
@@ -131,107 +135,14 @@ impl core::ops::Deref for TrySpinLockGuard<'_> {
     }
 }
 
-fn cpu_pause() {
-    unsafe {
-        asm!("pause", options(nomem, nostack, preserves_flags));
-    }
+fn spinlock_ptr(lock: &SpinlockNative) -> *mut SpinlockNative {
+    lock as *const SpinlockNative as *mut SpinlockNative
 }
 
-fn cpu_cli() {
-    unsafe {
-        asm!("cli", options(nomem, nostack, preserves_flags));
-    }
-}
-
-fn cpu_sti() {
-    unsafe {
-        asm!("sti", options(nomem, nostack, preserves_flags));
-    }
-}
-
-fn cpu_read_eflags() -> u32 {
-    let flags: u32;
-
-    unsafe {
-        asm!(
-            "pushfd",
-            "pop {out}",
-            out = out(reg) flags,
-            options(nomem, preserves_flags)
-        );
-    }
-
-    flags
-}
-
-unsafe fn atomic_xchg_u32(ptr: *mut u32, value: u32) -> u32 {
-    let mut value = value;
-
-    asm!(
-        "xchg [{ptr}], {value}",
-        ptr = in(reg) ptr,
-        value = inout(reg) value,
-        options(nostack, preserves_flags),
-    );
-
-    value
-}
-
-fn spinlock_locked_ptr(lock: &SpinlockNative) -> *mut u32 {
-    core::ptr::addr_of!(lock.locked) as *mut u32
-}
-
-pub fn spinlock_acquire(lock: &SpinlockNative) {
-    let mut backoff: u32 = 1;
-
-    loop {
-        while unsafe { core::ptr::read_volatile(&lock.locked) } != 0 {
-            for _ in 0..backoff {
-                cpu_pause();
-            }
-
-            if backoff < 1024 {
-                backoff <<= 1;
-            }
-        }
-
-        let locked_ptr = spinlock_locked_ptr(lock);
-        if unsafe { atomic_xchg_u32(locked_ptr, 1) } == 0 {
-            return;
-        }
-
-        cpu_pause();
-    }
-}
-
-pub fn spinlock_try_acquire(lock: &SpinlockNative) -> bool {
-    let locked_ptr = spinlock_locked_ptr(lock);
-
-    unsafe { atomic_xchg_u32(locked_ptr, 1) == 0 }
-}
-
-pub fn spinlock_release(lock: &SpinlockNative) {
-    let locked_ptr = spinlock_locked_ptr(lock);
-
-    unsafe {
-        atomic_xchg_u32(locked_ptr, 0);
-    }
-}
-
-pub fn spinlock_acquire_safe(lock: &SpinlockNative) -> u32 {
-    let flags = cpu_read_eflags();
-
-    cpu_cli();
-
-    spinlock_acquire(lock);
-
-    flags
-}
-
-pub fn spinlock_release_safe(lock: &SpinlockNative, flags: u32) {
-    spinlock_release(lock);
-
-    if (flags & 0x200) != 0 {
-        cpu_sti();
-    }
+extern "C" {
+    fn spinlock_acquire_native(lock: *mut SpinlockNative);
+    fn spinlock_acquire_safe_native(lock: *mut SpinlockNative) -> u32;
+    fn spinlock_release_native(lock: *mut SpinlockNative);
+    fn spinlock_release_safe_native(lock: *mut SpinlockNative, flags: u32);
+    fn spinlock_try_acquire_native(lock: *mut SpinlockNative) -> i32;
 }

@@ -5,11 +5,10 @@
 #define KERNEL_CPU_H
 
 #include <stdint.h>
+#include <kernel/cpu_limits.h>
 #include <hal/lock.h>
 #include <lib/rbtree.h>
 #include "proc.h"
-
-#define MAX_CPUS 32
 
 #ifdef __cplusplus
 extern "C" {
