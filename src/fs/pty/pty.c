@@ -576,6 +576,20 @@ static int pty_slave_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
         }
     }
 
+    int master_open;
+    {
+        uint32_t flags = spinlock_acquire_safe(&p->lock);
+        master_open = p->master_open;
+        spinlock_release_safe(&p->lock, flags);
+    }
+
+    if (master_open == 0) {
+        const int has_readable = p->ld ? pty_ld_has_readable(p->ld) : 0;
+        if (!has_readable) {
+            return 0;
+        }
+    }
+
     size_t n = pty_ld_read(p->ld, buffer, (size_t)size);
     if (n == (size_t)-2) {
         return -2;
