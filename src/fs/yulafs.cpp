@@ -73,6 +73,8 @@ public:
         uint32_t bmap_cache_lba;
         int bmap_cache_dirty;
 
+        spinlock_t alloc_lock;
+
         HashMap<DcacheKey, yfs_ino_t, 1024> dcache{};
 
         InodeTableCacheSlot inode_table_cache[MAX_CPUS][inode_table_cache_slots];
@@ -195,6 +197,8 @@ static uint32_t& last_free_ino_hint = yfs_state.last_free_ino_hint;
 static uint8_t (&bmap_cache_data)[YFS_BLOCK_SIZE] = yfs_state.bmap_cache_data;
 static uint32_t& bmap_cache_lba = yfs_state.bmap_cache_lba;
 static int& bmap_cache_dirty = yfs_state.bmap_cache_dirty;
+
+static spinlock_t& alloc_lock = yfs_state.alloc_lock;
 
 static yfs::FileSystem::State::InodeTableCacheSlot (&inode_table_cache)[
     MAX_CPUS
@@ -440,12 +444,13 @@ void yfs::FileSystem::dcache_invalidate_entry(yfs_ino_t parent, const char* name
 }
 
 static void flush_sb(void) {
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
     /* Superblock is tiny; rewrite is cheaper than partial updates. */
     bcache_write(1, (uint8_t*)&sb);
     bcache_flush_block(1);
 }
 
-static void flush_bitmap_cache(void) {
+static void flush_bitmap_cache_locked(void) {
     /* Single-block bitmap cache; writeback is explicit at call sites. */
     if (bmap_cache_lba != 0 && bmap_cache_dirty) {
         bcache_write(bmap_cache_lba, bmap_cache_data);
@@ -453,18 +458,28 @@ static void flush_bitmap_cache(void) {
     }
 }
 
-static void load_bitmap_block(uint32_t lba) {
+static void flush_bitmap_cache(void) {
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
+    flush_bitmap_cache_locked();
+}
+
+static void load_bitmap_block_locked(uint32_t lba) {
     /* Switching cache block is the writeback point for bitmap changes. */
     if (bmap_cache_lba == lba) {
         return;
     }
 
-    flush_bitmap_cache();
+    flush_bitmap_cache_locked();
 
     bcache_read(lba, bmap_cache_data);
 
     bmap_cache_lba = lba;
     bmap_cache_dirty = 0;
+}
+
+static void load_bitmap_block(uint32_t lba) {
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
+    load_bitmap_block_locked(lba);
 }
 
 static void zero_block(yfs_blk_t lba) {
@@ -505,6 +520,8 @@ static int find_free_bit_in_block(uint8_t* buf, int start_bit) {
 }
 
 static yfs_blk_t alloc_block(void) {
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
+
     /* 0 means allocation failure. */
     if (sb.free_blocks == 0) {
         return 0;
@@ -518,7 +535,7 @@ static yfs_blk_t alloc_block(void) {
         uint32_t sector_idx = (start_sector + i) % total_map_blocks;
         uint32_t map_lba = sb.map_block_start + sector_idx;
 
-        load_bitmap_block(map_lba);
+        load_bitmap_block_locked(map_lba);
 
         int bit_search_start = (i == 0) ? start_bit : 0;
         int found_bit = find_free_bit_in_block(bmap_cache_data, bit_search_start);
@@ -541,6 +558,8 @@ static yfs_blk_t alloc_block(void) {
 }
 
 static void free_block(yfs_blk_t lba) {
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
+
     if (lba < sb.data_start) {
         return;
     }
@@ -550,7 +569,7 @@ static void free_block(yfs_blk_t lba) {
     uint32_t bit = idx % (YFS_BLOCK_SIZE * 8);
     uint32_t map_lba = sb.map_block_start + sector;
 
-    load_bitmap_block(map_lba);
+    load_bitmap_block_locked(map_lba);
 
     if (chk_bit(bmap_cache_data, bit)) {
         clr_bit(bmap_cache_data, bit);
@@ -564,13 +583,16 @@ static void free_block(yfs_blk_t lba) {
 }
 
 static yfs_ino_t alloc_inode(void) {
-    /* Inode 0 is reserved; allocator never returns it. */
-    if (sb.free_inodes == 0) {
+    uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
+    if (!buf) {
         return 0;
     }
 
-    uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
-    if (!buf) {
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
+
+    /* Inode 0 is reserved; allocator never returns it. */
+    if (sb.free_inodes == 0) {
+        kfree(buf);
         return 0;
     }
 
@@ -624,6 +646,8 @@ static void free_inode(yfs_ino_t ino) {
     if (!buf) {
         return;
     }
+
+    kernel::SpinLockNativeSafeGuard guard(alloc_lock);
 
     bcache_read(sb.map_inode_start + sector, buf);
 
@@ -1665,6 +1689,8 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
 void yfs::FileSystem::init() {
     /* Mount on valid magic, otherwise format. */
     bcache_init();
+
+    spinlock_init(&state_.alloc_lock);
 
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         spinlock_init(&inode_table_cache_lock[cpu]);
