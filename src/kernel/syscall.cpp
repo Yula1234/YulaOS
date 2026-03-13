@@ -8,6 +8,7 @@
 #include <hal/apic.h>
 
 #include <drivers/fbdev.h>
+#include <drivers/vga.h>
 #include <drivers/keyboard.h>
 #include <drivers/mouse.h>
 #include <drivers/serial/ttyS0.h>
@@ -43,8 +44,6 @@
 extern volatile uint32_t timer_ticks;
 
 extern uint32_t* paging_get_dir(void); 
-
-extern "C" int smp_fb_present_rect(task_t* owner, const void* src, uint32_t src_stride, int x, int y, int w, int h);
 
 static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     return uaccess_check_user_buffer(task, buf, size);
@@ -1786,7 +1785,7 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
             uint32_t irq_flags = irq_save_disable();
             fpu_save(fpu_tmp);
 
-            smp_fb_present_rect(curr, req.src, req.src_stride, x1, y1, x2 - x1, y2 - y1);
+            vga_present_rect(req.src, req.src_stride, x1, y1, x2 - x1, y2 - y1);
 
             fpu_restore(fpu_tmp);
             irq_restore(irq_flags);
