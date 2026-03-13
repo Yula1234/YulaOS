@@ -429,8 +429,6 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
 
     const size_t size_bytes = count * PAGE_SIZE;
 
-    kernel::SpinLockSafeGuard guard(lock_);
-
     static constexpr size_t k_batch = 128u;
 
     uint32_t phys_batch[k_batch] = {};
@@ -459,7 +457,7 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
 
         if (phys_count == k_batch) {
             const uintptr_t batch_end = virt + PAGE_SIZE;
-            const uintptr_t batch_start = batch_end - (k_batch * PAGE_SIZE);
+            const uintptr_t batch_start = batch_end - (phys_count * PAGE_SIZE);
 
             smp_tlb_shootdown_range(
                 static_cast<uint32_t>(batch_start),
@@ -502,20 +500,24 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
         }
     }
 
-    VmFreeBlock* block = alloc_node(free_nodes_head_);
-    if (kernel::unlikely(!block)) {
-        panic("VMM: Out of metadata nodes during free!");
-        return;
+    {
+        kernel::SpinLockSafeGuard guard(lock_);
+
+        VmFreeBlock* block = alloc_node(free_nodes_head_);
+        if (kernel::unlikely(!block)) {
+            panic("VMM: Out of metadata nodes during free!");
+            return;
+        }
+
+        block->start = virt_base;
+        block->size = size_bytes;
+
+        tree_insert(*block, addr_tree_, size_tree_);
+
+        merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+
+        used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
     }
-
-    block->start = virt_base;
-    block->size = size_bytes;
-
-    tree_insert(*block, addr_tree_, size_tree_);
-
-    merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
-
-    used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
 }
 
 int VmmState::map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {
