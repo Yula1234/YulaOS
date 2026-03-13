@@ -162,6 +162,10 @@ static void dequeue_task(cpu_t* cpu, task_t* p) {
 }
 
 void sched_add(task_t* t) {
+    if (!t || t->pid == 0) {
+        return;
+    }
+
     if (t->assigned_cpu == -1) {
         t->assigned_cpu = get_best_cpu();
     }
@@ -188,17 +192,23 @@ void sched_add(task_t* t) {
 
     t->quantum = base_quantum;
     t->ticks_left = t->quantum;
-    
+
+    uint64_t min_vruntime;
+    if (target->runq_leftmost) {
+        min_vruntime = target->runq_leftmost->vruntime;
+    } else {
+        min_vruntime = static_cast<uint64_t>(target->sched_ticks) * sched_detail::nice_0_load;
+    }
+
     if (t->vruntime == 0) {
-        uint64_t min_vruntime;
-        
-        if (target->runq_leftmost) {
-            min_vruntime = target->runq_leftmost->vruntime;
-        } else {
-            min_vruntime = static_cast<uint64_t>(target->sched_ticks) * sched_detail::nice_0_load;
-        }
-        
         t->vruntime = min_vruntime;
+    } else {
+        const uint64_t max_sleep_bonus = static_cast<uint64_t>(sched_detail::nice_0_load) * 2ull;
+        const uint64_t threshold = (min_vruntime > max_sleep_bonus) ? (min_vruntime - max_sleep_bonus) : 0ull;
+
+        if (t->vruntime < threshold) {
+            t->vruntime = threshold;
+        }
     }
     
     t->exec_start = 0;
@@ -261,11 +271,11 @@ void sched_yield(void) {
 
     kernel::ScopedIrqDisable irq_guard;
     
-    if (prev && prev->state == TASK_RUNNING) {
+    if (prev && prev->state == TASK_RUNNING && prev != me->idle_task && prev->pid != 0) {
         prev->state = TASK_RUNNABLE;
         fpu_save(prev->fpu_state);
         
-        if (prev->exec_start > 0 && prev->pid != 0) {
+        if (prev->exec_start > 0) {
             uint64_t delta_exec = me->sched_ticks - prev->exec_start;
             if (delta_exec > 0) {
                 uint32_t weight = calc_weight(prev->priority);
@@ -306,6 +316,8 @@ void sched_yield(void) {
                 return;
             }
             
+            me->prev_task_during_switch = prev;
+
             next->exec_start = me->sched_ticks;
             
             me->current_task = next;
@@ -315,10 +327,13 @@ void sched_yield(void) {
 
             if (prev) {
                 ctx_switch(&prev->esp, next->esp);
+
+                me->prev_task_during_switch = nullptr;
                 irq_guard.restore();
                 return;
             }
 
+            me->prev_task_during_switch = nullptr;
             irq_guard.restore();
             
             ctx_start(next->esp);

@@ -1477,6 +1477,11 @@ void proc_kill(task_t* t) {
 static void kthread_trampoline(void) {
     task_t* t = proc_current();
 
+    cpu_t* me = cpu_current();
+    if (me) {
+        me->prev_task_during_switch = nullptr;
+    }
+
     __asm__ volatile("sti");
 
     t->entry(t->arg);       
@@ -2112,7 +2117,7 @@ void reaper_task_func(void* arg) {
 
             int still_running = 0;
             for (int i = 0; i < MAX_CPUS; i++) {
-                if (cpus[i].current_task == curr) {
+                if (cpus[i].current_task == curr || cpus[i].prev_task_during_switch == curr) {
                     still_running = 1;
                     break;
                 }

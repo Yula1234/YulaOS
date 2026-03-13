@@ -18,6 +18,7 @@ typedef struct {
     int id;                 // LAPIC ID
     int index; 
     struct task* current_task;
+    struct task* prev_task_during_switch;
     volatile int started; 
     
     struct rb_root runq_root;
