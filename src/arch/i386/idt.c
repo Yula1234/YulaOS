@@ -85,7 +85,6 @@ extern uint32_t isr_stub_table[];
 extern void isr_stub_0x80(void);
 extern void isr_stub_0xFF(void);
 extern void isr_stub_0xF0(void);
-extern void isr_stub_0xF1(void);
 extern void isr_stub_0xA1(void);
 extern void isr_stub_0xA2(void);
 extern uint32_t* kernel_page_directory;
@@ -97,7 +96,6 @@ static irq_handler_t irq_vector_handlers[256] = {0};
 static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
-extern void smp_blit_ipi_handler(void);
 
 static inline uint32_t get_cr3();
 
@@ -420,12 +418,6 @@ void isr_handler(registers_t* regs) {
         goto out;
     }
 
-    if (regs->int_no == IPI_BLIT_VECTOR) {
-        smp_blit_ipi_handler();
-        lapic_eoi();
-        goto out;
-    }
-
     cpu = cpu_current();
     curr = cpu->current_task;
 
@@ -701,7 +693,6 @@ void idt_init(void) {
     
     idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
     idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
-    idt_set_gate(IPI_BLIT_VECTOR, (uint32_t)isr_stub_0xF1, 0x08, 0x8E);
     idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
     idt_set_gate(0xA2, (uint32_t)isr_stub_0xA2, 0x08, 0x8E);
 
