@@ -45,20 +45,144 @@ static uint32_t paging_ram_size_bytes = 0;
 
 static spinlock_t paging_fixmap_lock;
 
+typedef struct {
+    volatile uintptr_t key;
+    volatile uintptr_t lock;
+} paging_dir_lock_entry_t;
+
+#define PAGING_DIR_LOCK_EMPTY 0u
+#define PAGING_DIR_LOCK_TOMBSTONE 1u
+
+#define PAGING_DIR_LOCK_TABLE_SIZE 1024u
+#define PAGING_DIR_LOCK_TABLE_MASK (PAGING_DIR_LOCK_TABLE_SIZE - 1u)
+
+static paging_dir_lock_entry_t paging_dir_lock_table[PAGING_DIR_LOCK_TABLE_SIZE];
+static spinlock_t paging_dir_lock_write_lock;
+
 __attribute__((noreturn)) static void paging_halt(const char* msg);
 
 static inline spinlock_t* paging_select_dir_lock(uint32_t* dir) {
-    if (dir != kernel_page_directory) {
-        cpu_t* cpu = cpu_current();
-        task_t* t = cpu ? cpu->current_task : 0;
-        proc_mem_t* mem = t ? t->mem : 0;
+    if (!dir) {
+        return &paging_lock;
+    }
 
-        if (mem && mem->page_dir == dir) {
-            return &mem->pt_lock;
+    if (dir == kernel_page_directory) {
+        return &paging_lock;
+    }
+
+    const uintptr_t key = (uintptr_t)dir;
+    uint32_t idx = (uint32_t)((key >> 12) * 2654435761u) & PAGING_DIR_LOCK_TABLE_MASK;
+
+    for (uint32_t probe = 0; probe < PAGING_DIR_LOCK_TABLE_SIZE; probe++) {
+        paging_dir_lock_entry_t* e = &paging_dir_lock_table[(idx + probe) & PAGING_DIR_LOCK_TABLE_MASK];
+
+        const uintptr_t ekey = __atomic_load_n(&e->key, __ATOMIC_ACQUIRE);
+        if (ekey == PAGING_DIR_LOCK_EMPTY) {
+            break;
+        }
+
+        if (ekey == key) {
+            const uintptr_t lock_ptr = __atomic_load_n(&e->lock, __ATOMIC_RELAXED);
+            if (lock_ptr != 0u) {
+                return (spinlock_t*)lock_ptr;
+            }
+            break;
         }
     }
 
+    cpu_t* cpu = cpu_current();
+    task_t* t = cpu ? cpu->current_task : 0;
+    proc_mem_t* mem = t ? t->mem : 0;
+
+    if (mem && mem->page_dir == dir) {
+        return &mem->pt_lock;
+    }
+
     return &paging_lock;
+}
+
+int paging_register_dir_lock(uint32_t* dir, void* lock) {
+    if (!dir || !lock) {
+        return 0;
+    }
+
+    if (dir == kernel_page_directory) {
+        return 0;
+    }
+
+    const uintptr_t key = (uintptr_t)dir;
+    const uintptr_t lock_ptr = (uintptr_t)lock;
+
+    uint32_t int_flags = spinlock_acquire_safe(&paging_dir_lock_write_lock);
+
+    uint32_t idx = (uint32_t)((key >> 12) * 2654435761u) & PAGING_DIR_LOCK_TABLE_MASK;
+    uint32_t first_tombstone = PAGING_DIR_LOCK_TABLE_SIZE;
+
+    for (uint32_t probe = 0; probe < PAGING_DIR_LOCK_TABLE_SIZE; probe++) {
+        paging_dir_lock_entry_t* e = &paging_dir_lock_table[(idx + probe) & PAGING_DIR_LOCK_TABLE_MASK];
+
+        const uintptr_t ekey = __atomic_load_n(&e->key, __ATOMIC_ACQUIRE);
+        if (ekey == key) {
+            __atomic_store_n(&e->lock, lock_ptr, __ATOMIC_RELAXED);
+            spinlock_release_safe(&paging_dir_lock_write_lock, int_flags);
+            return 1;
+        }
+
+        if (ekey == PAGING_DIR_LOCK_TOMBSTONE && first_tombstone == PAGING_DIR_LOCK_TABLE_SIZE) {
+            first_tombstone = (idx + probe) & PAGING_DIR_LOCK_TABLE_MASK;
+            continue;
+        }
+
+        if (ekey == PAGING_DIR_LOCK_EMPTY) {
+            const uint32_t slot = (first_tombstone != PAGING_DIR_LOCK_TABLE_SIZE)
+                ? first_tombstone
+                : ((idx + probe) & PAGING_DIR_LOCK_TABLE_MASK);
+
+            paging_dir_lock_entry_t* dst = &paging_dir_lock_table[slot];
+
+            __atomic_store_n(&dst->lock, lock_ptr, __ATOMIC_RELAXED);
+            __atomic_store_n(&dst->key, key, __ATOMIC_RELEASE);
+
+            spinlock_release_safe(&paging_dir_lock_write_lock, int_flags);
+            return 1;
+        }
+    }
+
+    spinlock_release_safe(&paging_dir_lock_write_lock, int_flags);
+    return 0;
+}
+
+void paging_unregister_dir_lock(uint32_t* dir) {
+    if (!dir) {
+        return;
+    }
+
+    if (dir == kernel_page_directory) {
+        return;
+    }
+
+    const uintptr_t key = (uintptr_t)dir;
+
+    uint32_t int_flags = spinlock_acquire_safe(&paging_dir_lock_write_lock);
+
+    uint32_t idx = (uint32_t)((key >> 12) * 2654435761u) & PAGING_DIR_LOCK_TABLE_MASK;
+
+    for (uint32_t probe = 0; probe < PAGING_DIR_LOCK_TABLE_SIZE; probe++) {
+        paging_dir_lock_entry_t* e = &paging_dir_lock_table[(idx + probe) & PAGING_DIR_LOCK_TABLE_MASK];
+
+        const uintptr_t ekey = __atomic_load_n(&e->key, __ATOMIC_ACQUIRE);
+        if (ekey == PAGING_DIR_LOCK_EMPTY) {
+            break;
+        }
+
+        if (ekey == key) {
+            __atomic_store_n(&e->lock, 0u, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->key, PAGING_DIR_LOCK_TOMBSTONE, __ATOMIC_RELEASE);
+            break;
+        }
+    }
+
+    spinlock_release_safe(&paging_dir_lock_write_lock, int_flags);
 }
 
 static inline uint32_t paging_lock_dir_safe(uint32_t* dir) {
@@ -625,6 +749,7 @@ void paging_init(uint32_t ram_size_bytes) {
     paging_init_pat();
     spinlock_init(&paging_lock);
     spinlock_init(&paging_fixmap_lock);
+    spinlock_init(&paging_dir_lock_write_lock);
 
     if (ram_size_bytes & 0xFFFu) {
         ram_size_bytes = (ram_size_bytes & ~0xFFFu) + 4096u;

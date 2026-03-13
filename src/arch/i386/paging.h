@@ -117,6 +117,9 @@ int paging_get_present_pte(uint32_t* dir, uint32_t virt, uint32_t* out_pte);
  */
 extern uint32_t* kernel_page_directory;
 
+int paging_register_dir_lock(uint32_t* dir, void* lock);
+void paging_unregister_dir_lock(uint32_t* dir);
+
 #ifdef __cplusplus
 }
 #endif

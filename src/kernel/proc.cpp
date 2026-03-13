@@ -11,8 +11,9 @@
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
+#include <mm/heap.h>
+#include <mm/vma.h>
 
-#include <hal/lock.h>
 #include <hal/io.h>
 #include <hal/simd.h>
 #include <hal/apic.h>
@@ -1167,6 +1168,8 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
         return 0;
     }
 
+    (void)paging_register_dir_lock(mem->page_dir, &mem->pt_lock);
+
     return mem_guard.release();
 }
 
@@ -1196,6 +1199,8 @@ static void proc_mem_release(proc_mem_t* mem) {
     vma_destroy(mem);
 
     if (mem->page_dir && mem->page_dir != kernel_page_directory) {
+        paging_unregister_dir_lock(mem->page_dir);
+
         for (int i = 0; i < 1024; i++) {
             uint32_t pde = mem->page_dir[i];
 
