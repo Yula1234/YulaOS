@@ -240,6 +240,32 @@ typedef struct {
 
 static void vgpu_mark_inactive_locked(void);
 static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_t expected_resp_type);
+static int vgpu_ctrlq_can_sleep(void);
+
+static int vgpu_ctrlq_wait_token(virtqueue_token_t* token) {
+    if (!token) {
+        return 0;
+    }
+
+    if (vgpu_ctrlq_can_sleep()) {
+        uint32_t deadline = timer_ticks + VGPU_CTRLQ_TIMEOUT_TICKS;
+        return virtqueue_token_wait_timeout(token, deadline) != 0u;
+    }
+
+    for (uint32_t spins = 0;; spins++) {
+        virtqueue_handle_irq(&g_vgpu.ctrlq);
+
+        if (sem_try_acquire(&token->sem)) {
+            return 1;
+        }
+
+        if (spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
+            return 0;
+        }
+
+        __asm__ volatile("pause");
+    }
+}
 
 static void vgpu_ctrlq_async_complete(virtqueue_token_t* token, void* ctx) {
     (void)token;
@@ -605,27 +631,11 @@ static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_
         return 0;
     }
 
-    if (vgpu_ctrlq_can_sleep()) {
-        uint32_t deadline = timer_ticks + VGPU_CTRLQ_TIMEOUT_TICKS;
-        if (!virtqueue_token_wait_timeout(token, deadline)) {
-            virtqueue_destroy(&g_vgpu.ctrlq);
-            return 0;
-        }
-    } else {
-        for (uint32_t spins = 0;; spins++) {
-            virtqueue_handle_irq(&g_vgpu.ctrlq);
-
-            if (sem_try_acquire(&token->sem)) {
-                break;
-            }
-
-            if (spins > VGPU_CTRLQ_TIMEOUT_SPINS) {
-                virtqueue_destroy(&g_vgpu.ctrlq);
-                return 0;
-            }
-
-            __asm__ volatile("pause");
-        }
+    const int ok = vgpu_ctrlq_wait_token(token);
+    if (!ok) {
+        virtqueue_token_destroy(token);
+        virtqueue_destroy(&g_vgpu.ctrlq);
+        return 0;
     }
 
     virtqueue_token_destroy(token);
@@ -686,8 +696,91 @@ static int vgpu_ctrlq_submit_sg_locked(const uint64_t* addrs,
 }
 
 static int vgpu_ctrlq_submit(uint32_t cmd_len, uint32_t resp_len, uint32_t expected_resp_type) {
+    if (cmd_len == 0u) {
+        return 0;
+    }
+
     mutex_lock(&g_vgpu.lock);
-    int ok = vgpu_ctrlq_submit_locked(cmd_len, resp_len, expected_resp_type);
+
+    if (!g_vgpu.ctrlq.ring_mem || !g_vgpu.ctrl_cmd) {
+        mutex_unlock(&g_vgpu.lock);
+        return 0;
+    }
+
+    vgpu_ctrlq_async_slot_t* slot = vgpu_ctrlq_async_try_acquire_slot_locked();
+    if (!slot) {
+        mutex_unlock(&g_vgpu.lock);
+        return 0;
+    }
+
+    if (!slot->cmd || !slot->resp || slot->cmd_phys == 0u || slot->resp_phys == 0u) {
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+        mutex_unlock(&g_vgpu.lock);
+        return 0;
+    }
+
+    if (cmd_len > PAGE_SIZE) {
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+        mutex_unlock(&g_vgpu.lock);
+        return 0;
+    }
+
+    memcpy(slot->cmd, g_vgpu.ctrl_cmd, cmd_len);
+
+    const uint32_t resp_len_safe = resp_len != 0u ? resp_len : (uint32_t)sizeof(virtio_gpu_ctrl_hdr_t);
+    memset(slot->resp, 0, resp_len_safe);
+    slot->expected_resp_type = expected_resp_type;
+
+    uint64_t addrs[2] = {
+        (uint64_t)slot->cmd_phys,
+        (uint64_t)slot->resp_phys,
+    };
+
+    uint32_t lens[2] = {
+        cmd_len,
+        resp_len_safe,
+    };
+
+    uint16_t flags[2] = {
+        0,
+        VRING_DESC_F_WRITE,
+    };
+
+    virtqueue_token_t* token = 0;
+    if (!virtqueue_submit(&g_vgpu.ctrlq, addrs, lens, flags, 2, 0, &token) || !token) {
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+        mutex_unlock(&g_vgpu.lock);
+        return 0;
+    }
+
+    mutex_unlock(&g_vgpu.lock);
+
+    const int wait_ok = vgpu_ctrlq_wait_token(token);
+
+    mutex_lock(&g_vgpu.lock);
+
+    if (!wait_ok) {
+        virtqueue_token_destroy(token);
+        virtqueue_destroy(&g_vgpu.ctrlq);
+        vgpu_mark_inactive_locked();
+
+        __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+
+        mutex_unlock(&g_vgpu.lock);
+        return 0;
+    }
+
+    virtqueue_token_destroy(token);
+
+    const virtio_gpu_ctrl_hdr_t* rhdr = (const virtio_gpu_ctrl_hdr_t*)slot->resp;
+    const int ok = rhdr && rhdr->type == expected_resp_type;
+
+    if (ok && g_vgpu.ctrl_resp && resp_len_safe <= PAGE_SIZE) {
+        memcpy(g_vgpu.ctrl_resp, slot->resp, resp_len_safe);
+    }
+
+    __atomic_store_n(&slot->in_use, 0, __ATOMIC_RELEASE);
+
     mutex_unlock(&g_vgpu.lock);
     return ok;
 }
