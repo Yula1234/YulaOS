@@ -33,7 +33,7 @@
 #include <kernel/tty/tty.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 #include <kernel/output/console.h>
 

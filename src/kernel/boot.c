@@ -14,7 +14,7 @@
 
 #include <arch/i386/paging.h>
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 #include "boot.h"
 

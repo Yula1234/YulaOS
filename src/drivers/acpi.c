@@ -6,7 +6,7 @@
 #include <kernel/panic.h>
 #include <drivers/vga.h>
 #include <mm/pmm.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 #include "acpi.h"
 

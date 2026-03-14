@@ -12,7 +12,7 @@
 #include <kernel/syscall.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/panic.h>
 
 #ifdef KERNEL_PROFILE

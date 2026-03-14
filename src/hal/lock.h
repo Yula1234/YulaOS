@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#include <kernel/cpu_limits.h>
+#include <kernel/smp/cpu_limits.h>
 #include <kernel/panic.h>
 
 #ifdef __cplusplus

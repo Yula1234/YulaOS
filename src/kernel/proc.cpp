@@ -30,7 +30,7 @@
 #include "proc.h"
 #include "poll_waitq.h"
 #include "elf.h"
-#include "cpu.h"
+#include <kernel/smp/cpu.h>
 
 #define PID_MAP_BUCKETS 256
 

@@ -8,7 +8,7 @@
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/panic.h>
 
 #include <arch/i386/paging.h>

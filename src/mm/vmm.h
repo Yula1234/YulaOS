@@ -27,7 +27,7 @@
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/rbtree.h>
 
-#include <kernel/cpu_limits.h>
+#include <kernel/smp/cpu_limits.h>
 
 namespace kernel {
 

@@ -37,7 +37,7 @@
 #include "syscall.h"
 #include "sched.h"
 #include "proc.h"
-#include "cpu.h"
+#include <kernel/smp/cpu.h>
 
 extern volatile uint32_t timer_ticks;
 

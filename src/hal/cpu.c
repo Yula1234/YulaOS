@@ -3,7 +3,7 @@
 
 #include <hal/cpu.h>
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 #include <stdint.h>
 

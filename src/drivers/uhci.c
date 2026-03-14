@@ -12,7 +12,7 @@
 
 #include <hal/lock.h>
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/proc.h>
 
 #include <mm/heap.h>

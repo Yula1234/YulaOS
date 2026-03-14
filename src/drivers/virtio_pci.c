@@ -11,7 +11,7 @@
 #include <hal/irq.h>
 #include <hal/lock.h>
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 #include <lib/string.h>
 

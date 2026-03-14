@@ -2,7 +2,7 @@
 /* Copyright (C) 2025 Yula1234 */
   
 #include <lib/string.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include "gdt.h"
 
 /*

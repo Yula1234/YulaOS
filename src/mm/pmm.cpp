@@ -10,7 +10,7 @@
 
 #include "pmm.h"
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 namespace kernel {
 

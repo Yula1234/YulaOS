@@ -15,7 +15,7 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/input_focus.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/output/kprintf.h>
 
 #include <mm/heap.h>

@@ -5,10 +5,10 @@
 #define KERNEL_CPU_H
 
 #include <stdint.h>
-#include <kernel/cpu_limits.h>
+#include <kernel/smp/cpu_limits.h>
 #include <hal/lock.h>
 #include <lib/rbtree.h>
-#include "proc.h"
+#include <kernel/proc.h>
 
 #ifdef __cplusplus
 extern "C" {

@@ -5,7 +5,7 @@
 #define ARCH_I386_GDT_H
 
 #include <stdint.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 
 /*
  * Global Descriptor Table layout.

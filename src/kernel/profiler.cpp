@@ -1,6 +1,6 @@
 #include <kernel/profiler.h>
 
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/proc.h>
 #include <kernel/symbols/symbols.h>
 

@@ -6,7 +6,7 @@
 #include <lib/string.h>
 #include <mm/heap.h>
 #include <kernel/sched.h>
-#include <kernel/cpu.h>
+#include <kernel/smp/cpu.h>
 #include <drivers/acpi.h>
 #include <hal/irq.h>
 #include <hal/io.h>
