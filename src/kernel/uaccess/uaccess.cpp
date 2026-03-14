@@ -106,7 +106,7 @@ static int check_user_range_basic(task_t* task, uintptr_t start, uintptr_t end_e
         return 0;
     }
 
-    if (start < 0x08000000u || end_excl > 0xC0000000u) {
+    if (start < 0x40000000u || end_excl > 0xC0000000u) {
         return 0;
     }
 
@@ -122,7 +122,7 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
         return 0;
     }
 
-    if (start < 0x08000000u || end_excl > 0xC0000000u) {
+    if (start < 0x40000000u || end_excl > 0xC0000000u) {
         return 0;
     }
 

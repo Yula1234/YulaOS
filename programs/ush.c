@@ -5,11 +5,11 @@ static int write_all(int fd, const void* buf, uint32_t size) {
     uint32_t done = 0;
     while (done < size) {
         uintptr_t a = (uintptr_t)(p + done);
-        uintptr_t b = a + (uintptr_t)(size - done);
+        uint32_t b = a + size;
         if (b < a) {
             return -1;
         }
-        if (a < 0x08000000u || b > 0xC0000000u) {
+        if (a < 0x40000000u || b > 0xC0000000u) {
             return -1;
         }
         int r = write(fd, p + done, size - done);

@@ -307,6 +307,11 @@ void sched_yield(void) {
         }
 
         if (next) {
+
+            if (next->state != TASK_ZOMBIE) {
+                next->state = TASK_RUNNING;
+            }
+
             if (next == prev) {
                 if (next->pid == 0) {
                     __asm__ volatile("sti; hlt; cli");

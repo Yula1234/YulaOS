@@ -26,7 +26,7 @@ namespace {
 constexpr uint32_t page_size = 4096u;
 constexpr uint32_t page_mask = 4095u;
 
-constexpr uint32_t user_addr_min = 0x08000000u;
+constexpr uint32_t user_addr_min = 0x40000000u;
 constexpr uint32_t user_addr_max = 0xC0000000u;
 
 constexpr uint32_t user_stack_addr_min = 0x60000000u;

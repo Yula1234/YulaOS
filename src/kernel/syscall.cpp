@@ -174,12 +174,12 @@ static void syscall_clone(registers_t* regs, task_t* curr) {
         return;
     }
 
-    if (entry < 0x08000000u || entry >= 0xC0000000u) {
+    if (entry < 0x40000000u || entry >= 0xC0000000u) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    if (stack_bottom < 0x08000000u || stack_top > 0xC0000000u) {
+    if (stack_bottom < 0x40000000u || stack_top > 0xC0000000u) {
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -1615,7 +1615,7 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
                     uint64_t src_row_addr = (uint64_t)(uintptr_t)src_base + src_row_off;
                     uint64_t src_row_end_excl = src_row_addr + (uint64_t)row_bytes;
 
-                    if (src_row_end_excl < src_row_addr || src_row_addr < 0x08000000ull || src_row_end_excl > 0xC0000000ull) {
+                    if (src_row_end_excl < src_row_addr || src_row_addr < 0x40000000ull || src_row_end_excl > 0xC0000000ull) {
                         regs->eax = (uint32_t)-1;
                         return;
                     }
@@ -1642,7 +1642,7 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
                 uint64_t row_addr = (uint64_t)(uintptr_t)src_base + row_off;
                 uint64_t row_end_excl = row_addr + (uint64_t)row_bytes;
 
-                if (row_end_excl < row_addr || row_addr < 0x08000000ull || row_end_excl > 0xC0000000ull) {
+                if (row_end_excl < row_addr || row_addr < 0x40000000ull || row_end_excl > 0xC0000000ull) {
                     regs->eax = (uint32_t)-1;
                     return;
                 }

@@ -49,13 +49,13 @@ namespace detail {
 
 static constexpr uint32_t irq_if_mask = 0x200u;
 
-static constexpr uint32_t user_elf_min_vaddr = 0x08000000u;
+static constexpr uint32_t user_elf_min_vaddr = 0x40000000u;
 static constexpr uint32_t user_elf_max_vaddr = 0xB0000000u;
 
-static constexpr uint32_t user_stack_addr_min = 0x08000000u;
+static constexpr uint32_t user_stack_addr_min = 0x40000000u;
 static constexpr uint32_t user_stack_addr_max = 0xC0000000u;
 
-static constexpr uint32_t default_mmap_top = 0x80001000u;
+static constexpr uint32_t default_mmap_top = user_elf_min_vaddr;
 
 static constexpr uint32_t max_elf_phdrs = 64u;
 
@@ -1216,13 +1216,21 @@ static void proc_mem_release(proc_mem_t* mem) {
                 for (int j = 0; j < 1024; j++) {
                     uint32_t pte = pt[j];
 
-                    if ((pte & 1)) {
-                        if (pte & 0x200) {
-                            pt[j] = 0;
-                        } else if (pte & 4) {
-                            void* physical_page = (void*)(pte & ~0xFFF);
-                            pmm_free_block(physical_page);
-                        }
+                    if ((pte & 1u) == 0u) {
+                        continue;
+                    }
+
+                    const uint32_t phys = pte & ~0xFFFu;
+                    const uint32_t flags = pte & 0xFFFu;
+
+                    pt[j] = 0u;
+
+                    if ((flags & 0x200u) != 0u) {
+                        continue;
+                    }
+
+                    if ((flags & 4u) != 0u && phys != 0u) {
+                        pmm_free_block((void*)phys);
                     }
                 }
 

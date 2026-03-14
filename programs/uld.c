@@ -6,7 +6,7 @@
 
 #define MAX_OBJECTS     64
 #define MAX_SYMBOLS     4096
-#define BASE_ADDR       0x08048000
+#define BASE_ADDR       0x40048000
 #define PAGE_ALIGN      4096
 #define SECT_ALIGN      16
 #define SHN_UNDEF 0
