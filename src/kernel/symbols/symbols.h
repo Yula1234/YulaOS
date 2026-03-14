@@ -1,7 +1,7 @@
 #ifndef KERNEL_SYMBOLS_H
 #define KERNEL_SYMBOLS_H
 
-#include <kernel/boot.h>
+#include <kernel/init/boot.h>
 
 #include <stdint.h>
 

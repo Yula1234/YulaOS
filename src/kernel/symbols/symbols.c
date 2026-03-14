@@ -2,7 +2,7 @@
 
 #include <kernel/symbols/ksyms.h>
 
-#include <kernel/boot.h>
+#include <kernel/init/boot.h>
 
 #include <stdint.h>
 

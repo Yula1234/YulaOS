@@ -28,8 +28,8 @@
 
 #include <drivers/driver.h>
 
-#include <kernel/boot.h>
-#include <kernel/init.h>
+#include <kernel/init/boot.h>
+#include <kernel/init/init.h>
 #include <kernel/tty/tty.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
