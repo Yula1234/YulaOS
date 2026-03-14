@@ -746,7 +746,7 @@ private:
 
         if (kernel::unlikely(list == nullptr)) {
             if (kernel::unlikely(count != 0u)) {
-                local.remote_free_count.store(count);
+                local.remote_free_count.fetch_add(count);
             }
             return;
         }
@@ -787,10 +787,8 @@ private:
             it = next;
         }
 
-        if (drained != count) {
-            if (kernel::unlikely(count < drained)) {
-                panic("SLUB: remote free count underflow");
-            }
+        if (drained < count) {
+            local.remote_free_count.fetch_add(count - drained);
         }
     }
 

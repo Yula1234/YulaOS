@@ -15,6 +15,8 @@
 #include <kernel/smp/cpu.h>
 #include <kernel/panic.h>
 
+#include <kernel/output/kprintf.h>
+
 #ifdef KERNEL_PROFILE
 #include <kernel/profiler.h>
 #endif
@@ -106,6 +108,53 @@ __attribute__((noreturn)) static void early_exception_halt(const char* msg, regi
 
     __asm__ volatile("cli");
     while (1) {
+        __asm__ volatile("hlt");
+    }
+}
+
+__attribute__((noreturn)) void double_fault_report(
+    uint32_t err,
+    uint32_t eip,
+    uint32_t cs,
+    uint32_t eflags,
+    uint32_t useresp,
+    uint32_t ss,
+    uint32_t old_esp
+) {
+    __asm__ volatile("cli");
+
+    uint32_t cr2 = 0;
+    uint32_t cr3 = 0;
+
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+
+    kprintf("\n\n!!! DOUBLE FAULT (#DF) !!!\n");
+    kprintf("err=0x%08x eip=0x%08x cs=0x%08x eflags=0x%08x\n", err, eip, cs, eflags);
+    kprintf("useresp=0x%08x ss=0x%08x old_esp=0x%08x\n", useresp, ss, old_esp);
+    kprintf("cr2=0x%08x cr3=0x%08x\n", cr2, cr3);
+
+    cpu_t* cpu = cpu_current();
+    task_t* curr = cpu ? cpu->current_task : 0;
+
+    if (cpu) {
+        kprintf("cpu=%u\n", (uint32_t)cpu->index);
+    }
+
+    if (curr) {
+        kprintf(
+            "task pid=%u state=%u name=%s mem=%p page_dir=%p\n",
+            curr->pid,
+            (uint32_t)curr->state,
+            curr->name,
+            curr->mem,
+            curr->mem ? curr->mem->page_dir : 0
+        );
+    } else {
+        kprintf("task (none)\n");
+    }
+
+    for (;;) {
         __asm__ volatile("hlt");
     }
 }

@@ -87,6 +87,20 @@ static int copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, con
     return uaccess_copy_user_str_bounded(task, dst, dst_size, user_src);
 }
 
+static constexpr uint32_t k_user_path_max = 256u;
+
+static int copy_user_path(task_t* task, const char* user_path, char (&out)[k_user_path_max]) {
+    if (!task || !user_path) {
+        return -1;
+    }
+
+    if (copy_user_str_bounded(task, out, k_user_path_max, user_path) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
 static inline uint32_t align_down_4k_u32(uint32_t v) {
     return v & ~0xFFFu;
 }
@@ -194,11 +208,16 @@ static void syscall_clone(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_open(registers_t* regs, task_t* curr) {
-    if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
-        regs->eax = (uint32_t)vfs_open((char*)regs->ebx, (int)regs->ecx);
-    } else {
+    const char* user_path = (const char*)regs->ebx;
+    const int flags = (int)regs->ecx;
+
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_open(path, flags);
 }
 
 static void syscall_read(registers_t* regs, [[maybe_unused]] task_t* curr) {
@@ -371,41 +390,53 @@ static void syscall_get_mem_stats(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_mkdir(registers_t* regs, task_t* curr) {
-    if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
-        regs->eax = (uint32_t)vfs_mkdir((char*)regs->ebx);
-    } else {
+    const char* user_path = (const char*)regs->ebx;
+
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_mkdir(path);
 }
 
 static void syscall_mkdirat(registers_t* regs, task_t* curr) {
     int dirfd = (int)regs->ebx;
-    char* path = (char*)regs->ecx;
+    const char* user_path = (const char*)regs->ecx;
 
-    if (check_user_buffer(curr, path, 1)) {
-        regs->eax = (uint32_t)vfs_mkdirat(dirfd, path);
-    } else {
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_mkdirat(dirfd, path);
 }
 
 static void syscall_unlink(registers_t* regs, task_t* curr) {
-    if (check_user_buffer(curr, (void*)regs->ebx, 1)) {
-        regs->eax = (uint32_t)vfs_unlink((char*)regs->ebx);
-    } else {
+    const char* user_path = (const char*)regs->ebx;
+
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_unlink(path);
 }
 
 static void syscall_unlinkat(registers_t* regs, task_t* curr) {
     int dirfd = (int)regs->ebx;
-    char* path = (char*)regs->ecx;
+    const char* user_path = (const char*)regs->ecx;
 
-    if (check_user_buffer(curr, path, 1)) {
-        regs->eax = (uint32_t)vfs_unlinkat(dirfd, path);
-    } else {
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_unlinkat(dirfd, path);
 }
 
 static void syscall_reboot(registers_t* regs, task_t* curr) {
@@ -645,10 +676,12 @@ static void syscall_munmap(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_stat(registers_t* regs, task_t* curr) {
-    char* path = (char*)regs->ebx;
+    const char* user_path = (const char*)regs->ebx;
     user_stat_t* u_stat = (user_stat_t*)regs->ecx;
 
-    if (!check_user_buffer(curr, path, 1) || !check_user_buffer(curr, u_stat, sizeof(user_stat_t))) {
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0
+        || !check_user_buffer_writable_present(curr, u_stat, sizeof(*u_stat))) {
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -670,10 +703,12 @@ static void syscall_stat(registers_t* regs, task_t* curr) {
 
 static void syscall_statat(registers_t* regs, task_t* curr) {
     int dirfd = (int)regs->ebx;
-    char* path = (char*)regs->ecx;
+    const char* user_path = (const char*)regs->ecx;
     user_stat_t* u_stat = (user_stat_t*)regs->edx;
 
-    if (!check_user_buffer(curr, path, 1) || !check_user_buffer(curr, u_stat, sizeof(user_stat_t))) {
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0
+        || !check_user_buffer_writable_present(curr, u_stat, sizeof(*u_stat))) {
         regs->eax = (uint32_t)-1;
         return;
     }
@@ -718,27 +753,33 @@ static void syscall_get_fs_info(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_rename(registers_t* regs, task_t* curr) {
-    char* oldp = (char*)regs->ebx;
-    char* newp = (char*)regs->ecx;
+    const char* user_oldp = (const char*)regs->ebx;
+    const char* user_newp = (const char*)regs->ecx;
 
-    if (check_user_buffer(curr, oldp, 1) && check_user_buffer(curr, newp, 1)) {
-        regs->eax = (uint32_t)vfs_rename(oldp, newp);
-    } else {
+    char oldp[k_user_path_max];
+    char newp[k_user_path_max];
+    if (copy_user_path(curr, user_oldp, oldp) != 0 || copy_user_path(curr, user_newp, newp) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_rename(oldp, newp);
 }
 
 static void syscall_renameat(registers_t* regs, task_t* curr) {
     int old_dirfd = (int)regs->ebx;
-    char* oldp = (char*)regs->ecx;
+    const char* user_oldp = (const char*)regs->ecx;
     int new_dirfd = (int)regs->edx;
-    char* newp = (char*)regs->esi;
+    const char* user_newp = (const char*)regs->esi;
 
-    if (check_user_buffer(curr, oldp, 1) && check_user_buffer(curr, newp, 1)) {
-        regs->eax = (uint32_t)vfs_renameat(old_dirfd, oldp, new_dirfd, newp);
-    } else {
+    char oldp[k_user_path_max];
+    char newp[k_user_path_max];
+    if (copy_user_path(curr, user_oldp, oldp) != 0 || copy_user_path(curr, user_newp, newp) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_renameat(old_dirfd, oldp, new_dirfd, newp);
 }
 
 static void syscall_spawn_process(registers_t* regs, task_t* curr) {
@@ -807,22 +848,26 @@ static void syscall_getdents(registers_t* regs, task_t* curr) {
 
 static void syscall_openat(registers_t* regs, task_t* curr) {
     int dirfd = (int)regs->ebx;
-    char* path = (char*)regs->ecx;
+    const char* user_path = (const char*)regs->ecx;
     int flags = (int)regs->edx;
 
-    if (check_user_buffer(curr, path, 1)) {
-        regs->eax = (uint32_t)vfs_openat(dirfd, path, flags);
-    } else {
+    char path[k_user_path_max];
+    if (copy_user_path(curr, user_path, path) != 0) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    regs->eax = (uint32_t)vfs_openat(dirfd, path, flags);
 }
 
 static void syscall_fstatat(registers_t* regs, task_t* curr) {
     int dirfd = (int)regs->ebx;
-    char* name = (char*)regs->ecx;
+    const char* user_name = (const char*)regs->ecx;
     user_stat_t* u_stat = (user_stat_t*)regs->edx;
 
-    if (!check_user_buffer(curr, name, 1) || !check_user_buffer(curr, u_stat, sizeof(user_stat_t))) {
+    char name[k_user_path_max];
+    if (copy_user_path(curr, user_name, name) != 0
+        || !check_user_buffer_writable_present(curr, u_stat, sizeof(*u_stat))) {
         regs->eax = (uint32_t)-1;
         return;
     }

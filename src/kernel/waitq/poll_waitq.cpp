@@ -257,65 +257,99 @@ static inline void wake_all(poll_waitq_t& q) {
 
     [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
 
-    PollWaitersByQueue waiters(q.waiters);
+    dlist_head_t* head = &q.waiters;
+    dlist_head_t* it = head->next;
+    while (it && it != head) {
+        dlist_head_t* next = it->next;
 
-    for (poll_waiter_t& w : waiters) {
-        if (w.task) {
-            proc_wake(w.task);
+        poll_waiter_t* w = container_of(it, poll_waiter_t, q_node);
+        if (!w) {
+            it = next;
+            continue;
         }
+
+        task_t* task = w->task;
+        if (!task || !proc_task_retain(task)) {
+            WaiterLink link(*w);
+            link.detach_from_queue_only(q);
+            it = next;
+            continue;
+        }
+
+        proc_wake(task);
+        proc_task_put(task);
+
+        it = next;
     }
 }
 
 static inline void detach_all(poll_waitq_t& q) {
     for (;;) {
-        poll_waiter_t* w = nullptr;
         task_t* task = nullptr;
 
-        PollWaitQueue waitq(q);
-
         {
+            PollWaitQueue waitq(q);
             [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
 
             PollWaitersByQueue waiters(q.waiters);
-            if (!waiters.empty()) {
-                w = &waiters.front();
-                task = w->task;
+            if (waiters.empty()) {
+                return;
+            }
+
+            poll_waiter_t& front = waiters.front();
+            task = front.task;
+            if (task && !proc_task_retain(task)) {
+                task = nullptr;
             }
         }
-
-        if (!w) {
-            return;
-        }
-
-        WaiterLink link(*w);
 
         if (!task) {
+            PollWaitQueue waitq(q);
             [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
 
-            if (link.queue_ptr() == &q) {
-                link.detach_from_queue_only(q);
+            PollWaitersByQueue waiters(q.waiters);
+            if (waiters.empty()) {
+                return;
             }
 
+            poll_waiter_t& w = waiters.front();
+            WaiterLink link(w);
+            link.detach_from_queue_only(q);
             continue;
         }
 
         TaskPollList task_list(*task);
-
         [[maybe_unused]] kernel::SpinLockNativeSafeGuard task_guard(task_list.lock_native());
 
-        if (link.task_ptr() != task || link.queue_ptr() != &q) {
+        poll_waiter_t* w = nullptr;
+
+        {
+            PollWaitersByTask waiters(task_list.waiters());
+            for (poll_waiter_t& cur : waiters) {
+                if (cur.q == &q) {
+                    w = &cur;
+                    break;
+                }
+            }
+        }
+
+        if (!w) {
+            proc_task_put(task);
             continue;
         }
 
         {
+            PollWaitQueue waitq(q);
             [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
 
-            if (link.queue_ptr() == &q) {
+            WaiterLink link(*w);
+            if (link.task_ptr() == task && link.queue_ptr() == &q) {
                 link.detach_everywhere(*task, q);
             }
         }
 
         proc_wake(task);
+        proc_task_put(task);
     }
 }
 

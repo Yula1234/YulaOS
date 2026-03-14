@@ -772,6 +772,8 @@ static int pty_close(vfs_node_t* node) {
         return 0;
     }
 
+    pty_pair_retain(p);
+
     int do_unregister = 0;
     uint32_t pts_id = 0;
 
@@ -810,6 +812,7 @@ static int pty_close(vfs_node_t* node) {
         }
     }
 
+    pty_pair_release(p);
     return 0;
 }
 

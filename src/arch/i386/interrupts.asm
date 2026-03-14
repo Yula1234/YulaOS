@@ -8,6 +8,7 @@ public isr_stub_table
 public load_page_directory
 public enable_paging
 extrn isr_handler
+extrn double_fault_report
 
 load_page_directory:
     mov eax, [esp + 4]
@@ -90,46 +91,14 @@ isr_df_entry:
     mov fs, ax
     mov gs, ax
 
-    test ebx, 3
-    jz isr_df_no_user
+    push eax
     push ebp
     push edi
-isr_df_no_user:
-
-    mov al, 'D'
-    call df_putc
-    mov al, 'F'
-    call df_putc
-    mov al, ' '
-    call df_putc
-
-    mov al, 'e'
-    call df_putc
-    mov al, 'i'
-    call df_putc
-    mov al, 'p'
-    call df_putc
-    mov al, '='
-    call df_putc
-    mov eax, ecx
-    call df_puthex32
-
-    mov al, ' '
-    call df_putc
-
-    mov al, 'c'
-    call df_putc
-    mov al, 'r'
-    call df_putc
-    mov al, '2'
-    call df_putc
-    mov al, '='
-    call df_putc
-    mov eax, cr2
-    call df_puthex32
-
-    mov al, 10
-    call df_putc
+    push esi
+    push ebx
+    push ecx
+    push edx
+    call double_fault_report
 
     cli
 df_halt:

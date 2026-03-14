@@ -29,6 +29,9 @@
 #include "sched.h"
 #include "proc.h"
 #include <kernel/waitq/poll_waitq.h>
+#include <kernel/sched.h>
+#include <kernel/syscall.h>
+#include <kernel/futex/futex.h>
 #include "elf.h"
 #include <kernel/smp/cpu.h>
 
@@ -880,8 +883,11 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
         out = ft->fds[fd];
     }
 
-    proc::detail::FileDescRef out_ref = proc::detail::FileDescRef::from_borrowed(out);
-    return out_ref.detach();
+    if (out) {
+        file_desc_retain(out);
+    }
+
+    return out;
 }
 
 static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
@@ -1318,6 +1324,8 @@ static task_t* alloc_task(void) {
 
     {
         kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+
+        proc_task_retain(t);
         proc::detail::all_tasks.push_back(*t);
         proc::detail::total_tasks++;
     }
@@ -1398,13 +1406,21 @@ void proc_free_resources(task_t* t) {
     t->pid = 0;
     memset(t->name, 0, sizeof(t->name));
     
+    bool removed_from_all_tasks = false;
     {
         kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
 
-        dlist_del(&t->all_tasks_node);
-        if (proc::detail::total_tasks > 0) {
+        if (t->all_tasks_node.next && t->all_tasks_node.prev) {
+            dlist_del(&t->all_tasks_node);
+            removed_from_all_tasks = true;
+        }
+        if (removed_from_all_tasks && proc::detail::total_tasks > 0) {
             proc::detail::total_tasks--;
         }
+    }
+
+    if (removed_from_all_tasks) {
+        proc_task_put(t);
     }
 
     proc_task_put(t);
@@ -1459,7 +1475,11 @@ void proc_kill(task_t* t) {
         proc_task_put(init);
     }
 
-    sem_remove_task(t);
+    if (t->blocked_kind == TASK_BLOCK_FUTEX) {
+        futex_remove_task(t);
+    } else {
+        sem_remove_task(t);
+    }
 
     poll_task_cleanup(t);
 
@@ -2191,13 +2211,21 @@ task_t* proc_create_idle(int cpu_index) {
     
     t->esp = sp;
 
+    bool removed_from_all_tasks = false;
     {
         kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
 
-        dlist_del(&t->all_tasks_node);
-        if (proc::detail::total_tasks > 0) {
+        if (t->all_tasks_node.next && t->all_tasks_node.prev) {
+            dlist_del(&t->all_tasks_node);
+            removed_from_all_tasks = true;
+        }
+        if (removed_from_all_tasks && proc::detail::total_tasks > 0) {
             proc::detail::total_tasks--;
         }
+    }
+
+    if (removed_from_all_tasks) {
+        proc_task_put(t);
     }
 
     proc::detail::pid_map_remove(old_pid);

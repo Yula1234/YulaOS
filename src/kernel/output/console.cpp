@@ -40,6 +40,10 @@ extern "C" void console_write(const char* data, size_t size) {
     console_write_unlocked(data, size);
 }
 
+extern "C" void console_write_emergency(const char* data, size_t size) {
+    console_write_unlocked(data, size);
+}
+
 extern "C" void console_putc(char c) {
     console_write(&c, 1);
 }

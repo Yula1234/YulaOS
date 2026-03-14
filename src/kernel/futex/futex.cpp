@@ -294,3 +294,30 @@ extern "C" int futex_wake(uint32_t key, uint32_t max_wake) {
 
     return rc;
 }
+
+extern "C" void futex_remove_task(struct task* t) {
+    if (!t || t->blocked_kind != TASK_BLOCK_FUTEX || !t->blocked_on_sem) {
+        return;
+    }
+
+    auto* entry = static_cast<futex_entry_t*>(t->blocked_on_sem);
+
+    {
+        kernel::SpinLockSafeGuard guard(entry->lock);
+
+        if (t->blocked_on_sem != entry || t->blocked_kind != TASK_BLOCK_FUTEX) {
+            return;
+        }
+
+        if (t->sem_node.next && t->sem_node.prev) {
+            dlist_del(&t->sem_node);
+            t->sem_node.next = nullptr;
+            t->sem_node.prev = nullptr;
+        }
+
+        t->blocked_on_sem = nullptr;
+        t->blocked_kind = TASK_BLOCK_NONE;
+    }
+
+    entry->release();
+}
