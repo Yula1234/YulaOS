@@ -20,7 +20,7 @@
 #include <drivers/serial/ns16550.h>
 #include <drivers/serial/serial_core.h>
 #include <drivers/serial/ttyS0.h>
-#include <drivers/virtio_gpu.h>
+#include <drivers/virtio/virtio_gpu.h>
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
 

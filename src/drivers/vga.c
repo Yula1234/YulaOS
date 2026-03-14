@@ -5,7 +5,7 @@
 #include <mm/heap.h>
 #include <hal/simd.h>
 #include <drivers/fbdev.h>
-#include <drivers/virtio_gpu.h>
+#include <drivers/virtio/virtio_gpu.h>
 
 #include "font8x16.h"
 #include "vga.h"

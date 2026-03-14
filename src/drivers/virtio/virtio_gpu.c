@@ -1,6 +1,6 @@
-#include <drivers/virtio_gpu.h>
-#include <drivers/virtio_pci.h>
-#include <drivers/virtqueue.h>
+#include <drivers/virtio/virtio_gpu.h>
+#include <drivers/virtio/virtio_pci.h>
+#include <drivers/virtio/virtqueue.h>
 #include <hal/lock.h>
 #include <kernel/proc.h>
 #include <lib/string.h>

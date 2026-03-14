@@ -12,7 +12,7 @@
 #include <drivers/keyboard.h>
 #include <drivers/mouse.h>
 #include <drivers/serial/ttyS0.h>
-#include <drivers/virtio_gpu.h>
+#include <drivers/virtio/virtio_gpu.h>
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
 #include <kernel/panic.h>

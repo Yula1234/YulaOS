@@ -1,5 +1,5 @@
 #include <drivers/gpu0.h>
-#include <drivers/virtio_gpu.h>
+#include <drivers/virtio/virtio_gpu.h>
 
 #include <fs/vfs.h>
 #include <hal/lock.h>
