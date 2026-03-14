@@ -17,7 +17,7 @@
 #include <kernel/input_focus.h>
 #include <kernel/panic.h>
 #include <mm/shm.h>
-#include <kernel/ipc_endpoint.h>
+#include <kernel/ipc/ipc_endpoint.h>
 #include <kernel/poll_waitq.h>
 #include <yos/ioctl.h>
 #include <yos/proc.h>
