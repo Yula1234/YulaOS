@@ -737,10 +737,6 @@ private:
     }
 
     void drain_remote_frees(KmemCache& cache, KmemCache::PerCpuSlab& local) noexcept {
-        if (kernel::unlikely(local.page == nullptr)) {
-            return;
-        }
-
         if (kernel::likely(local.remote_free.load() == nullptr)) {
             return;
         }
@@ -748,17 +744,11 @@ private:
         void* list = local.remote_free.exchange(nullptr);
         const uint32_t count = local.remote_free_count.exchange(0u);
 
-        page_t* page = local.page;
-
         if (kernel::unlikely(list == nullptr)) {
             if (kernel::unlikely(count != 0u)) {
                 local.remote_free_count.store(count);
             }
             return;
-        }
-
-        if (kernel::unlikely(page->slab_cache != &cache)) {
-            panic("SLUB: remote free slab cache mismatch");
         }
 
         uint32_t drained = 0u;
@@ -770,7 +760,29 @@ private:
             }
 
             void* next = reinterpret_cast<void*>(next_tagged & ~static_cast<uintptr_t>(1u));
+
+            const uintptr_t virt = reinterpret_cast<uintptr_t>(it);
+            const uint32_t phys = paging_get_phys(
+                kernel_page_directory,
+                static_cast<uint32_t>(virt)
+            );
+
+            page_t* page = pmm_->phys_to_page(phys);
+            if (kernel::unlikely(!page)) {
+                panic("SLUB: remote free on invalid page");
+            }
+
+            if (kernel::unlikely(page->slab_cache != &cache)) {
+                panic("SLUB: remote free slab cache mismatch");
+            }
+
+            if (kernel::unlikely(page->objects == 0u)) {
+                panic("SLUB: remote free objects underflow");
+            }
+
             push_object_to_page_freelist(*page, it);
+            page->objects--;
+
             drained++;
             it = next;
         }
@@ -780,12 +792,6 @@ private:
                 panic("SLUB: remote free count underflow");
             }
         }
-
-        if (kernel::unlikely(page->objects < drained)) {
-            panic("SLUB: remote free objects underflow");
-        }
-
-        page->objects = static_cast<uint16_t>(page->objects - drained);
     }
 
     void finish_cpu_slab_full(KmemCache& cache, int cpu_index, page_t& page) noexcept {
