@@ -809,7 +809,7 @@ void paging_init(uint32_t ram_size_bytes) {
         paging_fixmap_clear(virt);
     }
     
-    for(uint32_t addr = 0xC0000000; addr < 0xC1000000; addr += 0x400000) {
+    for(uint32_t addr = 0xC0000000; addr != 0; addr += 0x400000) {
         /* Pre-allocate kernel PTs for the heap / early dynamic mappings. */
         paging_allocate_table(addr);
     }
