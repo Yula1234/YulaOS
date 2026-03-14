@@ -313,7 +313,7 @@ static inline int openat(int dirfd, const char* path, int flags) {
 }
 
 static inline int renameat(int old_dirfd, const char* oldpath, int new_dirfd, const char* newpath) {
-    return syscall4(56, old_dirfd, (int)oldpath, new_dirfd, (int)newpath);
+    return syscall4(13, old_dirfd, (int)oldpath, new_dirfd, (int)newpath);
 }
 
 static inline int spawn_process(const char* path, int argc, char** argv) {

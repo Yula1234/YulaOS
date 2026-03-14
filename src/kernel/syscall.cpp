@@ -15,7 +15,6 @@
 #include <drivers/virtio_gpu.h>
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
-#include <kernel/rtc.h>
 #include <kernel/panic.h>
 #include <kernel/shm.h>
 #include <kernel/ipc_endpoint.h>
@@ -404,15 +403,6 @@ static void syscall_unlinkat(registers_t* regs, task_t* curr) {
 
     if (check_user_buffer(curr, path, 1)) {
         regs->eax = (uint32_t)vfs_unlinkat(dirfd, path);
-    } else {
-        regs->eax = (uint32_t)-1;
-    }
-}
-
-static void syscall_get_time(registers_t* regs, task_t* curr) {
-    if (check_user_buffer(curr, (void*)regs->ebx, 9)) {
-        get_time_string((char*)regs->ebx);
-        regs->eax = 0;
     } else {
         regs->eax = (uint32_t)-1;
     }
@@ -1923,7 +1913,7 @@ static const syscall_fn_t syscall_table[] = {
     [10] = syscall_get_mem_stats,
     [11] = syscall_mkdir,
     [12] = syscall_unlink,
-    [13] = syscall_get_time,
+    [13] = syscall_renameat,
     [14] = syscall_reboot,
     [15] = syscall_signal,
     [16] = syscall_sigreturn,
@@ -1966,7 +1956,6 @@ static const syscall_fn_t syscall_table[] = {
     [53] = syscall_mkdirat,
     [54] = syscall_unlinkat,
     [55] = syscall_statat,
-    [56] = syscall_renameat,
 };
 
 extern "C" void syscall_handler(registers_t* regs) {
