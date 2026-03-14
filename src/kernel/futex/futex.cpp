@@ -187,8 +187,6 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
             return -2;
         }
 
-        uaccess_prefault_user_read((const void*)uaddr, 4u);
-
         uint32_t v = 0u;
         if (uaccess_copy_from_user(&v, (const void*)uaddr, sizeof(v)) != 0) {
             return -1;
