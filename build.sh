@@ -141,7 +141,7 @@ if [[ "${KERNEL_PROFILE:-0}" == "1" ]]; then
     nm -n bin/kernel.elf \
         | awk 'tolower($2)=="t" || tolower($2)=="w" { print $1 " " $3 }' \
         | awk 'BEGIN { \
-                print "#include <kernel/ksyms.h>"; \
+                print "#include <kernel/symbols/ksyms.h>"; \
                 print "const ksym_t ksyms_table[] = {"; \
             } \
             { \

@@ -1,6 +1,6 @@
-#include <kernel/symbols.h>
+#include <kernel/symbols/symbols.h>
 
-#include <kernel/ksyms.h>
+#include <kernel/symbols/ksyms.h>
 
 #include <kernel/boot.h>
 

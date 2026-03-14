@@ -2,7 +2,7 @@
 
 #include <kernel/cpu.h>
 #include <kernel/proc.h>
-#include <kernel/symbols.h>
+#include <kernel/symbols/symbols.h>
 
 #include <hal/io.h>
 

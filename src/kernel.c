@@ -54,7 +54,7 @@
 #include <kernel/panic.h>
 
 #include <kernel/profiler.h>
-#include <kernel/symbols.h>
+#include <kernel/symbols/symbols.h>
 
 #include <lib/cpp/ctors.h>
 

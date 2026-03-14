@@ -1,4 +1,4 @@
-#include <kernel/ksyms.h>
+#include <kernel/symbols/ksyms.h>
 
 #include <stdint.h>
 
