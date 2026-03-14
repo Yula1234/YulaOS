@@ -4,37 +4,9 @@
 
 #include <kernel/init/boot.h>
 
+#include <kernel/elf.h>
+
 #include <stdint.h>
-
-typedef struct {
-    uint32_t st_name;
-    uint32_t st_value;
-    uint32_t st_size;
-    uint8_t st_info;
-    uint8_t st_other;
-    uint16_t st_shndx;
-} __attribute__((packed)) Elf32_Sym;
-
-typedef struct {
-    uint32_t sh_name;
-    uint32_t sh_type;
-    uint32_t sh_flags;
-    uint32_t sh_addr;
-    uint32_t sh_offset;
-    uint32_t sh_size;
-    uint32_t sh_link;
-    uint32_t sh_info;
-    uint32_t sh_addralign;
-    uint32_t sh_entsize;
-} __attribute__((packed)) Elf32_Shdr;
-
-enum {
-    SHT_SYMTAB = 2u,
-};
-
-enum {
-    SHN_UNDEF = 0u,
-};
 
 static const Elf32_Sym* g_symtab;
 static uint32_t g_sym_count;
