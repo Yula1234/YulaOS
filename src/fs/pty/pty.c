@@ -3,7 +3,7 @@
 
 #include <hal/lock.h>
 #include <kernel/sched.h>
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 #include <kernel/proc.h>
 #include <lib/string.h>
 #include <mm/heap.h>

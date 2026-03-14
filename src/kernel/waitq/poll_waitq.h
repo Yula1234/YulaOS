@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
 
-#ifndef KERNEL_POLL_WAITQ_H
-#define KERNEL_POLL_WAITQ_H
+#ifndef YULAOS_SRC_KERNEL_WAITQ_POLL_WAITQ_H
+#define YULAOS_SRC_KERNEL_WAITQ_POLL_WAITQ_H
 
 #include <hal/lock.h>
 

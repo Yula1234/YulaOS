@@ -4,7 +4,7 @@
 #ifndef KERNEL_IPC_ENDPOINT_H
 #define KERNEL_IPC_ENDPOINT_H
 
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 #include <stdint.h>
 
 #define IPC_NAME_MAX 31u

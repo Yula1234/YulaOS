@@ -4,7 +4,7 @@
 #ifndef FS_PTY_H
 #define FS_PTY_H
 
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 
 #include <fs/vfs.h>
 

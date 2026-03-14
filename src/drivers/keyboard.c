@@ -7,7 +7,7 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/input_focus.h>
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 #include <drivers/fbdev.h>
 
 #include <hal/io.h>

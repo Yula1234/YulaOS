@@ -1,6 +1,6 @@
 #pragma once
 
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 
 #ifdef __cplusplus
 extern "C" {

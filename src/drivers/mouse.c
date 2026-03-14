@@ -10,7 +10,7 @@
 
 #include <kernel/input_focus.h>
 #include <kernel/proc.h>
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 
 #include <hal/io.h>
 #include <hal/irq.h>

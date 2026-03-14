@@ -12,7 +12,7 @@
 #include <kernel/tty/line_discipline.h>
 
 #include <kernel/proc.h>
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 #include <kernel/sched.h>
 
 #include <stddef.h>

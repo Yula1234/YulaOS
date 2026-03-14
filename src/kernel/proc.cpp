@@ -28,7 +28,7 @@
 
 #include "sched.h"
 #include "proc.h"
-#include "poll_waitq.h"
+#include <kernel/waitq/poll_waitq.h>
 #include "elf.h"
 #include <kernel/smp/cpu.h>
 

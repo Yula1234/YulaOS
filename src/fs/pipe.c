@@ -2,7 +2,7 @@
 /* Copyright (C) 2025 Yula1234 */
 
 #include <hal/lock.h>
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 #include <kernel/sched.h>
 #include <lib/string.h>
 #include <mm/heap.h>

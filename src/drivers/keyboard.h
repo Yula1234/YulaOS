@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 
 #include <arch/i386/idt.h>
 

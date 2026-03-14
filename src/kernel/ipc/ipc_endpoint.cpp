@@ -7,7 +7,7 @@
 #include <fs/pipe.h>
 
 #include <kernel/proc.h>
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/intrusive_ref.h>

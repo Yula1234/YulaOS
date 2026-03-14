@@ -4,7 +4,7 @@
 #ifndef FS_PIPE_H
 #define FS_PIPE_H
 
-#include <kernel/poll_waitq.h>
+#include <kernel/waitq/poll_waitq.h>
 
 #include "vfs.h"
 
