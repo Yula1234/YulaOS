@@ -4,7 +4,7 @@
 #include <fs/vfs.h>
 #include <hal/lock.h>
 #include <kernel/proc.h>
-#include <kernel/shm.h>
+#include <mm/shm.h>
 #include <lib/hash_map.h>
 
 #include <lib/cpp/intrusive_ref.h>

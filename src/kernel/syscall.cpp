@@ -16,7 +16,7 @@
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
 #include <kernel/panic.h>
-#include <kernel/shm.h>
+#include <mm/shm.h>
 #include <kernel/ipc_endpoint.h>
 #include <kernel/poll_waitq.h>
 #include <yos/ioctl.h>
