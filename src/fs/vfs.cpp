@@ -118,12 +118,21 @@ static vfs_node_t* vfs_node_clone_existing(const vfs_node_t* src) noexcept {
 
 class DevFSRegistry {
 public:
+    DevFSRegistry() noexcept {
+        percpu_rwspinlock_init(&lock_);
+    }
+
+    DevFSRegistry(const DevFSRegistry&) = delete;
+    DevFSRegistry& operator=(const DevFSRegistry&) = delete;
+
     void set_instance(vfs_fs_instance* inst) noexcept;
     void register_node(vfs_node_t* node) noexcept;
     int unregister_node(const char* name) noexcept;
+
     vfs_node_t* fetch_borrowed(const char* name) noexcept;
     vfs_node_t* clone(const char* name) noexcept;
     vfs_node_t* take(const char* name) noexcept;
+    
     int getdents(uint32_t* inout_offset, yfs_dirent_info_t* out, uint32_t out_size) noexcept;
 
 private:
@@ -132,7 +141,7 @@ private:
      * - lock_ protects nodes_ and instance_.
      * - Never call into arbitrary backend ops while holding lock_.
      */
-    kernel::SpinLock lock_;
+    percpu_rwspinlock_t lock_;
 
     /*
      * Registry ownership model:
@@ -258,6 +267,7 @@ struct vfs_fs_instance {
     const vfs_fs_type* type;
     void* fs_private;
     vfs_node_t* root;
+
     uint32_t refs;
 };
 
@@ -300,6 +310,7 @@ static void vfs_node_bind_instance(vfs_node_t* node, vfs_fs_instance* inst) noex
 struct vfs_fs_type {
     const char* name;
     const vfs_fs_type_ops* ops;
+    
     vfs_fs_instance* (*mount)(const char* source, uint32_t flags);
     int (*umount)(vfs_fs_instance* inst);
 };
@@ -411,7 +422,7 @@ namespace {
 
 void DevFSRegistry::set_instance(vfs_fs_instance* inst) noexcept {
     {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(lock_);
 
         instance_ = inst;
     }
@@ -425,7 +436,7 @@ void DevFSRegistry::register_node(vfs_node_t* node) noexcept {
     const kernel::string key(node->name);
 
     {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(lock_);
 
         nodes_.insert_or_assign(key, node);
     }
@@ -440,7 +451,7 @@ int DevFSRegistry::unregister_node(const char* name) noexcept {
 
     int rc;
     {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(lock_);
 
         rc = nodes_.remove(key) ? 0 : -1;
     }
@@ -463,7 +474,7 @@ vfs_node_t* DevFSRegistry::fetch_borrowed(const char* name) noexcept {
 
     vfs_node_t* out = nullptr;
     {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(lock_);
 
         auto locked = nodes_.find_ptr(key);
         if (!locked) {
@@ -492,7 +503,7 @@ vfs_node_t* DevFSRegistry::take(const char* name) noexcept {
     vfs_node_t* out = nullptr;
 
     {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(lock_);
 
         if (!nodes_.remove_and_get(key, out)) {
             return nullptr;
@@ -520,7 +531,7 @@ vfs_node_t* DevFSRegistry::clone(const char* name) noexcept {
     memset(&snapshot, 0, sizeof(snapshot));
 
     {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(lock_);
 
         auto locked = nodes_.find_ptr(key);
         if (!locked) {
@@ -562,7 +573,7 @@ vfs_node_t* DevFSRegistry::clone(const char* name) noexcept {
     node->fs_driver = snapshot.fs_driver;
 
     if (!node->fs_driver) {
-        kernel::SpinLockSafeGuard guard(lock_);
+        kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(lock_);
 
         node->fs_driver = instance_;
     }
