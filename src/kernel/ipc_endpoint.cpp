@@ -267,24 +267,18 @@ void IpcPendingConn::release() {
     delete this;
 }
 
-static kernel::SpinLock g_endpoints_lock;
-
 class IpcEndpointRegistry {
 public:
     bool add(const kernel::string& name, IpcEndpoint* ep) {
-        kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         return endpoints.insert_unique(name, ep);
     }
 
     void remove(const kernel::string& name) {
-        kernel::SpinLockSafeGuard guard(g_endpoints_lock);
         endpoints.remove(name);
     }
 
     bool find_and_retain(const kernel::string& name,
                          kernel::IntrusiveRef<IpcEndpoint>& out) {
-        kernel::SpinLockSafeGuard guard(g_endpoints_lock);
-
         return endpoints.with_value_unlocked(
             name,
             [&out](IpcEndpoint* ep) -> bool {
