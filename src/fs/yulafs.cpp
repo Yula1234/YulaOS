@@ -477,7 +477,7 @@ static void load_bitmap_block_locked(uint32_t lba) {
     bmap_cache_dirty = 0;
 }
 
-static void load_bitmap_block(uint32_t lba) {
+[[maybe_unused]] static void load_bitmap_block(uint32_t lba) {
     kernel::SpinLockNativeSafeGuard guard(alloc_lock);
     load_bitmap_block_locked(lba);
 }
