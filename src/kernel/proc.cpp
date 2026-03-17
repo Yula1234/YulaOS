@@ -160,9 +160,12 @@ static ProcGroup* pgroup_get_or_create(uint32_t pgid) {
         }
 
         memset(group, 0, sizeof(*group));
+
         group->pgid = pgid;
+        
         rwspinlock_init(&group->lock);
         dlist_init(&group->members);
+        
         group->refs.store(2u, kernel::memory_order::relaxed);
 
         const auto res = pgroups.insert_unique_ex(pgid, group);
@@ -762,10 +765,8 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
 
         uint32_t parent_pid;
         {
-            kernel::ScopedIrqDisable irq_guard;
-            spinlock_acquire(&t.state_lock);
+            kernel::SpinLockNativeSafeGuard guard(t.state_lock);
             parent_pid = t.parent_pid;
-            spinlock_release(&t.state_lock);
         }
 
         yos_proc_info_t* e = &out[count++];
@@ -1409,9 +1410,9 @@ static task_t* alloc_task(void) {
     t->sid = t->pid;
 
     {
-        spinlock_acquire(&t->state_lock);
+        kernel::SpinLockNativeGuard guard(t->state_lock);
+
         (void)proc::detail::task_set_pgid_locked(t, t->pid);
-        spinlock_release(&t->state_lock);
     }
 
     {
@@ -1447,42 +1448,42 @@ void proc_free_resources(task_t* t) {
     }
 
     {
-        kernel::ScopedIrqDisable irq_guard;
-        spinlock_acquire(&t->state_lock);
+        kernel::SpinLockNativeSafeGuard guard(t->state_lock);
+        
         proc::detail::task_pgroup_detach_locked(t);
-        spinlock_release(&t->state_lock);
     }
 
     {
         kernel::ScopedIrqDisable irq_guard;
-        spinlock_acquire(&t->state_lock);
-        uint32_t parent_pid = t->parent_pid;
-        spinlock_release(&t->state_lock);
+
+        uint32_t parent_pid;
+
+        {
+            kernel::SpinLockNativeGuard guard(t->state_lock);
+            parent_pid = t->parent_pid;
+        }
 
         if (parent_pid != 0) {
             task_t* parent = proc_find_by_pid(parent_pid);
             if (parent) {
-                spinlock_acquire(&parent->state_lock);
-                spinlock_acquire(&t->state_lock);
+                {
+                    kernel::SpinLockNativeGuard parent_guard(parent->state_lock);
+                    kernel::SpinLockNativeGuard t_guard(t->state_lock);
 
-                if (t->parent_pid == parent_pid) {
-                    t->parent_pid = 0;
+                    if (t->parent_pid == parent_pid) {
+                        t->parent_pid = 0;
 
-                    proc::detail::task_parent_detach_locked(t);
+                        proc::detail::task_parent_detach_locked(t);
+                    }
                 }
-
-                spinlock_release(&t->state_lock);
-                spinlock_release(&parent->state_lock);
 
                 proc_task_put(parent);
             }
         } else {
-            spinlock_acquire(&t->state_lock);
+            kernel::SpinLockNativeGuard guard(t->state_lock);
 
             t->parent_pid = 0;
             proc::detail::task_parent_detach_locked(t);
-
-            spinlock_release(&t->state_lock);
         }
     }
 
@@ -1535,14 +1536,13 @@ void proc_kill(task_t* t) {
     if (!t) return;
 
     {
-        uint32_t flags = spinlock_acquire_safe(&t->state_lock);
+        kernel::SpinLockNativeSafeGuard guard(t->state_lock);
+
         if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
-            spinlock_release_safe(&t->state_lock, flags);
             return;
         }
 
         t->state = TASK_ZOMBIE;
-        spinlock_release_safe(&t->state_lock, flags);
     }
     
     uint32_t waited_pid = t->wait_for_pid;
@@ -1566,26 +1566,21 @@ void proc_kill(task_t* t) {
         task_t* child = nullptr;
         task_t* next = nullptr;
 
-        spinlock_acquire(&init->state_lock);
-        spinlock_acquire(&t->state_lock);
+        kernel::SpinLockNativeGuard init_guard(init->state_lock);
+        kernel::SpinLockNativeGuard t_guard(t->state_lock);
 
         dlist_for_each_entry_safe(child, next, &t->children_list, sibling_node) {
-            spinlock_acquire(&child->state_lock);
+            kernel::SpinLockNativeGuard child_guard(child->state_lock);
 
             if (child->state == TASK_UNUSED) {
                 child->parent_pid = 0;
 
                 proc::detail::task_parent_detach_locked(child);
-                spinlock_release(&child->state_lock);
                 continue;
             }
 
             proc::detail::task_set_parent_locked(child, init);
-            spinlock_release(&child->state_lock);
         }
-
-        spinlock_release(&t->state_lock);
-        spinlock_release(&init->state_lock);
     }
 
     if (init) {
@@ -1609,13 +1604,10 @@ void proc_kill(task_t* t) {
     }
 
     {
-        kernel::ScopedIrqDisable irq_guard;
-        spinlock_acquire(&proc::detail::g_zombie_lock);
+        kernel::SpinLockNativeSafeGuard guard(proc::detail::g_zombie_lock);
 
         t->zombie_next = proc::detail::g_zombie_head;
         proc::detail::g_zombie_head = t;
-
-        spinlock_release(&proc::detail::g_zombie_lock);
     }
 
     sem_signal_all(&t->exit_sem);
@@ -1870,13 +1862,8 @@ static int proc_mem_register_stack_region(proc_mem_t* mem, uint32_t stack_bottom
     }
 
     vma_region_t* region = vma_create(
-        mem,
-        start,
-        stack_top - stack_bottom,
-        nullptr,
-        0u,
-        0u,
-        VMA_MAP_PRIVATE | VMA_MAP_STACK
+        mem, start, stack_top - stack_bottom,
+        nullptr, 0u, 0u, VMA_MAP_PRIVATE | VMA_MAP_STACK
     );
 
     return region ? 1 : 0;
