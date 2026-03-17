@@ -2364,6 +2364,7 @@ static int vfs_open_resolved(task_t* curr, const VfsResolvedPath& resolved, int 
     if (node->ops && node->ops->open) {
         const int rc = node->ops->open(node);
         if (rc != 0) {
+            node->ops = 0;
             vfs_node_release(node);
             return -1;
         }
@@ -2740,6 +2741,7 @@ extern "C" vfs_node_t* vfs_create_node_from_path(const char* path) {
         if (node->ops && node->ops->open) {
             const int rc = node->ops->open(node);
             if (rc != 0) {
+                node->ops = 0;
                 vfs_node_release(node);
                 return nullptr;
             }

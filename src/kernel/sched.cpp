@@ -490,6 +490,7 @@ int sem_try_acquire(semaphore_t* sem) {
 }
 
 void sem_wait(semaphore_t* sem) {
+
     while (1) {
         if (sem_try_acquire_fast(sem)) {
             task_t* curr = proc_current();

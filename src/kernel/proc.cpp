@@ -395,22 +395,22 @@ int proc_setsid(task_t* t) {
 
     kernel::ScopedIrqDisable irq_guard;
 
-    spinlock_acquire(&t->state_lock);
+    {
+        kernel::SpinLockNativeGuard guard(&t->state_lock);
 
-    if (t->pid == t->pgid) {
-        spinlock_release(&t->state_lock);
-        return -1;
+        if (t->pid == t->pgid) {
+            return -1;
+        }
+
+        t->sid = t->pid;
+        (void)task_set_pgid_locked(t, t->pid);
+
+        if (t->controlling_tty) {
+            vfs_node_release(t->controlling_tty);
+            t->controlling_tty = nullptr;
+        }
+
     }
-
-    t->sid = t->pid;
-    (void)task_set_pgid_locked(t, t->pid);
-
-    if (t->controlling_tty) {
-        vfs_node_release(t->controlling_tty);
-        t->controlling_tty = nullptr;
-    }
-
-    spinlock_release(&t->state_lock);
 
     return (int)t->sid;
 }
@@ -1403,14 +1403,13 @@ static task_t* alloc_task(void) {
     t->sid = t->pid;
 
     {
-        kernel::ScopedIrqDisable irq_guard;
         spinlock_acquire(&t->state_lock);
         (void)proc::detail::task_set_pgid_locked(t, t->pid);
         spinlock_release(&t->state_lock);
     }
 
     {
-        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        kernel::PerCpuRwSpinLockNativeWriteGuard guard(proc::detail::task_list_lock);
 
         proc_task_retain(t);
         proc::detail::all_tasks.push_back(*t);
@@ -1429,6 +1428,12 @@ void proc_free_resources(task_t* t) {
 
     proc_sleep_remove(t);
     poll_task_cleanup(t);
+
+    vfs_node_t* tty_node = nullptr;
+    if (t->controlling_tty) {
+        tty_node = t->controlling_tty;
+        t->controlling_tty = nullptr;
+    }
 
     if (t->fd_table) {
         proc_fd_table_release(t->fd_table);
@@ -1475,9 +1480,8 @@ void proc_free_resources(task_t* t) {
         }
     }
 
-    if (t->controlling_tty) {
-        vfs_node_release(t->controlling_tty);
-        t->controlling_tty = nullptr;
+    if (tty_node) {
+        vfs_node_release(tty_node);
     }
 
     if (t->mem) {
