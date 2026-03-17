@@ -396,7 +396,7 @@ int proc_setsid(task_t* t) {
     kernel::ScopedIrqDisable irq_guard;
 
     {
-        kernel::SpinLockNativeGuard guard(&t->state_lock);
+        kernel::SpinLockNativeGuard guard(t->state_lock);
 
         if (t->pid == t->pgid) {
             return -1;
@@ -420,10 +420,16 @@ int proc_setpgid(task_t* t, uint32_t pgid) {
         return -1;
     }
 
+    int rc;
+
     kernel::ScopedIrqDisable irq_guard;
-    spinlock_acquire(&t->state_lock);
-    const int rc = task_set_pgid_locked(t, pgid);
-    spinlock_release(&t->state_lock);
+
+    {
+        kernel::SpinLockNativeGuard guard(t->state_lock);
+
+        rc = task_set_pgid_locked(t, pgid);
+    }
+
     return rc;
 }
 
