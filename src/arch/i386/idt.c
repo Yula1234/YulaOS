@@ -87,6 +87,7 @@ extern uint32_t isr_stub_table[];
 extern void isr_stub_0x80(void);
 extern void isr_stub_0xFF(void);
 extern void isr_stub_0xF0(void);
+extern void isr_stub_0xF1(void);
 extern void isr_stub_0xA1(void);
 extern void isr_stub_0xA2(void);
 extern uint32_t* kernel_page_directory;
@@ -98,6 +99,14 @@ static irq_handler_t irq_vector_handlers[256] = {0};
 static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
+
+__attribute__((noreturn, no_instrument_function))
+static void smp_panic_ipi_handler(void) {
+    __asm__ volatile("cli" ::: "memory");
+    for (;;) {
+        __asm__ volatile("hlt" ::: "memory");
+    }
+}
 
 static inline uint32_t get_cr3();
 
@@ -457,6 +466,15 @@ void isr_handler(registers_t* regs) {
         return;
     }
 
+    if (regs->int_no == 2) {
+        if (g_kernel_panic_in_progress != 0) {
+            __asm__ volatile("cli" ::: "memory");
+            for (;;) {
+                __asm__ volatile("hlt" ::: "memory");
+            }
+        }
+    }
+
 #ifdef KERNEL_PROFILE
     profiler_irq_enter();
 #endif
@@ -465,6 +483,11 @@ void isr_handler(registers_t* regs) {
         smp_tlb_ipi_handler();
         lapic_eoi();
         goto out;
+    }
+
+    if (regs->int_no == IPI_PANIC_VECTOR) {
+        lapic_eoi();
+        smp_panic_ipi_handler();
     }
 
     cpu = cpu_current();
@@ -665,11 +688,15 @@ void isr_handler(registers_t* regs) {
                 uint32_t pd_idx = cr2 >> 22;
                 uint32_t pt_idx = (cr2 >> 12) & 0x3FF;
 
-                if (dir[pd_idx] & 1) {
-                    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFF);
-                    if (pt[pt_idx] & 1) {
-                        __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
-                        goto out;
+                if ((dir[pd_idx] & 1u) != 0u) {
+                    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFFu);
+                    if ((pt[pt_idx] & 1u) == 0u) {
+                        uint32_t kernel_pte = 0;
+                        if (paging_get_present_pte(kernel_page_directory, cr2, &kernel_pte)) {
+                            pt[pt_idx] = kernel_pte;
+                            __asm__ volatile("invlpg (%0)" :: "r"(cr2) : "memory");
+                            goto out;
+                        }
                     }
                 }
             }
@@ -742,6 +769,7 @@ void idt_init(void) {
     
     idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
     idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
+    idt_set_gate(IPI_PANIC_VECTOR, (uint32_t)isr_stub_0xF1, 0x08, 0x8E);
     idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
     idt_set_gate(0xA2, (uint32_t)isr_stub_0xA2, 0x08, 0x8E);
 

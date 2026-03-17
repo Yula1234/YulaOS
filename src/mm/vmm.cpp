@@ -466,7 +466,7 @@ void* VmmState::alloc_pages(size_t count) noexcept {
         }
 
         if (kernel::unlikely(!map_new_pages(out, 1u, pmm_))) {
-            const size_t rollback_size = carve_pages * PAGE_SIZE;
+            const size_t rollback_size = PAGE_SIZE;
 
             kernel::SpinLockSafeGuard guard(lock_);
 
@@ -476,7 +476,7 @@ void* VmmState::alloc_pages(size_t count) noexcept {
                 return nullptr;
             }
 
-            rollback->start = carve_base;
+            rollback->start = out;
             rollback->size = rollback_size;
 
             tree_insert(*rollback, addr_tree_, size_tree_);

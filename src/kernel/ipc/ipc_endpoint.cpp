@@ -65,7 +65,7 @@ struct IpcPendingConn {
     IpcPendingConn& operator=(IpcPendingConn&&) = delete;
 
     bool retain() {
-        kernel::SpinLockSafeGuard guard(lock);
+        kernel::SpinLockGuard guard(lock);
         refcount++;
         return true;
     }
@@ -108,7 +108,7 @@ public:
     }
 
     bool retain() {
-        kernel::SpinLockSafeGuard guard(lock);
+        kernel::SpinLockGuard guard(lock);
         if (closing != 0u) {
             return false;
         }
@@ -121,7 +121,7 @@ public:
         bool do_finalize = false;
 
         {
-            kernel::SpinLockSafeGuard guard(lock);
+            kernel::SpinLockGuard guard(lock);
             if (refcount > 0u) {
                 refcount--;
             }
@@ -139,7 +139,7 @@ public:
         kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> to_release;
 
         {
-            kernel::SpinLockSafeGuard guard(lock);
+            kernel::SpinLockGuard guard(lock);
             closing = 1u;
             while (!pending_conns.empty()) {
                 kernel::IntrusiveRef<IpcPendingConn> p;
@@ -165,7 +165,7 @@ public:
 
     bool enqueue_pending(IpcPendingConn* conn) {
         {
-            kernel::SpinLockSafeGuard guard(lock);
+            kernel::SpinLockGuard guard(lock);
             if (closing != 0u) {
                 return false;
             }
@@ -189,7 +189,7 @@ public:
     }
 
     bool remove_pending(IpcPendingConn* conn) {
-        kernel::SpinLockSafeGuard guard(lock);
+        kernel::SpinLockGuard guard(lock);
         if (!conn->is_queued()) {
             return false;
         }
@@ -210,7 +210,7 @@ public:
     }
 
     bool has_pending() {
-        kernel::SpinLockSafeGuard guard(lock);
+        kernel::SpinLockGuard guard(lock);
         return !pending_conns.empty();
     }
 
@@ -219,7 +219,7 @@ public:
     }
 
     kernel::IntrusiveRef<IpcPendingConn> pop_pending() {
-        kernel::SpinLockSafeGuard guard(lock);
+        kernel::SpinLockGuard guard(lock);
         if (pending_conns.empty()) {
             return {};
         }
@@ -251,7 +251,7 @@ void IpcPendingConn::release() {
     bool destroy = false;
 
     {
-        kernel::SpinLockSafeGuard guard(lock);
+        kernel::SpinLockGuard guard(lock);
         if (refcount > 0u) {
             refcount--;
         }

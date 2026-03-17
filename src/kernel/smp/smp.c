@@ -32,6 +32,33 @@ static inline int smp_interrupts_enabled(void) {
     return (flags & 0x200u) != 0u;
 }
 
+void smp_panic_stop_other_cpus(void) {
+    if (cpu_count <= 1 || ap_running_count == 0) {
+        return;
+    }
+
+    cpu_t* me = cpu_current();
+    const int me_id = me ? me->id : -1;
+
+    for (int i = 0; i < cpu_count; i++) {
+        cpu_t* c = &cpus[i];
+        if (!c->started) {
+            continue;
+        }
+
+        if (c->id < 0) {
+            continue;
+        }
+
+        if (c->id == me_id) {
+            continue;
+        }
+
+        lapic_write(LAPIC_ICRHI, (uint32_t)c->id << 24);
+        lapic_write(LAPIC_ICRLO, 0x00004000u | 0x00000400u);
+    }
+}
+
 static inline void tlb_flush_range_local(uint32_t start, uint32_t end) {
     if (end <= start) {
         return;
@@ -193,11 +220,6 @@ void smp_tlb_shootdown_range_dir(uint32_t* page_dir, uint32_t start, uint32_t en
         return;
     }
 
-    if (!smp_interrupts_enabled()) {
-        tlb_flush_range_local(start, end);
-        return;
-    }
-
     const uint32_t mask = smp_tlb_cpu_mask_for_page_dir(page_dir);
     if (mask == 0u) {
         tlb_flush_range_local(start, end);
@@ -206,7 +228,7 @@ void smp_tlb_shootdown_range_dir(uint32_t* page_dir, uint32_t start, uint32_t en
 
     spinlock_acquire(&tlb_shootdown_lock);
 
-    if (cpu_count <= 1 || ap_running_count == 0 || !smp_interrupts_enabled()) {
+    if (cpu_count <= 1 || ap_running_count == 0) {
         spinlock_release(&tlb_shootdown_lock);
         tlb_flush_range_local(start, end);
         return;
@@ -253,14 +275,9 @@ void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
         return;
     }
 
-    if (!smp_interrupts_enabled()) {
-        tlb_flush_range_local(start, end);
-        return;
-    }
-
     spinlock_acquire(&tlb_shootdown_lock);
 
-    if (cpu_count <= 1 || ap_running_count == 0 || !smp_interrupts_enabled()) {
+    if (cpu_count <= 1 || ap_running_count == 0) {
         spinlock_release(&tlb_shootdown_lock);
         tlb_flush_range_local(start, end);
         return;

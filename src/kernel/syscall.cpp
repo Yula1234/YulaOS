@@ -347,28 +347,15 @@ static void syscall_kill(registers_t* regs, task_t* curr) {
         return;
     }
 
-    int is_running = 0;
-    for (int i = 0; i < MAX_CPUS; i++) {
-        if (cpus[i].current_task == t) {
-            is_running = 1;
-            break;
-        }
+    if (t->mem && t->mem->page_dir) {
+        __sync_fetch_and_or(&t->pending_signals, 1u << SIGTERM);
+        proc_wake(t);
+        regs->eax = 0;
+    } else {
+        regs->eax = (uint32_t)-1;
     }
 
-    if (is_running) {
-        if (t->mem && t->mem->page_dir) {
-            __sync_fetch_and_or(&t->pending_signals, 1u << SIGTERM);
-            regs->eax = 0;
-        } else {
-            regs->eax = (uint32_t)-1;
-        }
-        proc_task_put(t);
-        return;
-    }
-
-    proc_kill(t);
     proc_task_put(t);
-    regs->eax = 0;
 }
 
 static void syscall_usleep(registers_t* regs, task_t* curr) {
@@ -538,7 +525,9 @@ static void syscall_dup2(registers_t* regs, task_t* curr) {
         return;
     }
 
-    if (proc_fd_get(curr, newfd)) {
+    file_desc_t* nf = proc_fd_get(curr, newfd);
+    if (nf) {
+        file_desc_release(nf);
         (void)vfs_close(newfd);
     }
 
@@ -1744,19 +1733,29 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
 
     pollfd_t* k_fds = 0;
     poll_waiter_t* waiters = 0;
+    file_desc_t** active_descs = 0;
 
     if (nfds > 0) {
         k_fds = (pollfd_t*)kmalloc(bytes);
         waiters = (poll_waiter_t*)kmalloc((uint32_t)sizeof(poll_waiter_t) * nfds);
-        if (!k_fds || !waiters) {
+        active_descs = (file_desc_t**)kmalloc((uint32_t)sizeof(file_desc_t*) * nfds);
+        if (!k_fds || !waiters || !active_descs) {
             if (k_fds) kfree(k_fds);
             if (waiters) kfree(waiters);
+            if (active_descs) kfree(active_descs);
             regs->eax = (uint32_t)-1;
             return;
         }
+        memset(active_descs, 0, (uint32_t)sizeof(file_desc_t*) * nfds);
         memset(waiters, 0, (uint32_t)sizeof(poll_waiter_t) * nfds);
-        prefault_user_read(u_fds, bytes);
-        memcpy(k_fds, u_fds, bytes);
+
+        if (uaccess_copy_from_user(k_fds, u_fds, bytes) != 0) {
+            kfree(k_fds);
+            kfree(waiters);
+            kfree(active_descs);
+            regs->eax = (uint32_t)-1;
+            return;
+        }
     }
 
     uint32_t end_tick = 0;
@@ -1768,19 +1767,45 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         have_deadline = 1;
     }
 
+    const auto unblock_curr = [have_deadline](task_t* t) {
+        if (!t) {
+            return;
+        }
+
+        if (have_deadline) {
+            proc_sleep_remove(t);
+        }
+
+        (void)proc_change_state(t, TASK_RUNNABLE);
+    };
+
     int result = 0;
     for (;;) {
+        if (waiters) {
+            for (uint32_t i = 0; i < nfds; i++) {
+                poll_waitq_unregister(&waiters[i]);
+
+                if (active_descs && active_descs[i]) {
+                    file_desc_release(active_descs[i]);
+                    active_descs[i] = 0;
+                }
+            }
+        }
+
         if (curr->pending_signals != 0) {
+            unblock_curr(curr);
             result = -2;
             break;
         }
 
         if (nfds == 0) {
             if (timeout_ms == 0) {
+                unblock_curr(curr);
                 result = 0;
                 break;
             }
             if (have_deadline && timer_ticks >= end_tick) {
+                unblock_curr(curr);
                 result = 0;
                 break;
             }
@@ -1788,15 +1813,69 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             if (have_deadline) {
                 proc_sleep_add(curr, end_tick);
             } else {
-                curr->state = TASK_WAITING;
+                if (proc_change_state(curr, TASK_WAITING) != 0) {
+                    unblock_curr(curr);
+                    result = -2;
+                    break;
+                }
                 sched_yield();
             }
             continue;
         }
 
         for (uint32_t i = 0; i < nfds; i++) {
-            poll_waitq_unregister(&waiters[i]);
+            pollfd_t* p = &k_fds[i];
+
+            if (p->revents != 0) continue;
+
+            int32_t fd = p->fd;
+            int16_t ev = p->events;
+
+            if (fd < 0) continue;
+            if ((ev & (POLLIN | POLLOUT)) == 0) continue;
+
+            file_desc_t* d = proc_fd_get(curr, fd);
+            if (!d || !d->node) {
+                if (d) {
+                    file_desc_release(d);
+                }
+                continue;
+            }
+
+            if (active_descs) {
+                active_descs[i] = d;
+            }
+
+            vfs_node_t* node = d->node;
+            if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
+                (void)pipe_poll_waitq_register(node, &waiters[i], curr);
+            } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
+                (void)pty_poll_waitq_register(node, &waiters[i], curr);
+            } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
+                if (ev & POLLIN) {
+                    (void)ipc_listen_poll_waitq_register(node, &waiters[i], curr);
+                }
+            } else if (ev & POLLIN) {
+                if (node->name[0] == 'k' && strcmp(node->name, "kbd") == 0) {
+                    (void)kbd_poll_waitq_register(&waiters[i], curr);
+                } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
+                    (void)mouse_poll_waitq_register(&waiters[i], curr);
+                } else if (node->name[0] == 't' && strcmp(node->name, "ttyS0") == 0) {
+                    (void)ttyS0_poll_waitq_register(&waiters[i], curr);
+                }
+            }
+
+            if (!active_descs) {
+                file_desc_release(d);
+            }
         }
+
+        if (proc_change_state(curr, TASK_WAITING) != 0) {
+            unblock_curr(curr);
+            result = -2;
+            break;
+        }
+        __sync_synchronize();
 
         int ready = 0;
         for (uint32_t i = 0; i < nfds; i++) {
@@ -1861,70 +1940,42 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
 
         if (ready > 0) {
+            unblock_curr(curr);
             result = ready;
             break;
         }
 
         if (timeout_ms == 0) {
+            unblock_curr(curr);
             result = 0;
             break;
         }
 
         if (have_deadline && timer_ticks >= end_tick) {
+            unblock_curr(curr);
             result = 0;
             break;
         }
 
-        for (uint32_t i = 0; i < nfds; i++) {
-            pollfd_t* p = &k_fds[i];
-
-            if (p->revents != 0) continue;
-
-            int32_t fd = p->fd;
-            int16_t ev = p->events;
-
-            if (fd < 0) continue;
-            if ((ev & (POLLIN | POLLOUT)) == 0) continue;
-
-            file_desc_t* d = proc_fd_get(curr, fd);
-            if (!d || !d->node) {
-                file_desc_release(d);
-                continue;
-            }
-
-            vfs_node_t* node = d->node;
-            if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
-                (void)pipe_poll_waitq_register(node, &waiters[i], curr);
-            } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
-                (void)pty_poll_waitq_register(node, &waiters[i], curr);
-            } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
-                if (ev & POLLIN) {
-                    (void)ipc_listen_poll_waitq_register(node, &waiters[i], curr);
-                }
-            } else if (ev & POLLIN) {
-                if (node->name[0] == 'k' && strcmp(node->name, "kbd") == 0) {
-                    (void)kbd_poll_waitq_register(&waiters[i], curr);
-                } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
-                    (void)mouse_poll_waitq_register(&waiters[i], curr);
-                } else if (node->name[0] == 't' && strcmp(node->name, "ttyS0") == 0) {
-                    (void)ttyS0_poll_waitq_register(&waiters[i], curr);
-                }
-            }
-
-            file_desc_release(d);
-        }
-
         if (have_deadline) {
-            proc_sleep_add(curr, end_tick);
+            if (curr->state == TASK_WAITING) {
+                proc_sleep_add(curr, end_tick);
+            }
         } else {
-            curr->state = TASK_WAITING;
-            sched_yield();
+            if (curr->state == TASK_WAITING) {
+                sched_yield();
+            }
         }
     }
 
     if (waiters) {
         for (uint32_t i = 0; i < nfds; i++) {
             poll_waitq_unregister(&waiters[i]);
+
+            if (active_descs && active_descs[i]) {
+                file_desc_release(active_descs[i]);
+                active_descs[i] = 0;
+            }
         }
     }
 
@@ -1935,11 +1986,14 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
     }
 
     if (k_fds && bytes) {
-        memcpy(u_fds, k_fds, bytes);
+        if (uaccess_copy_to_user(u_fds, k_fds, bytes) != 0) {
+            result = -1;
+        }
     }
 
     if (k_fds) kfree(k_fds);
     if (waiters) kfree(waiters);
+    if (active_descs) kfree(active_descs);
 
     regs->eax = (uint32_t)result;
 }

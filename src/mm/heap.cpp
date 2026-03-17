@@ -48,11 +48,13 @@ struct KmemCache {
 
     struct PerCpuSlab {
         page_t* page;
+
         kernel::atomic<void*> remote_free;
         kernel::atomic<uint32_t> remote_free_count;
     };
 
     PerCpuSlab cpu_slabs[MAX_CPUS];
+    
     page_t* partial;
     page_t* full;
 
@@ -109,6 +111,50 @@ public:
         init_dynamic_caches();
     }
 
+private:
+    static constexpr uint32_t k_owner_tag_mask = 0xFFu;
+    static constexpr uint32_t k_remote_pending_shift = 8u;
+    static constexpr uint32_t k_remote_pending_inc = 1u << k_remote_pending_shift;
+
+    static uint32_t page_owner_tag(const page_t& page) noexcept {
+        const uint32_t v = __atomic_load_n(&page._reserved, __ATOMIC_ACQUIRE);
+        return v & k_owner_tag_mask;
+    }
+
+    static uint32_t page_remote_pending(const page_t& page) noexcept {
+        const uint32_t v = __atomic_load_n(&page._reserved, __ATOMIC_ACQUIRE);
+        return v >> k_remote_pending_shift;
+    }
+
+    static void page_set_owner_tag(page_t& page, uint32_t tag) noexcept {
+        const uint32_t tag_bits = tag & k_owner_tag_mask;
+
+        uint32_t expected = __atomic_load_n(&page._reserved, __ATOMIC_RELAXED);
+        while (true) {
+            const uint32_t desired = (expected & ~k_owner_tag_mask) | tag_bits;
+
+            if (__atomic_compare_exchange_n(
+                    &page._reserved,
+                    &expected,
+                    desired,
+                    false,
+                    __ATOMIC_ACQ_REL,
+                    __ATOMIC_RELAXED
+                )) {
+                return;
+            }
+        }
+    }
+
+    static void page_remote_pending_inc(page_t& page) noexcept {
+        __atomic_fetch_add(&page._reserved, k_remote_pending_inc, __ATOMIC_ACQ_REL);
+    }
+
+    static void page_remote_pending_dec(page_t& page) noexcept {
+        __atomic_fetch_sub(&page._reserved, k_remote_pending_inc, __ATOMIC_ACQ_REL);
+    }
+
+public:
     [[nodiscard]] void* cache_alloc(KmemCache& cache) noexcept {
         kernel::ScopedIrqDisable irq_guard;
 
@@ -143,6 +189,7 @@ public:
             }
         }
 
+        irq_guard.restore();
         return cache_alloc_slowpath(cache, cpu_index);
     }
 
@@ -191,7 +238,7 @@ public:
             panic("SLUB: invalid object address");
         }
 
-        const uint32_t owner_tag = page->_reserved;
+        const uint32_t owner_tag = page_owner_tag(*page);
         const int owner_cpu = static_cast<int>(owner_tag) - 1;
 
         if (owner_tag != 0u && owner_cpu >= 0 && owner_cpu < MAX_CPUS) {
@@ -200,16 +247,30 @@ public:
                 if (kernel::likely(local.page == page)) {
                     drain_remote_frees(cache, local);
 
+                    if (kernel::unlikely(page->objects == 0u)) {
+                        panic("SLUB: free objects underflow");
+                    }
+
                     push_object_to_page_freelist(*page, obj);
                     page->objects--;
                     return;
                 }
             } else {
-                remote_free_object(cache.cpu_slabs[owner_cpu], obj);
-                return;
+                kernel::SpinLockSafeGuard guard(cache.lock);
+
+                const uint32_t locked_owner_tag = page_owner_tag(*page);
+                const int locked_owner_cpu = static_cast<int>(locked_owner_tag) - 1;
+
+                if (locked_owner_tag != 0u && locked_owner_cpu == owner_cpu) {
+                    if (kernel::likely(cache.cpu_slabs[owner_cpu].page == page)) {
+                        remote_free_object(cache.cpu_slabs[owner_cpu], *page, obj);
+                        return;
+                    }
+                }
             }
         }
 
+        irq_guard.restore();
         cache_free_slowpath(cache, obj, *page, page_virt);
     }
 
@@ -480,6 +541,10 @@ public:
                         return 0;
                     }
 
+                    if (page_remote_pending(*page) != 0u) {
+                        return 0;
+                    }
+
                     if (!page->freelist) {
                         return 0;
                     }
@@ -500,7 +565,7 @@ public:
                     page->objects = 0;
                     page->prev = nullptr;
                     page->next = nullptr;
-                    page->_reserved = 0u;
+                    page_set_owner_tag(*page, 0u);
                 }
             }
 
@@ -520,6 +585,25 @@ public:
     }
 
 private:
+    static bool heap_ptr_mapped(uintptr_t virt) noexcept {
+        if (kernel::unlikely(virt == 0u)) {
+            return false;
+        }
+
+        const uint32_t v = static_cast<uint32_t>(virt);
+
+        const uint32_t pde = kernel_page_directory[v >> 22];
+        if ((pde & PTE_PRESENT) == 0u) {
+            return false;
+        }
+
+        if ((pde & (1u << 7)) != 0u) {
+            return true;
+        }
+
+        return paging_get_present_pte(kernel_page_directory, v, nullptr) != 0;
+    }
+
     struct AlignedAllocHeader {
         uint32_t magic;
         uint32_t align;
@@ -589,6 +673,15 @@ private:
             static_cast<uint32_t>(header_addr)
         );
         if (kernel::unlikely(!header_phys)) {
+            return false;
+        }
+
+        page_t* page = pmm_->phys_to_page(header_phys);
+        if (kernel::unlikely(!page)) {
+            return false;
+        }
+
+        if (kernel::likely(page->slab_cache != nullptr)) {
             return false;
         }
 
@@ -672,7 +765,7 @@ private:
         page.objects = 0;
         page.next = nullptr;
         page.prev = nullptr;
-        page._reserved = 0u;
+        page_set_owner_tag(page, 0u);
 
         const uint32_t obj_count = PAGE_SIZE / cache.object_size;
         uint8_t* base = static_cast<uint8_t*>(virt_addr);
@@ -704,6 +797,10 @@ private:
             return nullptr;
         }
 
+        if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(obj)))) {
+            panic("SLUB: freelist points to unmapped memory");
+        }
+
         const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(obj);
 
         if ((next_tagged & 1u) == 0u) {
@@ -720,11 +817,29 @@ private:
     }
 
     static void push_object_to_page_freelist(page_t& page, void* obj) noexcept {
+        if (kernel::unlikely(!obj)) {
+            panic("SLUB: push null object");
+        }
+
+        if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(obj)))) {
+            panic("SLUB: free object is unmapped");
+        }
+
         *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(page.freelist) | 1u;
         page.freelist = obj;
     }
 
-    static void remote_free_object(KmemCache::PerCpuSlab& target, void* obj) noexcept {
+    static void remote_free_object(KmemCache::PerCpuSlab& target, page_t& page, void* obj) noexcept {
+        if (kernel::unlikely(!obj)) {
+            panic("SLUB: remote free null object");
+        }
+
+        if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(obj)))) {
+            panic("SLUB: remote free object is unmapped");
+        }
+
+        page_remote_pending_inc(page);
+
         void* head = target.remote_free.load();
         while (true) {
             *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(head) | 1u;
@@ -754,6 +869,10 @@ private:
         uint32_t drained = 0u;
         void* it = list;
         while (it) {
+            if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(it)))) {
+                panic("SLUB: remote free list contains unmapped node");
+            }
+
             const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(it);
             if (kernel::unlikely((next_tagged & 1u) == 0u)) {
                 panic("SLUB: remote free tag corrupt");
@@ -780,8 +899,16 @@ private:
                 panic("SLUB: remote free objects underflow");
             }
 
-            push_object_to_page_freelist(*page, it);
-            page->objects--;
+            const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+
+            if (kernel::likely(local.page == page)) {
+                push_object_to_page_freelist(*page, it);
+                page->objects--;
+            } else {
+                cache_free_slowpath(cache, it, *page, page_virt);
+            }
+
+            page_remote_pending_dec(*page);
 
             drained++;
             it = next;
@@ -805,7 +932,7 @@ private:
         }
 
         local.page = nullptr;
-        page._reserved = 0u;
+        page_set_owner_tag(page, 0u);
 
         slab_list_add(cache.full, page);
     }
@@ -826,7 +953,7 @@ private:
                         page_t* full_page = local.page;
                         local.page = nullptr;
 
-                        full_page->_reserved = 0u;
+                        page_set_owner_tag(*full_page, 0u);
                         slab_list_add(cache.full, *full_page);
                     }
                 }
@@ -845,7 +972,7 @@ private:
                     slab_list_remove(cache.partial, *page);
 
                     local.page = page;
-                    page->_reserved = static_cast<uint32_t>(cpu_index + 1);
+                    page_set_owner_tag(*page, static_cast<uint32_t>(cpu_index + 1));
                 }
             }
 
@@ -891,9 +1018,9 @@ private:
                 KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
                 if (local.page == nullptr) {
                     local.page = new_page;
-                    new_page->_reserved = static_cast<uint32_t>(cpu_index + 1);
+                    page_set_owner_tag(*new_page, static_cast<uint32_t>(cpu_index + 1));
                 } else {
-                    new_page->_reserved = 0u;
+                    page_set_owner_tag(*new_page, 0u);
                     slab_list_add(cache.partial, *new_page);
                 }
             }
@@ -911,8 +1038,27 @@ private:
         {
             kernel::SpinLockSafeGuard guard(cache.lock);
 
+            if (kernel::unlikely(page.objects == 0u)) {
+                panic("SLUB: free objects underflow");
+            }
+
+            const uint32_t owner_tag = page_owner_tag(page);
+            if (kernel::unlikely(owner_tag != 0u)) {
+                const int owner_cpu = static_cast<int>(owner_tag) - 1;
+                if (owner_cpu >= 0 && owner_cpu < MAX_CPUS) {
+                    if (kernel::likely(cache.cpu_slabs[owner_cpu].page == &page)) {
+                        remote_free_object(cache.cpu_slabs[owner_cpu], page, obj);
+                        return;
+                    }
+                }
+            }
+
             const bool was_full = (page.freelist == nullptr);
-            const bool will_free_page = (page._reserved == 0u && page.objects == 1u);
+            const bool will_free_page = (
+                page_owner_tag(page) == 0u
+                && page.objects == 1u
+                && page_remote_pending(page) == 0u
+            );
 
             if (!will_free_page) {
                 push_object_to_page_freelist(page, obj);
@@ -920,7 +1066,7 @@ private:
 
             page.objects--;
 
-            if (page._reserved == 0u) {
+            if (page_owner_tag(page) == 0u) {
                 if (was_full) {
                     slab_list_remove(cache.full, page);
                     if (!will_free_page) {
@@ -934,12 +1080,18 @@ private:
                     slab_list_remove(cache.partial, page);
                 }
 
+                for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+                    if (cache.cpu_slabs[cpu].page == &page) {
+                        cache.cpu_slabs[cpu].page = nullptr;
+                    }
+                }
+
                 page.slab_cache = nullptr;
                 page.freelist = nullptr;
                 page.objects = 0;
                 page.prev = nullptr;
                 page.next = nullptr;
-                page._reserved = 0u;
+                page_set_owner_tag(page, 0u);
 
                 need_free_page = true;
             }

@@ -240,6 +240,8 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick);
 void proc_usleep(uint32_t us);
 void proc_wake(task_t* t);
 
+int proc_change_state(task_t* t, task_state_t new_state);
+
 #ifdef __cplusplus
 }
 #endif

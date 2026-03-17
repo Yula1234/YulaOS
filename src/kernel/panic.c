@@ -4,6 +4,10 @@
 #include <arch/i386/idt.h>
 #include <drivers/fbdev.h>
 
+extern void smp_panic_stop_other_cpus(void);
+
+volatile int g_kernel_panic_in_progress = 0;
+
 extern const uint8_t font8x16_basic[128][16];
 
 static void panic_putc(int x, int y, char c) {
@@ -39,6 +43,10 @@ static void panic_print_hex(int x, int y, uint32_t val) {
 
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs) {
     __asm__ volatile("cli");
+
+    if (__sync_lock_test_and_set(&g_kernel_panic_in_progress, 1) == 0) {
+        smp_panic_stop_other_cpus();
+    }
 
     if (!fb_ptr || fb_width == 0 || fb_height == 0 || !g_fb_mapped || !fb_kernel_can_render()) {
         while (1) {

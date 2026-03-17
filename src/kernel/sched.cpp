@@ -232,9 +232,50 @@ static task_t* pick_next_cfs(cpu_t* cpu) {
     return left;
 }
 
+static inline bool sched_should_pin_task(const task_t* t) {
+    return t && t->pid != 0u;
+}
+
+static inline void sched_task_pin(task_t* t) {
+    if (!sched_should_pin_task(t)) {
+        return;
+    }
+
+    (void)proc_task_retain(t);
+}
+
+static inline void sched_task_unpin(task_t* t) {
+    if (!sched_should_pin_task(t)) {
+        return;
+    }
+
+    proc_task_put(t);
+}
+
+extern "C" void sched_on_task_entry(void) {
+    cpu_t* me = cpu_current();
+    if (!me) {
+        return;
+    }
+
+    task_t* switched_out = me->prev_task_during_switch;
+    if (!switched_out) {
+        return;
+    }
+
+    me->prev_task_during_switch = nullptr;
+    sched_task_unpin(switched_out);
+}
+
 void sched_set_current(task_t* t) {
     cpu_t* cpu = cpu_current();
-    cpu->current_task = t;
+
+    task_t* old = cpu->current_task;
+    if (old != t) {
+        sched_task_pin(t);
+        cpu->current_task = t;
+        sched_task_unpin(old);
+    }
     
     uint32_t kstack_top = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t->kstack)) + t->kstack_size;
     kstack_top &= ~0xF; 
@@ -247,7 +288,7 @@ void sched_set_current(task_t* t) {
 
 void sched_start(task_t* first) {
     sched_set_current(first);
-    first->state = TASK_RUNNING;
+    (void)proc_change_state(first, TASK_RUNNING);
     fpu_restore(first->fpu_state);
     ctx_start(first->esp);
     for (;;) cpu_hlt();
@@ -269,10 +310,19 @@ void sched_yield(void) {
         }
     }
 
-    kernel::ScopedIrqDisable irq_guard;
+    uint32_t irq_flags;
+    __asm__ volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(irq_flags)
+        :
+        : "memory"
+    );
+    const bool irq_was_enabled = (irq_flags & 0x200u) != 0u;
     
     if (prev && prev->state == TASK_RUNNING && prev != me->idle_task && prev->pid != 0) {
-        prev->state = TASK_RUNNABLE;
+        (void)proc_change_state(prev, TASK_RUNNABLE);
         fpu_save(prev->fpu_state);
         
         if (prev->exec_start > 0) {
@@ -309,23 +359,27 @@ void sched_yield(void) {
         if (next) {
 
             if (next->state != TASK_ZOMBIE) {
-                next->state = TASK_RUNNING;
+                (void)proc_change_state(next, TASK_RUNNING);
             }
 
             if (next == prev) {
                 if (next->pid == 0) {
-                    __asm__ volatile("sti; hlt; cli");
+                    __asm__ volatile("sti; hlt" ::: "memory");
                 }
 
-                irq_guard.restore();
+                if (irq_was_enabled) {
+                    __asm__ volatile("sti" ::: "memory");
+                }
                 return;
             }
             
-            me->prev_task_during_switch = prev;
+            if (me->prev_task_during_switch != prev) {
+                sched_task_pin(prev);
+                me->prev_task_during_switch = prev;
+            }
 
             next->exec_start = me->sched_ticks;
             
-            me->current_task = next;
             sched_set_current(next);
 
             fpu_restore(next->fpu_state);
@@ -333,13 +387,19 @@ void sched_yield(void) {
             if (prev) {
                 ctx_switch(&prev->esp, next->esp);
 
-                me->prev_task_during_switch = nullptr;
-                irq_guard.restore();
+                if (me->prev_task_during_switch) {
+                    task_t* switched_out = me->prev_task_during_switch;
+                    me->prev_task_during_switch = nullptr;
+                    sched_task_unpin(switched_out);
+                }
+
+                __asm__ volatile("sti" ::: "memory");
                 return;
             }
 
             me->prev_task_during_switch = nullptr;
-            irq_guard.restore();
+
+            __asm__ volatile("sti" ::: "memory");
             
             ctx_start(next->esp);
             __builtin_unreachable();
@@ -347,7 +407,7 @@ void sched_yield(void) {
 
         me->current_task = nullptr;
 
-        __asm__ volatile("sti; hlt; cli");
+        __asm__ volatile("sti; hlt" ::: "memory");
     }
 }
 
@@ -471,7 +531,14 @@ void sem_wait(semaphore_t* sem) {
 
             dlist_add_tail(&curr->sem_node, &sem->wait_list);
 
-            curr->state = TASK_WAITING;
+            if (proc_change_state(curr, TASK_WAITING) != 0) {
+                dlist_del(&curr->sem_node);
+
+                curr->sem_node.next = nullptr;
+                curr->sem_node.prev = nullptr;
+                curr->blocked_on_sem = nullptr;
+                curr->blocked_kind = TASK_BLOCK_NONE;
+            }
         }
 
         sched_yield();
@@ -483,22 +550,29 @@ int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
         return 0;
     }
 
+    const auto unblock_curr = [](task_t* curr) {
+        if (!curr) {
+            return;
+        }
+
+        proc_sleep_remove(curr);
+        curr->blocked_on_sem = nullptr;
+        curr->blocked_kind = TASK_BLOCK_NONE;
+    };
+
     while (1) {
+        task_t* curr = proc_current();
+
         if (sem_try_acquire_fast(sem)) {
-            task_t* curr = proc_current();
-            if (curr) {
-                proc_sleep_remove(curr);
-                curr->blocked_on_sem = nullptr;
-                curr->blocked_kind = TASK_BLOCK_NONE;
-            }
+            unblock_curr(curr);
             return 1;
         }
 
         if ((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u) {
+            unblock_curr(curr);
             return 0;
         }
 
-        task_t* curr = proc_current();
         if (!curr) {
             while (!sem_try_acquire_fast(sem)) {
                 if ((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u) {
@@ -514,9 +588,7 @@ int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
 
             if (sem->count > 0) {
                 __atomic_fetch_sub(&sem->count, 1, __ATOMIC_ACQUIRE);
-                proc_sleep_remove(curr);
-                curr->blocked_on_sem = nullptr;
-                curr->blocked_kind = TASK_BLOCK_NONE;
+                unblock_curr(curr);
                 return 1;
             }
 
@@ -524,7 +596,14 @@ int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
             curr->blocked_kind = TASK_BLOCK_SEM;
             dlist_add_tail(&curr->sem_node, &sem->wait_list);
 
-            curr->state = TASK_WAITING;
+            if (proc_change_state(curr, TASK_WAITING) != 0) {
+                dlist_del(&curr->sem_node);
+
+                curr->sem_node.next = nullptr;
+                curr->sem_node.prev = nullptr;
+                curr->blocked_on_sem = nullptr;
+                curr->blocked_kind = TASK_BLOCK_NONE;
+            }
         }
 
         if (curr->blocked_on_sem != sem) {
@@ -539,7 +618,7 @@ int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
 
         if ((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u) {
             sem_remove_task(curr);
-            proc_sleep_remove(curr);
+            unblock_curr(curr);
             return 0;
         }
     }
@@ -567,8 +646,9 @@ void sem_signal(semaphore_t* sem) {
         return;
     }
 
-    t->state = TASK_RUNNABLE;
-    sched_add(t);
+    if (proc_change_state(t, TASK_RUNNABLE) == 0) {
+        sched_add(t);
+    }
 }
 
 void sem_signal_all(semaphore_t* sem) {
@@ -586,8 +666,7 @@ void sem_signal_all(semaphore_t* sem) {
 
         __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
-        if (t->state != TASK_ZOMBIE) {
-            t->state = TASK_RUNNABLE;
+        if (proc_change_state(t, TASK_RUNNABLE) == 0) {
             sched_add(t);
         }
     }

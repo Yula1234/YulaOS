@@ -12,6 +12,7 @@ extern "C" {
 #include <kernel/proc.h>
 #include <kernel/uaccess/uaccess.h>
 #include <hal/lock.h>
+#include <arch/i386/paging.h>
 #include <mm/heap.h>
 
 #include <lib/cpp/hash_traits.h>
@@ -25,6 +26,25 @@ extern "C" {
 struct vfs_fs_instance;
 
 namespace {
+
+static bool vfs_ptr_mapped(const void* p) noexcept {
+    if (!p) {
+        return false;
+    }
+
+    const uint32_t v = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p));
+
+    const uint32_t pde = kernel_page_directory[v >> 22];
+    if ((pde & PTE_PRESENT) == 0u) {
+        return false;
+    }
+
+    if ((pde & (1u << 7)) != 0u) {
+        return true;
+    }
+
+    return paging_get_present_pte(kernel_page_directory, v, nullptr) != 0;
+}
 
 static int vfs_copy_to_user(void* user_dst, const void* src, uint32_t size) noexcept {
     return uaccess_copy_to_user(user_dst, src, size);
@@ -669,12 +689,36 @@ extern "C" void vfs_node_retain(vfs_node_t* node) {
         return;
     }
 
-    __sync_fetch_and_add(&node->refs, 1);
+    if (!vfs_ptr_mapped(node)) {
+        panic("VFS: retain on unmapped node pointer");
+    }
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&node->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("VFS: node_retain after free");
+        }
+
+        if (__atomic_compare_exchange_n(
+                &node->refs,
+                &expected,
+                expected + 1u,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            return;
+        }
+    }
 }
 
 extern "C" void vfs_node_release(vfs_node_t* node) {
     if (!node) {
         return;
+    }
+
+    if (!vfs_ptr_mapped(node)) {
+        panic("VFS: release on unmapped node pointer");
     }
 
     /*
@@ -685,8 +729,29 @@ extern "C" void vfs_node_release(vfs_node_t* node) {
      * - private_release() next, so backend state is torn down deterministically.
      * - instance release last, so filesystem instance outlives node teardown.
      */
-    if (__sync_sub_and_fetch(&node->refs, 1) != 0) {
-        return;
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&node->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("VFS: node_release underflow");
+        }
+
+        const uint32_t desired = expected - 1u;
+
+        if (__atomic_compare_exchange_n(
+                &node->refs,
+                &expected,
+                desired,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            if (desired != 0u) {
+                return;
+            }
+
+            break;
+        }
     }
 
     if (node->ops && node->ops->close) {

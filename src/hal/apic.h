@@ -29,6 +29,7 @@
 #define LAPIC_TIMER_DIV     0x03E0
 
 #define IPI_TLB_VECTOR      0xF0
+#define IPI_PANIC_VECTOR    0xF1
 
 #define KERNEL_TIMER_HZ     1000
 

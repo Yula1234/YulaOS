@@ -184,15 +184,54 @@ static void sem_wake_all(semaphore_t* sem) {
 
 static void pty_pair_retain(void* private_data) {
     if (!private_data) return;
+
     pty_pair_t* p = (pty_pair_t*)private_data;
-    __sync_fetch_and_add(&p->refs, 1);
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("PTY: pair_retain after free");
+        }
+
+        if (__atomic_compare_exchange_n(
+                &p->refs,
+                &expected,
+                expected + 1u,
+                0,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            return;
+        }
+    }
 }
 
 static void pty_pair_release(void* private_data) {
     if (!private_data) return;
     pty_pair_t* p = (pty_pair_t*)private_data;
-    if (__sync_sub_and_fetch(&p->refs, 1) != 0) {
-        return;
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("PTY: pair_release underflow");
+        }
+
+        const uint32_t desired = expected - 1u;
+
+        if (__atomic_compare_exchange_n(
+                &p->refs,
+                &expected,
+                desired,
+                0,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            if (desired != 0u) {
+                return;
+            }
+
+            break;
+        }
     }
 
     pty_pair_destroy(p);
@@ -772,10 +811,9 @@ static int pty_close(vfs_node_t* node) {
         return 0;
     }
 
-    pty_pair_retain(p);
-
     int do_unregister = 0;
     uint32_t pts_id = 0;
+    vfs_node_t* slave_node = 0;
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     if (node->flags & VFS_FLAG_PTY_MASTER) {
@@ -784,6 +822,8 @@ static int pty_close(vfs_node_t* node) {
             do_unregister = 1;
             p->devfs_registered = 0;
             pts_id = p->id;
+
+            slave_node = p->slave_node;
             p->slave_node = 0;
         }
     } else if (node->flags & VFS_FLAG_PTY_SLAVE) {
@@ -800,19 +840,13 @@ static int pty_close(vfs_node_t* node) {
     if (do_unregister && pts_id != 0u) {
         char name[32];
         pty_make_pts_name(name, pts_id);
-        vfs_node_t* tmpl = devfs_take(name);
-        if (tmpl) {
-            if (tmpl->private_release && tmpl->private_data) {
-                tmpl->private_release(tmpl->private_data);
-                tmpl->private_data = 0;
-            }
-            kfree(tmpl);
-        } else {
-            (void)devfs_unregister(name);
-        }
+        (void)devfs_unregister(name);
     }
 
-    pty_pair_release(p);
+    if (slave_node) {
+        slave_node->ops = 0;
+        vfs_node_release(slave_node);
+    }
     return 0;
 }
 
@@ -861,15 +895,11 @@ static int pty_ptmx_open(vfs_node_t* node) {
 
     node->flags |= VFS_FLAG_PTY_MASTER;
     node->ops = &pty_master_ops;
-    node->private_data = p;
-    node->private_retain = pty_pair_retain;
-    node->private_release = pty_pair_release;
 
-    if (pty_master_open(node) != 0) {
-        mutex_unlock(&pty_id_lock);
-        pty_pair_release(p);
-        kfree(slave);
-        return -1;
+    {
+        uint32_t flags = spinlock_acquire_safe(&p->lock);
+        p->master_open++;
+        spinlock_release_safe(&p->lock, flags);
     }
 
     strlcpy(slave->name, pts_name, sizeof(slave->name));
@@ -886,6 +916,7 @@ static int pty_ptmx_open(vfs_node_t* node) {
     devfs_register(slave);
     if (devfs_fetch(pts_name) != slave) {
         pty_pair_release(p);
+        pty_pair_release(p);
         kfree(slave);
         mutex_unlock(&pty_id_lock);
         return -1;
@@ -897,6 +928,14 @@ static int pty_ptmx_open(vfs_node_t* node) {
     p->slave_node = slave;
     p->devfs_registered = 1;
     spinlock_release_safe(&p->lock, flags);
+
+    pty_pair_retain(p);
+
+    node->private_data = p;
+    node->private_retain = pty_pair_retain;
+    node->private_release = pty_pair_release;
+
+    pty_pair_release(p);
 
     return 0;
 }
@@ -978,5 +1017,10 @@ int pty_poll_waitq_register(vfs_node_t* node, poll_waiter_t* w, struct task* tas
     if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) return -1;
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
-    return poll_waitq_register(&p->poll_waitq, w, task);
+
+    pty_pair_retain(p);
+    const int rc = poll_waitq_register(&p->poll_waitq, w, task);
+    pty_pair_release(p);
+
+    return rc;
 }

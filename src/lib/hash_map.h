@@ -554,7 +554,7 @@ public:
     void clear() {
         kernel::SpinLockGuard lock(table_lock);
 
-        resizing.store(1u, kernel::memory_order::relaxed);
+        resizing.store(1u, kernel::memory_order::seq_cst);
         kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
 
 
@@ -566,7 +566,7 @@ public:
 
 
         size_.store(0u, kernel::memory_order::relaxed);
-        resizing.store(0u, kernel::memory_order::relaxed);
+        resizing.store(0u, kernel::memory_order::release);
     }
 
 public:
@@ -797,7 +797,7 @@ public:
         LockedView& operator=(const LockedView&) = delete;
 
         ~LockedView() {
-            map_->resizing.store(0u, kernel::memory_order::relaxed);
+            map_->resizing.store(0u, kernel::memory_order::release);
         }
 
         Iterator begin() {
@@ -912,7 +912,7 @@ private:
     }
 
     void quiesce_locked() {
-        resizing.store(1u, kernel::memory_order::relaxed);
+        resizing.store(1u, kernel::memory_order::seq_cst);
 
         kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
     }
@@ -929,9 +929,9 @@ private:
         other.bucket_mask = 0u;
 
         other.size_.store(0u, kernel::memory_order::relaxed);
-        other.resizing.store(0u, kernel::memory_order::relaxed);
+        other.resizing.store(0u, kernel::memory_order::release);
 
-        resizing.store(0u, kernel::memory_order::relaxed);
+        resizing.store(0u, kernel::memory_order::release);
     }
 
     void destroy() {
@@ -1040,26 +1040,6 @@ private:
         size_t fresh_count = 0u;
 
         while (1) {
-            if (resizing.load(kernel::memory_order::relaxed) == 0u) {
-                Bucket* local_buckets = buckets;
-                const size_t local_count = bucket_count;
-                const size_t local_mask = bucket_mask;
-
-                if (local_buckets && local_count > 0u) {
-                    active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
-
-                    if (resizing.load(kernel::memory_order::acquire) != 0u) {
-                        active_ops.fetch_sub(1u, kernel::memory_order::seq_cst);
-                        kernel::cpu_relax();
-                        continue;
-                    }
-
-                    out_buckets = local_buckets;
-                    out_mask = local_mask;
-                    return true;
-                }
-            }
-
             {
                 kernel::SpinLockGuard lock(table_lock);
 
@@ -1077,7 +1057,7 @@ private:
                     return true;
                 }
 
-                resizing.store(1u, kernel::memory_order::relaxed);
+                resizing.store(1u, kernel::memory_order::seq_cst);
             }
 
             kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
@@ -1091,7 +1071,7 @@ private:
                 kernel::SpinLockGuard lock(table_lock);
 
                 if (buckets && bucket_count > 0u) {
-                    resizing.store(0u, kernel::memory_order::relaxed);
+                    resizing.store(0u, kernel::memory_order::release);
 
                     active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
 
@@ -1102,7 +1082,7 @@ private:
                 }
 
                 if (!fresh) {
-                    resizing.store(0u, kernel::memory_order::relaxed);
+                    resizing.store(0u, kernel::memory_order::release);
                     out_buckets = nullptr;
                     out_mask = 0u;
                     return false;
@@ -1112,7 +1092,7 @@ private:
                 bucket_count = fresh_count;
                 bucket_mask = fresh_count - 1u;
 
-                resizing.store(0u, kernel::memory_order::relaxed);
+                resizing.store(0u, kernel::memory_order::release);
 
                 active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
 
@@ -1160,7 +1140,7 @@ private:
                     return;
                 }
 
-                resizing.store(1u, kernel::memory_order::relaxed);
+                resizing.store(1u, kernel::memory_order::seq_cst);
             }
 
             kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
@@ -1170,7 +1150,7 @@ private:
             new_buckets = allocate_buckets(target);
             if (!new_buckets) {
                 kernel::SpinLockGuard lock(table_lock);
-                resizing.store(0u, kernel::memory_order::relaxed);
+                resizing.store(0u, kernel::memory_order::release);
                 return;
             }
 
@@ -1178,7 +1158,7 @@ private:
                 kernel::SpinLockGuard lock(table_lock);
 
                 if (!should_grow(new_size)) {
-                    resizing.store(0u, kernel::memory_order::relaxed);
+                    resizing.store(0u, kernel::memory_order::release);
                     break;
                 }
 
@@ -1187,7 +1167,7 @@ private:
                 old_buckets = rehash_locked(new_buckets, target);
                 new_buckets = nullptr;
 
-                resizing.store(0u, kernel::memory_order::relaxed);
+                resizing.store(0u, kernel::memory_order::release);
                 break;
             }
         }

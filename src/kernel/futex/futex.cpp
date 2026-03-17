@@ -208,7 +208,14 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
 
             dlist_add_tail(&curr->sem_node, &entry->wait_list);
 
-            curr->state = TASK_WAITING;
+            if (proc_change_state(curr, TASK_WAITING) != 0) {
+                dlist_del(&curr->sem_node);
+
+                curr->sem_node.next = nullptr;
+                curr->sem_node.prev = nullptr;
+                curr->blocked_on_sem = 0;
+                curr->blocked_kind = TASK_BLOCK_NONE;
+            }
         }
 
         v = 0u;
@@ -223,7 +230,7 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
                 if (dlist_unlink_consistent(&curr->sem_node)) {
                     curr->blocked_on_sem = 0;
                     curr->blocked_kind = TASK_BLOCK_NONE;
-                    curr->state = TASK_RUNNING;
+                    (void)proc_change_state(curr, TASK_RUNNING);
                 }
             }
 
@@ -256,9 +263,7 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
             t.blocked_on_sem = 0;
             t.blocked_kind = TASK_BLOCK_NONE;
 
-            if (t.state != TASK_ZOMBIE) {
-                t.state = TASK_RUNNABLE;
-
+            if (proc_change_state(&t, TASK_RUNNABLE) == 0) {
                 sched_add(&t);
             }
 

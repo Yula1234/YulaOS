@@ -253,6 +253,8 @@ static void task_parent_detach_locked(task_t* t) {
     dlist_del(&t->sibling_node);
     t->sibling_node.next = nullptr;
     t->sibling_node.prev = nullptr;
+
+    proc_task_put(t);
 }
 
 static void task_set_parent_locked(task_t* child, task_t* parent) {
@@ -260,15 +262,21 @@ static void task_set_parent_locked(task_t* child, task_t* parent) {
         return;
     }
 
-    task_parent_detach_locked(child);
-
     if (parent && parent != child) {
+        if (!proc_task_retain(child)) {
+            child->parent_pid = 0;
+            return;
+        }
+
+        task_parent_detach_locked(child);
+
         dlist_add_tail(&child->sibling_node, &parent->children_list);
         child->parent_pid = parent->pid;
         return;
     }
 
     child->parent_pid = 0;
+    task_parent_detach_locked(child);
 }
 
 static int task_set_pgid_locked(task_t* t, uint32_t pgid) {
@@ -487,7 +495,8 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
     return 0;
 }
 
-static kernel::atomic<task_t*> g_zombie_head{nullptr};
+static spinlock_t g_zombie_lock;
+static task_t* g_zombie_head = nullptr;
 
 static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
 
@@ -770,7 +779,8 @@ void proc_init(void) {
 
     proc::detail::g_next_pid.store(1u, kernel::memory_order::relaxed);
 
-    proc::detail::g_zombie_head.store(nullptr, kernel::memory_order::relaxed);
+    spinlock_init(&proc::detail::g_zombie_lock);
+    proc::detail::g_zombie_head = nullptr;
 
     percpu_rwspinlock_init(&proc::detail::task_list_lock);
 
@@ -825,17 +835,74 @@ void proc_fd_table_init(task_t* t) {
 
 void proc_fd_table_retain(fd_table_t* ft) {
     if (!ft) return;
-    __sync_fetch_and_add(&ft->refs, 1);
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&ft->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("PROC: fd_table_retain after free");
+        }
+
+        if (__atomic_compare_exchange_n(
+                &ft->refs,
+                &expected,
+                expected + 1u,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            return;
+        }
+    }
 }
 
 void file_desc_retain(file_desc_t* d) {
     if (!d) return;
-    __sync_fetch_and_add(&d->refs, 1);
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&d->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("PROC: file_desc_retain after free");
+        }
+
+        if (__atomic_compare_exchange_n(
+                &d->refs,
+                &expected,
+                expected + 1u,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            return;
+        }
+    }
 }
 
 void file_desc_release(file_desc_t* d) {
     if (!d) return;
-    if (__sync_sub_and_fetch(&d->refs, 1) != 0) return;
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&d->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("PROC: file_desc_release underflow");
+        }
+
+        const uint32_t desired = expected - 1u;
+
+        if (__atomic_compare_exchange_n(
+                &d->refs,
+                &expected,
+                desired,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            if (desired != 0u) {
+                return;
+            }
+
+            break;
+        }
+    }
 
     if (d->node) {
         vfs_node_release(d->node);
@@ -848,12 +915,29 @@ void file_desc_release(file_desc_t* d) {
 void proc_fd_table_release(fd_table_t* ft) {
     if (!ft) return;
 
-    uint32_t old = __sync_fetch_and_sub(&ft->refs, 1);
-    if (old == 0) {
-        ft->refs = 0;
-        return;
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&ft->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("PROC: fd_table_release underflow");
+        }
+
+        const uint32_t desired = expected - 1u;
+
+        if (__atomic_compare_exchange_n(
+                &ft->refs,
+                &expected,
+                desired,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            if (desired != 0u) {
+                return;
+            }
+
+            break;
+        }
     }
-    if (old > 1) return;
 
     if (ft->fds) {
         for (uint32_t i = 0; i < ft->max_fds; i++) {
@@ -876,7 +960,7 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return 0;
 
-    kernel::RwSpinLockNativeReadSafeGuard guard(ft->lock);
+    kernel::RwSpinLockNativeReadGuard guard(ft->lock);
     
     file_desc_t* out = 0;
     if ((uint32_t)fd < ft->max_fds && ft->fds) {
@@ -926,7 +1010,7 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::RwSpinLockNativeWriteSafeGuard guard(ft->lock);
+    kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
     
     if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
         return -1;
@@ -962,7 +1046,7 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::RwSpinLockNativeWriteSafeGuard guard(ft->lock);
+    kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
     
     if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
         return -1;
@@ -992,7 +1076,7 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     int found = -1;
 
     {
-        kernel::RwSpinLockNativeWriteSafeGuard guard(ft->lock);
+        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
 
         int expected = ft->fd_next;
         if (expected < 0) {
@@ -1038,7 +1122,7 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::RwSpinLockNativeWriteSafeGuard guard(ft->lock);
+    kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
     
     if ((uint32_t)fd >= ft->max_fds || !ft->fds || !ft->fds[fd]) {
         return -1;
@@ -1067,7 +1151,7 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     ft.get()->refs = 1;
     rwspinlock_init(&ft.get()->lock);
 
-    kernel::RwSpinLockNativeReadSafeGuard src_guard(src->lock);
+    kernel::RwSpinLockNativeReadGuard src_guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
     ft.get()->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds));
@@ -1270,10 +1354,13 @@ static task_t* alloc_task(void) {
     spinlock_init(&t->poll_lock);
     dlist_init(&t->poll_waiters);
 
-    dlist_init(&t->pgrp_node);
+    t->pgrp_node.next = nullptr;
+    t->pgrp_node.prev = nullptr;
 
     dlist_init(&t->children_list);
-    dlist_init(&t->sibling_node);
+
+    t->sibling_node.next = nullptr;
+    t->sibling_node.prev = nullptr;
 
     spinlock_init(&t->state_lock);
 
@@ -1336,6 +1423,10 @@ static task_t* alloc_task(void) {
 void proc_free_resources(task_t* t) {
     if (!t) return;
 
+    if (!proc_task_retain(t)) {
+        return;
+    }
+
     proc_sleep_remove(t);
     poll_task_cleanup(t);
 
@@ -1364,8 +1455,9 @@ void proc_free_resources(task_t* t) {
                 spinlock_acquire(&t->state_lock);
 
                 if (t->parent_pid == parent_pid) {
-                    proc::detail::task_parent_detach_locked(t);
                     t->parent_pid = 0;
+
+                    proc::detail::task_parent_detach_locked(t);
                 }
 
                 spinlock_release(&t->state_lock);
@@ -1375,7 +1467,10 @@ void proc_free_resources(task_t* t) {
             }
         } else {
             spinlock_acquire(&t->state_lock);
+
+            t->parent_pid = 0;
             proc::detail::task_parent_detach_locked(t);
+
             spinlock_release(&t->state_lock);
         }
     }
@@ -1428,6 +1523,17 @@ void proc_free_resources(task_t* t) {
 
 void proc_kill(task_t* t) {
     if (!t) return;
+
+    {
+        uint32_t flags = spinlock_acquire_safe(&t->state_lock);
+        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            spinlock_release_safe(&t->state_lock, flags);
+            return;
+        }
+
+        t->state = TASK_ZOMBIE;
+        spinlock_release_safe(&t->state_lock, flags);
+    }
     
     uint32_t waited_pid = t->wait_for_pid;
     if (waited_pid) {
@@ -1457,8 +1563,9 @@ void proc_kill(task_t* t) {
             spinlock_acquire(&child->state_lock);
 
             if (child->state == TASK_UNUSED) {
-                proc::detail::task_parent_detach_locked(child);
                 child->parent_pid = 0;
+
+                proc::detail::task_parent_detach_locked(child);
                 spinlock_release(&child->state_lock);
                 continue;
             }
@@ -1487,17 +1594,19 @@ void proc_kill(task_t* t) {
 
     sched_remove(t);
 
-    t->state = TASK_ZOMBIE;
+    if (!proc_task_retain(t)) {
+        return;
+    }
 
-    task_t* old_head = proc::detail::g_zombie_head.load(kernel::memory_order::relaxed);
-    do {
-        t->zombie_next = old_head;
-    } while (!proc::detail::g_zombie_head.compare_exchange_weak(
-        old_head,
-        t,
-        kernel::memory_order::release,
-        kernel::memory_order::relaxed
-    ));
+    {
+        kernel::ScopedIrqDisable irq_guard;
+        spinlock_acquire(&proc::detail::g_zombie_lock);
+
+        t->zombie_next = proc::detail::g_zombie_head;
+        proc::detail::g_zombie_head = t;
+
+        spinlock_release(&proc::detail::g_zombie_lock);
+    }
 
     sem_signal_all(&t->exit_sem);
 }
@@ -1505,16 +1614,13 @@ void proc_kill(task_t* t) {
 static void kthread_trampoline(void) {
     task_t* t = proc_current();
 
-    cpu_t* me = cpu_current();
-    if (me) {
-        me->prev_task_during_switch = nullptr;
-    }
+    sched_on_task_entry();
 
     __asm__ volatile("sti");
 
     t->entry(t->arg);       
-    
-    t->state = TASK_ZOMBIE;
+
+    proc_kill(t);
 
     sched_yield();        
 
@@ -1553,6 +1659,8 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
     t->esp = sp;
 
     sched_add(t);
+
+    proc_task_put(t);
     return t;
 }
 
@@ -1714,6 +1822,8 @@ task_t* proc_clone_thread(uint32_t entry, uint32_t arg, uint32_t stack_bottom, u
     proc_init_user_context(t, entry, user_esp);
 
     sched_add(t);
+
+    proc_task_put(t);
     return t;
 }
 
@@ -2081,6 +2191,7 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
     task_t* out = t_guard.release();
     sched_add(out);
+    proc_task_put(out);
     return out;
 }
 
@@ -2135,7 +2246,16 @@ int proc_waitpid(uint32_t pid, int* out_status) {
 void reaper_task_func(void* arg) {
     (void)arg;
     while (1) {
-        task_t* list = proc::detail::g_zombie_head.exchange(nullptr, kernel::memory_order::acquire);
+        task_t* list = nullptr;
+        {
+            kernel::ScopedIrqDisable irq_guard;
+            spinlock_acquire(&proc::detail::g_zombie_lock);
+
+            list = proc::detail::g_zombie_head;
+            proc::detail::g_zombie_head = nullptr;
+
+            spinlock_release(&proc::detail::g_zombie_lock);
+        }
         task_t* survivors = nullptr;
 
         while (list) {
@@ -2158,6 +2278,7 @@ void reaper_task_func(void* arg) {
             }
 
             proc_free_resources(curr);
+            proc_task_put(curr);
         }
 
         if (survivors) {
@@ -2166,15 +2287,15 @@ void reaper_task_func(void* arg) {
                 tail = tail->zombie_next;
             }
 
-            task_t* old_head = proc::detail::g_zombie_head.load(kernel::memory_order::relaxed);
-            do {
-                tail->zombie_next = old_head;
-            } while (!proc::detail::g_zombie_head.compare_exchange_weak(
-                old_head,
-                survivors,
-                kernel::memory_order::release,
-                kernel::memory_order::relaxed
-            ));
+            {
+                kernel::ScopedIrqDisable irq_guard;
+                spinlock_acquire(&proc::detail::g_zombie_lock);
+
+                tail->zombie_next = proc::detail::g_zombie_head;
+                proc::detail::g_zombie_head = survivors;
+
+                spinlock_release(&proc::detail::g_zombie_lock);
+            }
         }
 
         proc_usleep(50000);
@@ -2238,27 +2359,57 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         return;
     }
 
+    if (wake_tick == 0u) {
+        wake_tick = 1u;
+    }
+
     cpu_t* cpu = cpu_current();
     if (!cpu) {
         return;
     }
 
-    const bool was_sleeping = (t->wake_tick != 0 && t->sleep_cpu >= 0 && t->sleep_cpu < MAX_CPUS);
-    cpu_t* old_cpu = was_sleeping ? &cpus[t->sleep_cpu] : nullptr;
+    if (proc_change_state(t, TASK_WAITING) != 0) {
+        return;
+    }
 
-    if (!was_sleeping || old_cpu == cpu) {
-        kernel::SpinLockNativeSafeGuard guard(cpu->sleep_lock);
+    while (true) {
+        const int new_cpu_idx = cpu->index;
 
-        if (was_sleeping) {
-            proc::detail::cpu_sleep_remove_locked(cpu, t);
+        const uint32_t old_wake = __atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE);
+        const int old_cpu_idx = __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE);
+
+        if (old_wake != 0u && (old_cpu_idx < 0 || old_cpu_idx >= MAX_CPUS)) {
+            kernel::cpu_relax();
+            continue;
         }
 
-        t->wake_tick = wake_tick;
-        t->state = TASK_WAITING;
-        t->sleep_cpu = cpu->index;
+        const bool was_sleeping = (
+            old_wake != 0u
+            && old_cpu_idx >= 0
+            && old_cpu_idx < MAX_CPUS
+        );
 
-        proc::detail::cpu_sleep_insert_locked(cpu, t);
-    } else {
+        if (!was_sleeping || old_cpu_idx == new_cpu_idx) {
+            kernel::SpinLockNativeSafeGuard guard(cpu->sleep_lock);
+
+            if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != old_wake
+                || (was_sleeping && __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE) != old_cpu_idx)) {
+                continue;
+            }
+
+            if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != 0u) {
+                proc::detail::cpu_sleep_remove_locked(cpu, t);
+            }
+
+            __atomic_store_n(&t->sleep_cpu, new_cpu_idx, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->wake_tick, wake_tick, __ATOMIC_RELEASE);
+
+            proc::detail::cpu_sleep_insert_locked(cpu, t);
+            break;
+        }
+
+        cpu_t* old_cpu = &cpus[old_cpu_idx];
+
         cpu_t* first = old_cpu;
         cpu_t* second = cpu;
         if (first->index > second->index) {
@@ -2269,13 +2420,18 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         kernel::SpinLockNativeSafeGuard first_guard(first->sleep_lock);
         kernel::SpinLockNativeSafeGuard second_guard(second->sleep_lock);
 
+        if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != old_wake
+            || __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE) != old_cpu_idx) {
+            continue;
+        }
+
         proc::detail::cpu_sleep_remove_locked(old_cpu, t);
 
-        t->wake_tick = wake_tick;
-        t->state = TASK_WAITING;
-        t->sleep_cpu = cpu->index;
+        __atomic_store_n(&t->sleep_cpu, new_cpu_idx, __ATOMIC_RELEASE);
+        __atomic_store_n(&t->wake_tick, wake_tick, __ATOMIC_RELEASE);
 
         proc::detail::cpu_sleep_insert_locked(cpu, t);
+        break;
     }
 
     sched_yield();
@@ -2314,15 +2470,20 @@ void proc_check_sleepers(uint32_t current_tick) {
             break;
         }
 
-        if (t->wake_tick > current_tick) {
+        if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) > current_tick) {
             break;
         }
 
         proc::detail::cpu_sleep_remove_locked(cpu, t);
 
-        t->state = TASK_RUNNABLE;
-        t->wake_tick = 0;
-        t->sleep_cpu = -1;
+        if (proc_change_state(t, TASK_RUNNABLE) != 0) {
+            __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
+            continue;
+        }
+
+        __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
 
         sem_remove_task(t);
 
@@ -2333,39 +2494,108 @@ void proc_check_sleepers(uint32_t current_tick) {
 }
 
 void proc_sleep_remove(task_t* t) {
-    if (!t || t->wake_tick == 0) {
+    if (!t) {
         return;
     }
 
-    const int cpu_idx = t->sleep_cpu;
-    if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
-        t->wake_tick = 0;
-        t->sleep_cpu = -1;
+    while (true) {
+        if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) == 0u) {
+            return;
+        }
+
+        const int cpu_idx = __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE);
+        if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
+            kernel::cpu_relax();
+            continue;
+        }
+
+        cpu_t* cpu = &cpus[cpu_idx];
+        kernel::SpinLockNativeSafeGuard guard(cpu->sleep_lock);
+
+        if (__atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE) != cpu_idx) {
+            continue;
+        }
+
+        if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != 0u) {
+            proc::detail::cpu_sleep_remove_locked(cpu, t);
+            __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
+        }
+
         return;
-    }
-
-    cpu_t* cpu = &cpus[cpu_idx];
-
-    kernel::SpinLockNativeSafeGuard guard(cpu->sleep_lock);
-
-    if (t->wake_tick != 0) {
-        proc::detail::cpu_sleep_remove_locked(cpu, t);
-        t->wake_tick = 0;
-        t->sleep_cpu = -1;
     }
 }
 
 void proc_wake(task_t* t) {
     if (!t) return;
-    if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) return;
+
+    if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+        return;
+    }
 
     proc_sleep_remove(t);
-    t->wake_tick = 0;
 
     if (t->blocked_on_sem) return;
-    
-    if (t->state == TASK_WAITING) {
-        t->state = TASK_RUNNABLE;
+
+    if (proc_change_state(t, TASK_RUNNABLE) == 0) {
         sched_add(t);
     }
+}
+
+int proc_change_state(task_t* t, task_state_t new_state) {
+    if (!t) {
+        return -1;
+    }
+
+    uint32_t flags = spinlock_acquire_safe(&t->state_lock);
+
+    const task_state_t old_state = t->state;
+    if (old_state == TASK_UNUSED) {
+        spinlock_release_safe(&t->state_lock, flags);
+        return -1;
+    }
+    if (old_state == TASK_ZOMBIE && new_state != TASK_ZOMBIE) {
+        spinlock_release_safe(&t->state_lock, flags);
+        return -1;
+    }
+
+    bool ok = true;
+    switch (new_state) {
+        case TASK_UNUSED:
+            ok = false;
+            break;
+
+        case TASK_ZOMBIE:
+            ok = true;
+            break;
+
+        case TASK_WAITING:
+            ok = old_state == TASK_RUNNING
+                || old_state == TASK_RUNNABLE
+                || old_state == TASK_WAITING;
+            break;
+
+        case TASK_RUNNABLE:
+            ok = old_state == TASK_WAITING
+                || old_state == TASK_RUNNING
+                || old_state == TASK_RUNNABLE;
+            break;
+
+        case TASK_RUNNING:
+            ok = old_state == TASK_RUNNABLE
+                || old_state == TASK_RUNNING
+                || old_state == TASK_WAITING;
+            break;
+
+        case TASK_STOPPED:
+            ok = true;
+            break;
+    }
+
+    if (ok) {
+        t->state = new_state;
+    }
+
+    spinlock_release_safe(&t->state_lock, flags);
+    return ok ? 0 : -1;
 }

@@ -7,6 +7,8 @@ public ctx_switch
 public ctx_start
 public irq_return
 
+extrn sched_on_task_entry
+
 section '.text' executable
 
 ctx_switch:
@@ -36,6 +38,7 @@ ctx_start:
     ret
 
 irq_return:
+    call sched_on_task_entry
     mov ax, 0x23 
     mov ds, ax
     mov es, ax

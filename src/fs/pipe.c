@@ -44,8 +44,38 @@ typedef struct {
     int readers;
     int writers;
 
+    uint32_t refs;
+
     spinlock_t lock;
 } pipe_t;
+
+static void pipe_private_retain(void* private_data) {
+    pipe_t* p = (pipe_t*)private_data;
+    if (!p) {
+        return;
+    }
+
+    __sync_fetch_and_add(&p->refs, 1u);
+}
+
+static void pipe_private_release(void* private_data) {
+    pipe_t* p = (pipe_t*)private_data;
+    if (!p) {
+        return;
+    }
+
+    if (__sync_sub_and_fetch(&p->refs, 1u) != 0u) {
+        return;
+    }
+
+    poll_waitq_detach_all(&p->poll_waitq);
+
+    if (p->buffer) {
+        kfree(p->buffer);
+    }
+
+    kfree(p);
+}
 
 /*
  * Semaphore helpers.
@@ -678,11 +708,6 @@ static int pipe_close(vfs_node_t* node) {
     if (readers == 0
         && writers == 0) {
         poll_waitq_detach_all(&p->poll_waitq);
-
-        if (p->buffer) {
-            kfree(p->buffer);
-        }
-        kfree(p);
     }
     return 0;
 }
@@ -720,6 +745,8 @@ int vfs_create_pipe(
     }
 
     memset(p, 0, sizeof(pipe_t));
+
+    p->refs = 2u;
 
     p->size = PIPE_SIZE;
     p->buffer = (char*)kmalloc(p->size);
@@ -764,8 +791,8 @@ int vfs_create_pipe(
     strlcpy((*read_node)->name, "pipe_r", 32);
     (*read_node)->ops = &pipe_ops;
     (*read_node)->private_data = p;
-    (*read_node)->private_retain = 0;
-    (*read_node)->private_release = 0;
+    (*read_node)->private_retain = pipe_private_retain;
+    (*read_node)->private_release = pipe_private_release;
     (*read_node)->inode_idx = 0;
     (*read_node)->size = 0;
     (*read_node)->flags = VFS_FLAG_PIPE_READ;
@@ -773,8 +800,8 @@ int vfs_create_pipe(
     strlcpy((*write_node)->name, "pipe_w", 32);
     (*write_node)->ops = &pipe_ops;
     (*write_node)->private_data = p;
-    (*write_node)->private_retain = 0;
-    (*write_node)->private_release = 0;
+    (*write_node)->private_retain = pipe_private_retain;
+    (*write_node)->private_release = pipe_private_release;
     (*write_node)->inode_idx = 0;
     (*write_node)->size = 0;
     (*write_node)->flags = VFS_FLAG_PIPE_WRITE;

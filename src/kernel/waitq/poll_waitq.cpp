@@ -5,6 +5,7 @@
 #include <kernel/panic.h>
 #include <kernel/proc.h>
 
+#include <lib/cpp/atomic.h>
 #include <lib/cpp/dlist.h>
 #include <lib/cpp/lock_guard.h>
 
@@ -22,12 +23,35 @@ static inline bool poll_ptr_mapped(const void* p) {
         return false;
     }
 
-    const uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    const uint32_t v = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p));
 
-    return paging_get_phys(
-        kernel_page_directory,
-        static_cast<uint32_t>(v)
-    ) != 0u;
+    auto dir_mapped = [&](uint32_t* dir) {
+        if (!dir) {
+            return false;
+        }
+
+        const uint32_t pde = dir[v >> 22];
+        if ((pde & PTE_PRESENT) == 0u) {
+            return false;
+        }
+
+        if ((pde & (1u << 7)) != 0u) {
+            return true;
+        }
+
+        return paging_get_present_pte(dir, v, nullptr) != 0;
+    };
+
+    uint32_t* active_dir = paging_get_dir();
+    if (dir_mapped(active_dir)) {
+        return true;
+    }
+
+    if (dir_mapped(kernel_page_directory)) {
+        return true;
+    }
+
+    return false;
 }
 
 static inline int poll_dlist_node_valid(const dlist_head_t* node) {
@@ -71,16 +95,23 @@ public:
             && !dlist_node_linked(&w_.task_node);
     }
 
-    void attach(task_t& task, poll_waitq_t& q) {
+    bool attach(task_t& task, poll_waitq_t& q) {
+        if (!proc_task_retain(&task)) {
+            return false;
+        }
+
         w_.task = &task;
         w_.q = &q;
 
         dlist_add_tail(&w_.q_node, &q.waiters);
         dlist_add_tail(&w_.task_node, &task.poll_waiters);
+
+        return true;
     }
 
     void detach_from_queue_only(poll_waitq_t& q) {
         detach_from_queue(q);
+        reset_queue_node();
         clear_queue();
     }
 
@@ -88,6 +119,15 @@ public:
         detach_from_task_list(task);
 
         clear_task_and_queue();
+    }
+
+    void detach_from_task_list_only(task_t& task) {
+        detach_from_task_list(task);
+        reset_task_node();
+    }
+
+    void clear_task_ptr_no_put() {
+        clear_task_no_put();
     }
 
     void detach_everywhere(task_t& task, poll_waitq_t& q) {
@@ -106,7 +146,24 @@ public:
     }
 
 private:
+    void reset_queue_node() {
+        w_.q_node.next = nullptr;
+        w_.q_node.prev = nullptr;
+    }
+
+    void reset_task_node() {
+        w_.task_node.next = nullptr;
+        w_.task_node.prev = nullptr;
+    }
+
     void clear_task() {
+        if (w_.task) {
+            proc_task_put(w_.task);
+        }
+        w_.task = nullptr;
+    }
+
+    void clear_task_no_put() {
         w_.task = nullptr;
     }
 
@@ -117,6 +174,9 @@ private:
     void clear_task_and_queue() {
         clear_task();
         clear_queue();
+
+        reset_queue_node();
+        reset_task_node();
     }
 
     void detach_from_task_list(task_t& task) {
@@ -201,7 +261,9 @@ static inline int register_waiter(poll_waitq_t& q, poll_waiter_t& w, task_t& tas
     PollWaitQueue waitq(q);
     [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
 
-    link.attach(task, q);
+    if (!link.attach(task, q)) {
+        return -1;
+    }
 
     return 0;
 }
@@ -229,12 +291,22 @@ static inline void unregister_waiter(poll_waiter_t& w) {
     [[maybe_unused]] kernel::SpinLockNativeSafeGuard task_guard(task_list.lock_native());
 
     if (link.task_ptr() != task) {
+        poll_waitq_t* q = link.queue_ptr();
+        if (q && poll_ptr_mapped(q)) {
+            PollWaitQueue waitq(*q);
+            [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
+
+            if (link.queue_ptr() == q) {
+                link.detach_from_queue_only(*q);
+            }
+        }
         return;
     }
 
     poll_waitq_t* q = link.queue_ptr();
     if (q && !poll_ptr_mapped(q)) {
-        panic("POLL: waiter->q unmapped");
+        link.detach_from_task_only(*task);
+        return;
     }
 
     if (!q) {
@@ -246,6 +318,9 @@ static inline void unregister_waiter(poll_waiter_t& w) {
     [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
 
     if (link.queue_ptr() != q) {
+        if (link.queue_ptr() == nullptr) {
+            link.detach_from_task_only(*task);
+        }
         return;
     }
 
@@ -254,102 +329,85 @@ static inline void unregister_waiter(poll_waiter_t& w) {
 
 static inline void wake_all(poll_waitq_t& q) {
     PollWaitQueue waitq(q);
+    [[maybe_unused]] kernel::SpinLockNativeGuard q_guard(waitq.lock_native());
 
-    [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
-
-    dlist_head_t* head = &q.waiters;
-    dlist_head_t* it = head->next;
-    while (it && it != head) {
-        dlist_head_t* next = it->next;
-
+    for (dlist_head_t* it = q.waiters.next; it && it != &q.waiters; it = it->next) {
         poll_waiter_t* w = container_of(it, poll_waiter_t, q_node);
         if (!w) {
-            it = next;
             continue;
         }
 
         task_t* task = w->task;
-        if (!task || !proc_task_retain(task)) {
-            WaiterLink link(*w);
-            link.detach_from_queue_only(q);
-            it = next;
+        if (!task) {
             continue;
         }
 
         proc_wake(task);
-        proc_task_put(task);
-
-        it = next;
     }
 }
 
 static inline void detach_all(poll_waitq_t& q) {
     for (;;) {
-        task_t* task = nullptr;
+        spinlock_acquire(&q.lock);
 
-        {
-            PollWaitQueue waitq(q);
-            [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
-
-            PollWaitersByQueue waiters(q.waiters);
-            if (waiters.empty()) {
-                return;
-            }
-
-            poll_waiter_t& front = waiters.front();
-            task = front.task;
-            if (task && !proc_task_retain(task)) {
-                task = nullptr;
-            }
+        if (dlist_empty(&q.waiters)) {
+            spinlock_release(&q.lock);
+            return;
         }
 
-        if (!task) {
-            PollWaitQueue waitq(q);
-            [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
-
-            PollWaitersByQueue waiters(q.waiters);
-            if (waiters.empty()) {
-                return;
-            }
-
-            poll_waiter_t& w = waiters.front();
-            WaiterLink link(w);
-            link.detach_from_queue_only(q);
-            continue;
+        dlist_head_t* it = q.waiters.next;
+        if (!it || it == &q.waiters) {
+            spinlock_release(&q.lock);
+            return;
         }
 
-        TaskPollList task_list(*task);
-        [[maybe_unused]] kernel::SpinLockNativeSafeGuard task_guard(task_list.lock_native());
-
-        poll_waiter_t* w = nullptr;
-
-        {
-            PollWaitersByTask waiters(task_list.waiters());
-            for (poll_waiter_t& cur : waiters) {
-                if (cur.q == &q) {
-                    w = &cur;
-                    break;
-                }
-            }
-        }
-
+        poll_waiter_t* w = container_of(it, poll_waiter_t, q_node);
         if (!w) {
-            proc_task_put(task);
+            dlist_del(it);
+            it->next = nullptr;
+            it->prev = nullptr;
+
+            spinlock_release(&q.lock);
             continue;
         }
 
-        {
-            PollWaitQueue waitq(q);
-            [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
+        task_t* task = w->task;
+        if (!task) {
+            w->q = nullptr;
 
-            WaiterLink link(*w);
-            if (link.task_ptr() == task && link.queue_ptr() == &q) {
-                link.detach_everywhere(*task, q);
+            dlist_del(&w->q_node);
+            w->q_node.next = nullptr;
+            w->q_node.prev = nullptr;
+
+            spinlock_release(&q.lock);
+            continue;
+        }
+
+        if (!spinlock_try_acquire(&task->poll_lock)) {
+            spinlock_release(&q.lock);
+            kernel::cpu_relax();
+            continue;
+        }
+
+        w->q = nullptr;
+
+        if (w->task == task) {
+            if (w->task_node.next && w->task_node.prev) {
+                dlist_del(&w->task_node);
+                w->task_node.next = nullptr;
+                w->task_node.prev = nullptr;
             }
         }
+
+        dlist_del(&w->q_node);
+        w->q_node.next = nullptr;
+        w->q_node.prev = nullptr;
+
+        spinlock_release(&task->poll_lock);
 
         proc_wake(task);
-        proc_task_put(task);
+
+        spinlock_release(&q.lock);
     }
 }
 
@@ -366,13 +424,20 @@ static inline void task_cleanup(task_t& task) {
 
         poll_waitq_t* q = link.queue_ptr();
 
-        if (!q) {
+        if (!q || !poll_ptr_mapped(q)) {
             link.detach_from_task_only(task);
             continue;
         }
 
         PollWaitQueue waitq(*q);
         [[maybe_unused]] kernel::SpinLockNativeSafeGuard q_guard(waitq.lock_native());
+
+        if (link.queue_ptr() != q) {
+            if (link.queue_ptr() == nullptr) {
+                link.detach_from_task_only(task);
+            }
+            continue;
+        }
 
         link.detach_everywhere(task, *q);
     }
