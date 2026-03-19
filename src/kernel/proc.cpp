@@ -2257,8 +2257,14 @@ void reaper_task_func(void* arg) {
 
         while (list) {
             task_t* curr = list;
-            list = curr->zombie_next;
+            task_t* next_zombie = curr->zombie_next;
             curr->zombie_next = nullptr;
+            list = next_zombie;
+
+            if (!proc_task_retain(curr)) {
+                proc_task_put(curr);
+                continue;
+            }
 
             int still_running = 0;
             for (int i = 0; i < MAX_CPUS; i++) {
@@ -2271,10 +2277,13 @@ void reaper_task_func(void* arg) {
             if (still_running || curr->exit_waiters > 0) {
                 curr->zombie_next = survivors;
                 survivors = curr;
+
+                proc_task_put(curr);
                 continue;
             }
 
             proc_free_resources(curr);
+            proc_task_put(curr);
             proc_task_put(curr);
         }
 

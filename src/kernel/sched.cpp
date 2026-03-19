@@ -630,30 +630,35 @@ void sem_signal(semaphore_t* sem) {
 
     __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
-    if (dlist_empty(&sem->wait_list)) {
-        return;
-    }
+    while (!dlist_empty(&sem->wait_list)) {
+        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
 
-    task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+        dlist_del(&t->sem_node);
 
-    dlist_del(&t->sem_node);
+        t->sem_node.next = nullptr;
+        t->sem_node.prev = nullptr;
+        t->blocked_on_sem = nullptr;
+        t->blocked_kind = TASK_BLOCK_NONE;
 
-    t->sem_node.next = nullptr;
-    t->sem_node.prev = nullptr;
-    t->blocked_on_sem = nullptr;
-    t->blocked_kind = TASK_BLOCK_NONE;
+        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            continue;
+        }
 
-    if (t->state == TASK_ZOMBIE) {
-        return;
-    }
+        if (proc_change_state(t, TASK_RUNNABLE) == 0) {
+            sched_add(t);
+        }
 
-    if (proc_change_state(t, TASK_RUNNABLE) == 0) {
-        sched_add(t);
+        break;
     }
 }
 
 void sem_signal_all(semaphore_t* sem) {
     kernel::SpinLockNativeSafeGuard guard(sem->lock);
+
+    if (dlist_empty(&sem->wait_list)) {
+        __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
+        return;
+    }
 
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);

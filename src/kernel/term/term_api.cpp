@@ -1736,15 +1736,20 @@ int Term::set_winsz(uint16_t cols, uint16_t rows) {
 
     kernel::SpinLockGuard g(impl_->lock_);
 
-    if (cols > 0) {
-        impl_->term.cols = (int)cols;
+    int new_cols = impl_->term.cols;
+    if (new_cols <= 0) {
+        new_cols = kDefaultCols;
     }
+
+    if (cols > 0) {
+        new_cols = (int)cols;
+    }
+
+    impl_->reflow_locked(new_cols);
 
     if (rows > 0) {
         impl_->term.view_rows = (int)rows;
     }
-
-    impl_->reflow_locked(impl_->term.cols);
 
     return 0;
 }
@@ -1893,6 +1898,10 @@ int Term::capture_snapshot(TermSnapshot& out_snapshot) {
     int src_view_row = impl_->term.view_row;
     int src_history_rows = impl_->term.history_rows;
 
+    if (src_history_rows > impl_->term.history_cap_rows) {
+        src_history_rows = impl_->term.history_cap_rows;
+    }
+
     for (int y = 0; y < n; y++) {
         if (!dst.dirty_rows[y]) {
             continue;
@@ -1985,14 +1994,28 @@ int Term::capture_cell(TermSnapshot& snapshot, int rel_row, int col) {
     int src_row = impl_->term.view_row + rel_row;
     size_t dst_i = (size_t)rel_row * (size_t)cols + (size_t)x;
 
-    if (src_row < 0 || src_row >= impl_->term.history_rows) {
+    if (
+        src_row < 0
+        || src_row >= impl_->term.history_rows
+        || src_row >= impl_->term.history_cap_rows
+    ) {
         dst.buffer[dst_i] = ' ';
         dst.fg_colors[dst_i] = impl_->term.curr_fg;
         dst.bg_colors[dst_i] = impl_->term.curr_bg;
         return 0;
     }
 
-    size_t src_i = (size_t)src_row * (size_t)cols + (size_t)x;
+    int src_cols = impl_->term.cols;
+    if (src_cols <= 0) {
+        src_cols = kDefaultCols;
+    }
+
+    int src_x = x;
+    if (src_x >= src_cols) {
+        src_x = src_cols - 1;
+    }
+
+    size_t src_i = (size_t)src_row * (size_t)src_cols + (size_t)src_x;
 
     dst.buffer[dst_i] = impl_->term.buffer[src_i];
     dst.fg_colors[dst_i] = impl_->term.fg_colors[src_i];
