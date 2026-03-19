@@ -2262,7 +2262,6 @@ void reaper_task_func(void* arg) {
             list = next_zombie;
 
             if (!proc_task_retain(curr)) {
-                proc_task_put(curr);
                 continue;
             }
 

@@ -242,6 +242,36 @@ static void pty_pair_destroy(pty_pair_t* p) {
         return;
     }
 
+    vfs_node_t* slave_node = 0;
+    uint32_t slave_id = 0u;
+    int do_unregister = 0;
+
+    {
+        uint32_t flags = spinlock_acquire_safe(&p->lock);
+
+        if (p->devfs_registered) {
+            do_unregister = 1;
+            p->devfs_registered = 0;
+            slave_id = p->id;
+        }
+
+        slave_node = p->slave_node;
+        p->slave_node = 0;
+
+        spinlock_release_safe(&p->lock, flags);
+    }
+
+    if (do_unregister && slave_id != 0u) {
+        char name[32];
+        pty_make_pts_name(name, slave_id);
+        (void)devfs_unregister(name);
+    }
+
+    if (slave_node) {
+        slave_node->ops = 0;
+        vfs_node_release(slave_node);
+    }
+
     if (p->ld) {
         pty_ld_destroy(p->ld);
         p->ld = 0;
@@ -813,7 +843,6 @@ static int pty_close(vfs_node_t* node) {
 
     int do_unregister = 0;
     uint32_t pts_id = 0;
-    vfs_node_t* slave_node = 0;
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     if (node->flags & VFS_FLAG_PTY_MASTER) {
@@ -822,9 +851,6 @@ static int pty_close(vfs_node_t* node) {
             do_unregister = 1;
             p->devfs_registered = 0;
             pts_id = p->id;
-
-            slave_node = p->slave_node;
-            p->slave_node = 0;
         }
     } else if (node->flags & VFS_FLAG_PTY_SLAVE) {
         if (p->slave_open > 0) p->slave_open--;
@@ -841,11 +867,6 @@ static int pty_close(vfs_node_t* node) {
         char name[32];
         pty_make_pts_name(name, pts_id);
         (void)devfs_unregister(name);
-    }
-
-    if (slave_node) {
-        slave_node->ops = 0;
-        vfs_node_release(slave_node);
     }
     return 0;
 }
