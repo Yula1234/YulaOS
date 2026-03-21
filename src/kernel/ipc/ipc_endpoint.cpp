@@ -32,6 +32,8 @@ static bool ipc_name_valid(const char* name) {
 
 class IpcEndpoint;
 
+static void ipc_endpoint_poll_waitq_finalize(void* ctx);
+
 struct IpcPendingConn {
     kernel::IntrusiveRef<IpcEndpoint> owner;
 
@@ -90,7 +92,7 @@ class IpcEndpoint {
 public:
     IpcEndpoint(const char* n, vfs_node_t* node)
         : name(n ? n : "") {
-        poll_waitq_init(&poll_waitq);
+        poll_waitq_init_finalizable(&poll_waitq, ipc_endpoint_poll_waitq_finalize, this);
 
         listen_node = node;
         refcount = 1u;
@@ -235,7 +237,7 @@ public:
 private:
     void finalize() {
         poll_waitq_detach_all(&poll_waitq);
-        delete this;
+        poll_waitq_put(&poll_waitq);
     }
 
     kernel::string name;
@@ -246,6 +248,15 @@ private:
     uint32_t refcount;
     uint32_t closing;
 };
+
+static void ipc_endpoint_poll_waitq_finalize(void* ctx) {
+    auto* ep = static_cast<IpcEndpoint*>(ctx);
+    if (!ep) {
+        return;
+    }
+
+    delete ep;
+}
 
 void IpcPendingConn::release() {
     bool destroy = false;

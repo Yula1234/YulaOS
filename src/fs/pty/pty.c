@@ -55,6 +55,8 @@ static void pty_isig_to_fg_pgrp(int sig, void* ctx);
 
 static void pty_pair_destroy(pty_pair_t* p);
 
+static void pty_poll_waitq_finalize(void* ctx);
+
 static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n);
 
 static __cacheline_aligned mutex_t pty_id_lock;
@@ -298,6 +300,15 @@ static void pty_pair_destroy(pty_pair_t* p) {
     }
 
     poll_waitq_detach_all(&p->poll_waitq);
+    poll_waitq_put(&p->poll_waitq);
+}
+
+static void pty_poll_waitq_finalize(void* ctx) {
+    pty_pair_t* p = (pty_pair_t*)ctx;
+    if (!p) {
+        return;
+    }
+
     kfree(p);
 }
 
@@ -326,7 +337,7 @@ static pty_pair_t* pty_pair_create(void) {
 
     p->refs = 1;
     spinlock_init(&p->lock);
-    poll_waitq_init(&p->poll_waitq);
+    poll_waitq_init_finalizable(&p->poll_waitq, pty_poll_waitq_finalize, p);
 
     sem_init(&p->m2s.sem_read, 0);
     sem_init(&p->m2s.sem_write, (int)PTY_BUF_SIZE);
@@ -1074,9 +1085,5 @@ int pty_poll_waitq_register(vfs_node_t* node, poll_waiter_t* w, struct task* tas
     pty_pair_t* p = (pty_pair_t*)node->private_data;
     if (!p) return -1;
 
-    pty_pair_retain(p);
-    const int rc = poll_waitq_register(&p->poll_waitq, w, task);
-    pty_pair_release(p);
-
-    return rc;
+    return poll_waitq_register(&p->poll_waitq, w, task);
 }

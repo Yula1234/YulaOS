@@ -4,6 +4,7 @@
 #include "poll_waitq.h"
 #include <kernel/proc.h>
 #include <kernel/output/kprintf.h>
+#include <kernel/panic.h>
 #include <hal/lock.h>
 
 extern "C" {
@@ -113,6 +114,89 @@ void poll_waitq_init(poll_waitq_t* q) {
     if (!q) return;
     spinlock_init(&q->lock);
     dlist_init(&q->waiters);
+
+    q->refs = 1u;
+    q->finalize = nullptr;
+    q->finalize_ctx = nullptr;
+}
+
+void poll_waitq_init_finalizable(
+    poll_waitq_t* q,
+    void (*finalize)(void* ctx),
+    void* finalize_ctx
+) {
+    if (!q) {
+        return;
+    }
+
+    poll_waitq_init(q);
+
+    q->finalize = finalize;
+    q->finalize_ctx = finalize_ctx;
+}
+
+void poll_waitq_retain(poll_waitq_t* q) {
+    if (!q) {
+        return;
+    }
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&q->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("POLL: waitq_retain after free");
+        }
+
+        if (__atomic_compare_exchange_n(
+                &q->refs,
+                &expected,
+                expected + 1u,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            return;
+        }
+    }
+}
+
+void poll_waitq_put(poll_waitq_t* q) {
+    if (!q) {
+        return;
+    }
+
+    void (*finalize)(void*) = nullptr;
+    void* finalize_ctx = nullptr;
+
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&q->refs, __ATOMIC_RELAXED);
+        if (expected == 0u) {
+            panic("POLL: waitq_put underflow");
+        }
+
+        const uint32_t desired = expected - 1u;
+        if (__atomic_compare_exchange_n(
+                &q->refs,
+                &expected,
+                desired,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_RELAXED
+            )) {
+            if (desired != 0u) {
+                return;
+            }
+
+            finalize = q->finalize;
+            finalize_ctx = q->finalize_ctx;
+            break;
+        }
+    }
+
+    if (!finalize) {
+        panic("POLL: waitq finalized without finalizer");
+    }
+
+    finalize(finalize_ctx);
 }
 
 int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
@@ -143,6 +227,8 @@ int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
         spinlock_release_safe(&g_poll_global_lock, flags);
         return -1;
     }
+
+    poll_waitq_retain(q);
 
     w->task = task;
     w->q = q;
@@ -188,6 +274,10 @@ void poll_waitq_unregister(poll_waiter_t* w) {
 
         w->task = nullptr;
         proc_task_put(task);
+    }
+
+    if (q) {
+        poll_waitq_put(q);
     }
 
     spinlock_release_safe(&g_poll_global_lock, flags);
@@ -242,6 +332,8 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
         }
 
         w->q = nullptr;
+
+        poll_waitq_put(q);
     }
 
     spinlock_release_safe(&g_poll_global_lock, flags);
@@ -282,6 +374,10 @@ void poll_task_cleanup(struct task* task) {
         if (w->task) {
             w->task = nullptr;
             proc_task_put(task);
+        }
+
+        if (q) {
+            poll_waitq_put(q);
         }
     }
 

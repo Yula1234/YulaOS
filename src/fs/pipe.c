@@ -49,6 +49,20 @@ typedef struct {
     spinlock_t lock;
 } pipe_t;
 
+static void pipe_poll_waitq_finalize(void* ctx) {
+    pipe_t* p = (pipe_t*)ctx;
+    if (!p) {
+        return;
+    }
+
+    if (p->buffer) {
+        kfree(p->buffer);
+        p->buffer = 0;
+    }
+
+    kfree(p);
+}
+
 static void pipe_private_retain(void* private_data) {
     pipe_t* p = (pipe_t*)private_data;
     if (!p) {
@@ -70,11 +84,7 @@ static void pipe_private_release(void* private_data) {
 
     poll_waitq_detach_all(&p->poll_waitq);
 
-    if (p->buffer) {
-        kfree(p->buffer);
-    }
-
-    kfree(p);
+    poll_waitq_put(&p->poll_waitq);
 }
 
 /*
@@ -765,7 +775,6 @@ int vfs_create_pipe(
     }
 
     spinlock_init(&p->lock);
-    poll_waitq_init(&p->poll_waitq);
 
     sem_init(&p->sem_read, 0);
     sem_init(&p->sem_write, p->size);
@@ -817,6 +826,8 @@ int vfs_create_pipe(
 
     (*read_node)->refs = 1;
     (*write_node)->refs = 1;
+
+    poll_waitq_init_finalizable(&p->poll_waitq, pipe_poll_waitq_finalize, p);
 
     return 0;
 }

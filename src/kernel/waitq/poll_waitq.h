@@ -15,6 +15,11 @@ extern "C" {
 typedef struct poll_waitq {
     spinlock_t lock;
     dlist_head_t waiters;
+
+    volatile uint32_t refs;
+
+    void (*finalize)(void* ctx);
+    void* finalize_ctx;
 } poll_waitq_t;
 
 typedef struct poll_waiter {
@@ -26,6 +31,15 @@ typedef struct poll_waiter {
 } poll_waiter_t;
 
 void poll_waitq_init(poll_waitq_t* q);
+
+void poll_waitq_init_finalizable(
+    poll_waitq_t* q,
+    void (*finalize)(void* ctx),
+    void* finalize_ctx
+);
+
+void poll_waitq_retain(poll_waitq_t* q);
+void poll_waitq_put(poll_waitq_t* q);
 
 int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task);
 void poll_waitq_unregister(poll_waiter_t* w);

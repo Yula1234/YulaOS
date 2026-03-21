@@ -2503,6 +2503,8 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
             __atomic_store_n(&t->sleep_cpu, new_cpu_idx, __ATOMIC_RELEASE);
             __atomic_store_n(&t->wake_tick, wake_tick, __ATOMIC_RELEASE);
 
+            __sync_synchronize();
+
             proc::detail::cpu_sleep_insert_locked(cpu, t);
             break;
         }
@@ -2533,6 +2535,8 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
 
         __atomic_store_n(&t->sleep_cpu, new_cpu_idx, __ATOMIC_RELEASE);
         __atomic_store_n(&t->wake_tick, wake_tick, __ATOMIC_RELEASE);
+
+        __sync_synchronize();
 
         proc::detail::cpu_sleep_insert_locked(cpu, t);
         break;
@@ -2578,6 +2582,13 @@ void proc_check_sleepers(uint32_t current_tick) {
             break;
         }
 
+        if (!proc_task_retain(t)) {
+            proc::detail::cpu_sleep_remove_locked(cpu, t);
+            __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
+            continue;
+        }
+
         __sync_fetch_and_add(&t->in_transit, 1);
 
         proc::detail::cpu_sleep_remove_locked(cpu, t);
@@ -2586,6 +2597,7 @@ void proc_check_sleepers(uint32_t current_tick) {
             __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
             __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
             __sync_fetch_and_sub(&t->in_transit, 1);
+            proc_task_put(t);
             continue;
         }
 
@@ -2597,6 +2609,7 @@ void proc_check_sleepers(uint32_t current_tick) {
         sched_add(t);
 
         __sync_fetch_and_sub(&t->in_transit, 1);
+        proc_task_put(t);
     }
 
     spinlock_release(&cpu->sleep_lock);
