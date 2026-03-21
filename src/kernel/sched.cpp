@@ -175,6 +175,13 @@ void sched_add(task_t* t) {
 
     kernel::SpinLockNativeSafeGuard guard(target->lock);
 
+    {
+        kernel::SpinLockNativeGuard state_guard(t->state_lock);
+        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            return;
+        }
+    }
+
     if (t->is_queued) {
         return; 
     }
@@ -633,6 +640,8 @@ void sem_signal(semaphore_t* sem) {
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
 
+        __sync_fetch_and_add(&t->in_transit, 1);
+
         dlist_del(&t->sem_node);
 
         t->sem_node.next = nullptr;
@@ -641,12 +650,15 @@ void sem_signal(semaphore_t* sem) {
         t->blocked_kind = TASK_BLOCK_NONE;
 
         if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            __sync_fetch_and_sub(&t->in_transit, 1);
             continue;
         }
 
         if (proc_change_state(t, TASK_RUNNABLE) == 0) {
             sched_add(t);
         }
+
+        __sync_fetch_and_sub(&t->in_transit, 1);
 
         break;
     }
@@ -663,6 +675,8 @@ void sem_signal_all(semaphore_t* sem) {
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
 
+        __sync_fetch_and_add(&t->in_transit, 1);
+
         dlist_del(&t->sem_node);
 
         t->sem_node.next = nullptr;
@@ -675,6 +689,8 @@ void sem_signal_all(semaphore_t* sem) {
         if (proc_change_state(t, TASK_RUNNABLE) == 0) {
             sched_add(t);
         }
+
+        __sync_fetch_and_sub(&t->in_transit, 1);
     }
 }
 

@@ -256,6 +256,8 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
         while (woken < max_wake && !waiters.empty()) {
             task_t& t = waiters.front();
 
+            __sync_fetch_and_add(&t.in_transit, 1);
+
             if (!dlist_unlink_consistent(&t.sem_node)) {
                 panic("FUTEX: waiter unlink failed");
             }
@@ -266,6 +268,8 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
             if (proc_change_state(&t, TASK_RUNNABLE) == 0) {
                 sched_add(&t);
             }
+
+            __sync_fetch_and_sub(&t.in_transit, 1);
 
             woken++;
         }
@@ -323,6 +327,4 @@ extern "C" void futex_remove_task(struct task* t) {
         t->blocked_on_sem = nullptr;
         t->blocked_kind = TASK_BLOCK_NONE;
     }
-
-    entry->release();
 }

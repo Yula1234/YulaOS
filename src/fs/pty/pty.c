@@ -135,14 +135,25 @@ static void sem_signal_n(semaphore_t* sem, uint32_t n) {
 
     while (n-- && !dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+
+        __sync_fetch_and_add(&t->in_transit, 1);
+
         dlist_del(&t->sem_node);
         t->sem_node.next = 0;
         t->sem_node.prev = 0;
         t->blocked_on_sem = 0;
-        if (t->state != TASK_ZOMBIE) {
-            t->state = TASK_RUNNABLE;
+        t->blocked_kind = TASK_BLOCK_NONE;
+
+        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            __sync_fetch_and_sub(&t->in_transit, 1);
+            continue;
+        }
+
+        if (proc_change_state(t, TASK_RUNNABLE) == 0) {
             sched_add(t);
         }
+
+        __sync_fetch_and_sub(&t->in_transit, 1);
     }
 
     spinlock_release_safe(&sem->lock, flags);
@@ -166,17 +177,26 @@ static void sem_wake_all(semaphore_t* sem) {
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
 
+        __sync_fetch_and_add(&t->in_transit, 1);
+
         dlist_del(&t->sem_node);
         t->sem_node.next = 0;
         t->sem_node.prev = 0;
         t->blocked_on_sem = 0;
+        t->blocked_kind = TASK_BLOCK_NONE;
 
         sem->count++;
 
-        if (t->state != TASK_ZOMBIE) {
-            t->state = TASK_RUNNABLE;
+        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            __sync_fetch_and_sub(&t->in_transit, 1);
+            continue;
+        }
+
+        if (proc_change_state(t, TASK_RUNNABLE) == 0) {
             sched_add(t);
         }
+
+        __sync_fetch_and_sub(&t->in_transit, 1);
     }
 
     spinlock_release_safe(&sem->lock, flags);
@@ -242,7 +262,6 @@ static void pty_pair_destroy(pty_pair_t* p) {
         return;
     }
 
-    vfs_node_t* slave_node = 0;
     uint32_t slave_id = 0u;
     int do_unregister = 0;
 
@@ -255,7 +274,6 @@ static void pty_pair_destroy(pty_pair_t* p) {
             slave_id = p->id;
         }
 
-        slave_node = p->slave_node;
         p->slave_node = 0;
 
         spinlock_release_safe(&p->lock, flags);
@@ -264,12 +282,14 @@ static void pty_pair_destroy(pty_pair_t* p) {
     if (do_unregister && slave_id != 0u) {
         char name[32];
         pty_make_pts_name(name, slave_id);
-        (void)devfs_unregister(name);
-    }
 
-    if (slave_node) {
-        slave_node->ops = 0;
-        vfs_node_release(slave_node);
+        vfs_node_t* slave_node = devfs_take(name);
+        if (slave_node) {
+            slave_node->ops = 0;
+            slave_node->private_data = 0;
+            slave_node->private_release = 0;
+            vfs_node_release(slave_node);
+        }
     }
 
     if (p->ld) {
@@ -841,6 +861,8 @@ static int pty_close(vfs_node_t* node) {
         return 0;
     }
 
+    pty_pair_retain(p);
+
     int do_unregister = 0;
     uint32_t pts_id = 0;
 
@@ -866,8 +888,21 @@ static int pty_close(vfs_node_t* node) {
     if (do_unregister && pts_id != 0u) {
         char name[32];
         pty_make_pts_name(name, pts_id);
-        (void)devfs_unregister(name);
+
+        vfs_node_t* slave_node = devfs_take(name);
+        if (slave_node) {
+            slave_node->ops = 0;
+
+            slave_node->private_data = 0;
+            slave_node->private_release = 0;
+
+            vfs_node_release(slave_node);
+
+            pty_pair_release(p);
+        }
     }
+
+    pty_pair_release(p);
     return 0;
 }
 

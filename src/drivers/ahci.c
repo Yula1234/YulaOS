@@ -324,9 +324,12 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
         return 0;
     }
 
+    __sync_fetch_and_or(&port_active_slots[port_no], (1u << slot));
+
     uint8_t* dma_virt = (uint8_t*)ex->dma_buf_virt[slot];
     
     if (!dma_virt) {
+        __sync_fetch_and_and(&port_active_slots[port_no], ~(1u << slot));
         spinlock_release(&state->lock);
         return 0;
     }
@@ -335,6 +338,7 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
         if (byte_count <= AHCI_DMA_BUF_SIZE) {
             memcpy(dma_virt, buf, byte_count);
         } else {
+            __sync_fetch_and_and(&port_active_slots[port_no], ~(1u << slot));
             spinlock_release(&state->lock);
             return 0;
         }
@@ -379,7 +383,11 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
         __asm__ volatile("pause");
     }
 
-    __sync_fetch_and_or(&port_active_slots[port_no], (1 << slot));
+    if (spin >= 1000000) {
+        __sync_fetch_and_and(&port_active_slots[port_no], ~(1u << slot));
+        return 0;
+    }
+
     port->ci = 1 << slot;
 
     int success = 1;
@@ -392,7 +400,7 @@ int ahci_send_command(int port_no, uint32_t lba, uint8_t* buf, int is_write, uin
         }
     }
 
-    __sync_fetch_and_and(&port_active_slots[port_no], ~(1 << slot));
+    __sync_fetch_and_and(&port_active_slots[port_no], ~(1u << slot));
 
     if ((port->is & (1 << 30)) || (port->tfd & AHCI_DEV_ERR)) {
         success = 0;

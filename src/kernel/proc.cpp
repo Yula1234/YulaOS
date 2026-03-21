@@ -28,8 +28,12 @@
 
 #include "sched.h"
 #include "proc.h"
-#include <kernel/waitq/poll_waitq.h>
 #include <kernel/sched.h>
+#include <kernel/output/kprintf.h>
+#include <kernel/term/term.h>
+#include <kernel/tty/tty_service.h>
+#include <kernel/tty/tty_internal.h>
+#include <kernel/waitq/poll_waitq.h>
 #include <kernel/syscall.h>
 #include <kernel/futex/futex.h>
 #include "elf.h"
@@ -377,7 +381,14 @@ static void cpu_sleep_insert_locked(cpu_t* cpu, task_t* t) noexcept {
 }
 
 static void cpu_sleep_remove_locked(cpu_t* cpu, task_t* t) noexcept {
-    if (!cpu || !t || t->wake_tick == 0) {
+    if (!cpu || !t) {
+        return;
+    }
+
+    if (t->sleep_rb.__parent_color == 0
+        && t->sleep_rb.rb_left == nullptr
+        && t->sleep_rb.rb_right == nullptr
+        && cpu->sleep_root.rb_node != &t->sleep_rb) {
         return;
     }
 
@@ -387,6 +398,10 @@ static void cpu_sleep_remove_locked(cpu_t* cpu, task_t* t) noexcept {
     }
 
     rb_erase(&t->sleep_rb, &cpu->sleep_root);
+
+    t->sleep_rb.__parent_color = 0;
+    t->sleep_rb.rb_left = nullptr;
+    t->sleep_rb.rb_right = nullptr;
 
     cpu_sleep_update_next_wake_tick(cpu);
 }
@@ -843,9 +858,32 @@ void proc_fd_table_init(task_t* t) {
 void proc_fd_table_retain(fd_table_t* ft) {
     if (!ft) return;
 
+    static uint32_t retain_after_free_logs = 0;
+    const auto log_retain_after_free = [&](uint32_t refs_now) {
+        if (retain_after_free_logs >= 32u) {
+            return;
+        }
+
+        retain_after_free_logs++;
+
+        task_t* curr = proc_current();
+        const uint32_t pid = curr ? curr->pid : 0u;
+        const void* ra = __builtin_return_address(0);
+
+        kprintf(
+            "[proc] fd_table_retain after free: ft=%p refs=%u curr=%p pid=%u ra=%p\n",
+            ft,
+            refs_now,
+            curr,
+            pid,
+            ra
+        );
+    };
+
     for (;;) {
         uint32_t expected = __atomic_load_n(&ft->refs, __ATOMIC_RELAXED);
         if (expected == 0u) {
+            log_retain_after_free(expected);
             panic("PROC: fd_table_retain after free");
         }
 
@@ -922,9 +960,32 @@ void file_desc_release(file_desc_t* d) {
 void proc_fd_table_release(fd_table_t* ft) {
     if (!ft) return;
 
+    static uint32_t release_underflow_logs = 0;
+    const auto log_release_underflow = [&](uint32_t refs_now) {
+        if (release_underflow_logs >= 32u) {
+            return;
+        }
+
+        release_underflow_logs++;
+
+        task_t* curr = proc_current();
+        const uint32_t pid = curr ? curr->pid : 0u;
+        const void* ra = __builtin_return_address(0);
+
+        kprintf(
+            "[proc] fd_table_release underflow: ft=%p refs=%u curr=%p pid=%u ra=%p\n",
+            ft,
+            refs_now,
+            curr,
+            pid,
+            ra
+        );
+    };
+
     for (;;) {
         uint32_t expected = __atomic_load_n(&ft->refs, __ATOMIC_RELAXED);
         if (expected == 0u) {
+            log_release_underflow(expected);
             panic("PROC: fd_table_release underflow");
         }
 
@@ -1434,7 +1495,6 @@ void proc_free_resources(task_t* t) {
     }
 
     proc_sleep_remove(t);
-    poll_task_cleanup(t);
 
     vfs_node_t* tty_node = nullptr;
     if (t->controlling_tty) {
@@ -1443,6 +1503,23 @@ void proc_free_resources(task_t* t) {
     }
 
     if (t->fd_table) {
+        static uint32_t free_resources_fd_table_logs = 0;
+        if (free_resources_fd_table_logs < 32u) {
+            free_resources_fd_table_logs++;
+
+            const uint32_t refs_now = __atomic_load_n(&t->fd_table->refs, __ATOMIC_RELAXED);
+            const void* ra = __builtin_return_address(0);
+
+            kprintf(
+                "[proc] free_resources: t=%p pid=%u fd_table=%p refs=%u ra=%p\n",
+                t,
+                t->pid,
+                t->fd_table,
+                refs_now,
+                ra
+            );
+        }
+
         proc_fd_table_release(t->fd_table);
         t->fd_table = 0;
     }
@@ -2273,7 +2350,19 @@ void reaper_task_func(void* arg) {
                 }
             }
 
-            if (still_running || curr->exit_waiters > 0) {
+            if (still_running || curr->exit_waiters > 0 || curr->in_transit > 0) {
+                curr->zombie_next = survivors;
+                survivors = curr;
+
+                proc_task_put(curr);
+                continue;
+            }
+
+            uint32_t refs = __atomic_load_n(&curr->refs, __ATOMIC_ACQUIRE);
+            uint32_t parent_pid = __atomic_load_n(&curr->parent_pid, __ATOMIC_ACQUIRE);
+            uint32_t expected_refs = parent_pid != 0u ? 5u : 4u;
+
+            if (refs > expected_refs) {
                 curr->zombie_next = survivors;
                 survivors = curr;
 
@@ -2402,6 +2491,11 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
                 continue;
             }
 
+            kernel::SpinLockNativeGuard state_guard(t->state_lock);
+            if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+                break;
+            }
+
             if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != 0u) {
                 proc::detail::cpu_sleep_remove_locked(cpu, t);
             }
@@ -2428,6 +2522,11 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != old_wake
             || __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE) != old_cpu_idx) {
             continue;
+        }
+
+        kernel::SpinLockNativeGuard state_guard(t->state_lock);
+        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+            break;
         }
 
         proc::detail::cpu_sleep_remove_locked(old_cpu, t);
@@ -2479,11 +2578,14 @@ void proc_check_sleepers(uint32_t current_tick) {
             break;
         }
 
+        __sync_fetch_and_add(&t->in_transit, 1);
+
         proc::detail::cpu_sleep_remove_locked(cpu, t);
 
         if (proc_change_state(t, TASK_RUNNABLE) != 0) {
             __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
             __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
+            __sync_fetch_and_sub(&t->in_transit, 1);
             continue;
         }
 
@@ -2493,6 +2595,8 @@ void proc_check_sleepers(uint32_t current_tick) {
         sem_remove_task(t);
 
         sched_add(t);
+
+        __sync_fetch_and_sub(&t->in_transit, 1);
     }
 
     spinlock_release(&cpu->sleep_lock);
@@ -2504,12 +2608,11 @@ void proc_sleep_remove(task_t* t) {
     }
 
     while (true) {
-        if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) == 0u) {
-            return;
-        }
-
         const int cpu_idx = __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE);
         if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) {
+            if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) == 0u) {
+                return;
+            }
             kernel::cpu_relax();
             continue;
         }
@@ -2521,11 +2624,10 @@ void proc_sleep_remove(task_t* t) {
             continue;
         }
 
-        if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) != 0u) {
-            proc::detail::cpu_sleep_remove_locked(cpu, t);
-            __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
-            __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
-        }
+        proc::detail::cpu_sleep_remove_locked(cpu, t);
+
+        __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
 
         return;
     }
@@ -2538,13 +2640,20 @@ void proc_wake(task_t* t) {
         return;
     }
 
+    __sync_fetch_and_add(&t->in_transit, 1);
+
     proc_sleep_remove(t);
 
-    if (t->blocked_on_sem) return;
+    if (t->blocked_on_sem) {
+        __sync_fetch_and_sub(&t->in_transit, 1);
+        return;
+    }
 
     if (proc_change_state(t, TASK_RUNNABLE) == 0) {
         sched_add(t);
     }
+
+    __sync_fetch_and_sub(&t->in_transit, 1);
 }
 
 int proc_change_state(task_t* t, task_state_t new_state) {

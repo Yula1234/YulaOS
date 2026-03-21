@@ -783,6 +783,8 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                 }
                 new_right->file_size = right_file_size;
 
+                tree_erase(mem, curr);
+
                 curr->vaddr_end = o_start;
                 curr->length = left_len;
 
@@ -792,6 +794,12 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                 }
                 curr->file_size = left_file_size;
 
+                if (!tree_insert(mem, curr)) {
+                    free_region(new_right);
+                    cleanup_spans();
+                    return -1;
+                }
+
                 if (!tree_insert(mem, new_right)) {
                     free_region(new_right);
                     cleanup_spans();
@@ -799,7 +807,6 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                 }
 
                 dlist_add_tail(&new_right->list_node, &mem->mmap_regions);
-                vma_region_propagate(&curr->rb_node, nullptr);
 
                 scan = o_end;
                 continue;
@@ -849,6 +856,8 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             if (o_start > m_start && o_end == m_end) {
                 const uint32_t new_len = o_start - m_start;
 
+                tree_erase(mem, curr);
+
                 curr->vaddr_end = o_start;
                 curr->length = new_len;
 
@@ -856,7 +865,10 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                     curr->file_size = new_len;
                 }
 
-                vma_region_propagate(&curr->rb_node, nullptr);
+                if (!tree_insert(mem, curr)) {
+                    cleanup_spans();
+                    return -1;
+                }
 
                 scan = o_end;
                 continue;

@@ -186,6 +186,8 @@ typedef struct task {
 
     volatile uint32_t refs;
 
+    volatile uint32_t in_transit;
+
     volatile uint32_t exit_waiters;
     int exit_status;
     semaphore_t exit_sem; 

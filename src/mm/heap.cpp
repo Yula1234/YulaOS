@@ -650,10 +650,6 @@ private:
     }
 
     bool try_free_aligned(void* ptr) noexcept {
-        /*
-         * The aligned pointer is expected to be inside the heap range, but not
-         * page-aligned (page-aligned allocations are handled by kmalloc_a()).
-         */
         const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
         if (kernel::unlikely(addr < sizeof(AlignedAllocHeader))) {
             return false;
@@ -668,20 +664,11 @@ private:
             return false;
         }
 
-        const uint32_t header_phys = paging_get_phys(
-            kernel_page_directory,
-            static_cast<uint32_t>(header_addr)
-        );
-        if (kernel::unlikely(!header_phys)) {
+        if (kernel::unlikely(!heap_ptr_mapped(header_addr))) {
             return false;
         }
 
-        page_t* page = pmm_->phys_to_page(header_phys);
-        if (kernel::unlikely(!page)) {
-            return false;
-        }
-
-        if (kernel::likely(page->slab_cache != nullptr)) {
+        if (kernel::unlikely(!heap_ptr_mapped(header_addr + sizeof(AlignedAllocHeader) - 1u))) {
             return false;
         }
 
@@ -713,6 +700,34 @@ private:
 
         if (kernel::unlikely(addr < min_aligned || addr >= max_aligned)) {
             return false;
+        }
+
+        const uint32_t orig_phys = paging_get_phys(
+            kernel_page_directory,
+            static_cast<uint32_t>(original_addr)
+        );
+        if (kernel::unlikely(!orig_phys)) {
+            return false;
+        }
+
+        page_t* orig_page = pmm_->phys_to_page(orig_phys);
+        if (kernel::unlikely(!orig_page)) {
+            return false;
+        }
+
+        if (orig_page->slab_cache) {
+            const auto* cache = static_cast<const KmemCache*>(orig_page->slab_cache);
+            if (cache->object_size > 0u) {
+                const uintptr_t page_base = original_addr & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+                const uintptr_t offset_in_page = original_addr - page_base;
+                if (kernel::unlikely((offset_in_page % cache->object_size) != 0u)) {
+                    return false;
+                }
+            }
+        } else {
+            if (kernel::unlikely((original_addr & static_cast<uintptr_t>(PAGE_SIZE - 1u)) != 0u)) {
+                return false;
+            }
         }
 
         header->magic = 0u;

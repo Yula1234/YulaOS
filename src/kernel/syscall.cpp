@@ -1789,6 +1789,8 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                     file_desc_release(active_descs[i]);
                     active_descs[i] = 0;
                 }
+
+                memset(&waiters[i], 0, sizeof(poll_waiter_t));
             }
         }
 
