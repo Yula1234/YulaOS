@@ -77,11 +77,45 @@ int mouse_poll_waitq_register(poll_waiter_t* w, task_t* task) {
     return poll_waitq_register(&mouse_poll_waitq, w, task);
 }
 
+static int mouse_vfs_poll_status(vfs_node_t* node, int events) {
+    (void)node;
+
+    if ((events & VFS_POLLIN) == 0) {
+        return 0;
+    }
+
+    task_t* curr = proc_current();
+    if (!curr) {
+        return 0;
+    }
+
+    if (mouse_poll_ready(curr)) {
+        return VFS_POLLIN;
+    }
+
+    return 0;
+}
+
+static int mouse_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* task) {
+    (void)node;
+    return mouse_poll_waitq_register(w, task);
+}
+
 void mouse_poll_notify_focus_change(void) {
     poll_waitq_wake_all(&mouse_poll_waitq);
 }
 
-static vfs_ops_t mouse_ops = { .read = mouse_vfs_read };
+static vfs_ops_t mouse_ops = {
+    .read = mouse_vfs_read,
+    .write = 0,
+    .open = 0,
+    .close = 0,
+    .ioctl = 0,
+    .get_phys_page = 0,
+    .poll_status = mouse_vfs_poll_status,
+    .poll_register = mouse_vfs_poll_register,
+};
+
 static vfs_node_t mouse_node = { .name = "mouse", .ops = &mouse_ops, .size = sizeof(mouse_state_t) };
 
 void mouse_vfs_init(void) {
