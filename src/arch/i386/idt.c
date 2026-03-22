@@ -482,6 +482,11 @@ void isr_handler(registers_t* regs) {
     if (regs->int_no == IPI_TLB_VECTOR) {
         smp_tlb_ipi_handler();
         lapic_eoi();
+
+        if (regs->cs == 0x1B) {
+            rcu_qs_count_inc();
+        }
+
         goto out;
     }
 
@@ -544,6 +549,8 @@ void isr_handler(registers_t* regs) {
 
             int from_user = (regs->cs == 0x1B);
             if (from_user && curr && curr->state == TASK_RUNNING && curr->pid != 0) {
+                rcu_qs_count_inc();
+                
                 if (curr->exec_start > 0) {
                     uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
                     if (delta_exec >= 1) {

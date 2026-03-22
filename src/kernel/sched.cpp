@@ -277,6 +277,8 @@ extern "C" void sched_on_task_entry(void) {
 void sched_set_current(task_t* t) {
     cpu_t* cpu = cpu_current();
 
+    rcu_qs_count_inc();
+
     task_t* old = cpu->current_task;
     if (old != t) {
         sched_task_pin(t);
@@ -304,6 +306,8 @@ void sched_start(task_t* first) {
 void sched_yield(void) {
     cpu_t* me = cpu_current();
     task_t* prev = me->current_task;
+
+    rcu_qs_count_inc();
 
     if (prev && prev->state == TASK_RUNNING && prev->pid != 0) {
         task_t* leftmost = me->runq_leftmost;

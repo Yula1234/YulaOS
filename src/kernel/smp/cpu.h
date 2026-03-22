@@ -48,6 +48,8 @@ typedef struct {
     volatile int total_priority_weight; 
     volatile int total_task_count;
 
+    volatile uint32_t rcu_qs_count;
+
 } __cacheline_aligned cpu_t;
 
 extern cpu_t cpus[MAX_CPUS];

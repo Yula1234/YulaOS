@@ -158,6 +158,8 @@ void uhci_late_init_task(void* arg) {
 void idle_task_func(void* arg) {
     (void)arg;
     while (1) {
+        rcu_qs_count_inc();
+
         __asm__ volatile("sti");
         cpu_hlt();
         sched_yield();
