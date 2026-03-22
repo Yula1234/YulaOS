@@ -24,8 +24,6 @@ int uaccess_ensure_user_buffer_writable_mappable(task_t* task, void* buf, uint32
 
 int uaccess_user_range_mappable(task_t* task, uintptr_t start, uintptr_t end_excl);
 
-void uaccess_prefault_user_read(const void* p, uint32_t len);
-
 int uaccess_copy_user_str_bounded(task_t* task, char* dst, uint32_t dst_size, const char* user_src);
 
 int uaccess_copy_from_user(void* dst, const void* user_src, uint32_t size);

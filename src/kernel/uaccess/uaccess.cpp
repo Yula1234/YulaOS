@@ -198,33 +198,6 @@ extern "C" int uaccess_check_user_buffer(task_t* task, const void* buf, uint32_t
     return check_user_range_basic(task, start, end_excl);
 }
 
-extern "C" void uaccess_prefault_user_read(const void* p, uint32_t len) {
-    if (!p || len == 0u) {
-        return;
-    }
-
-    const uintptr_t addr = (uintptr_t)p;
-    const uintptr_t end = addr + (uintptr_t)len - 1u;
-
-    if (end < addr) {
-        return;
-    }
-
-    uint8_t tmp;
-    for (uintptr_t cur = addr; cur <= end;) {
-        if (uaccess_copy_from_user(&tmp, (const void*)cur, 1u) != 0) {
-            return;
-        }
-
-        const uintptr_t next = (cur & ~(uintptr_t)0xFFFu) + (uintptr_t)0x1000u;
-        if (next <= cur) {
-            return;
-        }
-
-        cur = next;
-    }
-}
-
 extern "C" int uaccess_check_user_buffer_present(task_t* task, const void* buf, uint32_t size) {
     if (!uaccess_check_user_buffer(task, buf, size)) {
         return 0;
@@ -271,13 +244,7 @@ extern "C" int uaccess_ensure_user_buffer_writable_mappable(task_t* task, void* 
         return 0;
     }
 
-    if (!user_range_mappable(task, start, end_excl)) {
-        return 0;
-    }
-
-    uaccess_prefault_user_read((const void*)buf, size);
-
-    return uaccess_check_user_buffer_writable_present(task, buf, size);
+    return user_range_mappable(task, start, end_excl);
 }
 
 extern "C" int uaccess_user_range_mappable(task_t* task, uintptr_t start, uintptr_t end_excl) {

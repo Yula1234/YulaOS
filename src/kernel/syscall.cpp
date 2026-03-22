@@ -44,10 +44,6 @@ static int check_user_buffer(task_t* task, const void* buf, uint32_t size) {
     return uaccess_check_user_buffer(task, buf, size);
 }
 
-static void prefault_user_read(const void* p, uint32_t len) {
-    uaccess_prefault_user_read(p, len);
-}
-
 static uint8_t fb_present_fpu_tmp[MAX_CPUS][4096] __attribute__((aligned(64)));
 
 __attribute__((always_inline))
@@ -1693,8 +1689,6 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
                         return;
                     }
 
-                    prefault_user_read((const void*)(uintptr_t)src_row_addr, row_bytes);
-
                     uint64_t dst_row_off = (uint64_t)(uint32_t)y * (uint64_t)dst_pitch + (uint64_t)(uint32_t)x1 * 4ull;
                     memcpy(dst_base + dst_row_off, (const void*)(uintptr_t)src_row_addr, row_bytes);
                 }
@@ -1719,8 +1713,6 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
                     regs->eax = (uint32_t)-1;
                     return;
                 }
-
-                prefault_user_read((const void*)(uintptr_t)row_addr, row_bytes);
             }
 
             cpu_t* cpu = cpu_current();
