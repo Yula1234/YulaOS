@@ -8,6 +8,7 @@
 #include <drivers/mouse.h>
 #include <drivers/keyboard.h>
 #include <drivers/fbdev.h>
+#include <drivers/uhci.h>
 
 #include <kernel/syscall.h>
 #include <kernel/sched.h>
@@ -530,6 +531,10 @@ void isr_handler(registers_t* regs) {
             }
 
             proc_check_sleepers(timer_ticks);
+
+            if (cpu->index == 0) {
+                uhci_periodic_tick();
+            }
 
             cpu->stat_total_ticks++;
             if (curr == cpu->idle_task) {

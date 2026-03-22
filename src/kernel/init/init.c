@@ -148,11 +148,6 @@ void uhci_late_init_task(void* arg) {
     (void)arg;
     uhci_init();
     uhci_late_init();
-
-    while (1) {
-        uhci_poll();
-        proc_usleep(2000);
-    }
 }
 
 void idle_task_func(void* arg) {

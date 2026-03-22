@@ -774,6 +774,7 @@ static void uhci_sched_insert_head_qh(uhci_qh_t* qh);
 static void uhci_sched_remove_head_qh(uhci_qh_t* qh);
 
 static void uhci_hid_intr_cb(void* ctx, const uint8_t* data, uint32_t len);
+static void uhci_kbd_repeat_tick(uhci_hid_dev_t* dev);
 
 typedef void (*uhci_intr_cb_t)(void* ctx, const uint8_t* data, uint32_t len);
 
@@ -852,7 +853,7 @@ static void uhci_intr_pipe_arm_td(uhci_intr_pipe_t* p) {
     }
 
     p->td->link = UHCI_PTR_T;
-    p->td->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_SPD;
+    p->td->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_SPD | UHCI_TD_CTRL_IOC;
     if (p->low_speed) {
         p->td->status |= UHCI_TD_CTRL_LS;
     }
@@ -1084,6 +1085,16 @@ static void uhci_irq_handler(registers_t* regs) {
     if (st) {
         uhci_writew(UHCI_REG_USBSTS, st);
     }
+
+    uhci_intr_pipes_poll_all();
+
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_hid_devs) / sizeof(g_hid_devs[0])); i++) {
+        if (g_hid_devs[i].present) {
+            uhci_kbd_repeat_tick(&g_hid_devs[i]);
+        }
+    }
+
+    uhci_hub_poll();
 }
 
 static inline uint16_t uhci_port_reg(uint8_t port) {
@@ -2152,7 +2163,7 @@ void uhci_late_init(void) {
     g_uhci_can_sleep = 1;
 
     uhci_writew(UHCI_REG_USBSTS, UHCI_USBSTS_CLEAR_ALL);
-    uhci_writew(UHCI_REG_USBINTR, 0);
+    uhci_writew(UHCI_REG_USBINTR, UHCI_USBINTR_IOC);
     uhci_writew(UHCI_REG_USBCMD, (uint16_t)(UHCI_USBCMD_RUN | UHCI_USBCMD_CF | UHCI_USBCMD_MAXP));
 
     if (g_uhci_irq_line != 0xFFu) {
@@ -2194,4 +2205,16 @@ void uhci_poll(void) {
     }
 
     uhci_hub_poll();
+}
+
+void uhci_periodic_tick(void) {
+    if (!g_uhci_initialized) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_hid_devs) / sizeof(g_hid_devs[0])); i++) {
+        if (g_hid_devs[i].present) {
+            uhci_kbd_repeat_tick(&g_hid_devs[i]);
+        }
+    }
 }
