@@ -98,6 +98,7 @@ private:
 
 static constexpr int kDefaultCols = 80;
 static constexpr int kDefaultRows = 12;
+static constexpr int kMaxHistoryRows = 2000;
 
 struct TermState {
     char* buffer;
@@ -110,6 +111,7 @@ struct TermState {
 
     int history_cap_rows;
     int history_rows;
+    int history_start_row;
 
     uint8_t* dirty_rows;
     int* dirty_x1;
@@ -216,6 +218,7 @@ public:
 
         term.max_row = 0;
         term.history_rows = 1;
+        term.history_start_row = 0;
 
         term.full_redraw = 1;
         term.view_row = 0;
@@ -261,6 +264,7 @@ public:
             term.view_row = 0;
             term.max_row = 0;
             term.history_rows = 1;
+            term.history_start_row = 0;
 
             clear_row_locked(0);
 
@@ -279,7 +283,8 @@ public:
                 return;
             }
 
-            int idx = term.row * cols + term.col;
+            int phys = phys_row(term.row);
+            int idx = phys * cols + term.col;
             uint32_t fg = effective_fg();
             uint32_t bg = effective_bg();
             int remaining = cols - term.col;
@@ -305,7 +310,8 @@ public:
                 return;
             }
 
-            int idx = term.row * cols + term.col;
+            int phys = phys_row(term.row);
+            int idx = phys * cols + term.col;
             term.buffer[idx] = ' ';
             term.fg_colors[idx] = effective_fg();
             term.bg_colors[idx] = effective_bg();
@@ -316,7 +322,8 @@ public:
                 return;
             }
 
-            int idx = term.row * cols + term.col;
+            int phys = phys_row(term.row);
+            int idx = phys * cols + term.col;
             term.buffer[idx] = c;
             term.fg_colors[idx] = effective_fg();
             term.bg_colors[idx] = effective_bg();
@@ -551,10 +558,11 @@ public:
                 have_view = 1;
             }
 
+            int phys = phys_row(r);
             int end = old_cols - 1;
             while (
                 end >= 0
-                && term.buffer[(size_t)r * (size_t)old_cols + (size_t)end] == ' '
+                && term.buffer[(size_t)phys * (size_t)old_cols + (size_t)end] == ' '
             ) {
                 end--;
             }
@@ -585,7 +593,7 @@ public:
                 }
 
                 size_t dst = (size_t)out_r * (size_t)new_cols + (size_t)out_c;
-                size_t src = (size_t)r * (size_t)old_cols + (size_t)c;
+                size_t src = (size_t)phys * (size_t)old_cols + (size_t)c;
 
                 nb_data[dst] = term.buffer[src];
                 nfg_data[dst] = term.fg_colors[src];
@@ -629,6 +637,7 @@ public:
         term.history_cap_rows = cap_rows;
         term.history_rows = out_r + 1;
         term.max_row = term.history_rows - 1;
+        term.history_start_row = 0;
 
         term.view_row = have_view ? new_view_r : term.view_row;
 
@@ -803,7 +812,8 @@ public:
                 continue;
             }
 
-            if (!term.dirty_rows[src_row]) {
+            int phys = phys_row(src_row);
+            if (!term.dirty_rows[phys]) {
                 out_rows[y] = 0;
                 out_x1[y] = cols;
                 out_x2[y] = -1;
@@ -811,8 +821,8 @@ public:
             }
 
             out_rows[y] = 1;
-            out_x1[y] = term.dirty_x1[src_row];
-            out_x2[y] = term.dirty_x2[src_row];
+            out_x1[y] = term.dirty_x1[phys];
+            out_x2[y] = term.dirty_x2[phys];
 
             if (out_x1[y] < 0) {
                 out_x1[y] = 0;
@@ -822,7 +832,7 @@ public:
                 out_x2[y] = cols;
             }
 
-            reset_dirty_row(src_row, cols);
+            reset_dirty_row(phys, cols);
         }
 
         return n;
@@ -840,6 +850,19 @@ public:
     RawBuffer<int> dirty_x1_;
     RawBuffer<int> dirty_x2_;
 
+    int phys_row(int logical_row) const {
+        if (term.history_start_row == 0) {
+            return logical_row;
+        }
+
+        int cap = term.history_cap_rows;
+        if (cap <= 0) {
+            return logical_row;
+        }
+
+        return (term.history_start_row + logical_row) % cap;
+    }
+
 private:
     void sync_term_views() {
         term.buffer = buffer_.data();
@@ -849,6 +872,47 @@ private:
         term.dirty_rows = dirty_rows_.data();
         term.dirty_x1 = dirty_x1_.data();
         term.dirty_x2 = dirty_x2_.data();
+    }
+
+    void advance_ring_locked() {
+        int cap = term.history_cap_rows;
+        if (cap <= 0) {
+            return;
+        }
+
+        int old_start = term.history_start_row;
+        int new_start = (old_start + 1) % cap;
+
+        int cols = term.cols;
+        if (cols <= 0) {
+            cols = kDefaultCols;
+        }
+
+        size_t base = (size_t)new_start * (size_t)cols;
+
+        for (int i = 0; i < cols; i++) {
+            term.buffer[base + i] = ' ';
+            term.fg_colors[base + i] = term.curr_fg;
+            term.bg_colors[base + i] = term.curr_bg;
+        }
+
+        term.dirty_rows[new_start] = 1;
+        term.dirty_x1[new_start] = 0;
+        term.dirty_x2[new_start] = cols;
+
+        term.history_start_row = new_start;
+
+        if (term.view_row > 0) {
+            term.view_row--;
+        }
+
+        if (term.row > 0) {
+            term.row--;
+        }
+
+        if (term.max_row > 0) {
+            term.max_row--;
+        }
     }
 
     int ensure_rows_locked(int need_rows) {
@@ -873,6 +937,18 @@ private:
             return 0;
         }
 
+        if (old_cap >= kMaxHistoryRows) {
+            while (term.history_rows >= kMaxHistoryRows && need_rows > old_cap) {
+                advance_ring_locked();
+                need_rows--;
+            }
+
+            if (need_rows > term.history_rows) {
+                term.history_rows = need_rows;
+            }
+            return 0;
+        }
+
         int new_cap = old_cap ? old_cap : 1;
         while (new_cap < need_rows) {
             int next = new_cap << 1;
@@ -881,6 +957,22 @@ private:
                 break;
             }
             new_cap = next;
+        }
+
+        if (new_cap > kMaxHistoryRows) {
+            new_cap = kMaxHistoryRows;
+        }
+
+        if (new_cap <= old_cap) {
+            while (term.history_rows >= kMaxHistoryRows && need_rows > old_cap) {
+                advance_ring_locked();
+                need_rows--;
+            }
+
+            if (need_rows > term.history_rows) {
+                term.history_rows = need_rows;
+            }
+            return 0;
         }
 
         size_t old_cells = (size_t)old_cap * (size_t)cols;
@@ -971,7 +1063,8 @@ private:
             return;
         }
 
-        if (row < 0 || row >= term.history_cap_rows) {
+        int phys = phys_row(row);
+        if (phys < 0 || phys >= term.history_cap_rows) {
             return;
         }
 
@@ -987,19 +1080,19 @@ private:
             return;
         }
 
-        if (!term.dirty_rows[row]) {
-            term.dirty_rows[row] = 1;
-            term.dirty_x1[row] = x0;
-            term.dirty_x2[row] = x1;
+        if (!term.dirty_rows[phys]) {
+            term.dirty_rows[phys] = 1;
+            term.dirty_x1[phys] = x0;
+            term.dirty_x2[phys] = x1;
             return;
         }
 
-        if (x0 < term.dirty_x1[row]) {
-            term.dirty_x1[row] = x0;
+        if (x0 < term.dirty_x1[phys]) {
+            term.dirty_x1[phys] = x0;
         }
 
-        if (x1 > term.dirty_x2[row]) {
-            term.dirty_x2[row] = x1;
+        if (x1 > term.dirty_x2[phys]) {
+            term.dirty_x2[phys] = x1;
         }
     }
 
@@ -1029,7 +1122,8 @@ private:
             return;
         }
 
-        size_t base = (size_t)row * (size_t)cols + (size_t)x0;
+        int phys = phys_row(row);
+        size_t base = (size_t)phys * (size_t)cols + (size_t)x0;
         uint32_t fg = effective_fg();
         uint32_t bg = effective_bg();
 
@@ -1066,7 +1160,8 @@ private:
             cols = kDefaultCols;
         }
 
-        size_t start = (size_t)row * (size_t)cols;
+        int phys = phys_row(row);
+        size_t start = (size_t)phys * (size_t)cols;
 
         for (int i = 0; i < cols; i++) {
             term.buffer[start + (size_t)i] = ' ';
@@ -1159,6 +1254,7 @@ private:
         term.view_row = 0;
         term.max_row = 0;
         term.history_rows = 1;
+        term.history_start_row = 0;
 
         invalidate_view_locked();
     }
@@ -1935,7 +2031,8 @@ int Term::capture_snapshot(TermSnapshot& out_snapshot) {
             continue;
         }
 
-        size_t row_src = (size_t)src_row * (size_t)cols;
+        int phys = impl_->phys_row(src_row);
+        size_t row_src = (size_t)phys * (size_t)cols;
 
         memcpy(
             dst.buffer + row_dst + (size_t)x0,
@@ -2015,7 +2112,8 @@ int Term::capture_cell(TermSnapshot& snapshot, int rel_row, int col) {
         src_x = src_cols - 1;
     }
 
-    size_t src_i = (size_t)src_row * (size_t)src_cols + (size_t)src_x;
+    int phys = impl_->phys_row(src_row);
+    size_t src_i = (size_t)phys * (size_t)src_cols + (size_t)src_x;
 
     dst.buffer[dst_i] = impl_->term.buffer[src_i];
     dst.fg_colors[dst_i] = impl_->term.fg_colors[src_i];
