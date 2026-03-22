@@ -51,7 +51,9 @@ gcc -O3 tools/yulafs_tool.c -o "$TOOL" &
 
 $ASM src/boot/smp_trampoline.asm bin/smp_trampoline.bin > /dev/null &
 
-wait
+for job in $(jobs -p); do
+    wait $job || exit 1
+done
 
 echo "[kernel] compiling asm..."
 KERNEL_OBJ_FILES=""
@@ -73,6 +75,8 @@ for FILE in $(find src -name "*.c"); do
     FLAT="${REL//\//_}"
     OBJ="bin/obj/${FLAT}.o"
 
+    rm -f "$OBJ"
+
     $CC $CFLAGS_KERN -c "$FILE" -o "$OBJ" &
     KERNEL_OBJ_FILES="$KERNEL_OBJ_FILES $OBJ"
 done
@@ -82,6 +86,8 @@ for FILE in $(find src -name "*.cpp"); do
     REL="${FILE#src/}"
     FLAT="${REL//\//_}"
     OBJ="bin/obj/${FLAT}.o"
+
+    rm -f "$OBJ"
 
     if [[ "${KERNEL_PROFILE:-0}" == "1" && "$FILE" == "src/kernel/profiler.cpp" ]]; then
         $CXX $CXXFLAGS_KERN -fno-instrument-functions -c "$FILE" -o "$OBJ" &
@@ -130,7 +136,9 @@ for APP in "${USER_APPS[@]}"; do
     fi
 done
 
-wait
+for job in $(jobs -p); do
+    wait $job || exit 1
+done
 
 echo "[ld] linking kernel..."
 SORTED_K_OBJS=$(echo $KERNEL_OBJ_FILES | tr ' ' '\n' | sort | tr '\n' ' ')
@@ -168,7 +176,9 @@ for APP in "${USER_APPS[@]}"; do
     ) &
 done
 
-wait
+for job in $(jobs -p); do
+    wait $job || exit 1
+done
 
 if [ ! -f "$DISK_IMG" ]; then
     dd if=/dev/zero of="$DISK_IMG" bs=1M count=40 status=none
