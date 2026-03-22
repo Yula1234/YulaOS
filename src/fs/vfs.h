@@ -62,10 +62,22 @@
 #define VFS_FLAG_EXEC_NODE    0x80000000u
 
 struct vfs_node;
+struct poll_waiter;
+struct task;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * Poll event flags.
+ * These match the standard POLLIN/POLLOUT/POLLERR/POLLHUP values.
+ */
+#define VFS_POLLIN   0x001
+#define VFS_POLLOUT  0x004
+#define VFS_POLLERR  0x008
+#define VFS_POLLHUP  0x010
+#define VFS_POLLNVAL 0x020
 
 typedef struct vfs_ops {
     /*
@@ -92,6 +104,18 @@ typedef struct vfs_ops {
     int (*ioctl)(struct vfs_node* node, uint32_t req, void* arg);
 
     uint32_t (*get_phys_page)(struct vfs_node* node, uint32_t offset);
+
+    /*
+     * Poll operations.
+     *
+     * poll_status: Returns a bitmask of ready events (VFS_POLLIN, VFS_POLLOUT, etc.)
+     *              for the given events mask. Returns 0 if no events are ready.
+     *
+     * poll_register: Registers the waiter with the device's wait queue.
+     *                Returns 0 on success, negative on failure.
+     */
+    int (*poll_status)(struct vfs_node* node, int events);
+    int (*poll_register)(struct vfs_node* node, struct poll_waiter* w, struct task* task);
 } vfs_ops_t;
 
 /* Flags passed to vfs_open/vfs_openat. */

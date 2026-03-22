@@ -918,6 +918,8 @@ static vfs_ops_t yfs_vfs_ops = {
     yfs_close_wrapper,
     0,
     0,
+    0,
+    0,
 };
 
 static percpu_rwspinlock_t g_mount_lock;
