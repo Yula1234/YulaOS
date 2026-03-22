@@ -66,23 +66,7 @@ void poll_waitq_retain(poll_waitq_t* q) {
         return;
     }
 
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&q->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            panic("POLL: waitq_retain after free");
-        }
-
-        if (__atomic_compare_exchange_n(
-                &q->refs,
-                &expected,
-                expected + 1u,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            return;
-        }
-    }
+    __atomic_fetch_add(&q->refs, 1u, __ATOMIC_RELAXED);
 }
 
 void poll_waitq_put(poll_waitq_t* q) {

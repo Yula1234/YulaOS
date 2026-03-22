@@ -910,68 +910,13 @@ void proc_fd_table_init(task_t* t) {
 void proc_fd_table_retain(fd_table_t* ft) {
     if (!ft) return;
 
-    static uint32_t retain_after_free_logs = 0;
-    const auto log_retain_after_free = [&](uint32_t refs_now) {
-        if (retain_after_free_logs >= 32u) {
-            return;
-        }
-
-        retain_after_free_logs++;
-
-        task_t* curr = proc_current();
-        const uint32_t pid = curr ? curr->pid : 0u;
-        const void* ra = __builtin_return_address(0);
-
-        kprintf(
-            "[proc] fd_table_retain after free: ft=%p refs=%u curr=%p pid=%u ra=%p\n",
-            ft,
-            refs_now,
-            curr,
-            pid,
-            ra
-        );
-    };
-
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&ft->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            log_retain_after_free(expected);
-            panic("PROC: fd_table_retain after free");
-        }
-
-        if (__atomic_compare_exchange_n(
-                &ft->refs,
-                &expected,
-                expected + 1u,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            return;
-        }
-    }
+    __atomic_fetch_add(&ft->refs, 1u, __ATOMIC_RELAXED);
 }
 
 void file_desc_retain(file_desc_t* d) {
     if (!d) return;
 
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&d->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            panic("PROC: file_desc_retain after free");
-        }
-
-        if (__atomic_compare_exchange_n(
-                &d->refs,
-                &expected,
-                expected + 1u,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            return;
-        }
-    }
+    __atomic_fetch_add(&d->refs, 1u, __ATOMIC_RELAXED);
 }
 
 void file_desc_release(file_desc_t* d) {
