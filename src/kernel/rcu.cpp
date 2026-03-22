@@ -8,9 +8,7 @@
 #include <hal/lock.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/semaphore.h>
-
-static kernel::atomic<rcu_head_t*> g_rcu_queue_head{nullptr};
-static kernel::atomic<uint32_t> g_rcu_queue_len{0u};
+#include <lib/cpp/lock_guard.h>
 
 static kernel::Semaphore g_rcu_sem{};
 static kernel::atomic<uint32_t> g_rcu_sem_ready{0u};
@@ -24,16 +22,26 @@ extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
 
     head->func = func;
 
-    rcu_head_t* old_head = g_rcu_queue_head.load(kernel::memory_order::relaxed);
+    cpu_t* cpu = cpu_current();
+    if (!cpu) {
+        return;
+    }
+
+    kernel::ScopedIrqDisable irq_guard;
+
+    rcu_head_t* old_head = __atomic_load_n(&cpu->rcu_queue, __ATOMIC_RELAXED);
     do {
         head->next = old_head;
-    } while (!g_rcu_queue_head.compare_exchange_weak(
-        old_head, head,
-        kernel::memory_order::release,
-        kernel::memory_order::relaxed
+    } while (!__atomic_compare_exchange_n(
+        &cpu->rcu_queue,
+        &old_head,
+        head,
+        true,
+        __ATOMIC_RELEASE,
+        __ATOMIC_RELAXED
     ));
 
-    uint32_t len = g_rcu_queue_len.fetch_add(1u, kernel::memory_order::relaxed);
+    uint32_t len = __atomic_fetch_add(&cpu->rcu_qlen, 1u, __ATOMIC_RELAXED);
     if (len == 256u && g_rcu_sem_ready.load(kernel::memory_order::relaxed) != 0u) {
         g_rcu_sem.signal();
     }
@@ -47,8 +55,27 @@ extern "C" void rcu_gc_task(void* arg) {
     for (;;) {
         g_rcu_sem.wait_timeout(timer_ticks + 10u);
 
-        rcu_head_t* list = g_rcu_queue_head.exchange(nullptr, kernel::memory_order::acquire);
-        g_rcu_queue_len.store(0u, kernel::memory_order::relaxed);
+        rcu_head_t* list = nullptr;
+
+        for (int i = 0; i < MAX_CPUS; i++) {
+            if (cpus[i].id == -1) {
+                continue;
+            }
+
+            rcu_head_t* local = __atomic_exchange_n(&cpus[i].rcu_queue, nullptr, __ATOMIC_ACQUIRE);
+            if (!local) {
+                continue;
+            }
+
+            __atomic_store_n(&cpus[i].rcu_qlen, 0u, __ATOMIC_RELAXED);
+
+            while (local) {
+                rcu_head_t* next = local->next;
+                local->next = list;
+                list = local;
+                local = next;
+            }
+        }
 
         if (!list) {
             continue;

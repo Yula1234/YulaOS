@@ -14,6 +14,8 @@
 extern "C" {
 #endif
 
+struct rcu_head;
+
 typedef struct {
     int id;                 // LAPIC ID
     int index; 
@@ -49,6 +51,9 @@ typedef struct {
     volatile int total_task_count;
 
     volatile uint32_t rcu_qs_count;
+
+    struct rcu_head* rcu_queue;
+    volatile uint32_t rcu_qlen;
 
 } __cacheline_aligned cpu_t;
 
