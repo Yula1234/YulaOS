@@ -964,16 +964,12 @@ struct BcacheShard {
          * Perform disk I/O outside meta_lock.
          * Holding the shard writer lock across AHCI I/O would serialize the
          * whole shard on a slow path.
+         *
+         * Read directly into the cache buffer. The entry is protected by
+         * k_flag_io_inflight; no other thread can access it until we call
+         * io_done.signal_all().
          */
-        uint8_t tmp[BLOCK_SIZE];
-
-        DiskIo::read_4k(block_idx, tmp);
-
-        {
-            kernel::RwSpinLockNativeWriteGuard data_guard(created->data_lock);
-
-            memcpy(created->data, tmp, BLOCK_SIZE);
-        }
+        DiskIo::read_4k(block_idx, created->data);
 
         created->flags.fetch_or(
             k_flag_valid | k_flag_accessed,
@@ -1000,15 +996,12 @@ static void bcache_prefetch_worker(void*) {
             continue;
         }
 
-        uint8_t tmp[BLOCK_SIZE];
-
-        DiskIo::read_4k(e->block_idx, tmp);
-
-        {
-            kernel::RwSpinLockNativeWriteGuard data_guard(e->data_lock);
-
-            memcpy(e->data, tmp, BLOCK_SIZE);
-        }
+        /*
+         * Read directly into the cache buffer.
+         * The entry is protected by k_flag_io_inflight; no other thread can
+         * access it until we call io_done.signal_all().
+         */
+        DiskIo::read_4k(e->block_idx, e->data);
 
         e->flags.fetch_or(
             k_flag_valid | k_flag_accessed,
