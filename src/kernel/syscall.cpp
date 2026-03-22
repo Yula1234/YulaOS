@@ -1765,28 +1765,46 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
     }
 
+    constexpr uint32_t POLL_STACK_FAST_PATH = 8;
+
+    pollfd_t stack_fds[POLL_STACK_FAST_PATH];
+    poll_waiter_t stack_waiters[POLL_STACK_FAST_PATH];
+    file_desc_t* stack_descs[POLL_STACK_FAST_PATH];
+
     pollfd_t* k_fds = 0;
     poll_waiter_t* waiters = 0;
     file_desc_t** active_descs = 0;
 
+    bool use_heap = (nfds > POLL_STACK_FAST_PATH);
+
     if (nfds > 0) {
-        k_fds = (pollfd_t*)kmalloc(bytes);
-        waiters = (poll_waiter_t*)kmalloc((uint32_t)sizeof(poll_waiter_t) * nfds);
-        active_descs = (file_desc_t**)kmalloc((uint32_t)sizeof(file_desc_t*) * nfds);
-        if (!k_fds || !waiters || !active_descs) {
-            if (k_fds) kfree(k_fds);
-            if (waiters) kfree(waiters);
-            if (active_descs) kfree(active_descs);
-            regs->eax = (uint32_t)-1;
-            return;
+        if (use_heap) {
+            k_fds = (pollfd_t*)kmalloc(bytes);
+            waiters = (poll_waiter_t*)kmalloc((uint32_t)sizeof(poll_waiter_t) * nfds);
+            active_descs = (file_desc_t**)kmalloc((uint32_t)sizeof(file_desc_t*) * nfds);
+            if (!k_fds || !waiters || !active_descs) {
+                if (k_fds) kfree(k_fds);
+                if (waiters) kfree(waiters);
+                if (active_descs) kfree(active_descs);
+                regs->eax = (uint32_t)-1;
+                return;
+            }
+            memset(active_descs, 0, (uint32_t)sizeof(file_desc_t*) * nfds);
+            memset(waiters, 0, (uint32_t)sizeof(poll_waiter_t) * nfds);
+        } else {
+            k_fds = stack_fds;
+            waiters = stack_waiters;
+            active_descs = stack_descs;
+            memset(active_descs, 0, nfds * sizeof(file_desc_t*));
+            memset(waiters, 0, nfds * sizeof(poll_waiter_t));
         }
-        memset(active_descs, 0, (uint32_t)sizeof(file_desc_t*) * nfds);
-        memset(waiters, 0, (uint32_t)sizeof(poll_waiter_t) * nfds);
 
         if (uaccess_copy_from_user(k_fds, u_fds, bytes) != 0) {
-            kfree(k_fds);
-            kfree(waiters);
-            kfree(active_descs);
+            if (use_heap) {
+                kfree(k_fds);
+                kfree(waiters);
+                kfree(active_descs);
+            }
             regs->eax = (uint32_t)-1;
             return;
         }
@@ -1814,6 +1832,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
     };
 
     int result = 0;
+
     for (;;) {
         if (waiters) {
             for (uint32_t i = 0; i < nfds; i++) {
@@ -1831,19 +1850,17 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         if (curr->pending_signals != 0) {
             unblock_curr(curr);
             result = -2;
-            break;
+            goto out;
         }
 
         if (nfds == 0) {
             if (timeout_ms == 0) {
                 unblock_curr(curr);
-                result = 0;
-                break;
+                goto out;
             }
             if (have_deadline && timer_ticks >= end_tick) {
                 unblock_curr(curr);
-                result = 0;
-                break;
+                goto out;
             }
 
             if (have_deadline) {
@@ -1852,7 +1869,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                 if (proc_change_state(curr, TASK_WAITING) != 0) {
                     unblock_curr(curr);
                     result = -2;
-                    break;
+                    goto out;
                 }
                 sched_yield();
             }
@@ -1896,7 +1913,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         if (proc_change_state(curr, TASK_WAITING) != 0) {
             unblock_curr(curr);
             result = -2;
-            break;
+            goto out;
         }
         __sync_synchronize();
 
@@ -1932,19 +1949,17 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         if (ready > 0) {
             unblock_curr(curr);
             result = ready;
-            break;
+            goto out;
         }
 
         if (timeout_ms == 0) {
             unblock_curr(curr);
-            result = 0;
-            break;
+            goto out;
         }
 
         if (have_deadline && timer_ticks >= end_tick) {
             unblock_curr(curr);
-            result = 0;
-            break;
+            goto out;
         }
 
         if (have_deadline) {
@@ -1958,13 +1973,13 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
     }
 
+out:
     if (waiters) {
         for (uint32_t i = 0; i < nfds; i++) {
             poll_waitq_unregister(&waiters[i]);
 
             if (active_descs && active_descs[i]) {
                 file_desc_release(active_descs[i]);
-                active_descs[i] = 0;
             }
         }
     }
@@ -1981,9 +1996,11 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
     }
 
-    if (k_fds) kfree(k_fds);
-    if (waiters) kfree(waiters);
-    if (active_descs) kfree(active_descs);
+    if (use_heap) {
+        if (k_fds) kfree(k_fds);
+        if (waiters) kfree(waiters);
+        if (active_descs) kfree(active_descs);
+    }
 
     regs->eax = (uint32_t)result;
 }
