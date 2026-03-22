@@ -842,14 +842,16 @@ void proc_fd_table_init(task_t* t) {
     rwspinlock_init(&ft->lock);
     
     ft->max_fds = 32;
-    ft->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft->max_fds));
+    ft->fds = static_cast<rcu_ptr_t*>(kmalloc(sizeof(rcu_ptr_t) * ft->max_fds));
     if (!ft->fds) {
         kfree(ft);
         t->fd_table = 0;
         return;
     }
 
-    memset(ft->fds, 0, sizeof(file_desc_t*) * ft->max_fds);
+    for (uint32_t i = 0; i < ft->max_fds; i++) {
+        rcu_ptr_init(&ft->fds[i]);
+    }
     
     ft->fd_next = 0;
     t->fd_table = ft;
@@ -1008,10 +1010,12 @@ void proc_fd_table_release(fd_table_t* ft) {
     }
 
     if (ft->fds) {
+        synchronize_rcu();
+
         for (uint32_t i = 0; i < ft->max_fds; i++) {
-            if (ft->fds[i]) {
-                file_desc_release(ft->fds[i]);
-                ft->fds[i] = 0;
+            file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[i]));
+            if (d) {
+                file_desc_release(d);
             }
         }
 
@@ -1028,21 +1032,20 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return 0;
 
-    kernel::RwSpinLockNativeReadGuard guard(ft->lock);
-    
-    file_desc_t* out = 0;
-    if ((uint32_t)fd < ft->max_fds && ft->fds) {
-        out = ft->fds[fd];
-    }
+    if ((uint32_t)fd >= ft->max_fds) return 0;
 
+    rcu_read_lock();
+    file_desc_t* out = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
     if (out) {
         file_desc_retain(out);
     }
+    rcu_read_unlock();
 
     return out;
 }
 
-static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
+static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd, rcu_ptr_t** out_old_fds) {
+    if (out_old_fds) *out_old_fds = nullptr;
     if (required_fd < ft->max_fds) return 0;
     
     uint32_t new_cap = ft->max_fds ? ft->max_fds : 32;
@@ -1050,24 +1053,31 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd) {
         if (new_cap >= proc::detail::fd_table_cap_limit) {
             return -1;
         }
-
         new_cap *= 2;
     }
     
-    file_desc_t** new_fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * new_cap));
+    rcu_ptr_t* new_fds = static_cast<rcu_ptr_t*>(kmalloc(sizeof(rcu_ptr_t) * new_cap));
     if (!new_fds) {
         return -1;
     }
     
-    memset(new_fds, 0, sizeof(file_desc_t*) * new_cap);
-    if (ft->fds) {
-        memcpy(new_fds, ft->fds, sizeof(file_desc_t*) * ft->max_fds);
+    for (uint32_t i = 0; i < new_cap; i++) {
+        rcu_ptr_init(&new_fds[i]);
+    }
 
-        kfree(ft->fds);
+    rcu_ptr_t* old_fds = ft->fds;
+
+    if (old_fds) {
+        for (uint32_t i = 0; i < ft->max_fds; i++) {
+            rcu_ptr_assign(&new_fds[i], rcu_ptr_read(&old_fds[i]));
+        }
     }
     
     ft->fds = new_fds;
     ft->max_fds = new_cap;
+
+    if (out_old_fds) *out_old_fds = old_fds;
+
     return 0;
 }
 
@@ -1078,34 +1088,39 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
-    
-    if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
-        return -1;
+    rcu_ptr_t* old_fds = nullptr;
+    int ret = -1;
+    file_desc_t* d = nullptr;
+
+    {
+        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        
+        if (fd_table_ensure_cap(ft, (uint32_t)fd, &old_fds) == 0) {
+            if (!rcu_ptr_read(&ft->fds[fd])) {
+                d = static_cast<file_desc_t*>(kmalloc(sizeof(*d)));
+                if (d) {
+                    memset(d, 0, sizeof(*d));
+                    d->refs = 1;
+                    spinlock_init(&d->lock);
+
+                    rcu_ptr_assign(&ft->fds[fd], d);
+
+                    if (fd >= ft->fd_next) {
+                        ft->fd_next = fd + 1;
+                    }
+                    
+                    if (out_desc) *out_desc = d;
+                    ret = fd;
+                }
+            }
+        }
     }
 
-    if (ft->fds[fd]) {
-        return -1;
+    if (old_fds) {
+        synchronize_rcu();
+        kfree(old_fds);
     }
-
-    file_desc_t* d = static_cast<file_desc_t*>(kmalloc(sizeof(*d)));
-    if (!d) {
-        return -1;
-    }
-
-    memset(d, 0, sizeof(*d));
-
-    d->refs = 1;
-    spinlock_init(&d->lock);
-
-    ft->fds[fd] = d;
-
-    if (fd >= ft->fd_next) {
-        ft->fd_next = fd + 1;
-    }
-    
-    if (out_desc) *out_desc = d;
-    return fd;
+    return ret;
 }
 
 int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
@@ -1114,24 +1129,31 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
-    
-    if (fd_table_ensure_cap(ft, (uint32_t)fd) != 0) {
-        return -1;
+    rcu_ptr_t* old_fds = nullptr;
+    int ret = -1;
+
+    {
+        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        
+        if (fd_table_ensure_cap(ft, (uint32_t)fd, &old_fds) == 0) {
+            if (!rcu_ptr_read(&ft->fds[fd])) {
+                rcu_ptr_assign(&ft->fds[fd], desc);
+                file_desc_retain(desc);
+
+                if (fd >= ft->fd_next) {
+                    ft->fd_next = fd + 1;
+                }
+                
+                ret = fd;
+            }
+        }
     }
 
-    if (ft->fds[fd]) {
-        return -1;
+    if (old_fds) {
+        synchronize_rcu();
+        kfree(old_fds);
     }
-
-    ft->fds[fd] = desc;
-    file_desc_retain(desc);
-
-    if (fd >= ft->fd_next) {
-        ft->fd_next = fd + 1;
-    }
-    
-    return fd;
+    return ret;
 }
 
 int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
@@ -1142,6 +1164,8 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     if (!ft) return -1;
 
     int found = -1;
+    rcu_ptr_t* old_fds = nullptr;
+    file_desc_t* d = nullptr;
 
     {
         kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
@@ -1155,7 +1179,7 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
         uint32_t start = (uint32_t)expected;
 
         for (uint32_t i = start; i < limit; i++) {
-            if (ft->fds[i] == 0) {
+            if (!rcu_ptr_read(&ft->fds[i])) {
                 found = (int)i;
                 break;
             }
@@ -1163,7 +1187,7 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
 
         if (found == -1 && start > 0) {
             for (uint32_t i = 0; i < start; i++) {
-                if (ft->fds[i] == 0) {
+                if (!rcu_ptr_read(&ft->fds[i])) {
                     found = (int)i;
                     break;
                 }
@@ -1172,15 +1196,34 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
 
         if (found == -1) {
             found = (int)limit;
-            if (fd_table_ensure_cap(ft, limit) != 0) {
-                return -1;
+            if (fd_table_ensure_cap(ft, limit, &old_fds) != 0) {
+                found = -1;
             }
         }
 
-        ft->fd_next = found + 1;
+        if (found != -1) {
+            d = static_cast<file_desc_t*>(kmalloc(sizeof(*d)));
+            if (d) {
+                memset(d, 0, sizeof(*d));
+                d->refs = 1;
+                spinlock_init(&d->lock);
+
+                rcu_ptr_assign(&ft->fds[found], d);
+                ft->fd_next = found + 1;
+            } else {
+                found = -1;
+            }
+        }
     }
 
-    return proc_fd_add_at(t, found, out_desc);
+    if (old_fds) {
+        synchronize_rcu();
+        kfree(old_fds);
+    }
+    
+    if (found == -1) return -1;
+    if (out_desc) *out_desc = d;
+    return found;
 }
 
 int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
@@ -1190,20 +1233,32 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     fd_table_t* ft = t->fd_table;
     if (!ft) return -1;
 
-    kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
-    
-    if ((uint32_t)fd >= ft->max_fds || !ft->fds || !ft->fds[fd]) {
-        return -1;
+    file_desc_t* d = nullptr;
+
+    {
+        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        
+        if ((uint32_t)fd >= ft->max_fds || !ft->fds) {
+            return -1;
+        }
+
+        d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
+        if (!d) {
+            return -1;
+        }
+
+        rcu_ptr_assign(&ft->fds[fd], nullptr);
+
+        if (fd < ft->fd_next) {
+            ft->fd_next = fd;
+        }
     }
 
-    file_desc_t* d = ft->fds[fd];
-    ft->fds[fd] = 0;
-
-    if (fd < ft->fd_next) {
-        ft->fd_next = fd;
-    }
+    synchronize_rcu();
 
     if (out_desc) *out_desc = d;
+    else file_desc_release(d);
+
     return 0;
 }
 
@@ -1222,18 +1277,22 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     kernel::RwSpinLockNativeReadGuard src_guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
-    ft.get()->fds = static_cast<file_desc_t**>(kmalloc(sizeof(file_desc_t*) * ft.get()->max_fds));
+    ft.get()->fds = static_cast<rcu_ptr_t*>(kmalloc(sizeof(rcu_ptr_t) * ft.get()->max_fds));
     if (!ft.get()->fds) {
         return 0;
     }
-    memset(ft.get()->fds, 0, sizeof(file_desc_t*) * ft.get()->max_fds);
+
+    for (uint32_t i = 0; i < ft.get()->max_fds; i++) {
+        rcu_ptr_init(&ft.get()->fds[i]);
+    }
     
     ft.get()->fd_next = src->fd_next;
 
     for (uint32_t i = 0; i < ft.get()->max_fds; i++) {
-        if (src->fds[i]) {
-            ft.get()->fds[i] = src->fds[i];
-            file_desc_retain(ft.get()->fds[i]);
+        file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&src->fds[i]));
+        if (d) {
+            rcu_ptr_assign(&ft.get()->fds[i], d);
+            file_desc_retain(d);
         }
     }
 
@@ -1664,7 +1723,7 @@ void proc_kill(task_t* t) {
     }
 
     {
-        kernel::SpinLockNativeSafeGuard guard(proc::detail::g_zombie_lock);
+        kernel::SpinLockNativeGuard guard(proc::detail::g_zombie_lock);
 
         t->zombie_next = proc::detail::g_zombie_head;
         proc::detail::g_zombie_head = t;
@@ -2305,7 +2364,6 @@ void reaper_task_func(void* arg) {
     while (1) {
         task_t* list = nullptr;
         {
-            kernel::ScopedIrqDisable irq_guard;
             spinlock_acquire(&proc::detail::g_zombie_lock);
 
             list = proc::detail::g_zombie_head;
@@ -2365,7 +2423,6 @@ void reaper_task_func(void* arg) {
             }
 
             {
-                kernel::ScopedIrqDisable irq_guard;
                 spinlock_acquire(&proc::detail::g_zombie_lock);
 
                 tail->zombie_next = proc::detail::g_zombie_head;

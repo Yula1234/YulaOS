@@ -11,6 +11,7 @@
 #include <lib/rbtree.h>
 #include <yos/proc.h>
 
+#include <kernel/rcu.h>
 #include <mm/vma.h>
 
 #include <stdint.h>
@@ -95,7 +96,7 @@ typedef enum {
 typedef struct fd_table {
     uint32_t refs;
     rwspinlock_t lock;
-    struct file_desc** fds;
+    rcu_ptr_t* fds;
     uint32_t max_fds;
     int fd_next;
 } fd_table_t;
