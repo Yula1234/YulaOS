@@ -3,84 +3,12 @@
 
 #include "poll_waitq.h"
 #include <kernel/proc.h>
-#include <kernel/output/kprintf.h>
 #include <kernel/panic.h>
 #include <hal/lock.h>
 
 extern "C" {
 
 static spinlock_t g_poll_global_lock = {0};
-
-#define POLL_WAITQ_DIAG 1
-
-#define POLL_WAITQ_DIAG_MAX_PER_EVENT 32u
-
-enum class PollWaitqDiagEvent : uint32_t {
-    RegisterNotClean,
-    RegisterRetainFailed,
-    UnregisterQNodeUnlinkFailed,
-    UnregisterTaskNodeUnlinkFailed,
-    DetachAllQNodeUnlinkFailed,
-    DetachAllTaskNodeUnlinkFailed,
-    TaskCleanupQNodeUnlinkFailed,
-    TaskCleanupTaskNodeUnlinkFailed,
-    Count,
-};
-
-static uint32_t g_poll_waitq_diag_counts[(uint32_t)PollWaitqDiagEvent::Count] = {};
-
-static int poll_waitq_diag_should_log(PollWaitqDiagEvent ev) {
-    const uint32_t idx = (uint32_t)ev;
-
-    if (idx >= (uint32_t)PollWaitqDiagEvent::Count) {
-        return 0;
-    }
-
-    uint32_t& c = g_poll_waitq_diag_counts[idx];
-
-    if (c >= POLL_WAITQ_DIAG_MAX_PER_EVENT) {
-        return 0;
-    }
-
-    c++;
-    return 1;
-}
-
-static void poll_waitq_diag_print_waiter(const char* tag, const poll_waiter_t* w) {
-    if (!w) {
-        kprintf("[poll_waitq] %s w=null\n", tag ? tag : "?");
-        return;
-    }
-
-    kprintf(
-        "[poll_waitq] %s w=%p task=%p q=%p qn(prev=%p,next=%p) tn(prev=%p,next=%p)\n",
-        tag ? tag : "?",
-        w,
-        w->task,
-        w->q,
-        w->q_node.prev,
-        w->q_node.next,
-        w->task_node.prev,
-        w->task_node.next
-    );
-}
-
-static void poll_waitq_diag_print_queue(const char* tag, const poll_waitq_t* q) {
-    if (!q) {
-        kprintf("[poll_waitq] %s q=null\n", tag ? tag : "?");
-        return;
-    }
-
-    const dlist_head_t* head = &q->waiters;
-    kprintf(
-        "[poll_waitq] %s q=%p head=%p head(prev=%p,next=%p)\n",
-        tag ? tag : "?",
-        q,
-        head,
-        head->prev,
-        head->next
-    );
-}
 
 static int poll_waitq_waiter_is_clean(const poll_waiter_t* w) {
     if (!w) {
@@ -205,25 +133,11 @@ int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
     uint32_t flags = spinlock_acquire_safe(&g_poll_global_lock);
 
     if (!poll_waitq_waiter_is_clean(w)) {
-#if POLL_WAITQ_DIAG
-        if (poll_waitq_diag_should_log(PollWaitqDiagEvent::RegisterNotClean)) {
-            poll_waitq_diag_print_waiter("register: waiter not clean", w);
-            poll_waitq_diag_print_queue("register: queue", q);
-            kprintf("[poll_waitq] register: task=%p pid=%u\n", task, task->pid);
-        }
-#endif
         spinlock_release_safe(&g_poll_global_lock, flags);
         return -1;
     }
 
     if (!proc_task_retain(task)) {
-#if POLL_WAITQ_DIAG
-        if (poll_waitq_diag_should_log(PollWaitqDiagEvent::RegisterRetainFailed)) {
-            poll_waitq_diag_print_waiter("register: task retain failed", w);
-            poll_waitq_diag_print_queue("register: queue", q);
-            kprintf("[poll_waitq] register: task=%p pid=%u\n", task, task->pid);
-        }
-#endif
         spinlock_release_safe(&g_poll_global_lock, flags);
         return -1;
     }
@@ -251,12 +165,6 @@ void poll_waitq_unregister(poll_waiter_t* w) {
 
     if (q) {
         if (!poll_waitq_try_unlink_node(&w->q_node)) {
-#if POLL_WAITQ_DIAG
-            if (poll_waitq_diag_should_log(PollWaitqDiagEvent::UnregisterQNodeUnlinkFailed)) {
-                poll_waitq_diag_print_waiter("unregister: q_node unlink failed", w);
-                poll_waitq_diag_print_queue("unregister: queue", q);
-            }
-#endif
         }
 
         w->q = nullptr;
@@ -264,12 +172,6 @@ void poll_waitq_unregister(poll_waiter_t* w) {
 
     if (task) {
         if (!poll_waitq_try_unlink_node(&w->task_node)) {
-#if POLL_WAITQ_DIAG
-            if (poll_waitq_diag_should_log(PollWaitqDiagEvent::UnregisterTaskNodeUnlinkFailed)) {
-                poll_waitq_diag_print_waiter("unregister: task_node unlink failed", w);
-                kprintf("[poll_waitq] unregister: task=%p pid=%u\n", task, task->pid);
-            }
-#endif
         }
 
         w->task = nullptr;
@@ -310,12 +212,6 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
 
         if (task) {
             if (!poll_waitq_try_unlink_node(&w->task_node)) {
-#if POLL_WAITQ_DIAG
-                if (poll_waitq_diag_should_log(PollWaitqDiagEvent::DetachAllTaskNodeUnlinkFailed)) {
-                    poll_waitq_diag_print_waiter("detach_all: task_node unlink failed", w);
-                    kprintf("[poll_waitq] detach_all: task=%p pid=%u\n", task, task->pid);
-                }
-#endif
             }
 
             w->task = nullptr;
@@ -323,12 +219,6 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
         }
 
         if (!poll_waitq_try_unlink_node(&w->q_node)) {
-#if POLL_WAITQ_DIAG
-            if (poll_waitq_diag_should_log(PollWaitqDiagEvent::DetachAllQNodeUnlinkFailed)) {
-                poll_waitq_diag_print_waiter("detach_all: q_node unlink failed", w);
-                poll_waitq_diag_print_queue("detach_all: queue", q);
-            }
-#endif
         }
 
         w->q = nullptr;
@@ -350,25 +240,12 @@ void poll_task_cleanup(struct task* task) {
 
         if (q) {
             if (!poll_waitq_try_unlink_node(&w->q_node)) {
-#if POLL_WAITQ_DIAG
-                if (poll_waitq_diag_should_log(PollWaitqDiagEvent::TaskCleanupQNodeUnlinkFailed)) {
-                    poll_waitq_diag_print_waiter("task_cleanup: q_node unlink failed", w);
-                    poll_waitq_diag_print_queue("task_cleanup: queue", q);
-                    kprintf("[poll_waitq] task_cleanup: task=%p pid=%u\n", task, task->pid);
-                }
-#endif
             }
 
             w->q = nullptr;
         }
 
         if (!poll_waitq_try_unlink_node(&w->task_node)) {
-#if POLL_WAITQ_DIAG
-            if (poll_waitq_diag_should_log(PollWaitqDiagEvent::TaskCleanupTaskNodeUnlinkFailed)) {
-                poll_waitq_diag_print_waiter("task_cleanup: task_node unlink failed", w);
-                kprintf("[poll_waitq] task_cleanup: task=%p pid=%u\n", task, task->pid);
-            }
-#endif
         }
         
         if (w->task) {

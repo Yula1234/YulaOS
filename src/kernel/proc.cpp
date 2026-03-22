@@ -1503,23 +1503,6 @@ void proc_free_resources(task_t* t) {
     }
 
     if (t->fd_table) {
-        static uint32_t free_resources_fd_table_logs = 0;
-        if (free_resources_fd_table_logs < 32u) {
-            free_resources_fd_table_logs++;
-
-            const uint32_t refs_now = __atomic_load_n(&t->fd_table->refs, __ATOMIC_RELAXED);
-            const void* ra = __builtin_return_address(0);
-
-            kprintf(
-                "[proc] free_resources: t=%p pid=%u fd_table=%p refs=%u ra=%p\n",
-                t,
-                t->pid,
-                t->fd_table,
-                refs_now,
-                ra
-            );
-        }
-
         proc_fd_table_release(t->fd_table);
         t->fd_table = 0;
     }
