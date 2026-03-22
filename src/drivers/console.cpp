@@ -140,6 +140,8 @@ vfs_ops_t console_ops = {
     0,
     console_vfs_ioctl,
     0,
+    0,
+    0,
 };
 
 vfs_node_t console_node = {

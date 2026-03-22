@@ -562,6 +562,8 @@ static vfs_ops_t shm_ops = {
     .close = shm_close,
     .ioctl = 0,
     .get_phys_page = shm_get_phys_page,
+    .poll_status = 0,
+    .poll_register = 0,
 };
 
 }
