@@ -14,6 +14,8 @@
 #include <hal/irq.h>
 #include <hal/lock.h>
 
+#include <lib/string.h>
+
 #include <drivers/cdev.h>
 #include <drivers/driver.h>
 
@@ -104,6 +106,30 @@ int kbd_poll_ready(task_t* task) {
 int kbd_poll_waitq_register(poll_waiter_t* w, task_t* task) {
     if (!w || !task) return -1;
     return poll_waitq_register(&kbd_poll_waitq, w, task);
+}
+
+static int kbd_vfs_poll_status(vfs_node_t* node, int events) {
+    (void)node;
+
+    if ((events & VFS_POLLIN) == 0) {
+        return 0;
+    }
+
+    task_t* curr = proc_current();
+    if (!curr) {
+        return 0;
+    }
+
+    if (kbd_poll_ready(curr)) {
+        return VFS_POLLIN;
+    }
+
+    return 0;
+}
+
+static int kbd_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* task) {
+    (void)node;
+    return kbd_poll_waitq_register(w, task);
 }
 
 void kbd_poll_notify_focus_change(void) {
@@ -454,6 +480,17 @@ static int kbd_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* 
     }
 }
 
+static vfs_ops_t kbd_ops = {
+    .read = kbd_vfs_read,
+    .write = 0,
+    .open = 0,
+    .close = 0,
+    .ioctl = 0,
+    .get_phys_page = 0,
+    .poll_status = kbd_vfs_poll_status,
+    .poll_register = kbd_vfs_poll_register,
+};
+
 static cdevice_t g_kbd_cdev = {
     .dev = {
         .driver = 0,
@@ -461,11 +498,12 @@ static cdevice_t g_kbd_cdev = {
         .flags = 0u,
         .private_data = 0,
     },
-    .ops = { .read = kbd_vfs_read },
+    .ops = {0},
     .node_template = { .name = "kbd", .ops = 0, .size = 0u },
 };
 
 static int kbd_driver_init(void) {
+    memcpy(&g_kbd_cdev.ops, &kbd_ops, sizeof(vfs_ops_t));
     g_kbd_cdev.node_template.ops = &g_kbd_cdev.ops;
     return cdevice_register(&g_kbd_cdev);
 }
