@@ -919,12 +919,58 @@ static int pty_close(vfs_node_t* node) {
     return 0;
 }
 
+static int pty_vfs_poll_status(vfs_node_t* node, int events) {
+    if (!node) {
+        return 0;
+    }
+
+    if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) {
+        return 0;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)node->private_data;
+    if (!p) {
+        return VFS_POLLHUP;
+    }
+
+    uint32_t avail = 0;
+    uint32_t space = 0;
+    int peer_open = 0;
+
+    if (pty_poll_info(node, &avail, &space, &peer_open) != 0) {
+        return VFS_POLLERR;
+    }
+
+    int rev = 0;
+
+    if ((events & VFS_POLLIN) && avail > 0) {
+        rev |= VFS_POLLIN;
+    }
+
+    if ((events & VFS_POLLOUT) && peer_open > 0 && space > 0) {
+        rev |= VFS_POLLOUT;
+    }
+
+    if (peer_open == 0) {
+        rev |= VFS_POLLHUP;
+    }
+
+    return rev;
+}
+
+static int pty_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, struct task* task) {
+    return pty_poll_waitq_register(node, w, task);
+}
+
 static vfs_ops_t pty_master_ops = {
     .read = pty_master_read,
     .write = pty_master_write,
     .open = pty_master_open,
     .close = pty_close,
     .ioctl = pty_ioctl,
+    .get_phys_page = 0,
+    .poll_status = pty_vfs_poll_status,
+    .poll_register = pty_vfs_poll_register,
 };
 
 static vfs_ops_t pty_slave_ops = {
@@ -933,6 +979,9 @@ static vfs_ops_t pty_slave_ops = {
     .open = pty_slave_open,
     .close = pty_close,
     .ioctl = pty_ioctl,
+    .get_phys_page = 0,
+    .poll_status = pty_vfs_poll_status,
+    .poll_register = pty_vfs_poll_register,
 };
 
 static int pty_ptmx_open(vfs_node_t* node) {
