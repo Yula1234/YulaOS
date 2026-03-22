@@ -39,7 +39,14 @@
 #include "elf.h"
 #include <kernel/smp/cpu.h>
 
-#define PID_MAP_BUCKETS 256
+#define PID_L2_BITS 10
+#define PID_L1_BITS 12
+
+#define PID_L2_SIZE (1 << PID_L2_BITS)
+#define PID_L1_SIZE (1 << PID_L1_BITS)
+#define MAX_PID     ((1 << (PID_L1_BITS + PID_L2_BITS)) - 1)
+
+#define PGROUP_MAP_BUCKETS 256
 
 #define EI_CLASS 4
 #define EI_DATA 5
@@ -102,7 +109,7 @@ struct ProcGroup {
     kernel::atomic<uint32_t> refs{0u};
 };
 
-static HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS> pgroups;
+static HashMap<uint32_t, ProcGroup*, PGROUP_MAP_BUCKETS> pgroups;
 
 static inline void pgroup_ref(ProcGroup* g) {
     if (!g) {
@@ -173,11 +180,11 @@ static ProcGroup* pgroup_get_or_create(uint32_t pgid) {
         group->refs.store(2u, kernel::memory_order::relaxed);
 
         const auto res = pgroups.insert_unique_ex(pgid, group);
-        if (res == HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS>::InsertUniqueResult::Inserted) {
+        if (res == HashMap<uint32_t, ProcGroup*, PGROUP_MAP_BUCKETS>::InsertUniqueResult::Inserted) {
             return group;
         }
 
-        if (res == HashMap<uint32_t, ProcGroup*, PID_MAP_BUCKETS>::InsertUniqueResult::AlreadyPresent) {
+        if (res == HashMap<uint32_t, ProcGroup*, PGROUP_MAP_BUCKETS>::InsertUniqueResult::AlreadyPresent) {
             kfree(group);
             continue;
         }
@@ -522,7 +529,16 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
 static kernel::atomic<task_t*> g_zombie_head{nullptr};
 static kernel::Semaphore g_zombie_sem{};
 
-static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
+struct PidL2Node {
+    rcu_ptr_t tasks[PID_L2_SIZE];
+};
+
+struct PidL1Node {
+    rcu_ptr_t leaves[PID_L1_SIZE];
+};
+
+static PidL1Node g_pid_map;
+static spinlock_t g_pid_write_lock;
 
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
@@ -712,22 +728,54 @@ private:
 };
 
 static void pid_map_insert(uint32_t pid, task_t* t) {
-    if (!t) return;
+    if (!t || pid == 0 || pid > MAX_PID) {
+        return;
+    }
+
+    const uint32_t l1_idx = pid >> PID_L2_BITS;
+    const uint32_t l2_idx = pid & (PID_L2_SIZE - 1);
+
+    kernel::SpinLockNativeGuard guard(g_pid_write_lock);
+
+    PidL2Node* l2 = static_cast<PidL2Node*>(rcu_ptr_read(&g_pid_map.leaves[l1_idx]));
+
+    if (!l2) {
+        l2 = static_cast<PidL2Node*>(kmalloc(sizeof(PidL2Node)));
+        if (!l2) {
+            return;
+        }
+
+        memset(l2, 0, sizeof(PidL2Node));
+        rcu_ptr_assign(&g_pid_map.leaves[l1_idx], l2);
+    }
 
     if (!::proc_task_retain(t)) {
         return;
     }
 
-    const auto res = pid_map.insert_unique_ex(pid, t);
-    if (res != decltype(pid_map)::InsertUniqueResult::Inserted) {
-        ::proc_task_put(t);
-    }
+    rcu_ptr_assign(&l2->tasks[l2_idx], t);
 }
 
 static void pid_map_remove(uint32_t pid) {
-    task_t* removed = nullptr;
-    if (!pid_map.remove_and_get(pid, removed)) {
+    if (pid == 0 || pid > MAX_PID) {
         return;
+    }
+
+    const uint32_t l1_idx = pid >> PID_L2_BITS;
+    const uint32_t l2_idx = pid & (PID_L2_SIZE - 1);
+
+    task_t* removed = nullptr;
+
+    {
+        kernel::SpinLockNativeGuard guard(g_pid_write_lock);
+
+        PidL2Node* l2 = static_cast<PidL2Node*>(rcu_ptr_read(&g_pid_map.leaves[l1_idx]));
+        if (l2) {
+            removed = static_cast<task_t*>(rcu_ptr_read(&l2->tasks[l2_idx]));
+            if (removed) {
+                rcu_ptr_assign(&l2->tasks[l2_idx], nullptr);
+            }
+        }
     }
 
     if (removed) {
@@ -804,6 +852,9 @@ void proc_init(void) {
     proc::detail::g_zombie_head.store(nullptr, kernel::memory_order::relaxed);
 
     percpu_rwspinlock_init(&proc::detail::task_list_lock);
+
+    spinlock_init(&proc::detail::g_pid_write_lock);
+    memset(&proc::detail::g_pid_map, 0, sizeof(proc::detail::g_pid_map));
 
     proc::detail::all_tasks.clear_links_unsafe();
 
@@ -1307,26 +1358,32 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
 }
 
 task_t* proc_find_by_pid(uint32_t pid) {
-    task_t* out = nullptr;
-
-    if (!proc::detail::pid_map.with_value_locked(
-        pid,
-        [&out](task_t* t) -> bool {
-            if (!t || t->state == TASK_UNUSED) {
-                return false;
-            }
-
-            if (!proc_task_retain(t)) {
-                return false;
-            }
-            out = t;
-            return true;
-        }
-    )) {
+    if (pid == 0 || pid > MAX_PID) {
         return nullptr;
     }
 
-    return out;
+    const uint32_t l1_idx = pid >> PID_L2_BITS;
+    const uint32_t l2_idx = pid & (PID_L2_SIZE - 1);
+
+    kernel::RcuReadGuard rcu_guard;
+
+    proc::detail::PidL2Node* l2 = static_cast<proc::detail::PidL2Node*>(
+        rcu_ptr_read(&proc::detail::g_pid_map.leaves[l1_idx])
+    );
+    if (!l2) {
+        return nullptr;
+    }
+
+    task_t* t = static_cast<task_t*>(rcu_ptr_read(&l2->tasks[l2_idx]));
+    if (!t || t->state == TASK_UNUSED) {
+        return nullptr;
+    }
+
+    if (!proc_task_retain(t)) {
+        return nullptr;
+    }
+
+    return t;
 }
 
 int proc_task_retain(task_t* t) {
