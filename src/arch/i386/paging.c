@@ -43,7 +43,6 @@ static uint32_t paging_ram_size_bytes = 0;
 #define PAGING_FIXMAP_BASE 0xFFFFE000u
 #define PAGING_FIXMAP_SLOTS 16u
 
-static spinlock_t paging_fixmap_lock;
 
 typedef struct {
     volatile uintptr_t key;
@@ -360,39 +359,26 @@ static inline uint32_t paging_fixmap_virt(void) {
 }
 
 static void paging_fixmap_set(uint32_t virt, uint32_t phys) {
-    uint32_t int_flags = spinlock_acquire_safe(&paging_fixmap_lock);
-
     uint32_t* pt = paging_pt_virt(kernel_page_directory, virt);
     if (!pt) {
-        spinlock_release_safe(&paging_fixmap_lock, int_flags);
         paging_halt("paging_fixmap_set: missing PT");
     }
 
     uint32_t pt_idx = (virt >> 12) & 0x3FFu;
     pt[pt_idx] = (phys & ~0xFFFu) | PTE_PRESENT | PTE_RW;
 
-    spinlock_release_safe(&paging_fixmap_lock, int_flags);
-
-    /*
-     * Fixmap updates are immediately consumed by the current CPU.
-     * invlpg is sufficient because we only touch one PTE.
-     */
     __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
 }
 
 static void paging_fixmap_clear(uint32_t virt) {
-    uint32_t int_flags = spinlock_acquire_safe(&paging_fixmap_lock);
-
     uint32_t* pt = paging_pt_virt(kernel_page_directory, virt);
     if (!pt) {
-        spinlock_release_safe(&paging_fixmap_lock, int_flags);
         paging_halt("paging_fixmap_clear: missing PT");
     }
 
     uint32_t pt_idx = (virt >> 12) & 0x3FFu;
     pt[pt_idx] = 0;
 
-    spinlock_release_safe(&paging_fixmap_lock, int_flags);
     __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
 }
 
@@ -748,7 +734,6 @@ void paging_init(uint32_t ram_size_bytes) {
      */
     paging_init_pat();
     spinlock_init(&paging_lock);
-    spinlock_init(&paging_fixmap_lock);
     spinlock_init(&paging_dir_lock_write_lock);
 
     if (ram_size_bytes & 0xFFFu) {
