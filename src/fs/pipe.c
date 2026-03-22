@@ -4,6 +4,7 @@
 #include <hal/lock.h>
 #include <kernel/waitq/poll_waitq.h>
 #include <kernel/sched.h>
+#include <kernel/uaccess/uaccess.h>
 #include <lib/string.h>
 #include <mm/heap.h>
 
@@ -407,12 +408,28 @@ int pipe_read_nonblock(
         n1 = contig;
     }
 
-    memcpy(&buf[0], &p->buffer[rp], n1);
+    if (uaccess_copy_to_user(&buf[0], &p->buffer[rp], n1) != 0) {
+        spinlock_release_safe(&p->lock, flags);
+
+        sem_signal_n(&p->sem_read, take);
+
+        return -1;
+    }
+
     p->read_ptr += n1;
 
     uint32_t n2 = n - n1;
     if (n2 > 0) {
-        memcpy(&buf[n1], &p->buffer[0], n2);
+        if (uaccess_copy_to_user(&buf[n1], &p->buffer[0], n2) != 0) {
+            p->read_ptr -= n1;
+
+            spinlock_release_safe(&p->lock, flags);
+
+            sem_signal_n(&p->sem_read, take);
+
+            return -1;
+        }
+
         p->read_ptr += n2;
     }
 
@@ -498,13 +515,27 @@ int pipe_write_nonblock(
         n1 = contig;
     }
 
-    memcpy(&p->buffer[wp], &buf[0], n1);
+    if (uaccess_copy_from_user(&p->buffer[wp], &buf[0], n1) != 0) {
+        spinlock_release_safe(&p->lock, flags);
+
+        sem_signal_n(&p->sem_write, size);
+
+        return -1;
+    }
 
     p->write_ptr += n1;
 
     uint32_t n2 = size - n1;
     if (n2 > 0) {
-        memcpy(&p->buffer[0], &buf[n1], n2);
+        if (uaccess_copy_from_user(&p->buffer[0], &buf[n1], n2) != 0) {
+            p->write_ptr -= n1;
+
+            spinlock_release_safe(&p->lock, flags);
+
+            sem_signal_n(&p->sem_write, size);
+
+            return -1;
+        }
 
         p->write_ptr += n2;
     }

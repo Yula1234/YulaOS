@@ -367,13 +367,22 @@ static void syscall_get_mem_stats(registers_t* regs, task_t* curr) {
     uint32_t* u_ptr = (uint32_t*)regs->ebx;
     uint32_t* f_ptr = (uint32_t*)regs->ecx;
 
-    if (check_user_buffer(curr, u_ptr, 4) && check_user_buffer(curr, f_ptr, 4)) {
-        *u_ptr = pmm_get_used_blocks() * 4u;
-        *f_ptr = pmm_get_free_blocks() * 4u;
-        regs->eax = 0;
-    } else {
+    if (!ensure_user_buffer_writable_mappable(curr, u_ptr, 4u)
+        || !ensure_user_buffer_writable_mappable(curr, f_ptr, 4u)) {
         regs->eax = (uint32_t)-1;
+        return;
     }
+
+    const uint32_t used = pmm_get_used_blocks() * 4u;
+    const uint32_t free = pmm_get_free_blocks() * 4u;
+
+    if (uaccess_copy_to_user(u_ptr, &used, 4u) != 0
+        || uaccess_copy_to_user(f_ptr, &free, 4u) != 0) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    regs->eax = 0;
 }
 
 static void syscall_mkdir(registers_t* regs, task_t* curr) {
@@ -964,11 +973,6 @@ static void syscall_pipe_try_read(registers_t* regs, task_t* curr) {
     void* buf = (void*)regs->ecx;
     uint32_t size = (uint32_t)regs->edx;
 
-    if (!check_user_buffer(curr, buf, size)) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
-
     file_desc_t* d = proc_fd_get(curr, fd);
     if (!d || !d->node) {
         regs->eax = (uint32_t)-1;
@@ -983,11 +987,6 @@ static void syscall_pipe_try_write(registers_t* regs, task_t* curr) {
     int fd = (int)regs->ebx;
     const void* buf = (const void*)regs->ecx;
     uint32_t size = (uint32_t)regs->edx;
-
-    if (!check_user_buffer(curr, buf, size)) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
 
     file_desc_t* d = proc_fd_get(curr, fd);
     if (!d || !d->node) {
@@ -1026,7 +1025,11 @@ static void syscall_kbd_try_read(registers_t* regs, task_t* curr) {
         return;
     }
 
-    out[0] = c;
+    if (uaccess_copy_to_user(out, &c, 1u) != 0) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
     regs->eax = 1;
 }
 
@@ -1384,12 +1387,29 @@ static void syscall_proc_list(registers_t* regs, task_t* curr) {
     }
 
     uint32_t bytes = cap * (uint32_t)sizeof(*u_buf);
-    if (!check_user_buffer_writable_present(curr, (void*)u_buf, bytes)) {
+
+    if (!ensure_user_buffer_writable_mappable(curr, (void*)u_buf, bytes)) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
-    regs->eax = (uint32_t)proc_list_snapshot(u_buf, cap);
+    yos_proc_info_t* k_buf = (yos_proc_info_t*)kmalloc(bytes);
+    if (!k_buf) {
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    const uint32_t count = proc_list_snapshot(k_buf, cap);
+    const uint32_t out_bytes = count * (uint32_t)sizeof(*u_buf);
+
+    if (out_bytes > 0u && uaccess_copy_to_user(u_buf, k_buf, out_bytes) != 0) {
+        kfree(k_buf);
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    kfree(k_buf);
+    regs->eax = count;
 }
 
 static void syscall_chdir(registers_t* regs, task_t* curr) {
@@ -1426,17 +1446,40 @@ static void syscall_getcwd(registers_t* regs, task_t* curr) {
         return;
     }
 
-    if (!check_user_buffer_writable_present(curr, u_buf, size)) {
+    if (!ensure_user_buffer_writable_mappable(curr, u_buf, size)) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
     yfs_ino_t cur = (yfs_ino_t)(curr->cwd_inode ? curr->cwd_inode : 1u);
-    int len = yulafs_inode_to_path(cur, u_buf, size);
-    if (len < 0) {
+
+    char* k_buf = (char*)kmalloc(size);
+    if (!k_buf) {
         regs->eax = (uint32_t)-1;
         return;
     }
+
+    int len = yulafs_inode_to_path(cur, k_buf, size);
+    if (len < 0) {
+        kfree(k_buf);
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    const uint32_t out_bytes = (uint32_t)len + 1u;
+    if (out_bytes > size) {
+        kfree(k_buf);
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    if (uaccess_copy_to_user(u_buf, k_buf, out_bytes) != 0) {
+        kfree(k_buf);
+        regs->eax = (uint32_t)-1;
+        return;
+    }
+
+    kfree(k_buf);
 
     regs->eax = (uint32_t)len;
 }

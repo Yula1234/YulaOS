@@ -1364,7 +1364,7 @@ static void proc_mem_release(proc_mem_t* mem) {
 
             if (!(pde & 1)) continue;
 
-            if (kernel_page_directory[i] == pde) {
+            if ((kernel_page_directory[i] & ~0xFFFu) == (pde & ~0xFFFu)) {
                 continue;
             }
 
