@@ -32,6 +32,28 @@ static constexpr uint32_t best_cpu0_penalty = 25u;
 
 static constexpr uint32_t u32_max = 0xFFFFFFFFu;
 
+static const uint32_t prio_to_weight[40] = {
+    88761, 71755, 56483, 46273, 36291,
+    29154, 23254, 18705, 14949, 11916,
+    9548, 7620, 6100, 4904, 3906,
+    3121, 2501, 1991, 1586, 1277,
+    1024, 820, 655, 526, 423,
+    335, 272, 215, 172, 137,
+    110, 87, 70, 56, 45,
+    36, 29, 23, 18, 15
+};
+
+static const uint32_t prio_to_inv_weight[40] = {
+    48356, 59803, 76076, 92842, 118511,
+    147493, 185184, 230082, 287896, 361611,
+    452355, 566628, 708249, 881426, 1106992,
+    1386425, 1732135, 2177249, 2735104, 3400427,
+    4194304, 5235962, 6553609, 8153727, 10150640,
+    12809091, 15762734, 19901434, 24903704, 31269198,
+    38939098, 49275862, 61356675, 76695894, 95443717,
+    119304647, 148295351, 186831435, 238609294, 286331153
+};
+
 }
 
 }
@@ -39,28 +61,25 @@ static constexpr uint32_t u32_max = 0xFFFFFFFFu;
 static constexpr uint64_t cpu_cache_invalid = 0xFFFFFFFF00000000ull;
 static __cacheline_aligned kernel::atomic<uint64_t> g_cpu_cache{cpu_cache_invalid};
 
-uint32_t calc_weight(task_prio_t prio) {
+static inline int prio_to_index(task_prio_t prio) {
     int nice = 10 - static_cast<int>(prio);
     if (nice < -20) nice = -20;
     if (nice > 19) nice = 19;
-    
-    static const uint32_t prio_to_weight[40] = {
-        88761, 71755, 56483, 46273, 36291,
-        29154, 23254, 18705, 14949, 11916,
-        9548, 7620, 6100, 4904, 3906,
-        3121, 2501, 1991, 1586, 1277,
-        1024, 820, 655, 526, 423,
-        335, 272, 215, 172, 137,
-        110, 87, 70, 56, 45,
-        36, 29, 23, 18, 15
-    };
-    
-    return prio_to_weight[nice + 20];
+    return nice + 20;
 }
 
-uint64_t calc_delta_vruntime(uint64_t delta_exec, uint32_t weight) {
+uint32_t calc_weight(task_prio_t prio) {
+    return sched_detail::prio_to_weight[prio_to_index(prio)];
+}
+
+uint64_t calc_delta_vruntime(uint64_t delta_exec, task_prio_t prio) {
+    int idx = prio_to_index(prio);
+    uint32_t weight = sched_detail::prio_to_weight[idx];
+    
     if (weight == 0) return delta_exec;
-    return (delta_exec * sched_detail::nice_0_load) / weight;
+    
+    uint64_t tmp = delta_exec * sched_detail::nice_0_load;
+    return (tmp * sched_detail::prio_to_inv_weight[idx]) >> 32;
 }
 
 void sched_init(void) {
@@ -339,8 +358,7 @@ void sched_yield(void) {
         if (prev->exec_start > 0) {
             uint64_t delta_exec = me->sched_ticks - prev->exec_start;
             if (delta_exec > 0) {
-                uint32_t weight = calc_weight(prev->priority);
-                uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, weight);
+                uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, prev->priority);
                 prev->vruntime += delta_vruntime;
             }
         }

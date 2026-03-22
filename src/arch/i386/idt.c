@@ -559,8 +559,7 @@ void isr_handler(registers_t* regs) {
                 if (curr->exec_start > 0) {
                     uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
                     if (delta_exec >= 1) {
-                        uint32_t weight = calc_weight(curr->priority);
-                        uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, weight);
+                        uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, curr->priority);
                         curr->vruntime += delta_vruntime;
                         curr->exec_start = cpu->sched_ticks;
                     }
