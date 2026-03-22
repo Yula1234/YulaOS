@@ -13,6 +13,8 @@
 
 namespace {
 
+constexpr uintptr_t KERNEL_BASE = 0xC0000000u;
+
 __attribute__((no_instrument_function))
 static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32_t size) {
     if (size == 0u) {
@@ -20,6 +22,13 @@ static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32
     }
 
     if (!dst || !user_src) {
+        return -1;
+    }
+
+    const uintptr_t src_addr = (uintptr_t)user_src;
+    const uintptr_t src_end = src_addr + (uintptr_t)size;
+
+    if (src_addr >= KERNEL_BASE || src_end > KERNEL_BASE || src_end < src_addr) {
         return -1;
     }
 
@@ -55,6 +64,13 @@ static int uaccess_memcpy_to_user_impl(void* user_dst, const void* src, uint32_t
         return -1;
     }
 
+    const uintptr_t dst_addr = (uintptr_t)user_dst;
+    const uintptr_t dst_end = dst_addr + (uintptr_t)size;
+
+    if (dst_addr >= KERNEL_BASE || dst_end > KERNEL_BASE || dst_end < dst_addr) {
+        return -1;
+    }
+
     uint8_t* d = (uint8_t*)user_dst;
     const uint8_t* s = (const uint8_t*)src;
 
@@ -78,22 +94,10 @@ fixup:
 }
 
 extern "C" int uaccess_copy_from_user(void* dst, const void* user_src, uint32_t size) {
-    task_t* curr = proc_current();
-
-    if (!uaccess_check_user_buffer(curr, user_src, size)) {
-        return -1;
-    }
-
     return uaccess_memcpy_from_user_impl(dst, user_src, size);
 }
 
 extern "C" int uaccess_copy_to_user(void* user_dst, const void* src, uint32_t size) {
-    task_t* curr = proc_current();
-
-    if (!uaccess_check_user_buffer(curr, user_dst, size)) {
-        return -1;
-    }
-
     return uaccess_memcpy_to_user_impl(user_dst, src, size);
 }
 
@@ -285,19 +289,14 @@ extern "C" int uaccess_copy_user_str_bounded(task_t* task, char* dst, uint32_t d
         return -1;
     }
 
-    if (!uaccess_check_user_buffer(task, user_src, 1u)) {
+    const uintptr_t src_addr = (uintptr_t)user_src;
+    if (src_addr >= KERNEL_BASE) {
         return -1;
     }
 
     for (uint32_t i = 0; i < dst_size; i++) {
-        const void* p = (const void*)((uintptr_t)user_src + (uintptr_t)i);
-
-        if (!uaccess_check_user_buffer(task, p, 1u)) {
-            return -1;
-        }
-
         char c = '\0';
-        if (uaccess_copy_from_user(&c, p, 1u) != 0) {
+        if (uaccess_copy_from_user(&c, user_src + i, 1u) != 0) {
             return -1;
         }
         dst[i] = c;
