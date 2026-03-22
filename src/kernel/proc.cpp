@@ -519,8 +519,8 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
     return 0;
 }
 
-static spinlock_t g_zombie_lock;
-static task_t* g_zombie_head = nullptr;
+static kernel::atomic<task_t*> g_zombie_head{nullptr};
+static kernel::Semaphore g_zombie_sem{};
 
 static HashMap<uint32_t, task_t*, PID_MAP_BUCKETS> pid_map;
 
@@ -801,8 +801,7 @@ void proc_init(void) {
 
     proc::detail::g_next_pid.store(1u, kernel::memory_order::relaxed);
 
-    spinlock_init(&proc::detail::g_zombie_lock);
-    proc::detail::g_zombie_head = nullptr;
+    proc::detail::g_zombie_head.store(nullptr, kernel::memory_order::relaxed);
 
     percpu_rwspinlock_init(&proc::detail::task_list_lock);
 
@@ -1730,13 +1729,13 @@ void proc_kill(task_t* t) {
         return;
     }
 
-    {
-        kernel::SpinLockNativeGuard guard(proc::detail::g_zombie_lock);
+    task_t* old_head = proc::detail::g_zombie_head.load(kernel::memory_order::relaxed);
+    do {
+        t->zombie_next = old_head;
+    } while (!proc::detail::g_zombie_head.compare_exchange_weak(
+        old_head, t, kernel::memory_order::release, kernel::memory_order::relaxed));
 
-        t->zombie_next = proc::detail::g_zombie_head;
-        proc::detail::g_zombie_head = t;
-    }
-
+    proc::detail::g_zombie_sem.signal();
     sem_signal_all(&t->exit_sem);
 }
 
@@ -2369,30 +2368,42 @@ int proc_waitpid(uint32_t pid, int* out_status) {
 
 void reaper_task_func(void* arg) {
     (void)arg;
+    task_t* local_survivors = nullptr;
+
     while (1) {
-        task_t* list = nullptr;
-        {
-            spinlock_acquire(&proc::detail::g_zombie_lock);
-
-            list = proc::detail::g_zombie_head;
-            proc::detail::g_zombie_head = nullptr;
-
-            spinlock_release(&proc::detail::g_zombie_lock);
+        if (local_survivors) {
+            uint32_t deadline = timer_ticks + 50;
+            proc::detail::g_zombie_sem.wait_timeout(deadline);
+        } else {
+            proc::detail::g_zombie_sem.wait();
         }
-        task_t* survivors = nullptr;
 
-        while (list) {
-            task_t* curr = list;
-            task_t* next_zombie = curr->zombie_next;
+        task_t* fresh_zombies = proc::detail::g_zombie_head.exchange(nullptr, kernel::memory_order::acquire);
+
+        task_t* work_list = local_survivors;
+        if (fresh_zombies) {
+            task_t* tail = fresh_zombies;
+            while (tail->zombie_next) {
+                tail = tail->zombie_next;
+            }
+            tail->zombie_next = work_list;
+            work_list = fresh_zombies;
+        }
+
+        local_survivors = nullptr;
+
+        while (work_list) {
+            task_t* curr = work_list;
+            work_list = curr->zombie_next;
             curr->zombie_next = nullptr;
-            list = next_zombie;
 
             if (!proc_task_retain(curr)) {
                 continue;
             }
 
             int still_running = 0;
-            for (int i = 0; i < MAX_CPUS; i++) {
+            const int n = cpu_count > 0 ? cpu_count : 1;
+            for (int i = 0; i < n; i++) {
                 if (cpus[i].current_task == curr || cpus[i].prev_task_during_switch == curr) {
                     still_running = 1;
                     break;
@@ -2400,8 +2411,8 @@ void reaper_task_func(void* arg) {
             }
 
             if (still_running || curr->exit_waiters > 0 || curr->in_transit > 0) {
-                curr->zombie_next = survivors;
-                survivors = curr;
+                curr->zombie_next = local_survivors;
+                local_survivors = curr;
 
                 proc_task_put(curr);
                 continue;
@@ -2412,8 +2423,8 @@ void reaper_task_func(void* arg) {
             uint32_t expected_refs = parent_pid != 0u ? 5u : 4u;
 
             if (refs > expected_refs) {
-                curr->zombie_next = survivors;
-                survivors = curr;
+                curr->zombie_next = local_survivors;
+                local_survivors = curr;
 
                 proc_task_put(curr);
                 continue;
@@ -2423,24 +2434,6 @@ void reaper_task_func(void* arg) {
             proc_task_put(curr);
             proc_task_put(curr);
         }
-
-        if (survivors) {
-            task_t* tail = survivors;
-            while (tail->zombie_next) {
-                tail = tail->zombie_next;
-            }
-
-            {
-                spinlock_acquire(&proc::detail::g_zombie_lock);
-
-                tail->zombie_next = proc::detail::g_zombie_head;
-                proc::detail::g_zombie_head = survivors;
-
-                spinlock_release(&proc::detail::g_zombie_lock);
-            }
-        }
-
-        proc_usleep(50000);
     }
 }
 
