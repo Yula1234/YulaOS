@@ -112,12 +112,6 @@ static uint32_t sem_take_up_to(semaphore_t* sem, uint32_t max) {
     return taken;
 }
 
-static void sem_give_n(semaphore_t* sem, uint32_t n) {
-    while (n--) {
-        sem_signal(sem);
-    }
-}
-
 static uint32_t sem_try_take_up_to(semaphore_t* sem, uint32_t max) {
     if (!sem
         || max == 0) {
@@ -273,7 +267,7 @@ static int pipe_read(
             && p->writers == 0) {
             spinlock_release_safe(&p->lock, flags);
 
-            sem_give_n(&p->sem_read, take);
+            sem_signal_n(&p->sem_read, take);
 
             return (int)read_count;
         }
@@ -313,11 +307,11 @@ static int pipe_read(
 
         /* Return any over-taken credits back to sem_read. */
         if (n < take) {
-            sem_give_n(&p->sem_read, take - n);
+            sem_signal_n(&p->sem_read, take - n);
         }
 
         /* Each consumed byte becomes free space. */
-        sem_give_n(&p->sem_write, n);
+        sem_signal_n(&p->sem_write, n);
         if (n > 0) {
             /* Wake poll waiters for both read and write side state changes. */
             poll_waitq_wake_all(&p->poll_waitq);
@@ -388,7 +382,7 @@ int pipe_read_nonblock(
         && p->writers == 0) {
         spinlock_release_safe(&p->lock, flags);
 
-        sem_give_n(&p->sem_read, take);
+        sem_signal_n(&p->sem_read, take);
 
         return -1;
     }
@@ -587,7 +581,7 @@ static int pipe_write(
         if (p->readers == 0) {
             spinlock_release_safe(&p->lock, flags);
 
-            sem_give_n(&p->sem_write, take);
+            sem_signal_n(&p->sem_write, take);
 
             return (written_count > 0) ? (int)written_count : -1;
         }
@@ -618,7 +612,7 @@ static int pipe_write(
         spinlock_release_safe(&p->lock, flags);
 
         /* Each written byte becomes readable data. */
-        sem_give_n(&p->sem_read, n);
+        sem_signal_n(&p->sem_read, n);
         if (n > 0) {
             poll_waitq_wake_all(&p->poll_waitq);
         }
