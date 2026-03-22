@@ -922,103 +922,48 @@ void file_desc_retain(file_desc_t* d) {
 void file_desc_release(file_desc_t* d) {
     if (!d) return;
 
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&d->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            panic("PROC: file_desc_release underflow");
-        }
+    uint32_t old_refs = __atomic_fetch_sub(&d->refs, 1u, __ATOMIC_ACQ_REL);
 
-        const uint32_t desired = expected - 1u;
-
-        if (__atomic_compare_exchange_n(
-                &d->refs,
-                &expected,
-                desired,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            if (desired != 0u) {
-                return;
-            }
-
-            break;
-        }
+    if (old_refs == 0u) {
+        panic("PROC: file_desc_release underflow");
     }
 
-    if (d->node) {
-        vfs_node_release(d->node);
-        d->node = 0;
-    }
+    if (old_refs == 1u) {
+        if (d->node) {
+            vfs_node_release(d->node);
+            d->node = 0;
+        }
 
-    kfree(d);
+        kfree(d);
+    }
 }
 
 void proc_fd_table_release(fd_table_t* ft) {
     if (!ft) return;
 
-    static uint32_t release_underflow_logs = 0;
-    const auto log_release_underflow = [&](uint32_t refs_now) {
-        if (release_underflow_logs >= 32u) {
-            return;
-        }
+    uint32_t old_refs = __atomic_fetch_sub(&ft->refs, 1u, __ATOMIC_ACQ_REL);
 
-        release_underflow_logs++;
-
-        task_t* curr = proc_current();
-        const uint32_t pid = curr ? curr->pid : 0u;
-        const void* ra = __builtin_return_address(0);
-
-        kprintf(
-            "[proc] fd_table_release underflow: ft=%p refs=%u curr=%p pid=%u ra=%p\n",
-            ft,
-            refs_now,
-            curr,
-            pid,
-            ra
-        );
-    };
-
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&ft->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            log_release_underflow(expected);
-            panic("PROC: fd_table_release underflow");
-        }
-
-        const uint32_t desired = expected - 1u;
-
-        if (__atomic_compare_exchange_n(
-                &ft->refs,
-                &expected,
-                desired,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            if (desired != 0u) {
-                return;
-            }
-
-            break;
-        }
+    if (old_refs == 0u) {
+        panic("PROC: fd_table_release underflow");
     }
 
-    if (ft->fds) {
-        synchronize_rcu();
+    if (old_refs == 1u) {
+        if (ft->fds) {
+            synchronize_rcu();
 
-        for (uint32_t i = 0; i < ft->max_fds; i++) {
-            file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[i]));
-            if (d) {
-                file_desc_release(d);
+            for (uint32_t i = 0; i < ft->max_fds; i++) {
+                file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[i]));
+                if (d) {
+                    file_desc_release(d);
+                }
             }
+
+            kfree(ft->fds);
+            ft->fds = 0;
         }
 
-        kfree(ft->fds);
-        ft->fds = 0;
+        kfree(ft);
     }
-
-    kfree(ft);
 }
 
 file_desc_t* proc_fd_get(task_t* t, int fd) {

@@ -74,39 +74,22 @@ void poll_waitq_put(poll_waitq_t* q) {
         return;
     }
 
-    void (*finalize)(void*) = nullptr;
-    void* finalize_ctx = nullptr;
+    uint32_t old_refs = __atomic_fetch_sub(&q->refs, 1u, __ATOMIC_ACQ_REL);
 
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&q->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            panic("POLL: waitq_put underflow");
-        }
-
-        const uint32_t desired = expected - 1u;
-        if (__atomic_compare_exchange_n(
-                &q->refs,
-                &expected,
-                desired,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            if (desired != 0u) {
-                return;
-            }
-
-            finalize = q->finalize;
-            finalize_ctx = q->finalize_ctx;
-            break;
-        }
+    if (old_refs == 0u) {
+        panic("POLL: waitq_put underflow");
     }
 
-    if (!finalize) {
-        panic("POLL: waitq finalized without finalizer");
-    }
+    if (old_refs == 1u) {
+        void (*finalize)(void*) = q->finalize;
+        void* finalize_ctx = q->finalize_ctx;
 
-    finalize(finalize_ctx);
+        if (!finalize) {
+            panic("POLL: waitq finalized without finalizer");
+        }
+
+        finalize(finalize_ctx);
+    }
 }
 
 int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
