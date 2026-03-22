@@ -21,10 +21,17 @@ extern uint8_t smp_trampoline_end[];
 
 volatile int ap_running_count = 0;
 
-static spinlock_t tlb_shootdown_lock = {0};
-static volatile uint32_t tlb_shootdown_addr = 0;
-static volatile uint32_t tlb_shootdown_end = 0;
-static volatile uint32_t tlb_shootdown_pending = 0;
+#define TLB_REQ_COUNT 16
+
+typedef struct {
+    uint32_t start;
+    uint32_t end;
+    volatile uint32_t pending_mask;
+    volatile int in_use;
+} tlb_shootdown_req_t;
+
+static spinlock_t tlb_queue_lock = {0};
+static tlb_shootdown_req_t tlb_reqs[TLB_REQ_COUNT];
 
 static inline int smp_interrupts_enabled(void) {
     uint32_t flags;
@@ -161,14 +168,25 @@ void smp_boot_aps(void) {
 }
 
 void smp_tlb_ipi_handler(void) {
-    const uint32_t start = tlb_shootdown_addr;
-    const uint32_t end = tlb_shootdown_end;
-
-    tlb_flush_range_local(start, end);
-
     cpu_t* cpu = cpu_current();
-    uint32_t bit = 1u << cpu->index;
-    __sync_fetch_and_and(&tlb_shootdown_pending, ~bit);
+    uint32_t my_bit = 1u << cpu->index;
+
+    for (int i = 0; i < TLB_REQ_COUNT; i++) {
+        tlb_shootdown_req_t* req = &tlb_reqs[i];
+
+        if (!req->in_use) {
+            continue;
+        }
+
+        uint32_t pending = __atomic_load_n(&req->pending_mask, __ATOMIC_ACQUIRE);
+        if ((pending & my_bit) == 0u) {
+            continue;
+        }
+
+        tlb_flush_range_local(req->start, req->end);
+
+        __sync_fetch_and_and(&req->pending_mask, ~my_bit);
+    }
 }
 
 static inline uint32_t smp_tlb_cpu_mask_for_page_dir(uint32_t* page_dir) {
@@ -210,6 +228,62 @@ static inline uint32_t smp_tlb_cpu_mask_for_page_dir(uint32_t* page_dir) {
     return mask;
 }
 
+static int tlb_alloc_request(uint32_t start, uint32_t end, uint32_t mask) {
+    uint32_t flags = spinlock_acquire_safe(&tlb_queue_lock);
+
+    int idx = -1;
+    for (int i = 0; i < TLB_REQ_COUNT; i++) {
+        if (!tlb_reqs[i].in_use) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (idx < 0) {
+        spinlock_release_safe(&tlb_queue_lock, flags);
+        return -1;
+    }
+
+    tlb_reqs[idx].start = start;
+    tlb_reqs[idx].end = end;
+    tlb_reqs[idx].pending_mask = mask;
+    tlb_reqs[idx].in_use = 1;
+
+    __sync_synchronize();
+
+    spinlock_release_safe(&tlb_queue_lock, flags);
+
+    return idx;
+}
+
+static void tlb_free_request(int idx) {
+    if (idx < 0 || idx >= TLB_REQ_COUNT) {
+        return;
+    }
+
+    uint32_t flags = spinlock_acquire_safe(&tlb_queue_lock);
+    tlb_reqs[idx].in_use = 0;
+    spinlock_release_safe(&tlb_queue_lock, flags);
+}
+
+static void tlb_send_ipi_to_mask(uint32_t mask) {
+    for (int i = 0; i < cpu_count; i++) {
+        cpu_t* c = &cpus[i];
+        uint32_t bit = 1u << c->index;
+
+        if ((mask & bit) == 0u) {
+            continue;
+        }
+
+        if (c->id < 0) {
+            continue;
+        }
+
+        lapic_write(LAPIC_ICRHI, (uint32_t)c->id << 24);
+        lapic_write(LAPIC_ICRLO, (uint32_t)IPI_TLB_VECTOR | 0x00004000);
+    }
+}
+
 void smp_tlb_shootdown_range_dir(uint32_t* page_dir, uint32_t start, uint32_t end) {
     if (end <= start) {
         return;
@@ -226,43 +300,21 @@ void smp_tlb_shootdown_range_dir(uint32_t* page_dir, uint32_t start, uint32_t en
         return;
     }
 
-    spinlock_acquire(&tlb_shootdown_lock);
-
-    if (cpu_count <= 1 || ap_running_count == 0) {
-        spinlock_release(&tlb_shootdown_lock);
+    int req_idx = tlb_alloc_request(start, end, mask);
+    if (req_idx < 0) {
         tlb_flush_range_local(start, end);
         return;
     }
 
-    tlb_shootdown_addr = start;
-    tlb_shootdown_end = end;
-
-    tlb_shootdown_pending = mask;
-    __sync_synchronize();
-
-    for (int i = 0; i < cpu_count; i++) {
-        cpu_t* c = &cpus[i];
-        const uint32_t bit = 1u << c->index;
-
-        if ((mask & bit) == 0u) {
-            continue;
-        }
-
-        if (c->id < 0) {
-            continue;
-        }
-
-        lapic_write(LAPIC_ICRHI, (uint32_t)c->id << 24);
-        lapic_write(LAPIC_ICRLO, (uint32_t)IPI_TLB_VECTOR | 0x00004000);
-    }
+    tlb_send_ipi_to_mask(mask);
 
     tlb_flush_range_local(start, end);
 
-    while (tlb_shootdown_pending != 0u) {
+    while (__atomic_load_n(&tlb_reqs[req_idx].pending_mask, __ATOMIC_ACQUIRE) != 0u) {
         __asm__ volatile("pause");
     }
 
-    spinlock_release(&tlb_shootdown_lock);
+    tlb_free_request(req_idx);
 }
 
 void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
@@ -275,17 +327,6 @@ void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
         return;
     }
 
-    spinlock_acquire(&tlb_shootdown_lock);
-
-    if (cpu_count <= 1 || ap_running_count == 0) {
-        spinlock_release(&tlb_shootdown_lock);
-        tlb_flush_range_local(start, end);
-        return;
-    }
-
-    tlb_shootdown_addr = start;
-    tlb_shootdown_end = end;
-
     cpu_t* me = cpu_current();
     uint32_t mask = 0;
 
@@ -297,26 +338,26 @@ void smp_tlb_shootdown_range(uint32_t start, uint32_t end) {
         mask |= (1u << c->index);
     }
 
-    tlb_shootdown_pending = mask;
-    __sync_synchronize();
-
-    for (int i = 0; i < cpu_count; i++) {
-        cpu_t* c = &cpus[i];
-        uint32_t bit = 1u << c->index;
-        if (!(mask & bit)) continue;
-        if (c->id < 0) continue;
-
-        lapic_write(LAPIC_ICRHI, (uint32_t)c->id << 24);
-        lapic_write(LAPIC_ICRLO, (uint32_t)IPI_TLB_VECTOR | 0x00004000);
+    if (mask == 0u) {
+        tlb_flush_range_local(start, end);
+        return;
     }
+
+    int req_idx = tlb_alloc_request(start, end, mask);
+    if (req_idx < 0) {
+        tlb_flush_range_local(start, end);
+        return;
+    }
+
+    tlb_send_ipi_to_mask(mask);
 
     tlb_flush_range_local(start, end);
 
-    while (tlb_shootdown_pending != 0) {
+    while (__atomic_load_n(&tlb_reqs[req_idx].pending_mask, __ATOMIC_ACQUIRE) != 0u) {
         __asm__ volatile("pause");
     }
 
-    spinlock_release(&tlb_shootdown_lock);
+    tlb_free_request(req_idx);
 }
 
 void smp_tlb_shootdown(uint32_t virt) {
