@@ -88,6 +88,7 @@ extern void isr_stub_0x80(void);
 extern void isr_stub_0xFF(void);
 extern void isr_stub_0xF0(void);
 extern void isr_stub_0xF1(void);
+extern void isr_stub_0xF2(void);
 extern void isr_stub_0xA1(void);
 extern void isr_stub_0xA2(void);
 extern uint32_t* kernel_page_directory;
@@ -483,6 +484,12 @@ void isr_handler(registers_t* regs) {
         smp_tlb_ipi_handler();
         lapic_eoi();
 
+        goto out;
+    }
+
+    if (regs->int_no == IPI_RCU_VECTOR) {
+        lapic_eoi();
+
         if (regs->cs == 0x1B) {
             rcu_qs_count_inc();
         }
@@ -549,8 +556,6 @@ void isr_handler(registers_t* regs) {
 
             int from_user = (regs->cs == 0x1B);
             if (from_user && curr && curr->state == TASK_RUNNING && curr->pid != 0) {
-                rcu_qs_count_inc();
-                
                 if (curr->exec_start > 0) {
                     uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
                     if (delta_exec >= 1) {
@@ -777,6 +782,7 @@ void idt_init(void) {
     idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
     idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
     idt_set_gate(IPI_PANIC_VECTOR, (uint32_t)isr_stub_0xF1, 0x08, 0x8E);
+    idt_set_gate(IPI_RCU_VECTOR, (uint32_t)isr_stub_0xF2, 0x08, 0x8E);
     idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
     idt_set_gate(0xA2, (uint32_t)isr_stub_0xA2, 0x08, 0x8E);
 

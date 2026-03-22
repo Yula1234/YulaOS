@@ -107,7 +107,7 @@ extern "C" void synchronize_rcu(void) {
             snap[i] = __atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_RELAXED);
 
             lapic_write(LAPIC_ICRHI, (uint32_t)cpus[i].id << 24);
-            lapic_write(LAPIC_ICRLO, (uint32_t)IPI_TLB_VECTOR | 0x00004000u);
+            lapic_write(LAPIC_ICRLO, (uint32_t)IPI_RCU_VECTOR | 0x00004000u);
         }
     }
 
