@@ -554,9 +554,9 @@ public:
     void clear() {
         kernel::SpinLockGuard lock(table_lock);
 
+        seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
         resizing.store(1u, kernel::memory_order::seq_cst);
         kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
-
 
         if (buckets && bucket_count > 0u) {
             for (size_t i = 0; i < bucket_count; i++) {
@@ -564,9 +564,9 @@ public:
             }
         }
 
-
         size_.store(0u, kernel::memory_order::relaxed);
         resizing.store(0u, kernel::memory_order::release);
+        seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
     }
 
 public:
@@ -912,12 +912,15 @@ private:
     }
 
     void quiesce_locked() {
+        seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
         resizing.store(1u, kernel::memory_order::seq_cst);
 
         kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
     }
 
     void steal_from_locked(HashMap& other) {
+        seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
+
         buckets = other.buckets;
         bucket_count = other.bucket_count;
         bucket_mask = other.bucket_mask;
@@ -930,8 +933,10 @@ private:
 
         other.size_.store(0u, kernel::memory_order::relaxed);
         other.resizing.store(0u, kernel::memory_order::release);
+        other.seqlock_.store(other.seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
 
         resizing.store(0u, kernel::memory_order::release);
+        seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
     }
 
     void destroy() {
@@ -960,6 +965,7 @@ private:
     kernel::atomic<uint32_t> size_{0u};
     kernel::atomic<uint32_t> resizing{0u};
     kernel::atomic<uint32_t> active_ops{0u};
+    kernel::atomic<uint32_t> seqlock_{0u};
 
     uint32_t bucket_index(const K& key, size_t mask) const {
         return kernel::HashTraits<K>::hash(key) & (uint32_t)mask;
@@ -1036,79 +1042,61 @@ private:
     Bucket* try_resize_locked(uint32_t new_size, size_t& out_old_count) = delete;
 
     bool begin_op(Bucket*& out_buckets, size_t& out_mask) {
-        Bucket* fresh = nullptr;
-        size_t fresh_count = 0u;
-
         while (1) {
-            {
-                kernel::SpinLockGuard lock(table_lock);
-
-                if (resizing.load(kernel::memory_order::relaxed) != 0u) {
-                    kernel::cpu_relax();
-                    continue;
-                }
-
-                if (buckets && bucket_count > 0u) {
-                    active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
-
-                    out_buckets = buckets;
-                    out_mask = bucket_mask;
-
-                    return true;
-                }
-
-                resizing.store(1u, kernel::memory_order::seq_cst);
+            uint32_t seq1 = seqlock_.load(kernel::memory_order::acquire);
+            if ((seq1 & 1u) != 0u) {
+                kernel::cpu_relax();
+                continue;
             }
 
-            kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
+            Bucket* b = buckets;
+            size_t bc = bucket_count;
+            size_t bm = bucket_mask;
 
-            if (!fresh) {
-                fresh_count = normalize_bucket_count(Buckets);
-                fresh = allocate_buckets(fresh_count);
+            uint32_t seq2 = seqlock_.load(kernel::memory_order::acquire);
+            if (seq1 != seq2) {
+                continue;
             }
 
-            {
-                kernel::SpinLockGuard lock(table_lock);
-
-                if (buckets && bucket_count > 0u) {
-                    resizing.store(0u, kernel::memory_order::release);
-
-                    active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
-
-                    out_buckets = buckets;
-                    out_mask = bucket_mask;
-
-                    break;
-                }
-
-                if (!fresh) {
-                    resizing.store(0u, kernel::memory_order::release);
-                    out_buckets = nullptr;
-                    out_mask = 0u;
-                    return false;
-                }
-
-                buckets = fresh;
-                bucket_count = fresh_count;
-                bucket_mask = fresh_count - 1u;
-
-                resizing.store(0u, kernel::memory_order::release);
-
+            if (b && bc > 0u) {
                 active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+                kernel::atomic_thread_fence(kernel::memory_order::acquire);
 
+                out_buckets = b;
+                out_mask = bm;
+                return true;
+            }
+
+            kernel::SpinLockGuard lock(table_lock);
+
+            if (buckets && bucket_count > 0u) {
+                active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
                 out_buckets = buckets;
                 out_mask = bucket_mask;
-
-                fresh = nullptr;
-                break;
+                return true;
             }
-        }
 
-        if (fresh) {
-            destroy_buckets(fresh, fresh_count);
-        }
+            size_t fresh_count = normalize_bucket_count(Buckets);
+            Bucket* fresh = allocate_buckets(fresh_count);
+            if (!fresh) {
+                out_buckets = nullptr;
+                out_mask = 0u;
+                return false;
+            }
 
-        return true;
+            seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
+
+            buckets = fresh;
+            bucket_count = fresh_count;
+            bucket_mask = fresh_count - 1u;
+
+            seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
+
+            active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+            out_buckets = buckets;
+            out_mask = bucket_mask;
+            return true;
+        }
     }
 
     void end_op() {
@@ -1128,48 +1116,47 @@ private:
         Bucket* old_buckets = nullptr;
         size_t old_bucket_count = 0u;
 
-        while (1) {
-            {
-                kernel::SpinLockGuard lock(table_lock);
+        {
+            kernel::SpinLockGuard lock(table_lock);
 
-                if (resizing.load(kernel::memory_order::relaxed) != 0u) {
-                    return;
-                }
-
-                if (!should_grow(new_size)) {
-                    return;
-                }
-
-                resizing.store(1u, kernel::memory_order::seq_cst);
-            }
-
-            kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
-
-            target = grow_target_count();
-
-            new_buckets = allocate_buckets(target);
-            if (!new_buckets) {
-                kernel::SpinLockGuard lock(table_lock);
-                resizing.store(0u, kernel::memory_order::release);
+            if (!should_grow(new_size)) {
                 return;
             }
 
-            {
-                kernel::SpinLockGuard lock(table_lock);
+            seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
 
-                if (!should_grow(new_size)) {
-                    resizing.store(0u, kernel::memory_order::release);
-                    break;
-                }
+            resizing.store(1u, kernel::memory_order::seq_cst);
+        }
 
-                old_bucket_count = bucket_count;
+        kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
 
-                old_buckets = rehash_locked(new_buckets, target);
-                new_buckets = nullptr;
+        target = grow_target_count();
 
+        new_buckets = allocate_buckets(target);
+        if (!new_buckets) {
+            kernel::SpinLockGuard lock(table_lock);
+            resizing.store(0u, kernel::memory_order::release);
+            seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
+            return;
+        }
+
+        {
+            kernel::SpinLockGuard lock(table_lock);
+
+            if (!should_grow(new_size)) {
                 resizing.store(0u, kernel::memory_order::release);
-                break;
+                seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
+                destroy_buckets(new_buckets, target);
+                return;
             }
+
+            old_bucket_count = bucket_count;
+
+            old_buckets = rehash_locked(new_buckets, target);
+            new_buckets = nullptr;
+
+            resizing.store(0u, kernel::memory_order::release);
+            seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
         }
 
         if (new_buckets) {
