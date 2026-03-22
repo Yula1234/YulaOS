@@ -654,6 +654,56 @@ int pipe_poll_waitq_register(
     return poll_waitq_register(&p->poll_waitq, w, task);
 }
 
+static int pipe_vfs_poll_status(vfs_node_t* node, int events) {
+    if (!node) {
+        return 0;
+    }
+
+    if ((node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) == 0) {
+        return 0;
+    }
+
+    pipe_t* p = (pipe_t*)node->private_data;
+    if (!p) {
+        return VFS_POLLHUP;
+    }
+
+    uint32_t avail = 0;
+    uint32_t space = 0;
+    int readers = 0;
+    int writers = 0;
+
+    if (pipe_poll_info(node, &avail, &space, &readers, &writers) != 0) {
+        return VFS_POLLERR;
+    }
+
+    int rev = 0;
+
+    if (node->flags & VFS_FLAG_PIPE_READ) {
+        if ((events & VFS_POLLIN) && avail > 0) {
+            rev |= VFS_POLLIN;
+        }
+        if (writers == 0) {
+            rev |= VFS_POLLHUP;
+        }
+    }
+
+    if (node->flags & VFS_FLAG_PIPE_WRITE) {
+        if ((events & VFS_POLLOUT) && readers > 0 && space > 0) {
+            rev |= VFS_POLLOUT;
+        }
+        if (readers == 0) {
+            rev |= VFS_POLLHUP;
+        }
+    }
+
+    return rev;
+}
+
+static int pipe_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* task) {
+    return pipe_poll_waitq_register(node, w, task);
+}
+
 int pipe_poll_info(
     vfs_node_t* node,
     uint32_t* out_available,
@@ -767,6 +817,10 @@ static vfs_ops_t pipe_ops = {
     .write = pipe_write,
     .close = pipe_close,
     .open = 0,
+    .ioctl = 0,
+    .get_phys_page = 0,
+    .poll_status = pipe_vfs_poll_status,
+    .poll_register = pipe_vfs_poll_register,
 };
 
 int vfs_create_pipe(
