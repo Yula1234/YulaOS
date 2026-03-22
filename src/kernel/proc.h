@@ -85,6 +85,7 @@ typedef struct file_desc {
     uint32_t flags;
     uint32_t refs;
     spinlock_t lock;
+    rcu_head_t rcu;
 } file_desc_t;
 
 typedef enum {

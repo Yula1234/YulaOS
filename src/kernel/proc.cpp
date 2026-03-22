@@ -1044,6 +1044,11 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
     return out;
 }
 
+static void file_desc_release_rcu(rcu_head_t* head) {
+    file_desc_t* d = container_of(head, file_desc_t, rcu);
+    file_desc_release(d);
+}
+
 static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd, rcu_ptr_t** out_old_fds) {
     if (out_old_fds) *out_old_fds = nullptr;
     if (required_fd < ft->max_fds) return 0;
@@ -1254,10 +1259,11 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
         }
     }
 
-    synchronize_rcu();
-
-    if (out_desc) *out_desc = d;
-    else file_desc_release(d);
+    if (out_desc) {
+        *out_desc = d;
+    } else {
+        call_rcu(&d->rcu, file_desc_release_rcu);
+    }
 
     return 0;
 }

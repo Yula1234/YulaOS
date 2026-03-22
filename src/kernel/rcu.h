@@ -17,7 +17,14 @@ typedef struct rcu_ptr {
     void* ptr;
 } rcu_ptr_t;
 
+typedef struct rcu_head {
+    struct rcu_head* next;
+    void (*func)(struct rcu_head*);
+} rcu_head_t;
+
 void synchronize_rcu(void);
+void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*));
+void rcu_gc_task(void* arg);
 void rcu_qs_count_inc(void);
 uint32_t rcu_qs_count_read(int cpu_idx);
 

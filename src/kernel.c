@@ -373,6 +373,8 @@ static void kmain_spawn_service_tasks(void) {
         proc_spawn_kthread("uhci", PRIO_LOW, uhci_late_init_task, 0);
     }
 
+    proc_spawn_kthread("rcu", PRIO_LOW, rcu_gc_task, 0);
+
     proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);
 
     ahci_set_async_mode(1);
