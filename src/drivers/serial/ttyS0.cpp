@@ -305,6 +305,27 @@ int ttyS0_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
     return -1;
 }
 
+static int ttyS0_vfs_poll_status(vfs_node_t* node, int events) {
+    (void)node;
+
+    if ((events & VFS_POLLIN) == 0) {
+        return 0;
+    }
+
+    drain_rx();
+
+    if (g_ld.has_readable()) {
+        return VFS_POLLIN;
+    }
+
+    return 0;
+}
+
+static int ttyS0_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* task) {
+    (void)node;
+    return ttyS0_poll_waitq_register(w, task);
+}
+
 vfs_ops_t ttyS0_ops = {
     ttyS0_vfs_read,
     ttyS0_vfs_write,
@@ -312,6 +333,8 @@ vfs_ops_t ttyS0_ops = {
     0,
     ttyS0_vfs_ioctl,
     0,
+    ttyS0_vfs_poll_status,
+    ttyS0_vfs_poll_register,
 };
 
 vfs_node_t ttyS0_node = {
