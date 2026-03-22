@@ -217,7 +217,9 @@ void PmmState::init_regions(
      * free only what the memory map explicitly allows.
      */
     total_pages_ = 0u;
-    used_pages_count_.store(0u, kernel::memory_order::relaxed);
+    for (uint32_t i = 0u; i < MAX_CPUS; i++) {
+        cpu_used_pages_[i] = 0u;
+    }
     mem_map_ = nullptr;
 
     for (uint32_t zone = 0u; zone < PMM_ZONE_COUNT; zone++) {
@@ -418,12 +420,7 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
 
     page->order = order;
 
-    /*
-     * Treat this as a statistical counter.
-     * Buddy state is protected by zone locks; this value is only used for
-     * reporting and pressure heuristics.
-     */
-    used_pages_count_.fetch_add(1u << order, kernel::memory_order::relaxed);
+    cpu_used_pages_[pcp_cpu_index()] += (1u << order);
 
     return reinterpret_cast<void*>(page_to_phys(page));
 }
@@ -587,11 +584,15 @@ uint32_t PmmState::page_to_phys(page_t* page) const noexcept {
 }
 
 uint32_t PmmState::get_used_blocks() const noexcept {
-    return used_pages_count_.load(kernel::memory_order::relaxed);
+    uint32_t total = 0u;
+    for (uint32_t i = 0u; i < MAX_CPUS; i++) {
+        total += cpu_used_pages_[i];
+    }
+    return total;
 }
 
 uint32_t PmmState::get_free_blocks() const noexcept {
-    return total_pages_ - used_pages_count_.load(kernel::memory_order::relaxed);
+    return total_pages_ - get_used_blocks();
 }
 
 uint32_t PmmState::get_total_blocks() const noexcept {
@@ -607,7 +608,7 @@ uint32_t PmmState::align_down(uint32_t addr) noexcept {
 }
 
 void PmmState::init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) noexcept {
-    used_pages_count_.store(total_pages, kernel::memory_order::relaxed);
+    cpu_used_pages_[0u] = total_pages;
 
     const uint32_t kernel_end = align_up(kernel_end_addr);
 
@@ -879,7 +880,7 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
         return;
     }
 
-    used_pages_count_.fetch_sub(1u << order, kernel::memory_order::relaxed);
+    cpu_used_pages_[pcp_cpu_index()] -= (1u << order);
 
     uint32_t pfn = static_cast<uint32_t>(page - mem_map_);
 

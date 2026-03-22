@@ -175,7 +175,7 @@ private:
     page_t* mem_map_ = nullptr;
     uint32_t total_pages_ = 0u;
 
-    atomic<uint32_t> used_pages_count_{0u};
+    __cacheline_aligned uint32_t cpu_used_pages_[MAX_CPUS]{};
 
     struct FreeArea {
         page_t* head = nullptr;
