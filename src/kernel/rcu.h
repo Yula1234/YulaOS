@@ -66,6 +66,23 @@ inline void synchronize_rcu() {
     ::synchronize_rcu();
 }
 
+class RcuReadGuard {
+public:
+    RcuReadGuard() {
+        ::rcu_read_lock();
+    }
+
+    RcuReadGuard(const RcuReadGuard&) = delete;
+    RcuReadGuard& operator=(const RcuReadGuard&) = delete;
+
+    RcuReadGuard(RcuReadGuard&&) = delete;
+    RcuReadGuard& operator=(RcuReadGuard&&) = delete;
+
+    ~RcuReadGuard() {
+        ::rcu_read_unlock();
+    }
+};
+
 template <typename T>
 class RcuPtr {
 public:

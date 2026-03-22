@@ -1034,12 +1034,14 @@ file_desc_t* proc_fd_get(task_t* t, int fd) {
 
     if ((uint32_t)fd >= ft->max_fds) return 0;
 
-    rcu_read_lock();
-    file_desc_t* out = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
-    if (out) {
-        file_desc_retain(out);
+    file_desc_t* out = nullptr;
+    {
+        kernel::RcuReadGuard guard;
+        out = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
+        if (out) {
+            file_desc_retain(out);
+        }
     }
-    rcu_read_unlock();
 
     return out;
 }
