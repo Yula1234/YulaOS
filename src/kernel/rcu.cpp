@@ -98,11 +98,12 @@ extern "C" void rcu_gc_task(void* arg) {
 
 extern "C" void rcu_qs_count_inc(void);
 extern "C" void synchronize_rcu(void) {
-    uint32_t snap[MAX_CPUS];
+    const int n = cpu_count;
+    uint32_t* snap = (uint32_t*)__builtin_alloca(sizeof(uint32_t) * n);
 
     cpu_t* me = cpu_current();
 
-    for (int i = 0; i < MAX_CPUS; i++) {
+    for (int i = 0; i < n; i++) {
         if (cpus[i].id != -1 && &cpus[i] != me) {
             snap[i] = __atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_RELAXED);
 
@@ -111,14 +112,14 @@ extern "C" void synchronize_rcu(void) {
         }
     }
 
-    for (int i = 0; i < MAX_CPUS; i++) {
+    for (int i = 0; i < n; i++) {
         if (cpus[i].id == -1 || &cpus[i] == me) {
             continue;
         }
 
         while (__atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_RELAXED) == snap[i]) {
             rcu_qs_count_inc();
-            
+
             __asm__ volatile("pause" ::: "memory");
         }
     }
