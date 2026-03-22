@@ -9,6 +9,8 @@
 
 #include <mm/vma.h>
 
+#include <lib/dlist.h>
+
 #include <stdint.h>
 
 namespace {
@@ -131,6 +133,7 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
     }
 
     uintptr_t cur = start;
+
     while (cur < end_excl) {
         const uint32_t v = (uint32_t)cur;
 
@@ -151,13 +154,28 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
         }
 
         vma_region_t* region = vma_find(t->mem, v);
-
         if (!region) {
             return 0;
         }
 
-        uintptr_t lim = (uintptr_t)region->vaddr_end;
-        cur = (end_excl < lim) ? end_excl : lim;
+        cur = region->vaddr_end;
+
+        while (cur < end_excl && region != nullptr) {
+            dlist_head_t* next_node = region->list_node.next;
+
+            if (next_node == &t->mem->mmap_regions) {
+                return 0;
+            }
+
+            vma_region_t* next_region = container_of(next_node, vma_region_t, list_node);
+
+            if (next_region->vaddr_start > cur) {
+                return 0;
+            }
+
+            region = next_region;
+            cur = region->vaddr_end;
+        }
     }
 
     return 1;
