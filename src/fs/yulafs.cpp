@@ -1173,7 +1173,8 @@ static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
     }
 
     uint32_t entries_per_block = YFS_BLOCK_SIZE / sizeof(yfs_dirent_t);
-    yfs_dirent_t* entries = (yfs_dirent_t*)kmalloc(YFS_BLOCK_SIZE);
+    int scratch_slot = -1;
+    yfs_dirent_t* entries = (yfs_dirent_t*)yfs_scratch_acquire(&scratch_slot);
     if (!entries) {
         return 0;
     }
@@ -1192,13 +1193,17 @@ static yfs_ino_t dir_find(yfs_inode_t* dir, const char* name) {
                 dcache_insert(dir->id, name, entries[j].inode);
                 yfs_ino_t res = entries[j].inode;
 
-                kfree(entries);
+                if (scratch_slot >= 0) {
+                    yfs_scratch_release(scratch_slot);
+                }
                 return res;
             }
         }
     }
 
-    kfree(entries);
+    if (scratch_slot >= 0) {
+        yfs_scratch_release(scratch_slot);
+    }
     return 0;
 }
 
