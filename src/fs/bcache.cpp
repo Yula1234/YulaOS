@@ -267,7 +267,7 @@ struct HotCache {
     PerCpuHotCache per_cpu[MAX_CPUS]{};
 
     void init() {
-        for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+        for (int cpu = 0; cpu < cpu_count; cpu++) {
             per_cpu[cpu].init();
         }
     }

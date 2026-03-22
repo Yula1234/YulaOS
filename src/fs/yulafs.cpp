@@ -14,6 +14,7 @@
 #include "../mm/heap.h"
 
 #include <hal/lock.h>
+#include <kernel/smp/cpu.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/mutex.h>
 #include <lib/cpp/semaphore.h>
@@ -1691,7 +1692,7 @@ void yfs::FileSystem::init() {
     /* Mount on valid magic, otherwise format. */
     bcache_init();
 
-    for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
+    for (int cpu = 0; cpu < cpu_count; cpu++) {
         spinlock_init(&inode_table_cache_lock[cpu]);
         inode_table_cache_stamp[cpu] = 0;
 

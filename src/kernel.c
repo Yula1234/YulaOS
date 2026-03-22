@@ -327,7 +327,7 @@ static void kmain_tasks_init(void) {
     pc_speaker_init();
     pc_speaker_beep();
 
-    for (int i = 0; i < MAX_CPUS; i++) {
+    for (int i = 0; i < cpu_count; i++) {
         cpus[i].idle_task = proc_create_idle(i);
     }
 }

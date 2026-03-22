@@ -57,7 +57,7 @@ extern "C" void rcu_gc_task(void* arg) {
 
         rcu_head_t* list = nullptr;
 
-        for (int i = 0; i < MAX_CPUS; i++) {
+        for (int i = 0; i < cpu_count; i++) {
             if (cpus[i].id == -1) {
                 continue;
             }
