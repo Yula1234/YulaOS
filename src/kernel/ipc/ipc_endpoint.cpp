@@ -313,6 +313,9 @@ extern "C" {
 
 static int ipc_listen_close(vfs_node_t* node);
 
+static int ipc_listen_vfs_poll_status(vfs_node_t* node, int events);
+static int ipc_listen_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* task);
+
 static vfs_ops_t ipc_listen_ops = {
     .read = 0,
     .write = 0,
@@ -320,6 +323,8 @@ static vfs_ops_t ipc_listen_ops = {
     .close = ipc_listen_close,
     .ioctl = 0,
     .get_phys_page = nullptr,
+    .poll_status = ipc_listen_vfs_poll_status,
+    .poll_register = ipc_listen_vfs_poll_register,
 };
 
 struct vfs_node* ipc_listen_create(const char* name) {
@@ -497,6 +502,31 @@ int ipc_listen_poll_waitq_register(struct vfs_node* listen_node,
     }
 
     return ep->register_waiter(w, task);
+}
+
+static int ipc_listen_vfs_poll_status(vfs_node_t* node, int events) {
+    if (!node) {
+        return 0;
+    }
+
+    if ((node->flags & VFS_FLAG_IPC_LISTEN) == 0) {
+        return 0;
+    }
+
+    IpcEndpoint* ep = (IpcEndpoint*)node->private_data;
+    if (!ep) {
+        return 0;
+    }
+
+    if ((events & VFS_POLLIN) && ep->has_pending()) {
+        return VFS_POLLIN;
+    }
+
+    return 0;
+}
+
+static int ipc_listen_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* task) {
+    return ipc_listen_poll_waitq_register(node, w, task);
 }
 
 int ipc_accept(struct vfs_node* listen_node,
