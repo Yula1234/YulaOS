@@ -55,11 +55,11 @@ static inline void rcu_read_unlock(void) {
 namespace kernel {
 
 inline void rcu_read_lock() {
-    __asm__ volatile("" ::: "memory");
+    ::rcu_read_lock();
 }
 
 inline void rcu_read_unlock() {
-    __asm__ volatile("" ::: "memory");
+    ::rcu_read_unlock();
 }
 
 inline void synchronize_rcu() {

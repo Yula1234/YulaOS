@@ -29,6 +29,10 @@ public:
         sem_wait(&sem_);
     }
 
+    bool wait_timeout(uint32_t deadline_tick) {
+        return sem_wait_timeout(&sem_, deadline_tick) != 0;
+    }
+
     void signal() {
         sem_signal(&sem_);
     }

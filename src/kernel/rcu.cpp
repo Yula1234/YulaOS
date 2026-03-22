@@ -6,20 +6,16 @@
 #include <kernel/sched.h>
 #include <hal/apic.h>
 #include <hal/lock.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/semaphore.h>
 
-extern "C" void rcu_qs_count_inc(void) {
-    cpu_t* cpu = cpu_current();
+static kernel::atomic<rcu_head_t*> g_rcu_queue_head{nullptr};
+static kernel::atomic<uint32_t> g_rcu_queue_len{0u};
 
-    __atomic_fetch_add(&cpu->rcu_qs_count, 1, __ATOMIC_RELAXED);
-}
+static kernel::Semaphore g_rcu_sem{};
+static kernel::atomic<uint32_t> g_rcu_sem_ready{0u};
 
-extern "C" uint32_t rcu_qs_count_read(int cpu_idx) {
-    return __atomic_load_n(&cpus[cpu_idx].rcu_qs_count, __ATOMIC_RELAXED);
-}
-
-static spinlock_t g_rcu_queue_lock = {0u};
-static rcu_head_t* g_rcu_queue_head = nullptr;
-static rcu_head_t* g_rcu_queue_tail = nullptr;
+extern "C" volatile uint32_t timer_ticks;
 
 extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
     if (!head || !func) {
@@ -27,52 +23,53 @@ extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
     }
 
     head->func = func;
-    head->next = nullptr;
 
-    uint32_t flags = spinlock_acquire_safe(&g_rcu_queue_lock);
-    if (!g_rcu_queue_head) {
-        g_rcu_queue_head = head;
-        g_rcu_queue_tail = head;
-    } else {
-        g_rcu_queue_tail->next = head;
-        g_rcu_queue_tail = head;
+    rcu_head_t* old_head = g_rcu_queue_head.load(kernel::memory_order::relaxed);
+    do {
+        head->next = old_head;
+    } while (!g_rcu_queue_head.compare_exchange_weak(
+        old_head, head,
+        kernel::memory_order::release,
+        kernel::memory_order::relaxed
+    ));
+
+    uint32_t len = g_rcu_queue_len.fetch_add(1u, kernel::memory_order::relaxed);
+    if (len == 256u && g_rcu_sem_ready.load(kernel::memory_order::relaxed) != 0u) {
+        g_rcu_sem.signal();
     }
-    spinlock_release_safe(&g_rcu_queue_lock, flags);
 }
-
-extern "C" void proc_usleep(uint32_t us);
 
 extern "C" void rcu_gc_task(void* arg) {
     (void)arg;
 
+    g_rcu_sem_ready.store(1u, kernel::memory_order::release);
+
     for (;;) {
-        rcu_head_t* list = nullptr;
+        g_rcu_sem.wait_timeout(timer_ticks + 10u);
 
-        uint32_t flags = spinlock_acquire_safe(&g_rcu_queue_lock);
-        list = g_rcu_queue_head;
-        g_rcu_queue_head = nullptr;
-        g_rcu_queue_tail = nullptr;
-        spinlock_release_safe(&g_rcu_queue_lock, flags);
+        rcu_head_t* list = g_rcu_queue_head.exchange(nullptr, kernel::memory_order::acquire);
+        g_rcu_queue_len.store(0u, kernel::memory_order::relaxed);
 
-        if (list) {
-            synchronize_rcu();
-
-            while (list) {
-                rcu_head_t* next = list->next;
-                void (*func)(rcu_head_t*) = list->func;
-
-                list->next = nullptr;
-                list->func = nullptr;
-
-                func(list);
-                list = next;
-            }
+        if (!list) {
+            continue;
         }
 
-        proc_usleep(10000u);
+        synchronize_rcu();
+
+        while (list) {
+            rcu_head_t* next = list->next;
+            void (*f)(rcu_head_t*) = list->func;
+
+            list->next = nullptr;
+            list->func = nullptr;
+
+            f(list);
+            list = next;
+        }
     }
 }
 
+extern "C" void rcu_qs_count_inc(void);
 extern "C" void synchronize_rcu(void) {
     uint32_t snap[MAX_CPUS];
 
@@ -98,4 +95,14 @@ extern "C" void synchronize_rcu(void) {
             __asm__ volatile("pause" ::: "memory");
         }
     }
+}
+
+extern "C" uint32_t rcu_qs_count_read(int cpu_idx) {
+    return __atomic_load_n(&cpus[cpu_idx].rcu_qs_count, __ATOMIC_RELAXED);
+}
+
+extern "C" void rcu_qs_count_inc(void) {
+    cpu_t* cpu = cpu_current();
+
+    __atomic_fetch_add(&cpu->rcu_qs_count, 1, __ATOMIC_RELAXED);
 }
