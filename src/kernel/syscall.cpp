@@ -10,8 +10,6 @@
 #include <drivers/fbdev.h>
 #include <drivers/vga.h>
 #include <drivers/keyboard.h>
-#include <drivers/mouse.h>
-#include <drivers/serial/ttyS0.h>
 #include <drivers/virtio/virtio_gpu.h>
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
@@ -25,7 +23,6 @@
 #include <fs/vfs.h>
 #include <fs/yulafs.h>
 #include <fs/pipe.h>
-#include <fs/pty/pty.h>
 
 #include <mm/pmm.h>
 #include <mm/heap.h>
@@ -147,12 +144,6 @@ typedef struct {
     int16_t events;
     int16_t revents;
 } __attribute__((packed)) pollfd_t;
-
-#define POLLIN   0x001
-#define POLLOUT  0x004
-#define POLLERR  0x008
-#define POLLHUP  0x010
-#define POLLNVAL 0x020
 
 typedef void (*syscall_fn_t)(registers_t* regs, task_t* curr);
 
@@ -1877,7 +1868,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             int16_t ev = p->events;
 
             if (fd < 0) continue;
-            if ((ev & (POLLIN | POLLOUT)) == 0) continue;
+            if ((ev & (VFS_POLLIN | VFS_POLLOUT)) == 0) continue;
 
             file_desc_t* d = proc_fd_get(curr, fd);
             if (!d || !d->node) {
@@ -1892,22 +1883,9 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             }
 
             vfs_node_t* node = d->node;
-            if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
-                (void)pipe_poll_waitq_register(node, &waiters[i], curr);
-            } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
-                (void)pty_poll_waitq_register(node, &waiters[i], curr);
-            } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
-                if (ev & POLLIN) {
-                    (void)ipc_listen_poll_waitq_register(node, &waiters[i], curr);
-                }
-            } else if (ev & POLLIN) {
-                if (node->name[0] == 'k' && strcmp(node->name, "kbd") == 0) {
-                    (void)kbd_poll_waitq_register(&waiters[i], curr);
-                } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
-                    (void)mouse_poll_waitq_register(&waiters[i], curr);
-                } else if (node->name[0] == 't' && strcmp(node->name, "ttyS0") == 0) {
-                    (void)ttyS0_poll_waitq_register(&waiters[i], curr);
-                }
+
+            if (node->ops && node->ops->poll_register) {
+                (void)node->ops->poll_register(node, &waiters[i], curr);
             }
 
             if (!active_descs) {
@@ -1931,49 +1909,16 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             int16_t rev = 0;
 
             if (fd < 0) {
-                rev = POLLNVAL;
+                rev = VFS_POLLNVAL;
             } else {
                 file_desc_t* d = proc_fd_get(curr, fd);
                 if (!d || !d->node) {
-                    rev = POLLNVAL;
+                    rev = VFS_POLLNVAL;
                 } else {
                     vfs_node_t* node = d->node;
-                    if (node->flags & (VFS_FLAG_PIPE_READ | VFS_FLAG_PIPE_WRITE)) {
-                        uint32_t avail = 0;
-                        uint32_t space = 0;
-                        int readers = 0;
-                        int writers = 0;
-                        if (pipe_poll_info(node, &avail, &space, &readers, &writers) == 0) {
-                            if (node->flags & VFS_FLAG_PIPE_READ) {
-                                if ((ev & POLLIN) && avail > 0) rev |= POLLIN;
-                                if (writers == 0) rev |= POLLHUP;
-                            }
-                            if (node->flags & VFS_FLAG_PIPE_WRITE) {
-                                if ((ev & POLLOUT) && readers > 0 && space > 0) rev |= POLLOUT;
-                                if (readers == 0) rev |= POLLHUP;
-                            }
-                        }
-                    } else if (node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) {
-                        uint32_t avail = 0;
-                        uint32_t space = 0;
-                        int peer_open = 0;
-                        if (pty_poll_info(node, &avail, &space, &peer_open) == 0) {
-                            if ((ev & POLLIN) && avail > 0) rev |= POLLIN;
-                            if ((ev & POLLOUT) && peer_open > 0 && space > 0) rev |= POLLOUT;
-                            if (peer_open == 0) rev |= POLLHUP;
-                        }
-                    } else if (node->flags & VFS_FLAG_IPC_LISTEN) {
-                        if ((ev & POLLIN) && ipc_listen_poll_ready(node)) {
-                            rev |= POLLIN;
-                        }
-                    } else if (ev & POLLIN) {
-                        if (node->name[0] == 'k' && strcmp(node->name, "kbd") == 0) {
-                            if (kbd_poll_ready(curr)) rev |= POLLIN;
-                        } else if (node->name[0] == 'm' && strcmp(node->name, "mouse") == 0) {
-                            if (mouse_poll_ready(curr)) rev |= POLLIN;
-                        } else if (node->name[0] == 't' && strcmp(node->name, "ttyS0") == 0) {
-                            if (ttyS0_poll_ready()) rev |= POLLIN;
-                        }
+
+                    if (node->ops && node->ops->poll_status) {
+                        rev = (int16_t)node->ops->poll_status(node, ev);
                     }
                 }
 
