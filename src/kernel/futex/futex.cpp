@@ -253,6 +253,9 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
 
         kernel::CDBLinkedListView<task_t, &task_t::sem_node> waiters(entry->wait_list);
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+
         while (woken < max_wake && !waiters.empty()) {
             task_t& t = waiters.front();
 
@@ -273,6 +276,9 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
 
             woken++;
         }
+
+#pragma GCC diagnostic pop
+
     }
 
     return (int)woken;
