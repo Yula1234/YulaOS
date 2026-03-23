@@ -47,6 +47,7 @@
 #include <hal/io.h>
 #include <hal/ioapic.h>
 #include <hal/pic.h>
+#include <hal/pmio.h>
 
 #include <mm/heap.h>
 #include <mm/pmm.h>
@@ -256,6 +257,8 @@ static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
     paging_init(memory_end_addr);
     vmm_init();
     heap_init();
+
+    pmio_init();
 
     return memory_end_addr;
 }
