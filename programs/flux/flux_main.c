@@ -284,7 +284,7 @@ static int comp_clients_shrink(comp_client_t** clients,
     return 0;
 }
 
-__attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
+int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
     dbg_write("flux: enter main\n");

@@ -10,7 +10,7 @@ static void on_signal(int sig) {
     }
 }
 
-__attribute__((force_align_arg_pointer)) int main(int argc, char** argv) {
+int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
