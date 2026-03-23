@@ -30,10 +30,16 @@ static percpu_rwspinlock_t g_pmio_lock;
 void pmio_init(void) {
     g_pmio_regions = RB_ROOT;
 
+    /*
+     * PMIO reads are hot (probe paths, debug queries). Writers are rare.
+     * A percpu rwspinlock keeps the read side scalable without forcing an
+     * extra global bounce on every lookup.
+     */
     percpu_rwspinlock_init(&g_pmio_lock);
 }
 
 static int pmio_is_overlap(uint16_t start1, uint16_t end1, uint16_t start2, uint16_t end2) {
+    /* Intervals are inclusive on both ends. */
     if (start1 > end2) {
         return 0;
     }
@@ -64,6 +70,11 @@ static uint16_t pmio_region_max_end(const pmio_region_t* region) {
 
     return max_end;
 }
+
+/*
+ * max_end is the only augmentation we need: it allows us to discard entire
+ * subtrees when their max_end falls below the query start.
+ */
 
 static void pmio_augment_propagate(struct rb_node* node, struct rb_node* stop) {
     while (node != stop) {
@@ -109,12 +120,20 @@ static pmio_region_t* pmio_find_conflict_locked(uint16_t start, uint16_t end) {
             pmio_region_t* left = rb_entry(node->rb_left, pmio_region_t, rb_node);
             
             if (left->max_end >= start) {
+                /*
+                 * There is something in the left subtree that may still reach
+                 * into [start, ...]. Prefer going left to find the first hit.
+                 */
                 node = node->rb_left;
                 continue;
             }
         }
 
         if (region->start > end) {
+            /*
+             * Ordered by start: once we land on a node entirely to the right
+             * of the query, nothing further right can overlap.
+             */
             break;
         }
 
@@ -132,10 +151,18 @@ static void pmio_insert_locked(pmio_region_t* new_region) {
         pmio_region_t* region = rb_entry(*link, pmio_region_t, rb_node);
         parent = *link;
 
+        /*
+         * Fast-path the common case: extend max_end on the search path so the
+         * subsequent augmented rebalancing has less work to propagate.
+         */
         if (region->max_end < new_region->max_end) {
             region->max_end = new_region->max_end;
         }
 
+        /*
+         * Total order is (start, end): start is primary key. end breaks ties
+         * to keep the tree stable for nested/adjacent ranges.
+         */
         if (new_region->start < region->start) {
             link = &(*link)->rb_left;
         } else if (new_region->start > region->start) {
@@ -156,6 +183,10 @@ static int pmio_is_linked_locked(const pmio_region_t* region) {
         return 0;
     }
     
+    /*
+     * rb_node has no explicit "in-tree" bit. This is only a guard against an
+     * obvious double-release; it is not a general membership test.
+     */
     return rb_parent(&region->rb_node) != 0 || g_pmio_regions.rb_node == &region->rb_node;
 }
 
@@ -195,6 +226,10 @@ pmio_region_t* pmio_request_region(uint16_t start, uint16_t count, const char* n
         return 0;
     }
 
+    /*
+     * Port space is 16-bit. Do arithmetic in 32-bit to avoid wrap-around when
+     * callers request ranges near 0xffff.
+     */
     const uint32_t end32 = (uint32_t)start + count - 1u;
 
     if (end32 > 0xFFFFu) {
@@ -203,6 +238,10 @@ pmio_region_t* pmio_request_region(uint16_t start, uint16_t count, const char* n
 
     const uint16_t end = (uint16_t)end32;
 
+    /*
+     * Allocation is intentionally outside the write-locked section: the heap
+     * may take time, and we don't want to serialize readers on that.
+     */
     pmio_region_t* new_region = (pmio_region_t*)kmalloc(sizeof(pmio_region_t));
     if (!new_region) {
         return 0;
@@ -241,6 +280,7 @@ void pmio_release_region(pmio_region_t* region) {
     }
 
     if (region->magic != PMIO_REGION_MAGIC) {
+        /* Stale or foreign handle. */
         return;
     }
 
@@ -271,6 +311,11 @@ void pmio_iterate(pmio_iterate_cb_t callback, void* ctx) {
     }
 
     percpu_rwspinlock_acquire_read(&g_pmio_lock);
+
+    /*
+     * Callback runs under the read lock: keep it short and non-blocking.
+     * It must not call back into PMIO in a way that attempts a write lock.
+     */
 
     struct rb_node* node = rb_first(&g_pmio_regions);
 
