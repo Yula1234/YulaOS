@@ -44,6 +44,16 @@ pmio_region_t* pmio_request_region(uint16_t start, uint16_t count, const char* n
 void pmio_release_region(pmio_region_t* region);
 
 /*
+ * Optional per-device serialization.
+ *
+ * Some devices require multi-port sequences to be atomic with respect to
+ * other users (index/data pairs, mode/data programming, etc.). Drivers may
+ * bracket such sequences with pmio_acquire_bus()/pmio_release_bus().
+ */
+void pmio_acquire_bus(pmio_region_t* region);
+void pmio_release_bus(pmio_region_t* region);
+
+/*
  * Lookup helpers.
  *
  * pmio_find_region() returns the owner of a single port.
@@ -63,18 +73,18 @@ typedef void (*pmio_iterate_cb_t)(uint16_t start, uint16_t end, const char* name
 void pmio_iterate(pmio_iterate_cb_t callback, void* ctx);
 
 /*
- * Raw port accessors.
+ * Capability-style port accessors.
  *
- * These are thin wrappers around in/out instructions and do not perform
- * region ownership checks.
+ * Offsets are validated against the region bounds, so drivers cannot
+ * accidentally step outside their granted range.
  */
-uint8_t  pmio_readb(uint16_t port);
-uint16_t pmio_readw(uint16_t port);
-uint32_t pmio_readl(uint16_t port);
+int pmio_readb(pmio_region_t* region, uint16_t offset, uint8_t* value);
+int pmio_readw(pmio_region_t* region, uint16_t offset, uint16_t* value);
+int pmio_readl(pmio_region_t* region, uint16_t offset, uint32_t* value);
 
-void pmio_writeb(uint16_t port, uint8_t val);
-void pmio_writew(uint16_t port, uint16_t val);
-void pmio_writel(uint16_t port, uint32_t val);
+int pmio_writeb(pmio_region_t* region, uint16_t offset, uint8_t value);
+int pmio_writew(pmio_region_t* region, uint16_t offset, uint16_t value);
+int pmio_writel(pmio_region_t* region, uint16_t offset, uint32_t value);
 
 
 #ifdef __cplusplus

@@ -21,6 +21,7 @@ struct pmio_region {
     uint16_t start;
     uint16_t end;
     uint16_t max_end;
+    spinlock_t bus_lock;
     char name[32];
 };
 
@@ -53,6 +54,25 @@ static int pmio_is_overlap(uint16_t start1, uint16_t end1, uint16_t start2, uint
 
 static uint16_t pmio_max_u16(uint16_t a, uint16_t b) {
     return a > b ? a : b;
+}
+
+static uint16_t pmio_region_size(const pmio_region_t* region) {
+    return (uint16_t)(region->end - region->start + 1u);
+}
+
+static int pmio_is_valid_access(const pmio_region_t* region, uint16_t offset, uint16_t width) {
+    const uint32_t size = (uint32_t)pmio_region_size(region);
+    const uint32_t off = (uint32_t)offset;
+
+    if (off + width > size) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static uint16_t pmio_port_at(const pmio_region_t* region, uint16_t offset) {
+    return (uint16_t)(region->start + offset);
 }
 
 static uint16_t pmio_region_max_end(const pmio_region_t* region) {
@@ -252,6 +272,8 @@ pmio_region_t* pmio_request_region(uint16_t start, uint16_t count, const char* n
     new_region->end = end;
     new_region->max_end = end;
 
+    spinlock_init(&new_region->bus_lock);
+
     strlcpy(
         new_region->name,
         name ? name : "unknown",
@@ -305,6 +327,30 @@ void pmio_release_region(pmio_region_t* region) {
     }
 }
 
+void pmio_acquire_bus(pmio_region_t* region) {
+    if (!region) {
+        return;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return;
+    }
+
+    spinlock_acquire(&region->bus_lock);
+}
+
+void pmio_release_bus(pmio_region_t* region) {
+    if (!region) {
+        return;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return;
+    }
+
+    spinlock_release(&region->bus_lock);
+}
+
 void pmio_iterate(pmio_iterate_cb_t callback, void* ctx) {
     if (!callback) {
         return;
@@ -330,26 +376,110 @@ void pmio_iterate(pmio_iterate_cb_t callback, void* ctx) {
     percpu_rwspinlock_release_read(&g_pmio_lock);
 }
 
-uint8_t pmio_readb(uint16_t port) {
-    return inb(port);
+int pmio_readb(pmio_region_t* region, uint16_t offset, uint8_t* value) {
+    if (!region || !value) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (!pmio_is_valid_access(region, offset, 1u)) {
+        return -1;
+    }
+
+    *value = inb(pmio_port_at(region, offset));
+
+    return 0;
 }
 
-void pmio_writeb(uint16_t port, uint8_t val) {
-    outb(port, val);
+int pmio_writeb(pmio_region_t* region, uint16_t offset, uint8_t value) {
+    if (!region) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (!pmio_is_valid_access(region, offset, 1u)) {
+        return -1;
+    }
+
+    outb(pmio_port_at(region, offset), value);
+
+    return 0;
 }
 
-uint16_t pmio_readw(uint16_t port) {
-    return inw(port);
+int pmio_readw(pmio_region_t* region, uint16_t offset, uint16_t* value) {
+    if (!region || !value) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (!pmio_is_valid_access(region, offset, 2u)) {
+        return -1;
+    }
+
+    *value = inw(pmio_port_at(region, offset));
+
+    return 0;
 }
 
-void pmio_writew(uint16_t port, uint16_t val) {
-    outw(port, val);
+int pmio_writew(pmio_region_t* region, uint16_t offset, uint16_t value) {
+    if (!region) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (!pmio_is_valid_access(region, offset, 2u)) {
+        return -1;
+    }
+
+    outw(pmio_port_at(region, offset), value);
+
+    return 0;
 }
 
-uint32_t pmio_readl(uint16_t port) {
-    return inl(port);
+int pmio_readl(pmio_region_t* region, uint16_t offset, uint32_t* value) {
+    if (!region || !value) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (!pmio_is_valid_access(region, offset, 4u)) {
+        return -1;
+    }
+
+    *value = inl(pmio_port_at(region, offset));
+
+    return 0;
 }
 
-void pmio_writel(uint16_t port, uint32_t val) {
-    outl(port, val);
+int pmio_writel(pmio_region_t* region, uint16_t offset, uint32_t value) {
+    if (!region) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (!pmio_is_valid_access(region, offset, 4u)) {
+        return -1;
+    }
+
+    outl(pmio_port_at(region, offset), value);
+
+    return 0;
 }
