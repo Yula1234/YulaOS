@@ -17,7 +17,7 @@
 #define PPI_SPEAKER_ENABLE 0x03u
 #define PPI_SPEAKER_MASK   0xFCu
 
-static pmio_region_t* g_pit_ch2_region = 0;
+static pmio_region_t* g_pit_region = 0;
 static pmio_region_t* g_ppi_ctrl_region = 0;
 
 static int g_speaker_ready = 0;
@@ -34,17 +34,17 @@ void pc_speaker_init(void) {
         return;
     }
 
-    g_pit_ch2_region = pmio_request_region(PORT_PIT_CH2, 1u, "pit_ch2");
+    g_pit_region = pmio_request_region(PORT_PIT_CH2, 2u, "pit_ch2");
 
-    if (unlikely(!g_pit_ch2_region)) {
+    if (unlikely(!g_pit_region)) {
         return;
     }
 
     g_ppi_ctrl_region = pmio_request_region(PORT_PPI_CTRL, 1u, "ppi_speaker");
     
     if (unlikely(!g_ppi_ctrl_region)) {
-        pmio_release_region(g_pit_ch2_region);
-        g_pit_ch2_region = 0;
+        pmio_release_region(g_pit_region);
+        g_pit_region = 0;
 
         return;
     }
@@ -65,16 +65,25 @@ void pc_speaker_play(uint32_t frequency) {
 
     const uint32_t divisor = PIT_FREQUENCY / frequency;
 
-    pmio_writeb(PORT_PIT_COMMAND, PIT_CMD_CH2_SQUARE);
+    pmio_acquire_bus(g_pit_region);
 
-    pmio_writeb(PORT_PIT_CH2, (uint8_t)(divisor & 0xFFu));
-    pmio_writeb(PORT_PIT_CH2, (uint8_t)((divisor >> 8) & 0xFFu));
+    (void)pmio_writeb(g_pit_region, 1u, PIT_CMD_CH2_SQUARE);
 
-    const uint8_t ppi_state = pmio_readb(PORT_PPI_CTRL);
+    (void)pmio_writeb(g_pit_region, 0u, (uint8_t)(divisor & 0xFFu));
+    (void)pmio_writeb(g_pit_region, 0u, (uint8_t)((divisor >> 8) & 0xFFu));
+
+    pmio_release_bus(g_pit_region);
+
+    pmio_acquire_bus(g_ppi_ctrl_region);
+
+    uint8_t ppi_state = 0;
+    (void)pmio_readb(g_ppi_ctrl_region, 0u, &ppi_state);
 
     if ((ppi_state & PPI_SPEAKER_ENABLE) != PPI_SPEAKER_ENABLE) {
-        pmio_writeb(PORT_PPI_CTRL, ppi_state | PPI_SPEAKER_ENABLE);
+        (void)pmio_writeb(g_ppi_ctrl_region, 0u, ppi_state | PPI_SPEAKER_ENABLE);
     }
+
+    pmio_release_bus(g_ppi_ctrl_region);
 }
 
 void pc_speaker_stop(void) {
@@ -82,9 +91,14 @@ void pc_speaker_stop(void) {
         return;
     }
 
-    const uint8_t ppi_state = pmio_readb(PORT_PPI_CTRL);
+    pmio_acquire_bus(g_ppi_ctrl_region);
 
-    pmio_writeb(PORT_PPI_CTRL, ppi_state & PPI_SPEAKER_MASK);
+    uint8_t ppi_state = 0;
+    (void)pmio_readb(g_ppi_ctrl_region, 0u, &ppi_state);
+
+    (void)pmio_writeb(g_ppi_ctrl_region, 0u, ppi_state & PPI_SPEAKER_MASK);
+
+    pmio_release_bus(g_ppi_ctrl_region);
 }
 
 void pc_speaker_beep(void) {
