@@ -40,7 +40,8 @@ static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32
     uint32_t n = size;
 
     __asm__ volatile goto(
-        "1: cld; rep movsb\n"
+        "cld\n"
+        "1: rep movsb\n"           
         ".pushsection .uaccess_fixup, \"a\"\n"
         ".long 1b, %l[fixup]\n"
         ".popsection\n"
@@ -49,6 +50,7 @@ static int uaccess_memcpy_from_user_impl(void* dst, const void* user_src, uint32
         : "memory", "cc"
         : fixup
     );
+
 
     return 0;
 
@@ -79,7 +81,8 @@ static int uaccess_memcpy_to_user_impl(void* user_dst, const void* src, uint32_t
     uint32_t n = size;
 
     __asm__ volatile goto(
-        "1: cld; rep movsb\n"
+        "cld\n"
+        "1: rep movsb\n"
         ".pushsection .uaccess_fixup, \"a\"\n"
         ".long 1b, %l[fixup]\n"
         ".popsection\n"

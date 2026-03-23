@@ -294,29 +294,29 @@ static void kmain_devices_init(void) {
 
     drivers_init_stage(DRIVER_STAGE_CORE);
 
-    ttyS0_init();
-    mouse_vfs_init();
-    fb_vfs_init();
-    gpu0_vfs_init();
 }
 
 static void kmain_fs_init(void) {
-    vfs_init();
-
-    drivers_init_stage(DRIVER_STAGE_VFS);
-
     block_device_t* root_bdev = bdev_find_by_name("sd0");
+
     if (!root_bdev) {
         root_bdev = bdev_first();
     }
 
     bdev_set_root(root_bdev);
-
     bcache_attach_device(root_bdev);
 
     yulafs_init();
-    yulafs_lookup("/");
+    vfs_init();
 
+    ttyS0_init();
+    mouse_vfs_init();
+    fb_vfs_init();
+    gpu0_vfs_init();
+
+    drivers_init_stage(DRIVER_STAGE_VFS);
+
+    yulafs_lookup("/");
     pty_init();
 }
 
@@ -393,10 +393,13 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     cpp_call_global_ctors();
 
     kmain_video_init(memory_end_addr);
+    
     kmain_platform_init();
+    kmain_tasks_init();
+
     kmain_devices_init();
     kmain_fs_init();
-    kmain_tasks_init();
+    
     kmain_spawn_core_tasks();
     kmain_smp_init();
     kmain_spawn_service_tasks();
