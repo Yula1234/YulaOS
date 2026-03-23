@@ -12,8 +12,9 @@
 #include <kernel/proc.h>
 #include <kernel/waitq/poll_waitq.h>
 
-#include <hal/io.h>
 #include <hal/irq.h>
+#include <hal/lock.h>
+#include <hal/pmio.h>
 
 #include "mouse.h"
 
@@ -24,6 +25,128 @@ static poll_waitq_t mouse_poll_waitq;
 
 static uint8_t mouse_cycle = 0;
 static uint8_t mouse_byte[3];
+
+enum {
+    PS2_PORT_DATA = 0x60u,
+    PS2_PORT_STATUS = 0x64u,
+    PS2_PORT_COMMAND = 0x64u,
+};
+
+enum {
+    PIC_MASTER_DATA_PORT = 0x21u,
+    PIC_SLAVE_DATA_PORT = 0xA1u,
+};
+
+static pmio_region_t* g_ps2_data_region = 0;
+static pmio_region_t* g_ps2_cmd_region = 0;
+
+static pmio_region_t* g_pic_master_region = 0;
+static pmio_region_t* g_pic_slave_region = 0;
+
+static __cacheline_aligned spinlock_t g_ps2_lock;
+static int g_ps2_pmio_inited = 0;
+
+static int mouse_pmio_is_ready(void) {
+    return g_ps2_data_region && g_ps2_cmd_region;
+}
+
+static int mouse_pmio_init(void) {
+    if (g_ps2_pmio_inited) {
+        return 0;
+    }
+
+    spinlock_init(&g_ps2_lock);
+
+    g_ps2_data_region = pmio_request_region(PS2_PORT_DATA, 1u, "ps2_data");
+    if (!g_ps2_data_region) {
+        return -1;
+    }
+
+    g_ps2_cmd_region = pmio_request_region(PS2_PORT_COMMAND, 1u, "ps2_ctrl");
+    if (!g_ps2_cmd_region) {
+        pmio_release_region(g_ps2_data_region);
+        g_ps2_data_region = 0;
+
+        return -1;
+    }
+
+    g_pic_master_region = pmio_request_region(PIC_MASTER_DATA_PORT, 1u, "pic_master");
+    g_pic_slave_region = pmio_request_region(PIC_SLAVE_DATA_PORT, 1u, "pic_slave");
+
+    g_ps2_pmio_inited = 1;
+
+    return 0;
+}
+
+static uint8_t mouse_ps2_read_status(void) {
+    if (!mouse_pmio_is_ready()) {
+        return 0u;
+    }
+
+    uint8_t status = 0u;
+    (void)pmio_readb(g_ps2_cmd_region, 0u, &status);
+    return status;
+}
+
+static void mouse_ps2_write_command(uint8_t cmd) {
+    if (!mouse_pmio_is_ready()) {
+        return;
+    }
+
+    (void)pmio_writeb(g_ps2_cmd_region, 0u, cmd);
+}
+
+static void mouse_ps2_write_data(uint8_t data) {
+    if (!mouse_pmio_is_ready()) {
+        return;
+    }
+
+    (void)pmio_writeb(g_ps2_data_region, 0u, data);
+}
+
+static uint8_t mouse_ps2_read_data(void) {
+    if (!mouse_pmio_is_ready()) {
+        return 0u;
+    }
+
+    uint8_t data = 0u;
+    (void)pmio_readb(g_ps2_data_region, 0u, &data);
+    return data;
+}
+
+static void mouse_pic_unmask(uint8_t irq) {
+    if (!g_pic_master_region || !g_pic_slave_region) {
+        return;
+    }
+
+    if (irq < 8u) {
+        pmio_acquire_bus(g_pic_master_region);
+
+        uint8_t mask = 0u;
+        (void)pmio_readb(g_pic_master_region, 0u, &mask);
+        (void)pmio_writeb(g_pic_master_region, 0u, (uint8_t)(mask & (uint8_t)~(1u << irq)));
+
+        pmio_release_bus(g_pic_master_region);
+
+        return;
+    }
+
+    pmio_acquire_bus(g_pic_slave_region);
+
+    uint8_t mask_slave = 0u;
+    (void)pmio_readb(g_pic_slave_region, 0u, &mask_slave);
+    (void)pmio_writeb(g_pic_slave_region, 0u, (uint8_t)(mask_slave & (uint8_t)~(1u << (irq - 8u))));
+
+    pmio_release_bus(g_pic_slave_region);
+
+    pmio_acquire_bus(g_pic_master_region);
+
+    uint8_t mask_master = 0u;
+    (void)pmio_readb(g_pic_master_region, 0u, &mask_master);
+    (void)pmio_writeb(g_pic_master_region, 0u, (uint8_t)(mask_master & (uint8_t)~(1u << 2u)));
+
+    pmio_release_bus(g_pic_master_region);
+}
 
 static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
     (void)node;
@@ -123,34 +246,97 @@ void mouse_vfs_init(void) {
     devfs_register(&mouse_node);
 }
 
-void mouse_wait(uint8_t type) {
+static void mouse_wait_unlocked(uint8_t type) {
     uint32_t timeout = 100000;
+
+    if (!mouse_pmio_is_ready()) {
+        return;
+    }
+
     if (type == 0) {
-        while (timeout--) if ((inb(0x64) & 1) == 1) return;
+        while (timeout--) {
+            if ((mouse_ps2_read_status() & 1u) == 1u) {
+                return;
+            }
+        }
     } else {
-        while (timeout--) if ((inb(0x64) & 2) == 0) return;
+        while (timeout--) {
+            if ((mouse_ps2_read_status() & 2u) == 0u) {
+                return;
+            }
+        }
     }
 }
 
+static void mouse_write_unlocked(uint8_t a) {
+    mouse_wait_unlocked(1);
+    mouse_ps2_write_command(0xD4u);
+    mouse_wait_unlocked(1);
+    mouse_ps2_write_data(a);
+}
+
+static uint8_t mouse_read_unlocked(void) {
+    mouse_wait_unlocked(0);
+    return mouse_ps2_read_data();
+}
+
+void mouse_wait(uint8_t type) {
+    if (!mouse_pmio_is_ready()) {
+        return;
+    }
+
+    const uint32_t flags = spinlock_acquire_safe(&g_ps2_lock);
+
+    mouse_wait_unlocked(type);
+
+    spinlock_release_safe(&g_ps2_lock, flags);
+}
+
 void mouse_write(uint8_t a) {
-    mouse_wait(1);
-    outb(0x64, 0xD4);
-    mouse_wait(1);
-    outb(0x60, a);
+    if (!mouse_pmio_is_ready()) {
+        return;
+    }
+
+    const uint32_t flags = spinlock_acquire_safe(&g_ps2_lock);
+
+    mouse_write_unlocked(a);
+
+    spinlock_release_safe(&g_ps2_lock, flags);
 }
 
 uint8_t mouse_read() {
-    mouse_wait(0);
-    return inb(0x60);
+    if (!mouse_pmio_is_ready()) {
+        return 0u;
+    }
+
+    const uint32_t flags = spinlock_acquire_safe(&g_ps2_lock);
+
+    const uint8_t data = mouse_read_unlocked();
+
+    spinlock_release_safe(&g_ps2_lock, flags);
+
+    return data;
 }
 
 void mouse_irq_handler(registers_t* regs) {
     (void)regs;
-    uint8_t status = inb(0x64);
-    
-    if (!(status & 0x01)) return;
 
-    uint8_t data = inb(0x60);
+    if (!mouse_pmio_is_ready()) {
+        return;
+    }
+
+    const uint32_t flags = spinlock_acquire_safe(&g_ps2_lock);
+
+    uint8_t status = mouse_ps2_read_status();
+    
+    if (!(status & 0x01u)) {
+        spinlock_release_safe(&g_ps2_lock, flags);
+        return;
+    }
+
+    uint8_t data = mouse_ps2_read_data();
+
+    spinlock_release_safe(&g_ps2_lock, flags);
 
     if (status & 0x20) {
         mouse_process_byte(data);
@@ -158,31 +344,38 @@ void mouse_irq_handler(registers_t* regs) {
 }
 
 void mouse_init() {
+    if (mouse_pmio_init() != 0) {
+        return;
+    }
+
+    const uint32_t flags = spinlock_acquire_safe(&g_ps2_lock);
+
     uint8_t status;
 
-    mouse_wait(1);
-    outb(0x64, 0xA8);
+    mouse_wait_unlocked(1);
+    mouse_ps2_write_command(0xA8u);
 
-    mouse_wait(1);
-    outb(0x64, 0x20);
-    status = mouse_read() | 2;
+    mouse_wait_unlocked(1);
+    mouse_ps2_write_command(0x20u);
+    status = mouse_read_unlocked() | 2;
     status &= ~0x20;          
 
-    mouse_wait(1);
-    outb(0x64, 0x60);
-    mouse_wait(1);
-    outb(0x60, status);
+    mouse_wait_unlocked(1);
+    mouse_ps2_write_command(0x60u);
+    mouse_wait_unlocked(1);
+    mouse_ps2_write_data(status);
 
-    mouse_write(0xF6);
-    mouse_read();     
+    mouse_write_unlocked(0xF6);
+    (void)mouse_read_unlocked();
 
-    mouse_write(0xF4);
-    mouse_read();     
+    mouse_write_unlocked(0xF4);
+    (void)mouse_read_unlocked();
 
     irq_install_handler(12, mouse_irq_handler);
 
-    outb(0xA1, inb(0xA1) & ~(1 << 4)); // Slave: IRQ 12
-    outb(0x21, inb(0x21) & ~(1 << 2)); // Master: Cascade
+    mouse_pic_unmask(12u);
+
+    spinlock_release_safe(&g_ps2_lock, flags);
 }
 
 void mouse_process_byte(uint8_t data) {
