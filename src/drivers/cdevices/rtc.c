@@ -1,18 +1,44 @@
 #include <drivers/cdev.h>
 #include <drivers/driver.h>
 
-#include <hal/io.h>
+#include <hal/pmio.h>
 
 #include <stdint.h>
 
+enum {
+    CMOS_PORT_INDEX = 0x70u,
+    CMOS_PORT_DATA = 0x71u,
+};
+
+static pmio_region_t* g_cmos_region = 0;
+
+static int cmos_is_ready(void) {
+    return g_cmos_region != 0;
+}
+
+static uint8_t cmos_read_register(uint8_t reg) {
+    if (!cmos_is_ready()) {
+        return 0u;
+    }
+
+    pmio_acquire_bus(g_cmos_region);
+
+    (void)pmio_writeb(g_cmos_region, 0u, (uint8_t)(reg & 0x7Fu));
+
+    uint8_t value = 0u;
+    (void)pmio_readb(g_cmos_region, 1u, &value);
+
+    pmio_release_bus(g_cmos_region);
+
+    return value;
+}
+
 static int rtc_is_updating(void) {
-    outb(0x70, 0x0Au);
-    return (inb(0x71) & 0x80u) != 0u;
+    return (cmos_read_register(0x0Au) & 0x80u) != 0u;
 }
 
 static uint8_t rtc_get_register(uint8_t reg) {
-    outb(0x70, reg);
-    return inb(0x71);
+    return cmos_read_register(reg);
 }
 
 static uint8_t bcd_to_bin(uint8_t v) {
@@ -152,9 +178,25 @@ static cdevice_t g_rtc_cdev = {
 };
 
 static int rtc_driver_init(void) {
+    if (!g_cmos_region) {
+        g_cmos_region = pmio_request_region(CMOS_PORT_INDEX, 2u, "cmos_rtc");
+        if (!g_cmos_region) {
+            return -1;
+        }
+    }
+
     g_rtc_cdev.node_template.size = 8u;
 
     return cdevice_register(&g_rtc_cdev);
+}
+
+static void rtc_driver_shutdown(void) {
+    if (!g_cmos_region) {
+        return;
+    }
+
+    pmio_release_region(g_cmos_region);
+    g_cmos_region = 0;
 }
 
 DRIVER_REGISTER(
@@ -162,5 +204,5 @@ DRIVER_REGISTER(
     .klass = DRIVER_CLASS_CHAR,
     .stage = DRIVER_STAGE_VFS,
     .init = rtc_driver_init,
-    .shutdown = 0
+    .shutdown = rtc_driver_shutdown
 );
