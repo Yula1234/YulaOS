@@ -265,6 +265,26 @@ void pmio_release_region(pmio_region_t* region) {
     }
 }
 
+void pmio_iterate(pmio_iterate_cb_t callback, void* ctx) {
+    if (!callback) {
+        return;
+    }
+
+    percpu_rwspinlock_acquire_read(&g_pmio_lock);
+
+    struct rb_node* node = rb_first(&g_pmio_regions);
+
+    while (node) {
+        pmio_region_t* region = rb_entry(node, pmio_region_t, rb_node);
+        
+        callback(region->start, region->end, region->name, ctx);
+        
+        node = rb_next(node);
+    }
+
+    percpu_rwspinlock_release_read(&g_pmio_lock);
+}
+
 uint8_t pmio_readb(uint16_t port) {
     return inb(port);
 }
