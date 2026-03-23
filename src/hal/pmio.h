@@ -86,6 +86,23 @@ int pmio_writeb(pmio_region_t* region, uint16_t offset, uint8_t value);
 int pmio_writew(pmio_region_t* region, uint16_t offset, uint16_t value);
 int pmio_writel(pmio_region_t* region, uint16_t offset, uint32_t value);
 
+/*
+ * String I/O operations (rep ins/outs).
+ *
+ * These transfer count elements of the given width to/from a buffer.
+ * The offset must be within region bounds, and the entire transfer
+ * must fit within the region (offset + count * width <= region_size).
+ *
+ * Returns 0 on success, -1 on invalid parameters or bounds violation.
+ */
+int pmio_read_bufb(pmio_region_t* region, uint16_t offset, void* buf, uint32_t count);
+int pmio_read_bufw(pmio_region_t* region, uint16_t offset, void* buf, uint32_t count);
+int pmio_read_bufl(pmio_region_t* region, uint16_t offset, void* buf, uint32_t count);
+
+int pmio_write_bufb(pmio_region_t* region, uint16_t offset, const void* buf, uint32_t count);
+int pmio_write_bufw(pmio_region_t* region, uint16_t offset, const void* buf, uint32_t count);
+int pmio_write_bufl(pmio_region_t* region, uint16_t offset, const void* buf, uint32_t count);
+
 
 #ifdef __cplusplus
 }

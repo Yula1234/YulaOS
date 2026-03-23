@@ -483,3 +483,147 @@ int pmio_writel(pmio_region_t* region, uint16_t offset, uint32_t value) {
 
     return 0;
 }
+
+static int pmio_is_valid_string_access(const pmio_region_t* region, uint16_t offset, uint16_t width, uint32_t count) {
+    const uint32_t size = (uint32_t)pmio_region_size(region);
+    const uint32_t off = (uint32_t)offset;
+    const uint32_t total = off + (uint32_t)width * count;
+
+    if (total > size) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int pmio_read_bufb(pmio_region_t* region, uint16_t offset, void* buf, uint32_t count) {
+    if (!region || !buf) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    if (!pmio_is_valid_string_access(region, offset, 1u, count)) {
+        return -1;
+    }
+
+    insb(pmio_port_at(region, offset), buf, count);
+
+    return 0;
+}
+
+int pmio_write_bufb(pmio_region_t* region, uint16_t offset, const void* buf, uint32_t count) {
+    if (!region || !buf) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    if (!pmio_is_valid_string_access(region, offset, 1u, count)) {
+        return -1;
+    }
+
+    outsb(pmio_port_at(region, offset), buf, count);
+
+    return 0;
+}
+
+int pmio_read_bufw(pmio_region_t* region, uint16_t offset, void* buf, uint32_t count) {
+    if (!region || !buf) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    if (!pmio_is_valid_string_access(region, offset, 2u, count)) {
+        return -1;
+    }
+
+    insw(pmio_port_at(region, offset), buf, count);
+
+    return 0;
+}
+
+int pmio_write_bufw(pmio_region_t* region, uint16_t offset, const void* buf, uint32_t count) {
+    if (!region || !buf) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    if (!pmio_is_valid_string_access(region, offset, 2u, count)) {
+        return -1;
+    }
+
+    outsw(pmio_port_at(region, offset), buf, count);
+
+    return 0;
+}
+
+int pmio_read_bufl(pmio_region_t* region, uint16_t offset, void* buf, uint32_t count) {
+    if (!region || !buf) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    if (!pmio_is_valid_string_access(region, offset, 4u, count)) {
+        return -1;
+    }
+
+    insl(pmio_port_at(region, offset), buf, count);
+
+    return 0;
+}
+
+int pmio_write_bufl(pmio_region_t* region, uint16_t offset, const void* buf, uint32_t count) {
+    if (!region || !buf) {
+        return -1;
+    }
+
+    if (region->magic != PMIO_REGION_MAGIC) {
+        return -1;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    if (!pmio_is_valid_string_access(region, offset, 4u, count)) {
+        return -1;
+    }
+
+    outsl(pmio_port_at(region, offset), buf, count);
+
+    return 0;
+}

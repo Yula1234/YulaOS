@@ -44,4 +44,58 @@ static inline void io_wait(void) {
     outb(0x80, 0);
 }
 
+static inline void insb(uint16_t port, void* buf, uint32_t count) {
+    __asm__ volatile (
+        "rep insb"
+        : "+D"(buf), "+c"(count)
+        : "d"(port)
+        : "memory"
+    );
+}
+
+static inline void outsb(uint16_t port, const void* buf, uint32_t count) {
+    __asm__ volatile (
+        "rep outsb"
+        : "+S"(buf), "+c"(count)
+        : "d"(port)
+        : "memory"
+    );
+}
+
+static inline void insw(uint16_t port, void* buf, uint32_t count) {
+    __asm__ volatile (
+        "rep insw"
+        : "+D"(buf), "+c"(count)
+        : "d"(port)
+        : "memory"
+    );
+}
+
+static inline void outsw(uint16_t port, const void* buf, uint32_t count) {
+    __asm__ volatile (
+        "rep outsw"
+        : "+S"(buf), "+c"(count)
+        : "d"(port)
+        : "memory"
+    );
+}
+
+static inline void insl(uint16_t port, void* buf, uint32_t count) {
+    __asm__ volatile (
+        "rep insl"
+        : "+D"(buf), "+c"(count)
+        : "d"(port)
+        : "memory"
+    );
+}
+
+static inline void outsl(uint16_t port, const void* buf, uint32_t count) {
+    __asm__ volatile (
+        "rep outsl"
+        : "+S"(buf), "+c"(count)
+        : "d"(port)
+        : "memory"
+    );
+}
+
 #endif
