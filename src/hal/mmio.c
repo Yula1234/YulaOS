@@ -12,7 +12,7 @@
 #include <lib/rbtree.h>
 
 enum {
-    MMIO_REGION_MAGIC = 0x4D4D494Fu, // 'MMIO'
+    MMIO_REGION_MAGIC = 0x4D4D494Fu,
 };
 
 typedef struct {
@@ -164,10 +164,7 @@ static int mmio_map_pages(uint32_t phys_start, uint32_t size, uint32_t flags) {
     }
 
     for (uint32_t p = start_page; p < end_page; p += 0x1000u) {
-        /*
-         * Identity mapping into kernel directory.
-         * For 32-bit systems, devices usually reside in the 3GB-4GB range.
-         */
+
         paging_map(kernel_page_directory, p, p, flags);
 
         if (p + 0x1000u < p) {
@@ -197,7 +194,7 @@ static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t
     const uint32_t phys_end = phys_start + size - 1u;
 
     if (phys_end < phys_start) {
-        return 0; // Overflow
+        return 0;
     }
 
     MmioRegion* new_region = (MmioRegion*)kmalloc(sizeof(MmioRegion));
@@ -211,7 +208,7 @@ static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t
     new_region->phys_end_ = phys_end;
     new_region->max_end_ = phys_end;
     new_region->size_ = size;
-    new_region->vaddr_ = phys_start; // Currently identity mapped
+    new_region->vaddr_ = phys_start;
 
     strlcpy(
         new_region->name_,
@@ -242,27 +239,19 @@ out_unlock_fail:
 }
 
 mmio_region_t* mmio_request_region(uint32_t phys_start, uint32_t size, const char* name) {
-    /* 
-     * PTE_PRESENT (1) | PTE_RW (2) | PTE_PCD (16) | PTE_PWT (8) = 0x1B
-     * Strict Uncacheable (UC) mapping. Safe for command/status registers.
-     */
     const uint32_t flags = PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
 
     return mmio_request_region_internal(phys_start, size, name, flags);
 }
 
 mmio_region_t* mmio_request_region_wc(uint32_t phys_start, uint32_t size, const char* name) {
-    /* 
-     * PTE_PRESENT (1) | PTE_RW (2) = 0x3
-     * If PAT is supported, we add PTE_PAT (0x80) to enable Write-Combining (WC).
-     * If PAT is unsupported, it falls back to UC or WT depending on MTRR.
-     */
+
     uint32_t flags = PTE_PRESENT | PTE_RW;
 
     if (paging_pat_is_supported()) {
         flags |= PTE_PAT;
     } else {
-        flags |= PTE_PCD | PTE_PWT; // Fallback to safe UC
+        flags |= PTE_PCD | PTE_PWT;
     }
 
     return mmio_request_region_internal(phys_start, size, name, flags);
@@ -283,7 +272,6 @@ void mmio_release_region(mmio_region_t* region_handle) {
 
     percpu_rwspinlock_acquire_write(&g_mmio_lock);
 
-    /* Verify it's actually in the tree */
     if (rb_parent(&region->rb_node_) != 0 || g_mmio_regions.rb_node == &region->rb_node_) {
         rb_erase_augmented(&region->rb_node_, &g_mmio_regions, &g_mmio_augment_callbacks);
 
