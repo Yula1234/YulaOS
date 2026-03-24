@@ -24,12 +24,30 @@
 #include <lib/hash_map.h>
 
 #define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
+#define BLOCKS_PER_GROUP (YFS_BLOCK_SIZE * 8)
 
 /*
  * YFS keeps the on-disk format small.
  * Lock scopes are short; writeback points are explicit.
  */
 namespace yfs {
+
+struct BlockGroupState {
+    kernel::Mutex lock;
+    uint32_t free_blocks_count;
+    uint32_t free_inodes_count;
+    uint32_t last_alloc_blk_bit;
+    uint32_t last_alloc_ino_bit;
+
+    BlockGroupState()
+        : lock()
+        , free_blocks_count(0)
+        , free_inodes_count(0)
+        , last_alloc_blk_bit(0)
+        , last_alloc_ino_bit(0)
+    {
+    }
+};
 
 struct DcacheKey {
     yfs_ino_t parent_ino;
@@ -68,14 +86,11 @@ public:
         yfs_superblock_t sb;
         int mounted;
 
-        uint32_t last_free_blk_hint;
-        uint32_t last_free_ino_hint;
+        BlockGroupState* groups;
+        uint32_t group_count;
 
-        uint8_t bmap_cache_data[YFS_BLOCK_SIZE];
-        uint32_t bmap_cache_lba;
-        int bmap_cache_dirty;
-
-        kernel::Mutex alloc_lock;
+        kernel::atomic<uint32_t> global_free_blocks{0};
+        kernel::atomic<uint32_t> global_free_inodes{0};
 
         HashMap<DcacheKey, yfs_ino_t, 1024> dcache{};
 
@@ -89,6 +104,12 @@ public:
 
         InodeRuntimeState* inode_state;
         uint32_t inode_state_count;
+
+        State()
+            : groups(nullptr)
+            , group_count(0)
+        {
+        }
     };
 
     void init();
@@ -193,14 +214,8 @@ static yfs::FileSystem::State& yfs_state = yfs::g_fs.state();
 static yfs_superblock_t& sb = yfs_state.sb;
 static int& fs_mounted = yfs_state.mounted;
 
-static uint32_t& last_free_blk_hint = yfs_state.last_free_blk_hint;
-static uint32_t& last_free_ino_hint = yfs_state.last_free_ino_hint;
-
-static uint8_t (&bmap_cache_data)[YFS_BLOCK_SIZE] = yfs_state.bmap_cache_data;
-static uint32_t& bmap_cache_lba = yfs_state.bmap_cache_lba;
-static int& bmap_cache_dirty = yfs_state.bmap_cache_dirty;
-
-static kernel::Mutex& alloc_lock = yfs_state.alloc_lock;
+static yfs::BlockGroupState*& groups = yfs_state.groups;
+static uint32_t& group_count = yfs_state.group_count;
 
 static yfs::FileSystem::State::InodeTableCacheSlot (&inode_table_cache)[
     MAX_CPUS
@@ -302,6 +317,106 @@ static void inode_state_init_or_panic(uint32_t total_inodes) {
     }
 
     inode_state_count = total_inodes;
+}
+
+static void groups_init_or_panic(void) {
+    uint32_t data_blocks = sb.total_blocks - sb.data_start;
+    uint32_t calc_group_count = (data_blocks + BLOCKS_PER_GROUP - 1) / BLOCKS_PER_GROUP;
+
+    uint32_t inode_groups = (sb.total_inodes + BLOCKS_PER_GROUP - 1) / BLOCKS_PER_GROUP;
+    if (inode_groups > calc_group_count) {
+        calc_group_count = inode_groups;
+    }
+
+    if (calc_group_count == 0) {
+        calc_group_count = 1;
+    }
+
+    if (groups) {
+        kfree(groups);
+        groups = nullptr;
+        group_count = 0;
+    }
+
+    groups = static_cast<yfs::BlockGroupState*>(
+        kmalloc(sizeof(*groups) * calc_group_count)
+    );
+    if (!groups) {
+        kprintf("yulafs: OOM allocating block groups (%u groups)\n", calc_group_count);
+        panic("yulafs: OOM allocating block groups");
+    }
+
+    memset(groups, 0, sizeof(*groups) * calc_group_count);
+
+    for (uint32_t i = 0; i < calc_group_count; i++) {
+        new (&groups[i]) yfs::BlockGroupState();
+    }
+
+    group_count = calc_group_count;
+
+    uint8_t* map_buf = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!map_buf) {
+        panic("yulafs: OOM during groups init");
+    }
+
+    uint32_t total_free_blocks = 0;
+    uint32_t total_free_inodes = 0;
+
+    uint32_t remaining_data_blocks = data_blocks;
+    uint32_t remaining_inodes = sb.total_inodes;
+
+    for (uint32_t g = 0; g < group_count; g++) {
+        uint32_t blk_map_lba = sb.map_block_start + g;
+        uint32_t ino_map_lba = sb.map_inode_start + g;
+
+        uint32_t free_blks = 0;
+        uint32_t free_inos = 0;
+
+        uint32_t blocks_in_this_group = remaining_data_blocks;
+        if (blocks_in_this_group > BLOCKS_PER_GROUP) {
+            blocks_in_this_group = BLOCKS_PER_GROUP;
+        }
+        remaining_data_blocks -= blocks_in_this_group;
+
+        uint32_t inodes_in_this_group = remaining_inodes;
+        if (inodes_in_this_group > BLOCKS_PER_GROUP) {
+            inodes_in_this_group = BLOCKS_PER_GROUP;
+        }
+        remaining_inodes -= inodes_in_this_group;
+
+        bcache_read(blk_map_lba, map_buf);
+        uint32_t bits_to_check = blocks_in_this_group;
+        for (uint32_t bit = 0; bit < bits_to_check; bit++) {
+            uint32_t byte_idx = bit / 8;
+            uint32_t bit_idx = bit % 8;
+            if (!((map_buf[byte_idx] >> bit_idx) & 1u)) {
+                free_blks++;
+            }
+        }
+
+        bcache_read(ino_map_lba, map_buf);
+        bits_to_check = inodes_in_this_group;
+        for (uint32_t bit = 0; bit < bits_to_check; bit++) {
+            uint32_t byte_idx = bit / 8;
+            uint32_t bit_idx = bit % 8;
+            if (!((map_buf[byte_idx] >> bit_idx) & 1u)) {
+                free_inos++;
+            }
+        }
+
+        groups[g].free_blocks_count = free_blks;
+        groups[g].free_inodes_count = free_inos;
+        groups[g].last_alloc_blk_bit = 0;
+        groups[g].last_alloc_ino_bit = 0;
+
+        total_free_blocks += free_blks;
+        total_free_inodes += free_inos;
+    }
+
+    kfree(map_buf);
+
+    yfs_state.global_free_blocks.store(total_free_blocks, kernel::memory_order::relaxed);
+    yfs_state.global_free_inodes.store(total_free_inodes, kernel::memory_order::relaxed);
 }
 
 rwlock_t* yfs::FileSystem::inode_lock(yfs_ino_t ino) {
@@ -446,42 +561,10 @@ void yfs::FileSystem::dcache_invalidate_entry(yfs_ino_t parent, const char* name
 }
 
 static void flush_sb(void) {
-    kernel::MutexGuard guard(alloc_lock);
-    /* Superblock is tiny; rewrite is cheaper than partial updates. */
+    sb.free_blocks = yfs_state.global_free_blocks.load(kernel::memory_order::relaxed);
+    sb.free_inodes = yfs_state.global_free_inodes.load(kernel::memory_order::relaxed);
     bcache_write(1, (uint8_t*)&sb);
     bcache_flush_block(1);
-}
-
-static void flush_bitmap_cache_locked(void) {
-    /* Single-block bitmap cache; writeback is explicit at call sites. */
-    if (bmap_cache_lba != 0 && bmap_cache_dirty) {
-        bcache_write(bmap_cache_lba, bmap_cache_data);
-        bmap_cache_dirty = 0;
-    }
-}
-
-static void flush_bitmap_cache(void) {
-    kernel::MutexGuard guard(alloc_lock);
-    flush_bitmap_cache_locked();
-}
-
-static void load_bitmap_block_locked(uint32_t lba) {
-    /* Switching cache block is the writeback point for bitmap changes. */
-    if (bmap_cache_lba == lba) {
-        return;
-    }
-
-    flush_bitmap_cache_locked();
-
-    bcache_read(lba, bmap_cache_data);
-
-    bmap_cache_lba = lba;
-    bmap_cache_dirty = 0;
-}
-
-[[maybe_unused]] static void load_bitmap_block(uint32_t lba) {
-    kernel::MutexGuard guard(alloc_lock);
-    load_bitmap_block_locked(lba);
 }
 
 static void zero_block(yfs_blk_t lba) {
@@ -521,118 +604,187 @@ static int find_free_bit_in_block(uint8_t* buf, int start_bit) {
     return -1;
 }
 
-static yfs_blk_t alloc_block(void) {
-    kernel::MutexGuard guard(alloc_lock);
-
-    /* 0 means allocation failure. */
-    if (sb.free_blocks == 0) {
+static yfs_blk_t alloc_block_for_inode(yfs_ino_t file_ino) {
+    if (yfs_state.global_free_blocks.load(kernel::memory_order::relaxed) == 0) {
         return 0;
     }
 
-    uint32_t total_map_blocks = (sb.total_blocks + (YFS_BLOCK_SIZE * 8) - 1) / (YFS_BLOCK_SIZE * 8);
-    uint32_t start_sector = last_free_blk_hint / (YFS_BLOCK_SIZE * 8);
-    uint32_t start_bit = last_free_blk_hint % (YFS_BLOCK_SIZE * 8);
+    if (!groups || group_count == 0) {
+        return 0;
+    }
 
-    for (uint32_t i = 0; i < total_map_blocks; i++) {
-        uint32_t sector_idx = (start_sector + i) % total_map_blocks;
-        uint32_t map_lba = sb.map_block_start + sector_idx;
+    uint32_t preferred_group = file_ino / BLOCKS_PER_GROUP;
+    if (preferred_group >= group_count) {
+        preferred_group = group_count - 1;
+    }
 
-        load_bitmap_block_locked(map_lba);
+    uint8_t* map_buf = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!map_buf) {
+        return 0;
+    }
 
-        int bit_search_start = (i == 0) ? start_bit : 0;
-        int found_bit = find_free_bit_in_block(bmap_cache_data, bit_search_start);
+    for (uint32_t i = 0; i < group_count; i++) {
+        uint32_t group_idx = (preferred_group + i) % group_count;
+        yfs::BlockGroupState& group = groups[group_idx];
+
+        if (group.free_blocks_count == 0) {
+            continue;
+        }
+
+        kernel::MutexGuard guard(group.lock);
+
+        if (group.free_blocks_count == 0) {
+            continue;
+        }
+
+        uint32_t map_lba = sb.map_block_start + group_idx;
+        bcache_read(map_lba, map_buf);
+
+        int found_bit = find_free_bit_in_block(map_buf, group.last_alloc_blk_bit);
+        if (found_bit == -1) {
+            found_bit = find_free_bit_in_block(map_buf, 0);
+        }
 
         if (found_bit != -1) {
-            set_bit(bmap_cache_data, found_bit);
-            bmap_cache_dirty = 1;
-            sb.free_blocks--;
+            set_bit(map_buf, found_bit);
+            bcache_write(map_lba, map_buf);
 
-            uint32_t relative_idx = (sector_idx * YFS_BLOCK_SIZE * 8) + found_bit;
-            last_free_blk_hint = relative_idx + 1;
+            group.free_blocks_count--;
+            group.last_alloc_blk_bit = found_bit + 1;
 
-            yfs_blk_t lba = sb.data_start + relative_idx;
+            yfs_state.global_free_blocks.fetch_sub(1, kernel::memory_order::relaxed);
+
+            yfs_blk_t lba = sb.data_start + (group_idx * BLOCKS_PER_GROUP) + found_bit;
             zero_block(lba);
+
+            kfree(map_buf);
             return lba;
         }
     }
 
+    kfree(map_buf);
     return 0;
 }
 
-static void free_block(yfs_blk_t lba) {
-    kernel::MutexGuard guard(alloc_lock);
+static yfs_blk_t alloc_block(void) {
+    return alloc_block_for_inode(1);
+}
 
+static void free_block(yfs_blk_t lba) {
     if (lba < sb.data_start) {
         return;
     }
 
-    uint32_t idx = lba - sb.data_start;
-    uint32_t sector = idx / (YFS_BLOCK_SIZE * 8);
-    uint32_t bit = idx % (YFS_BLOCK_SIZE * 8);
-    uint32_t map_lba = sb.map_block_start + sector;
-
-    load_bitmap_block_locked(map_lba);
-
-    if (chk_bit(bmap_cache_data, bit)) {
-        clr_bit(bmap_cache_data, bit);
-        bmap_cache_dirty = 1;
-        sb.free_blocks++;
-
-        if (idx < last_free_blk_hint) {
-            last_free_blk_hint = idx;
-        }
+    if (!groups || group_count == 0) {
+        return;
     }
+
+    uint32_t idx = lba - sb.data_start;
+    uint32_t group_idx = idx / BLOCKS_PER_GROUP;
+    uint32_t bit = idx % BLOCKS_PER_GROUP;
+
+    if (group_idx >= group_count) {
+        return;
+    }
+
+    yfs::BlockGroupState& group = groups[group_idx];
+    kernel::MutexGuard guard(group.lock);
+
+    uint32_t map_lba = sb.map_block_start + group_idx;
+
+    uint8_t* map_buf = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!map_buf) {
+        return;
+    }
+
+    bcache_read(map_lba, map_buf);
+
+    if (chk_bit(map_buf, bit)) {
+        clr_bit(map_buf, bit);
+        bcache_write(map_lba, map_buf);
+
+        group.free_blocks_count++;
+        if (bit < group.last_alloc_blk_bit) {
+            group.last_alloc_blk_bit = bit;
+        }
+
+        yfs_state.global_free_blocks.fetch_add(1, kernel::memory_order::relaxed);
+    }
+
+    kfree(map_buf);
 }
 
-static yfs_ino_t alloc_inode(void) {
-    uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
-    if (!buf) {
+static yfs_ino_t alloc_inode_for_parent(yfs_ino_t parent_ino) {
+    if (yfs_state.global_free_inodes.load(kernel::memory_order::relaxed) == 0) {
         return 0;
     }
 
-    kernel::MutexGuard guard(alloc_lock);
-
-    /* Inode 0 is reserved; allocator never returns it. */
-    if (sb.free_inodes == 0) {
-        kfree(buf);
+    if (!groups || group_count == 0) {
         return 0;
     }
 
-    uint32_t total_map_blocks = (sb.total_inodes + (YFS_BLOCK_SIZE * 8) - 1) / (YFS_BLOCK_SIZE * 8);
-    uint32_t start_sector = last_free_ino_hint / (YFS_BLOCK_SIZE * 8);
-    uint32_t start_bit = last_free_ino_hint % (YFS_BLOCK_SIZE * 8);
+    uint32_t preferred_group = parent_ino / BLOCKS_PER_GROUP;
+    if (preferred_group >= group_count) {
+        preferred_group = group_count - 1;
+    }
 
-    for (uint32_t i = 0; i < total_map_blocks; i++) {
-        uint32_t sector_idx = (start_sector + i) % total_map_blocks;
+    uint8_t* map_buf = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!map_buf) {
+        return 0;
+    }
 
-        bcache_read(sb.map_inode_start + sector_idx, buf);
+    for (uint32_t i = 0; i < group_count; i++) {
+        uint32_t group_idx = (preferred_group + i) % group_count;
+        yfs::BlockGroupState& group = groups[group_idx];
 
-        int bit_search_start = (i == 0) ? start_bit : 0;
-        int found_bit = find_free_bit_in_block(buf, bit_search_start);
+        if (group.free_inodes_count == 0) {
+            continue;
+        }
+
+        kernel::MutexGuard guard(group.lock);
+
+        if (group.free_inodes_count == 0) {
+            continue;
+        }
+
+        uint32_t map_lba = sb.map_inode_start + group_idx;
+        bcache_read(map_lba, map_buf);
+
+        int found_bit = find_free_bit_in_block(map_buf, group.last_alloc_ino_bit);
+        if (found_bit == -1) {
+            found_bit = find_free_bit_in_block(map_buf, 0);
+        }
 
         if (found_bit != -1) {
-            uint32_t ino = (sector_idx * YFS_BLOCK_SIZE * 8) + found_bit;
+            uint32_t ino = (group_idx * BLOCKS_PER_GROUP) + found_bit;
 
             if (ino == 0) {
-                continue;
+                group.last_alloc_ino_bit = 1;
+                found_bit = find_free_bit_in_block(map_buf, 1);
+                if (found_bit == -1) {
+                    continue;
+                }
+                ino = (group_idx * BLOCKS_PER_GROUP) + found_bit;
             }
 
             if (ino >= sb.total_inodes) {
-                break;
+                continue;
             }
 
-            set_bit(buf, found_bit);
-            bcache_write(sb.map_inode_start + sector_idx, buf);
+            set_bit(map_buf, found_bit);
+            bcache_write(map_lba, map_buf);
 
-            sb.free_inodes--;
-            last_free_ino_hint = ino + 1;
+            group.free_inodes_count--;
+            group.last_alloc_ino_bit = found_bit + 1;
 
-            kfree(buf);
+            yfs_state.global_free_inodes.fetch_sub(1, kernel::memory_order::relaxed);
+
+            kfree(map_buf);
             return (yfs_ino_t)ino;
         }
     }
 
-    kfree(buf);
+    kfree(map_buf);
     return 0;
 }
 
@@ -641,29 +793,42 @@ static void free_inode(yfs_ino_t ino) {
         return;
     }
 
-    uint32_t sector = ino / (YFS_BLOCK_SIZE * 8);
-    uint32_t bit = ino % (YFS_BLOCK_SIZE * 8);
-
-    uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
-    if (!buf) {
+    if (!groups || group_count == 0) {
         return;
     }
 
-    kernel::MutexGuard guard(alloc_lock);
+    uint32_t group_idx = ino / BLOCKS_PER_GROUP;
+    uint32_t bit = ino % BLOCKS_PER_GROUP;
 
-    bcache_read(sb.map_inode_start + sector, buf);
-
-    if (chk_bit(buf, bit)) {
-        clr_bit(buf, bit);
-        bcache_write(sb.map_inode_start + sector, buf);
-        sb.free_inodes++;
-
-        if (ino < last_free_ino_hint) {
-            last_free_ino_hint = ino;
-        }
+    if (group_idx >= group_count) {
+        return;
     }
 
-    kfree(buf);
+    yfs::BlockGroupState& group = groups[group_idx];
+    kernel::MutexGuard guard(group.lock);
+
+    uint32_t map_lba = sb.map_inode_start + group_idx;
+
+    uint8_t* map_buf = static_cast<uint8_t*>(kmalloc(YFS_BLOCK_SIZE));
+    if (!map_buf) {
+        return;
+    }
+
+    bcache_read(map_lba, map_buf);
+
+    if (chk_bit(map_buf, bit)) {
+        clr_bit(map_buf, bit);
+        bcache_write(map_lba, map_buf);
+
+        group.free_inodes_count++;
+        if (bit < group.last_alloc_ino_bit) {
+            group.last_alloc_ino_bit = bit;
+        }
+
+        yfs_state.global_free_inodes.fetch_add(1, kernel::memory_order::relaxed);
+    }
+
+    kfree(map_buf);
 }
 
 static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
@@ -831,18 +996,14 @@ static int sync_inode(yfs_ino_t ino, yfs_inode_t* data, int write) {
     }
 }
 
-static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc) {
-    /*
-     * Centralized block mapping.
-     * Allocation is caller-driven; reads must not allocate.
-     */
+static yfs_blk_t resolve_block_for_inode(yfs_ino_t ino, yfs_inode_t* node, uint32_t file_block, int alloc) {
     if (file_block < YFS_DIRECT_PTRS) {
         if (node->direct[file_block] == 0) {
             if (!alloc) {
                 return 0;
             }
 
-            node->direct[file_block] = alloc_block();
+            node->direct[file_block] = alloc_block_for_inode(ino);
         }
 
         return node->direct[file_block];
@@ -856,7 +1017,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
                 return 0;
             }
 
-            node->indirect = alloc_block();
+            node->indirect = alloc_block_for_inode(ino);
         }
 
         yfs_blk_t* table = (yfs_blk_t*)kmalloc(YFS_BLOCK_SIZE);
@@ -868,7 +1029,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
 
         yfs_blk_t res = table[file_block];
         if (res == 0 && alloc) {
-            res = alloc_block();
+            res = alloc_block_for_inode(ino);
             table[file_block] = res;
             bcache_write(node->indirect, (uint8_t*)table);
         }
@@ -885,7 +1046,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
                 return 0;
             }
 
-            node->doubly_indirect = alloc_block();
+            node->doubly_indirect = alloc_block_for_inode(ino);
         }
 
         uint32_t l1_idx = file_block / PTRS_PER_BLOCK;
@@ -904,7 +1065,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
                 return 0;
             }
 
-            l1[l1_idx] = alloc_block();
+            l1[l1_idx] = alloc_block_for_inode(ino);
             bcache_write(node->doubly_indirect, (uint8_t*)l1);
         }
 
@@ -920,7 +1081,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
 
         yfs_blk_t res = l2[l2_idx];
         if (res == 0 && alloc) {
-            res = alloc_block();
+            res = alloc_block_for_inode(ino);
             l2[l2_idx] = res;
             bcache_write(l2_blk, (uint8_t*)l2);
         }
@@ -937,7 +1098,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
                 return 0;
             }
 
-            node->triply_indirect = alloc_block();
+            node->triply_indirect = alloc_block_for_inode(ino);
         }
 
         uint32_t ptrs_sq = PTRS_PER_BLOCK * PTRS_PER_BLOCK;
@@ -959,7 +1120,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
                 return 0;
             }
 
-            l1[i1] = alloc_block();
+            l1[i1] = alloc_block_for_inode(ino);
             bcache_write(node->triply_indirect, (uint8_t*)l1);
         }
 
@@ -979,7 +1140,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
                 return 0;
             }
 
-            l2[i2] = alloc_block();
+            l2[i2] = alloc_block_for_inode(ino);
             bcache_write(l2_blk, (uint8_t*)l2);
         }
 
@@ -995,7 +1156,7 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
 
         yfs_blk_t res = l3[i3];
         if (res == 0 && alloc) {
-            res = alloc_block();
+            res = alloc_block_for_inode(ino);
             l3[i3] = res;
             bcache_write(l3_blk, (uint8_t*)l3);
         }
@@ -1005,6 +1166,10 @@ static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc
     }
 
     return 0;
+}
+
+static yfs_blk_t resolve_block(yfs_inode_t* node, uint32_t file_block, int alloc) {
+    return resolve_block_for_inode(node->id, node, file_block, alloc);
 }
 
 static void free_indir_level(yfs_blk_t block, int level) {
@@ -1086,7 +1251,6 @@ static int inode_finalize_deferred_delete_locked(yfs_ino_t ino, yfs_inode_t* nod
 
     free_inode(ino);
 
-    flush_bitmap_cache();
     flush_sb();
 
     return 0;
@@ -1672,14 +1836,12 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
 
     sync_inode(1, &root, 1);
     flush_sb();
-    flush_bitmap_cache();
     bcache_sync();
 
     fs_mounted = 1;
-    last_free_blk_hint = 0;
-    last_free_ino_hint = 2;
 
     inode_state_init_or_panic(sb.total_inodes);
+    groups_init_or_panic();
 
     yfs_state.dcache.clear();
 
@@ -1716,9 +1878,6 @@ void yfs::FileSystem::init() {
         }
     }
 
-    bmap_cache_lba = 0;
-    bmap_cache_dirty = 0;
-
     state_.dcache.clear();
 
     uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
@@ -1748,10 +1907,9 @@ void yfs::FileSystem::init() {
         yulafs_format((uint32_t)(capacity_sectors / 8ull));
     } else {
         fs_mounted = 1;
-        last_free_blk_hint = 0;
-        last_free_ino_hint = 1;
 
         inode_state_init_or_panic(sb.total_inodes);
+        groups_init_or_panic();
         orphan_inode_cleanup();
     }
 }
@@ -2107,7 +2265,6 @@ static int yulafs_write_locked(
     }
 
     if (blocks_allocated) {
-        flush_bitmap_cache();
         flush_sb();
     }
 
@@ -2166,7 +2323,7 @@ int yulafs_create_obj(const char* path, int type) {
         return -1;
     }
 
-    yfs_ino_t new_ino = alloc_inode();
+    yfs_ino_t new_ino = alloc_inode_for_parent(dir_ino);
     if (!new_ino) {
         return -1;
     }
@@ -2179,7 +2336,7 @@ int yulafs_create_obj(const char* path, int type) {
 
     if (type == YFS_TYPE_DIR) {
         obj.size = YFS_BLOCK_SIZE;
-        obj.direct[0] = alloc_block();
+        obj.direct[0] = alloc_block_for_inode(new_ino);
 
         uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
         if (buf) {
@@ -2203,7 +2360,6 @@ int yulafs_create_obj(const char* path, int type) {
 
     dir_link(dir_ino, new_ino, name);
 
-    flush_bitmap_cache();
     flush_sb();
 
     return new_ino;
@@ -2427,7 +2583,6 @@ void yfs::FileSystem::resize(yfs_ino_t ino, uint32_t new_size) {
 
     if (new_size < node.size && new_size == 0) {
         truncate_inode(&node);
-        flush_bitmap_cache();
         flush_sb();
     }
 
@@ -2444,7 +2599,7 @@ void yulafs_resize(yfs_ino_t ino, uint32_t new_size) {
 void yfs::FileSystem::get_filesystem_info(uint32_t* total, uint32_t* free, uint32_t* size) {
     if (fs_mounted) {
         *total = sb.total_blocks;
-        *free = sb.free_blocks;
+        *free = yfs_state.global_free_blocks.load(kernel::memory_order::relaxed);
         *size = sb.block_size;
     } else {
         *total = 0;
@@ -2485,7 +2640,6 @@ int yfs::FileSystem::rename(const char* old_path, const char* new_path) {
 
     dir_unlink_entry_only(old_dir, old_name);
 
-    flush_bitmap_cache();
     flush_sb();
 
     return 0;
