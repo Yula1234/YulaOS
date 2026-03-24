@@ -11,6 +11,7 @@
 #include <hal/irq.h>
 #include <hal/io.h>
 #include <hal/ioapic.h>
+#include <hal/mmio.h>
 
 #include <drivers/block/bdev.h>
 
@@ -32,6 +33,7 @@
 
 static volatile uint32_t primary_disk_sectors = 0;
 static volatile HBA_MEM* ahci_base_virt = 0;
+static mmio_region_t* ahci_mmio_region = 0;
 
 #define AHCI_DMA_BUF_SIZE 4096
 
@@ -523,11 +525,15 @@ void ahci_init(void) {
     }
 
     uint32_t bar5 = pci_get_bar5(bus, slot, func);
-    
-    paging_map(kernel_page_directory, bar5, bar5, 0x13);
-    paging_map(kernel_page_directory, bar5 + 4096, bar5 + 4096, 0x13);
-    
-    ahci_base_virt = (volatile HBA_MEM*)bar5;
+
+    ahci_mmio_region = mmio_request_region(bar5, sizeof(HBA_MEM), "ahci_abar");
+
+    if (!ahci_mmio_region) {
+        g_ahci_has_device = 0;
+        return;
+    }
+
+    ahci_base_virt = (volatile HBA_MEM*)mmio_get_vaddr(ahci_mmio_region);
     ahci_reset_controller(ahci_base_virt);
 
     uint32_t pi = ahci_base_virt->pi;
