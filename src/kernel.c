@@ -1,63 +1,59 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
 
-#include <lib/string.h>
-
-#include <fs/yulafs.h>
-#include <fs/bcache.h>
-#include <fs/pty/pty.h>
-#include <fs/vfs.h>
-
+#include <drivers/serial/serial_core.h>
+#include <drivers/virtio/virtio_gpu.h>
+#include <drivers/serial/ns16550.h>
+#include <drivers/serial/ttyS0.h>
+#include <drivers/block/bdev.h>
 #include <drivers/pc_speaker.h>
 #include <drivers/keyboard.h>
 #include <drivers/console.h>
+#include <drivers/driver.h>
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
+#include <drivers/gpu0.h>
+#include <drivers/ne2k.h>
 #include <drivers/ahci.h>
 #include <drivers/uhci.h>
 #include <drivers/acpi.h>
 #include <drivers/vga.h>
-#include <drivers/serial/ns16550.h>
-#include <drivers/serial/serial_core.h>
-#include <drivers/serial/ttyS0.h>
-#include <drivers/virtio/virtio_gpu.h>
-#include <drivers/gpu0.h>
-#include <drivers/ne2k.h>
 
-#include <drivers/block/bdev.h>
-
-#include <drivers/driver.h>
-
-#include <kernel/init/boot.h>
+#include <kernel/symbols/symbols.h>
+#include <kernel/output/console.h>
 #include <kernel/init/init.h>
+#include <kernel/init/boot.h>
+#include <kernel/profiler.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/tty/tty.h>
 #include <kernel/sched.h>
+#include <kernel/panic.h>
 #include <kernel/proc.h>
-#include <kernel/smp/cpu.h>
 
-#include <kernel/output/console.h>
+#include <hal/ioapic.h>
+#include <hal/mmio.h>
+#include <hal/pmio.h>
+#include <hal/apic.h>
+#include <hal/simd.h>
+#include <hal/pit.h>
+#include <hal/pic.h>
+#include <hal/io.h>
+
+#include <fs/pty/pty.h>
+#include <fs/yulafs.h>
+#include <fs/bcache.h>
+#include <fs/vfs.h>
 
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
 #include <arch/i386/idt.h>
 
-#include <hal/apic.h>
-#include <hal/simd.h>
-#include <hal/pit.h>
-#include <hal/io.h>
-#include <hal/ioapic.h>
-#include <hal/pic.h>
-#include <hal/pmio.h>
-
 #include <mm/heap.h>
 #include <mm/pmm.h>
 #include <mm/vmm.h>
-#include <kernel/panic.h>
-
-#include <kernel/profiler.h>
-#include <kernel/symbols/symbols.h>
 
 #include <lib/cpp/ctors.h>
+#include <lib/string.h>
 
 #include <stdint.h>
 
@@ -259,6 +255,7 @@ static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
     heap_init();
 
     pmio_init();
+    mmio_init();
 
     return memory_end_addr;
 }
