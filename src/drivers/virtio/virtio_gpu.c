@@ -1,17 +1,22 @@
 #include <drivers/virtio/virtio_gpu.h>
 #include <drivers/virtio/virtio_pci.h>
 #include <drivers/virtio/virtqueue.h>
-#include <hal/lock.h>
-#include <kernel/proc.h>
-#include <lib/string.h>
+
 #include <mm/heap.h>
 #include <mm/pmm.h>
+
+#include <hal/lock.h>
+#include <hal/irq.h>
+
 #include <arch/i386/paging.h>
+
+#include <kernel/proc.h>
+
+#include <lib/string.h>
 
 extern volatile uint32_t timer_ticks;
 
 #define VIRTIO_GPU_PCI_DEVICE_ID 0x1050u
-#define VIRTIO_GPU_MSI_VECTOR 0xA2u
 #define VIRTIO_GPU_QUEUE_CTRL 0u
 
 #define VIRTIO_GPU_F_VIRGL 0u
@@ -544,6 +549,12 @@ static void vgpu_mark_inactive_locked(void) {
 static void vgpu_cleanup_state(void) {
     vgpu_mark_inactive_locked();
 
+    if (g_vgpu.dev.msi_enabled && g_vgpu.dev.msi_vector > 0) {
+        irq_free_vector(g_vgpu.dev.msi_vector);
+        g_vgpu.dev.msi_enabled = 0;
+        g_vgpu.dev.msi_vector = 0;
+    }
+
     vgpu_attached_reset(&g_vgpu.attached);
     g_vgpu.virgl_supported = 0;
     g_vgpu.virgl_ctx_ready = 0;
@@ -877,8 +888,17 @@ int virtio_gpu_init(void) {
     }
     g_vgpu.virgl_supported = (accepted & (1ull << VIRTIO_GPU_F_VIRGL)) != 0ull;
 
-    (void)virtio_pci_enable_msi(&g_vgpu.dev, VIRTIO_GPU_MSI_VECTOR);
-    if (!g_vgpu.dev.msi_enabled) {
+    int msi_vec = irq_alloc_vector();
+    int msi_ok = 0;
+    
+    if (msi_vec >= 0) {
+        msi_ok = virtio_pci_enable_msi(&g_vgpu.dev, (uint8_t)msi_vec);
+        if (!msi_ok) {
+            irq_free_vector(msi_vec);
+        }
+    }
+    
+    if (!msi_ok) {
         (void)virtio_pci_enable_intx(&g_vgpu.dev, virtio_pci_irq_handler);
     }
 
