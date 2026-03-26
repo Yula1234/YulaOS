@@ -780,6 +780,59 @@ int VmmState::map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {
     return 1;
 }
 
+void* VmmState::reserve_pages(size_t count) noexcept {
+    if (kernel::unlikely(count == 0u || count > SIZE_MAX / PAGE_SIZE)) {
+        return nullptr;
+    }
+
+    const size_t size_bytes = count * PAGE_SIZE;
+    uintptr_t virt_base = 0u;
+
+    kernel::SpinLockSafeGuard guard(lock_);
+
+    VmFreeBlock* block = find_best_fit(size_bytes, size_tree_);
+    if (kernel::unlikely(!block)) {
+        return nullptr;
+    }
+
+    virt_base = block->start;
+    tree_erase(*block, addr_tree_, size_tree_);
+
+    if (block->size == size_bytes) {
+        free_node(*block, free_nodes_head_);
+    } else {
+        block->start += size_bytes;
+        block->size -= size_bytes;
+
+        tree_insert(*block, addr_tree_, size_tree_);
+    }
+    
+    return reinterpret_cast<void*>(virt_base);
+}
+
+void VmmState::unreserve_pages(void* ptr, size_t count) noexcept {
+    if (kernel::unlikely(!ptr || count == 0u || count > SIZE_MAX / PAGE_SIZE)) {
+        return;
+    }
+
+    const uintptr_t virt_base = reinterpret_cast<uintptr_t>(ptr);
+    const size_t size_bytes = count * PAGE_SIZE;
+    
+    kernel::SpinLockSafeGuard guard(lock_);
+
+    VmFreeBlock* block = alloc_node(free_nodes_head_);
+    if (kernel::unlikely(!block)) {
+        panic("VMM: Out of metadata nodes during unreserve.");
+        return;
+    }
+
+    block->start = virt_base;
+    block->size = size_bytes;
+
+    tree_insert(*block, addr_tree_, size_tree_);
+    merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+}
+
 size_t VmmState::get_used_pages() const noexcept {
     return used_pages_count_.load(kernel::memory_order::relaxed);
 }
@@ -838,6 +891,16 @@ int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
     }
 
     return vmm->map_page(virt, phys, flags);
+}
+
+void* vmm_reserve_pages(size_t pages) {
+    kernel::VmmState* vmm = kernel::vmm_state();
+    return kernel::likely(vmm) ? vmm->reserve_pages(pages) : nullptr;
+}
+
+void vmm_unreserve_pages(void* virt, size_t pages) {
+    kernel::VmmState* vmm = kernel::vmm_state();
+    if (kernel::likely(vmm)) vmm->unreserve_pages(virt, pages);
 }
 
 size_t vmm_get_used_pages(void) {

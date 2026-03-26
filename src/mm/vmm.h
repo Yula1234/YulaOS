@@ -108,6 +108,9 @@ public:
      */
     void free_pages(void* ptr, size_t count) noexcept;
 
+    [[nodiscard]] void* reserve_pages(size_t count) noexcept;
+    void unreserve_pages(void* ptr, size_t count) noexcept;
+
     /*
      * Map a single page into the kernel page directory.
      * Returns 1 on success, 0 on invalid alignment.
@@ -158,6 +161,9 @@ void* vmm_alloc_pages(size_t pages);
 void vmm_free_pages(void* virt, size_t pages);
 
 int vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags);
+
+void* vmm_reserve_pages(size_t pages);
+void vmm_unreserve_pages(void* virt, size_t pages);
 
 size_t vmm_get_used_pages(void);
 

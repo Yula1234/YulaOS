@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <hal/mmio.h>
+#include <lib/string.h>
+#include <lib/rbtree.h>
 
-#include <arch/i386/paging.h>
+#include <hal/mmio.h>
 #include <hal/lock.h>
 
 #include <mm/heap.h>
+#include <mm/vmm.h>
 
-#include <lib/string.h>
-#include <lib/rbtree.h>
+#include <arch/i386/paging.h>
 
 enum {
     MMIO_REGION_MAGIC = 0x4D4D494Fu,
@@ -155,19 +156,20 @@ static void mmio_insert_locked(MmioRegion* new_region) {
     rb_insert_color_augmented(&new_region->rb_node_, &g_mmio_regions, &g_mmio_augment_callbacks);
 }
 
-static int mmio_map_pages(uint32_t phys_start, uint32_t size, uint32_t flags) {
-    const uint32_t start_page = phys_start & ~0xFFFu;
-    const uint32_t end_page = (phys_start + size + 0xFFFu) & ~0xFFFu;
+static int mmio_map_pages(uint32_t virt_start, uint32_t phys_start, uint32_t size, uint32_t flags) {
+    const uint32_t start_vpage = virt_start & ~0xFFFu;
+    const uint32_t start_ppage = phys_start & ~0xFFFu;
+    const uint32_t page_offset = phys_start & 0xFFFu;
+    const uint32_t aligned_size = (size + page_offset + 0xFFFu) & ~0xFFFu;
 
-    if (end_page < start_page) {
+    if (aligned_size == 0) {
         return 0;
     }
 
-    for (uint32_t p = start_page; p < end_page; p += 0x1000u) {
+    for (uint32_t p = 0; p < aligned_size; p += 0x1000u) {
+        paging_map(kernel_page_directory, start_vpage + p, start_ppage + p, flags);
 
-        paging_map(kernel_page_directory, p, p, flags);
-
-        if (p + 0x1000u < p) {
+        if (start_vpage + p + 0x1000u < start_vpage + p) {
             break;
         }
     }
@@ -175,9 +177,9 @@ static int mmio_map_pages(uint32_t phys_start, uint32_t size, uint32_t flags) {
     return 1;
 }
 
-static void mmio_unmap_pages(uint32_t phys_start, uint32_t size) {
-    const uint32_t start_page = phys_start & ~0xFFFu;
-    const uint32_t end_page = (phys_start + size + 0xFFFu) & ~0xFFFu;
+static void mmio_unmap_pages(uint32_t virt_start, uint32_t size) {
+    const uint32_t start_page = virt_start & ~0xFFFu;
+    const uint32_t end_page = start_page + size;
 
     if (end_page <= start_page) {
         return;
@@ -185,6 +187,7 @@ static void mmio_unmap_pages(uint32_t phys_start, uint32_t size) {
 
     paging_unmap_range(kernel_page_directory, start_page, end_page);
 }
+
 
 static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t size, const char* name, uint32_t pte_flags) {
     if (size == 0u) {
@@ -197,9 +200,20 @@ static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t
         return 0;
     }
 
+    uint32_t page_offset = phys_start & 0xFFFu;
+    uint32_t aligned_size = (size + page_offset + 0xFFFu) & ~0xFFFu;
+    uint32_t pages = aligned_size / 4096u;
+
+    void* virt_ptr = vmm_reserve_pages(pages);
+    if (!virt_ptr) {
+        return 0; 
+    }
+    uint32_t virt_start = (uint32_t)virt_ptr;
+
     MmioRegion* new_region = (MmioRegion*)kmalloc(sizeof(MmioRegion));
 
     if (!new_region) {
+        vmm_unreserve_pages(virt_ptr, pages);
         return 0;
     }
 
@@ -208,7 +222,8 @@ static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t
     new_region->phys_end_ = phys_end;
     new_region->max_end_ = phys_end;
     new_region->size_ = size;
-    new_region->vaddr_ = phys_start;
+
+    new_region->vaddr_ = virt_start + page_offset; 
 
     strlcpy(
         new_region->name_,
@@ -222,7 +237,7 @@ static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t
         goto out_unlock_fail;
     }
 
-    if (!mmio_map_pages(phys_start, size, pte_flags)) {
+    if (!mmio_map_pages(virt_start, phys_start, size, pte_flags)) {
         goto out_unlock_fail;
     }
 
@@ -235,6 +250,7 @@ static mmio_region_t* mmio_request_region_internal(uint32_t phys_start, uint32_t
 out_unlock_fail:
     percpu_rwspinlock_release_write(&g_mmio_lock);
     kfree(new_region);
+    vmm_unreserve_pages(virt_ptr, pages);
     return 0;
 }
 
@@ -285,7 +301,14 @@ void mmio_release_region(mmio_region_t* region_handle) {
     percpu_rwspinlock_release_write(&g_mmio_lock);
 
     if (removed) {
-        mmio_unmap_pages(region->phys_start_, region->size_);
+        uint32_t virt_start = region->vaddr_ & ~0xFFFu;
+        uint32_t page_offset = region->phys_start_ & 0xFFFu;
+        uint32_t aligned_size = (region->size_ + page_offset + 0xFFFu) & ~0xFFFu;
+        uint32_t pages = aligned_size / 4096u;
+
+        mmio_unmap_pages(virt_start, aligned_size);
+        
+        vmm_unreserve_pages((void*)virt_start, pages);
 
         region->magic_ = 0;
         kfree(region);
