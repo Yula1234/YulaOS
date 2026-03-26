@@ -1,4 +1,4 @@
-#include <drivers/pci.h>
+#include <drivers/pci/pci.h>
 #include <drivers/acpi.h>
 
 #include <drivers/keyboard.h>

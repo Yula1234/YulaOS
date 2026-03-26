@@ -289,7 +289,6 @@ static void kmain_devices_init(void) {
 
     bdev_init();
 
-    ahci_init();
     ne2k_init();
 
     drivers_init_stage(DRIVER_STAGE_CORE);

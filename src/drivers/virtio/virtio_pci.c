@@ -4,7 +4,7 @@
 #include <arch/i386/paging.h>
 
 #include <drivers/acpi.h>
-#include <drivers/pci.h>
+#include <drivers/pci/pci.h>
 
 #include <hal/io.h>
 #include <hal/ioapic.h>
