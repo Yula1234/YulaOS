@@ -157,7 +157,7 @@ static int ahci_send_command(
     uint32_t count
 );
 
-static uint32_t ahci_identify_device(ahci_port_extended_t* ex);
+static uint64_t ahci_identify_device(ahci_port_extended_t* ex);
 static int ahci_create_and_register_bdev(ahci_port_extended_t* ex);
 static void ahci_unregister_and_destroy_bdev(ahci_port_extended_t* ex);
 static void ahci_port_destroy(ahci_port_extended_t* ex);
@@ -659,7 +659,7 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
     return ex;
 }
 
-static uint32_t ahci_identify_device(ahci_port_extended_t* ex) {
+static uint64_t ahci_identify_device(ahci_port_extended_t* ex) {
     if (!ex) {
         return 0;
     }
@@ -721,9 +721,16 @@ static uint32_t ahci_identify_device(ahci_port_extended_t* ex) {
     }
 
     uint16_t* identify_buf = (uint16_t*)ex->identify_buf_virt;
-    uint32_t sectors = (uint32_t)identify_buf[60] | ((uint32_t)identify_buf[61] << 16);
 
-    return sectors;
+    uint64_t lba48_sectors = *(uint64_t*)&identify_buf[100];
+
+    if (lba48_sectors != 0u) {
+        return lba48_sectors;
+    }
+
+    uint32_t lba28_sectors = (uint32_t)identify_buf[60] | ((uint32_t)identify_buf[61] << 16);
+
+    return (uint64_t)lba28_sectors;
 }
 
 static int ahci_send_command(
