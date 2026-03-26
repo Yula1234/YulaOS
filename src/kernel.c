@@ -7,6 +7,7 @@
 #include <drivers/serial/ttyS0.h>
 #include <drivers/block/bdev.h>
 #include <drivers/pc_speaker.h>
+#include <drivers/sata/ahci.h>
 #include <drivers/keyboard.h>
 #include <drivers/console.h>
 #include <drivers/driver.h>
@@ -14,7 +15,6 @@
 #include <drivers/fbdev.h>
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
-#include <drivers/ahci.h>
 #include <drivers/uhci.h>
 #include <drivers/acpi.h>
 #include <drivers/vga.h>
