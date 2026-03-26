@@ -37,8 +37,6 @@
 #define ATA_CMD_WRITE_DMA_EX 0x35
 #define ATA_CMD_IDENTIFY 0xEC
 
-#define AHCI_MSI_VECTOR 0xA1
-
 #define AHCI_SECTOR_SIZE 512u
 #define AHCI_MAX_IO_SECTORS 2048u
 #define AHCI_MAX_PRDT_ENTRIES 248u
@@ -436,7 +434,9 @@ int ahci_msi_configure_cpu(int cpu_index) {
     }
 
     spinlock_acquire(&g_ahci_hba_list_lock);
+
     ahci_hba_t* hba = g_ahci_hba_list;
+    
     spinlock_release(&g_ahci_hba_list_lock);
 
     if (!hba || !hba->pdev) {
@@ -444,7 +444,7 @@ int ahci_msi_configure_cpu(int cpu_index) {
     }
 
     const int ok = pci_dev_enable_msi(
-        hba->pdev, AHCI_MSI_VECTOR,
+        hba->pdev, hba->msi_vector,
         (uint8_t)cpus[cpu_index].id
     );
 
@@ -1008,6 +1008,10 @@ static void ahci_hba_destroy(ahci_hba_t* hba) {
         return;
     }
 
+    if (hba->msi_enabled && hba->msi_vector > 0) {
+        irq_free_vector(hba->msi_vector);
+    }
+
     for (int i = 0; i < AHCI_MAX_PORTS; i++) {
         ahci_port_extended_t* ex = hba->ports[i];
         if (!ex) {
@@ -1150,17 +1154,31 @@ static int ahci_probe(pci_device_t* pdev) {
 
     int msi_ok = 0;
 
+    int msi_vec = irq_alloc_vector();
+
+    if (msi_vec < 0) {
+        ahci_hba_destroy(hba);
+
+        return -1;
+    }
+
     if (cpu_count > 0 && cpus[0].id >= 0) {
         msi_ok = pci_dev_enable_msi(pdev, AHCI_MSI_VECTOR, (uint8_t)cpus[0].id);
     }
 
+    hba->msi_vector = (uint8_t)msi_vec;
+
     if (msi_ok) {
         irq_install_vector_handler(AHCI_MSI_VECTOR, ahci_irq_handler);
         hba->msi_enabled = 1;
-        hba->msi_vector = AHCI_MSI_VECTOR;
     } else {
+        irq_free_vector(hba->msi_vector);
+        
+        hba->msi_vector = 0;
+
         if (!pci_request_irq(pdev, ahci_irq_handler)) {
             ahci_hba_destroy(hba);
+
             return -1;
         }
     }
