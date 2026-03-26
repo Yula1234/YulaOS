@@ -126,8 +126,6 @@ typedef struct {
     semaphore_t slot_sem[32]; 
 } ahci_port_state_t;
 
-void ahci_init(void);
-
 int ahci_read_sectors(uint32_t lba, uint32_t count, uint8_t* buf);
 int ahci_write_sectors(uint32_t lba, uint32_t count, const uint8_t* buf);
 
