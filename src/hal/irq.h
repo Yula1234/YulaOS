@@ -18,6 +18,9 @@ void irq_install_vector_handler(int vector, irq_handler_t handler);
 
 void irq_set_legacy_pic_enabled(int enabled);
 
+int irq_alloc_vector(void);
+void irq_free_vector(int vector);
+
 #ifdef __cplusplus
 }
 #endif

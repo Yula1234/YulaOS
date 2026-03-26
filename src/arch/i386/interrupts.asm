@@ -154,17 +154,10 @@ macro make_isr_code [id] {
         gen_isr id
 }
 
-match items, ISR_LIST {
-    make_isr_code items
+rept 256 i:0 {
+    gen_isr i
 }
 
-gen_isr 0x80
-gen_isr 0xFF
-gen_isr 0xF0
-gen_isr 0xF1
-gen_isr 0xF2
-gen_isr 0xA1
-gen_isr 0xA2
 
 section '.data' writeable
 
@@ -183,8 +176,8 @@ macro make_isr_table [id] {
 }
 
 isr_stub_table:
-match items, ISR_LIST {
-    make_isr_table items
+rept 256 i:0 {
+    dd isr_stub_#i
 }
 
 section '.note.GNU-stack'

@@ -85,19 +85,12 @@ volatile uint32_t system_uptime_seconds = 0;
 volatile uint32_t timer_ticks = 0;
 
 extern uint32_t isr_stub_table[];
-extern void isr_stub_0x80(void);
-extern void isr_stub_0xFF(void);
-extern void isr_stub_0xF0(void);
-extern void isr_stub_0xF1(void);
-extern void isr_stub_0xF2(void);
-extern void isr_stub_0xA1(void);
-extern void isr_stub_0xA2(void);
 extern uint32_t* kernel_page_directory;
 
 extern void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
 
 static irq_handler_t irq_handlers[16] = {0};
-static irq_handler_t irq_vector_handlers[256] = {0};
+irq_handler_t irq_vector_handlers[256] = {0};
 static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
@@ -780,15 +773,11 @@ void idt_init(void) {
     idtp.base = (uint32_t)&idt;
     memset(&idt, 0, sizeof(idt));
 
-    for (int i = 0; i < 48; i++) idt_set_gate(i, isr_stub_table[i], 0x08, 0x8E);
-    idt_set_gate(0x80, (uint32_t)isr_stub_0x80, 0x08, 0xEF);
-    
-    idt_set_gate(0xFF, (uint32_t)isr_stub_0xFF, 0x08, 0x8E);
-    idt_set_gate(IPI_TLB_VECTOR, (uint32_t)isr_stub_0xF0, 0x08, 0x8E);
-    idt_set_gate(IPI_PANIC_VECTOR, (uint32_t)isr_stub_0xF1, 0x08, 0x8E);
-    idt_set_gate(IPI_RCU_VECTOR, (uint32_t)isr_stub_0xF2, 0x08, 0x8E);
-    idt_set_gate(0xA1, (uint32_t)isr_stub_0xA1, 0x08, 0x8E);
-    idt_set_gate(0xA2, (uint32_t)isr_stub_0xA2, 0x08, 0x8E);
+    for (int i = 0; i < 256; i++) {
+        idt_set_gate((uint8_t)i, isr_stub_table[i], 0x08, 0x8E);
+    }
+
+    idt_set_gate(0x80, isr_stub_table[0x80], 0x08, 0xEF);
 
     outb(0x20, 0x11); io_wait();
     outb(0xA0, 0x11); io_wait();
