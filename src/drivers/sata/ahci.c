@@ -4,21 +4,17 @@
 #include <drivers/block/bdev.h>
 #include <drivers/pci/pci.h>
 #include <drivers/driver.h>
-#include <drivers/vga.h>
 
 #include <hal/mmio.h>
 #include <hal/irq.h>
-
-#include <kernel/smp/cpu.h>
-#include <kernel/sched.h>
-
-#include <arch/i386/paging.h>
 
 #include <lib/string.h>
 #include <lib/dlist.h>
 
 #include <mm/heap.h>
 #include <mm/dma.h>
+
+#include <kernel/smp/cpu.h>
 
 #include "ahci.h"
 
