@@ -15,6 +15,7 @@
 #include <arch/i386/paging.h>
 
 #include <lib/string.h>
+#include <lib/dlist.h>
 
 #include <mm/heap.h>
 #include <mm/dma.h>
@@ -75,10 +76,10 @@ struct ahci_hba_s {
 
     volatile uint32_t port_active_slots[AHCI_MAX_PORTS];
 
-    ahci_hba_t* next;
+    dlist_head_t list_node;
 };
 
-static ahci_hba_t* g_ahci_hba_list = 0;
+static dlist_head_t g_ahci_hba_list;
 static spinlock_t g_ahci_hba_list_lock;
 
 static int g_ahci_async_mode = 0;
@@ -99,39 +100,41 @@ static ahci_port_extended_t* ahci_first_port(void) {
 
 static void ahci_hba_list_add(ahci_hba_t* hba) {
     spinlock_acquire(&g_ahci_hba_list_lock);
-    hba->next = g_ahci_hba_list;
-    g_ahci_hba_list = hba;
+
+    dlist_add_tail(&hba->list_node, &g_ahci_hba_list);
+    
     spinlock_release(&g_ahci_hba_list_lock);
 }
 
 static void ahci_hba_list_remove(ahci_hba_t* hba) {
     spinlock_acquire(&g_ahci_hba_list_lock);
 
-    ahci_hba_t** pp = &g_ahci_hba_list;
-    while (*pp) {
-        if (*pp == hba) {
-            *pp = hba->next;
-            break;
-        }
-        pp = &(*pp)->next;
+    if (hba->list_node.next && hba->list_node.prev) {
+        dlist_del(&hba->list_node);
+
+        hba->list_node.next = 0;
+        hba->list_node.prev = 0;
     }
 
     spinlock_release(&g_ahci_hba_list_lock);
 }
 
 static ahci_hba_t* ahci_hba_from_pdev(pci_device_t* pdev) {
+    ahci_hba_t* found = 0;
+
     spinlock_acquire(&g_ahci_hba_list_lock);
 
-    ahci_hba_t* hba = g_ahci_hba_list;
-    while (hba) {
+    ahci_hba_t* hba;
+    dlist_for_each_entry(hba, &g_ahci_hba_list, list_node) {
         if (hba->pdev == pdev) {
+            found = hba;
             break;
         }
-        hba = hba->next;
     }
 
     spinlock_release(&g_ahci_hba_list_lock);
-    return hba;
+
+    return found;
 }
 
 static int ahci_bdev_read_sectors(block_device_t* dev, uint64_t lba, uint32_t count, void* buf);
@@ -434,9 +437,13 @@ int ahci_msi_configure_cpu(int cpu_index) {
     }
 
     spinlock_acquire(&g_ahci_hba_list_lock);
-
-    ahci_hba_t* hba = g_ahci_hba_list;
     
+    ahci_hba_t* hba = 0;
+    
+    if (!dlist_empty(&g_ahci_hba_list)) {
+        hba = container_of(g_ahci_hba_list.next, ahci_hba_t, list_node);
+    }
+
     spinlock_release(&g_ahci_hba_list_lock);
 
     if (!hba || !hba->pdev) {
@@ -503,17 +510,16 @@ void ahci_irq_handler(registers_t* regs) {
 
     spinlock_acquire(&g_ahci_hba_list_lock);
 
-    ahci_hba_t* hba = g_ahci_hba_list;
-    while (hba) {
+    ahci_hba_t* hba;
+    dlist_for_each_entry(hba, &g_ahci_hba_list, list_node) {
         volatile HBA_MEM* mmio = hba->mmio;
+
         if (!mmio) {
-            hba = hba->next;
             continue;
         }
 
         uint32_t is_glob = mmio->is;
         if (is_glob == 0u) {
-            hba = hba->next;
             continue;
         }
 
@@ -554,8 +560,6 @@ void ahci_irq_handler(registers_t* regs) {
                 port->serr = 0xFFFFFFFFu;
             }
         }
-
-        hba = hba->next;
     }
 
     spinlock_release(&g_ahci_hba_list_lock);
@@ -1257,6 +1261,9 @@ static pci_driver_t g_ahci_pci_driver = {
 };
 
 static int ahci_driver_init(void) {
+    dlist_init(&g_ahci_hba_list);
+    spinlock_init(&g_ahci_hba_list_lock);
+
     return pci_register_driver(&g_ahci_pci_driver);
 }
 
