@@ -17,6 +17,7 @@
 #include <lib/string.h>
 
 #include <mm/heap.h>
+#include <mm/dma.h>
 
 #include "ahci.h"
 
@@ -290,25 +291,29 @@ static void ahci_port_destroy(ahci_port_extended_t* ex) {
 
     for (int i = 0; i < 32; i++) {
         if (state->ctba_virt[i]) {
-            kfree(state->ctba_virt[i]);
+            dma_free_coherent(state->ctba_virt[i], 4096, dma_virt_to_phys(state->ctba_virt[i]));
+
             state->ctba_virt[i] = 0;
         }
     }
 
     if (ex->identify_buf_virt) {
-        kfree(ex->identify_buf_virt);
+        dma_free_coherent(ex->identify_buf_virt, AHCI_SECTOR_SIZE, ex->identify_buf_phys);
+
         ex->identify_buf_virt = 0;
     }
 
     ex->identify_buf_phys = 0;
 
     if (state->fb_virt) {
-        kfree(state->fb_virt);
+        dma_free_coherent(state->fb_virt, 256, dma_virt_to_phys(state->fb_virt));
+
         state->fb_virt = 0;
     }
 
     if (state->clb_virt) {
-        kfree(state->clb_virt);
+        dma_free_coherent(state->clb_virt, 1024, dma_virt_to_phys(state->clb_virt));
+
         state->clb_virt = 0;
     }
 
@@ -575,25 +580,30 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
 
     stop_cmd(port);
 
-    state->clb_virt = kmalloc_a(1024);
+    uint32_t clb_phys = 0;
+
+    state->clb_virt = dma_alloc_coherent(1024, &clb_phys);
+    
     if (!state->clb_virt) {
         kfree(ex);
         return 0;
     }
-    memset(state->clb_virt, 0, 1024);
-
-    port->clb = paging_get_phys(kernel_page_directory, (uint32_t)state->clb_virt);
+    
+    port->clb = clb_phys;
     port->clbu = 0;
 
-    state->fb_virt = kmalloc_a(256);
+    uint32_t fb_phys = 0;
+    
+    state->fb_virt = dma_alloc_coherent(256, &fb_phys);
+    
     if (!state->fb_virt) {
-        kfree(state->clb_virt);
+        dma_free_coherent(state->clb_virt, 1024, dma_virt_to_phys(state->clb_virt));
+        
         kfree(ex);
         return 0;
     }
-    memset(state->fb_virt, 0, 256);
 
-    port->fb = paging_get_phys(kernel_page_directory, (uint32_t)state->fb_virt);
+    port->fb = fb_phys;
     port->fbu = 0;
 
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)state->clb_virt;
@@ -601,36 +611,40 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
     for (int i = 0; i < 32; i++) {
         cmdheader[i].prdtl = 0;
 
-        void* ctba_virt = kmalloc_a(4096);
+        uint32_t ctba_phys = 0;
+        
+        void* ctba_virt = dma_alloc_coherent(4096, &ctba_phys);
+        
         if (!ctba_virt) {
             for (int j = 0; j < i; j++) {
-                kfree(state->ctba_virt[j]);
+                dma_free_coherent(state->ctba_virt[j], 4096, dma_virt_to_phys(state->ctba_virt[j]));
             }
-            kfree(state->fb_virt);
-            kfree(state->clb_virt);
+
+            dma_free_coherent(state->fb_virt, 256, dma_virt_to_phys(state->fb_virt));
+            dma_free_coherent(state->clb_virt, 1024, dma_virt_to_phys(state->clb_virt));
+            
             kfree(ex);
             return 0;
         }
-        memset(ctba_virt, 0, 4096);
 
         state->ctba_virt[i] = ctba_virt;
-
-        cmdheader[i].ctba = paging_get_phys(kernel_page_directory, (uint32_t)ctba_virt);
+        
+        cmdheader[i].ctba = ctba_phys;
         cmdheader[i].ctbau = 0;
 
         sem_init(&state->slot_sem[i], 0);
     }
 
-    ex->identify_buf_virt = kmalloc_a(AHCI_SECTOR_SIZE);
-    if (ex->identify_buf_virt) {
-        memset(ex->identify_buf_virt, 0, AHCI_SECTOR_SIZE);
-        ex->identify_buf_phys = paging_get_phys(kernel_page_directory, (uint32_t)ex->identify_buf_virt);
-    } else {
+    ex->identify_buf_virt = dma_alloc_coherent(AHCI_SECTOR_SIZE, &ex->identify_buf_phys);
+
+    if (!ex->identify_buf_virt) {
         for (int i = 0; i < 32; i++) {
-            kfree(state->ctba_virt[i]);
+            dma_free_coherent(state->ctba_virt[i], 4096, dma_virt_to_phys(state->ctba_virt[i]));
         }
-        kfree(state->fb_virt);
-        kfree(state->clb_virt);
+
+        dma_free_coherent(state->fb_virt, 256, dma_virt_to_phys(state->fb_virt));
+        dma_free_coherent(state->clb_virt, 1024, dma_virt_to_phys(state->clb_virt));
+        
         kfree(ex);
         return 0;
     }
@@ -800,7 +814,7 @@ static int ahci_send_command(
     uint16_t prdt_count = 0;
 
     while (bytes_remaining > 0u && prdt_count < (uint16_t)AHCI_MAX_PRDT_ENTRIES) {
-        uint32_t phys_addr = paging_get_phys(kernel_page_directory, current_vaddr);
+        uint32_t phys_addr = dma_virt_to_phys((void*)current_vaddr);
         if (phys_addr == 0u) {
             __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
             spinlock_release(&state->lock);
