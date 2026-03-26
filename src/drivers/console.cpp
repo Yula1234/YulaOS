@@ -8,7 +8,6 @@
 #include <hal/lock.h>
 #include <yos/ioctl.h>
 
-#include <drivers/console.h>
 #include <drivers/vga.h>
 
 #include <drivers/cdev.h>
@@ -16,9 +15,6 @@
 
 #include <kernel/tty/tty_internal.h>
 #include <kernel/tty/tty_service.h>
-
-#include "console.h"
-#include "vga.h"
 
 namespace {
 
@@ -180,8 +176,4 @@ DRIVER_REGISTER(
     .shutdown = nullptr
 );
 
-}
-
-extern "C" void console_init() {
-    (void)console_driver_init();
 }

@@ -9,7 +9,6 @@
 #include <drivers/pc_speaker.h>
 #include <drivers/sata/ahci.h>
 #include <drivers/keyboard.h>
-#include <drivers/console.h>
 #include <drivers/driver.h>
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
