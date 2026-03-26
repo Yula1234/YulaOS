@@ -1163,13 +1163,13 @@ static int ahci_probe(pci_device_t* pdev) {
     }
 
     if (cpu_count > 0 && cpus[0].id >= 0) {
-        msi_ok = pci_dev_enable_msi(pdev, AHCI_MSI_VECTOR, (uint8_t)cpus[0].id);
+        msi_ok = pci_dev_enable_msi(pdev, msi_vec, (uint8_t)cpus[0].id);
     }
 
     hba->msi_vector = (uint8_t)msi_vec;
 
     if (msi_ok) {
-        irq_install_vector_handler(AHCI_MSI_VECTOR, ahci_irq_handler);
+        irq_install_vector_handler(msi_vec, ahci_irq_handler);
         hba->msi_enabled = 1;
     } else {
         irq_free_vector(hba->msi_vector);
