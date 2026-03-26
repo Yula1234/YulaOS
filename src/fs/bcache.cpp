@@ -372,7 +372,17 @@ static kernel::atomic<int> g_prefetch_started{0};
 static block_device_t* g_bcache_bdev = nullptr;
 
 extern "C" void bcache_attach_device(block_device_t* dev) {
+    if (g_bcache_bdev == dev) return;
+
+    if (g_bcache_bdev) {
+        bdev_release(g_bcache_bdev);
+    }
+
     g_bcache_bdev = dev;
+
+    if (g_bcache_bdev) {
+        bdev_retain(g_bcache_bdev);
+    }
 }
 
 static void bcache_prefetch_worker(void*);

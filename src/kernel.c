@@ -302,8 +302,12 @@ static void kmain_fs_init(void) {
         root_bdev = bdev_first();
     }
 
-    bdev_set_root(root_bdev);
-    bcache_attach_device(root_bdev);
+    if (root_bdev) {
+        bdev_set_root(root_bdev);
+        bcache_attach_device(root_bdev);
+
+        bdev_release(root_bdev); 
+    }
 
     yulafs_init();
     vfs_init();

@@ -44,6 +44,8 @@ typedef struct block_device {
 
     vfs_node_t node_template;
 
+    uint32_t refs_;
+
     dlist_head_t list_node;
 } block_device_t;
 
@@ -61,6 +63,9 @@ block_device_t* bdev_root(void);
 int bdev_read_sectors(block_device_t* dev, uint64_t lba, uint32_t count, void* buf);
 int bdev_write_sectors(block_device_t* dev, uint64_t lba, uint32_t count, const void* buf);
 int bdev_flush(block_device_t* dev);
+
+void bdev_retain(block_device_t* dev);
+void bdev_release(block_device_t* dev);
 
 #ifdef __cplusplus
 }

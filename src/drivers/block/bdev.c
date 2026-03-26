@@ -6,6 +6,8 @@
 #include <mm/heap.h>
 
 #include <lib/string.h>
+#include <lib/dlist.h>
+#include <lib/compiler.h>
 
 #include <hal/lock.h>
 
@@ -23,10 +25,34 @@ static block_device_t* g_bdev_root = 0;
 
 static void bdev_init_node_template(block_device_t* dev);
 
+static int bdev_vfs_open(vfs_node_t* node);
+
+static int bdev_vfs_close(vfs_node_t* node);
+
 static int bdev_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer);
 
 static int bdev_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer);
 
+
+void bdev_retain(block_device_t* dev) {
+    if (unlikely(!dev)) {
+        return;
+    }
+
+    __atomic_fetch_add(&dev->refs_, 1u, __ATOMIC_RELAXED);
+}
+
+void bdev_release(block_device_t* dev) {
+    if (unlikely(!dev)) {
+        return;
+    }
+
+    const uint32_t old_refs = __atomic_fetch_sub(&dev->refs_, 1u, __ATOMIC_ACQ_REL);
+
+    if (old_refs == 1u) {
+        kfree(dev);
+    }
+}
 
 void bdev_init(void) {
     spinlock_init(&g_bdev.lock_);
@@ -77,17 +103,14 @@ int bdev_register(block_device_t* dev) {
         return -1;
     }
 
-    if (dev->sector_size == 0
-        || dev->sector_count == 0) {
-        return -1;
-    }
-
     uint32_t flags = spinlock_acquire_safe(&g_bdev.lock_);
 
     if (bdev_find_locked(dev->name)) {
         spinlock_release_safe(&g_bdev.lock_, flags);
         return -1;
     }
+
+    dev->refs_ = 1;
 
     bdev_init_node_template(dev);
 
@@ -120,6 +143,8 @@ int bdev_unregister(const char* name) {
 
     (void)devfs_unregister(name);
 
+    bdev_release(dev);
+
     return 0;
 }
 
@@ -131,6 +156,10 @@ block_device_t* bdev_find_by_name(const char* name) {
     uint32_t flags = spinlock_acquire_safe(&g_bdev.lock_);
 
     block_device_t* dev = bdev_find_locked(name);
+
+    if (dev) {
+        bdev_retain(dev);
+    }
 
     spinlock_release_safe(&g_bdev.lock_, flags);
 
@@ -144,6 +173,8 @@ block_device_t* bdev_first(void) {
 
     if (!dlist_empty(&g_bdev.device_list_)) {
         out = container_of(g_bdev.device_list_.next, block_device_t, list_node);
+
+        bdev_retain(out);
     }
 
     spinlock_release_safe(&g_bdev.lock_, flags);
@@ -219,6 +250,8 @@ int bdev_flush(block_device_t* dev) {
 static vfs_ops_t g_bdev_vfs_ops = {
     .read = bdev_vfs_read,
     .write = bdev_vfs_write,
+    .open = bdev_vfs_open,
+    .close = bdev_vfs_close,
 };
 
 static void bdev_init_node_template(block_device_t* dev) {
@@ -234,6 +267,30 @@ static void bdev_init_node_template(block_device_t* dev) {
 
     dev->node_template.ops = &g_bdev_vfs_ops;
     dev->node_template.private_data = dev;
+}
+
+static int bdev_vfs_open(vfs_node_t* node) {
+    if (!node || !node->private_data) {
+        return -1;
+    }
+
+    block_device_t* dev = (block_device_t*)node->private_data;
+
+    bdev_retain(dev);
+
+    return 0;
+}
+
+static int bdev_vfs_close(vfs_node_t* node) {
+    if (!node || !node->private_data) {
+        return -1;
+    }
+
+    block_device_t* dev = (block_device_t*)node->private_data;
+
+    bdev_release(dev);
+
+    return 0;
 }
 
 static int bdev_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
