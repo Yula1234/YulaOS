@@ -5,6 +5,8 @@
 
 #include <fs/vfs.h>
 
+#include <lib/dlist.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +43,8 @@ typedef struct block_device {
     void* private_data;
 
     vfs_node_t node_template;
+
+    dlist_head_t list_node;
 } block_device_t;
 
 void bdev_init(void);
