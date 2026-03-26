@@ -4,13 +4,10 @@
 #include <drivers/block/bdev.h>
 #include <drivers/pci/pci.h>
 #include <drivers/driver.h>
-#include <drivers/acpi.h>
 #include <drivers/vga.h>
 
-#include <hal/ioapic.h>
 #include <hal/mmio.h>
 #include <hal/irq.h>
-#include <hal/io.h>
 
 #include <kernel/smp/cpu.h>
 #include <kernel/sched.h>
@@ -1148,31 +1145,9 @@ static int ahci_probe(pci_device_t* pdev) {
         hba->msi_enabled = 1;
         hba->msi_vector = AHCI_MSI_VECTOR;
     } else {
-        irq_install_handler(irq_line, ahci_irq_handler);
-
-        if (ioapic_is_initialized() && cpu_count > 0 && cpus[0].id >= 0) {
-            uint32_t gsi = 0u;
-            int active_low = 0;
-            int level_trigger = 0;
-
-            if (!acpi_get_iso(irq_line, &gsi, &active_low, &level_trigger)) {
-                gsi = (uint32_t)irq_line;
-                active_low = 0;
-                level_trigger = 0;
-            }
-
-            ioapic_route_gsi(
-                gsi, (uint8_t)(32u + irq_line),
-                (uint8_t)cpus[0].id, active_low,
-                level_trigger
-            );
-        } else {
-            if (irq_line < 8u) {
-                outb(0x21, (uint8_t)(inb(0x21) & ~(1u << irq_line)));
-            } else {
-                outb(0xA1, (uint8_t)(inb(0xA1) & ~(1u << (irq_line - 8u))));
-                outb(0x21, (uint8_t)(inb(0x21) & ~(1u << 2u)));
-            }
+        if (!pci_request_irq(pdev, ahci_irq_handler)) {
+            ahci_hba_destroy(hba);
+            return -1;
         }
     }
 

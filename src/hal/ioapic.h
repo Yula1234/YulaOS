@@ -6,8 +6,16 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int ioapic_init(uint32_t phys_addr, uint32_t gsi_base);
 int ioapic_is_initialized(void);
 int ioapic_route_gsi(uint32_t gsi, uint8_t vector, uint8_t dest_apic_id, int active_low, int level_trigger);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -15,6 +15,7 @@
 #include <hal/irq.h>
 #include <hal/lock.h>
 #include <hal/pmio.h>
+#include <hal/pic.h>
 
 #include "mouse.h"
 
@@ -32,16 +33,8 @@ enum {
     PS2_PORT_COMMAND = 0x64u,
 };
 
-enum {
-    PIC_MASTER_DATA_PORT = 0x21u,
-    PIC_SLAVE_DATA_PORT = 0xA1u,
-};
-
 static pmio_region_t* g_ps2_data_region = 0;
 static pmio_region_t* g_ps2_cmd_region = 0;
-
-static pmio_region_t* g_pic_master_region = 0;
-static pmio_region_t* g_pic_slave_region = 0;
 
 static __cacheline_aligned spinlock_t g_ps2_lock;
 static int g_ps2_pmio_inited = 0;
@@ -69,9 +62,6 @@ static int mouse_pmio_init(void) {
 
         return -1;
     }
-
-    g_pic_master_region = pmio_request_region(PIC_MASTER_DATA_PORT, 1u, "pic_master");
-    g_pic_slave_region = pmio_request_region(PIC_SLAVE_DATA_PORT, 1u, "pic_slave");
 
     g_ps2_pmio_inited = 1;
 
@@ -112,40 +102,6 @@ static uint8_t mouse_ps2_read_data(void) {
     uint8_t data = 0u;
     (void)pmio_readb(g_ps2_data_region, 0u, &data);
     return data;
-}
-
-static void mouse_pic_unmask(uint8_t irq) {
-    if (!g_pic_master_region || !g_pic_slave_region) {
-        return;
-    }
-
-    if (irq < 8u) {
-        pmio_acquire_bus(g_pic_master_region);
-
-        uint8_t mask = 0u;
-        (void)pmio_readb(g_pic_master_region, 0u, &mask);
-        (void)pmio_writeb(g_pic_master_region, 0u, (uint8_t)(mask & (uint8_t)~(1u << irq)));
-
-        pmio_release_bus(g_pic_master_region);
-
-        return;
-    }
-
-    pmio_acquire_bus(g_pic_slave_region);
-
-    uint8_t mask_slave = 0u;
-    (void)pmio_readb(g_pic_slave_region, 0u, &mask_slave);
-    (void)pmio_writeb(g_pic_slave_region, 0u, (uint8_t)(mask_slave & (uint8_t)~(1u << (irq - 8u))));
-
-    pmio_release_bus(g_pic_slave_region);
-
-    pmio_acquire_bus(g_pic_master_region);
-
-    uint8_t mask_master = 0u;
-    (void)pmio_readb(g_pic_master_region, 0u, &mask_master);
-    (void)pmio_writeb(g_pic_master_region, 0u, (uint8_t)(mask_master & (uint8_t)~(1u << 2u)));
-
-    pmio_release_bus(g_pic_master_region);
 }
 
 static int mouse_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
@@ -373,7 +329,7 @@ void mouse_init() {
 
     irq_install_handler(12, mouse_irq_handler);
 
-    mouse_pic_unmask(12u);
+    (void)pic_unmask_irq(12u);
 
     spinlock_release_safe(&g_ps2_lock, flags);
 }

@@ -11,7 +11,14 @@
 #include <lib/string.h>
 
 #include <kernel/output/kprintf.h>
+#include <kernel/smp/cpu.h>
 #include <mm/heap.h>
+
+extern "C" {
+#include <hal/ioapic.h>
+#include <hal/pic.h>
+#include <drivers/acpi.h>
+}
 
 namespace kernel::pci {
 
@@ -459,6 +466,41 @@ int pci_msi_configure(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector, u
 
 int pci_register_driver(pci_driver_t* driver) {
     return kernel::pci::g_registry.register_driver(driver);
+}
+
+int pci_request_irq(pci_device_t* dev, irq_handler_t handler) {
+    if (!dev || !handler) {
+        return 0;
+    }
+
+    const uint8_t irq_line = dev->irq_line;
+    if (irq_line >= 16u) {
+        return 0;
+    }
+
+    irq_install_handler((int)irq_line, handler);
+
+    if (ioapic_is_initialized() && cpu_count > 0 && cpus[0].id >= 0) {
+        uint32_t gsi = 0u;
+        int active_low = 0;
+        int level_trigger = 0;
+
+        if (!acpi_get_iso(irq_line, &gsi, &active_low, &level_trigger)) {
+            gsi = (uint32_t)irq_line;
+            active_low = 0;
+            level_trigger = 0;
+        }
+
+        return ioapic_route_gsi(
+            gsi,
+            (uint8_t)(32u + irq_line),
+            (uint8_t)cpus[0].id,
+            active_low,
+            level_trigger
+        );
+    }
+
+    return pic_unmask_irq(irq_line);
 }
 
 uint32_t pci_dev_read32(const pci_device_t* dev, uint8_t offset) {
