@@ -1,19 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <mm/heap.h>
+#include <kernel/smp/cpu_limits.h>
 
+#include <hal/align.h>
 #include <hal/lock.h>
 #include <hal/cpu.h>
-#include <hal/align.h>
 #include <hal/cpu.h>
 #include <hal/irq.h>
 
-#include <kernel/smp/cpu_limits.h>
-
 #include <lib/compiler.h>
-#include <lib/dlist.h>
 #include <lib/string.h>
+#include <lib/dlist.h>
+
+#include <mm/heap.h>
 
 #include "api.h"
 
