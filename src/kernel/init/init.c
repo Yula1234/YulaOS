@@ -1,27 +1,28 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <lib/string.h>
+#include <kernel/output/kprintf.h>
+#include <kernel/tty/tty_bridge.h>
+#include <kernel/input_focus.h>
+#include <kernel/tty/tty.h>
+#include <kernel/smp/cpu.h>
+#include <kernel/sched.h>
+#include <kernel/proc.h>
 
-#include <fs/yulafs.h>
-#include <fs/vfs.h>
-#include <fs/bcache.h>
-
+#include <drivers/pc_speaker.h>
 #include <drivers/uhci.h>
 #include <drivers/vga.h>
 
-#include <kernel/tty/tty.h>
-#include <kernel/tty/tty_bridge.h>
-#include <kernel/proc.h>
-#include <kernel/sched.h>
-#include <kernel/input_focus.h>
-#include <kernel/smp/cpu.h>
-#include <kernel/output/kprintf.h>
-
-#include <mm/heap.h>
+#include <fs/yulafs.h>
+#include <fs/bcache.h>
+#include <fs/vfs.h>
 
 #include <hal/lock.h>
 #include <hal/io.h>
+
+#include <lib/string.h>
+
+#include <mm/heap.h>
 
 #include "init.h"
 
@@ -141,6 +142,9 @@ void init_task(void* arg) {
     tty_bridge_putc(tty, 0x0C);
 
     init_task_set_cwd(self);
+
+    pc_speaker_beep();
+
     init_task_spawn_shell_loop(self, tty);
 }
 
