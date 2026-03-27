@@ -9,10 +9,11 @@
 #include <mm/heap.h>
 #include <mm/dma.h>
 
+#include <kernel/workqueue.h>
+#include <kernel/smp/cpu.h>
+
 #include <lib/string.h>
 #include <lib/dlist.h>
-
-#include <kernel/smp/cpu.h>
 
 #include <hal/irq.h>
 
@@ -94,6 +95,9 @@ struct ahci_hba_s {
     volatile uint32_t port_active_slots[AHCI_MAX_PORTS];
 
     dlist_head_t list_node;
+
+    workqueue_t* wq;
+    work_struct_t irq_work;
 };
 
 static dlist_head_t g_ahci_hba_list;
@@ -190,19 +194,19 @@ static int ahci_send_command(
 );
 
 static uint64_t ahci_identify_device(ahci_port_extended_t* ex);
+
 static int ahci_create_and_register_bdev(ahci_port_extended_t* ex);
 static void ahci_unregister_and_destroy_bdev(ahci_port_extended_t* ex);
+
 static void ahci_port_destroy(ahci_port_extended_t* ex);
 static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no);
+
 static void ahci_hba_destroy(ahci_hba_t* hba);
 static int ahci_port_comreset(ahci_port_extended_t* ex);
 
 static int ahci_rw_sectors(
-    ahci_port_extended_t* ex,
-    uint64_t lba,
-    uint32_t count,
-    uint8_t* buf,
-    int is_write
+    ahci_port_extended_t* ex, uint64_t lba,
+    uint32_t count, uint8_t* buf, int is_write
 );
 
 static char* ahci_alloc_disk_name(uint32_t index) {
@@ -402,11 +406,8 @@ static int ahci_bdev_flush(block_device_t* dev) {
 }
 
 static int ahci_rw_sectors(
-    ahci_port_extended_t* ex,
-    uint64_t lba,
-    uint32_t count,
-    uint8_t* buf,
-    int is_write
+    ahci_port_extended_t* ex, uint64_t lba,
+    uint32_t count, uint8_t* buf, int is_write
 ) {
     if (!ex || !buf) {
         return 0;
@@ -543,6 +544,59 @@ static void start_cmd(ahci_hba_t* hba, int port_no) {
     ahci_hba_port_write(hba, port_no, AHCI_PORT_CMD(port_no), cmd);
 }
 
+static void ahci_irq_bh(work_struct_t* work) {
+    ahci_hba_t* hba = container_of(work, ahci_hba_t, irq_work);
+
+    if (!hba->iomem) return;
+
+    uint32_t is_glob = ioread32(hba->iomem, AHCI_HBA_IS);
+
+    for (int i = 0; i < AHCI_MAX_PORTS; i++) {
+        if ((is_glob & (1u << i)) == 0u) {
+            continue;
+        }
+
+        ahci_port_extended_t* ex = hba->ports[i];
+        if (!ex) {
+            uint32_t p_is = ioread32(hba->iomem, AHCI_PORT_IS(i));
+            iowrite32(hba->iomem, AHCI_PORT_IS(i), p_is);
+
+            uint32_t p_serr = ioread32(hba->iomem, AHCI_PORT_SERR(i));
+            if (p_serr) {
+                iowrite32(hba->iomem, AHCI_PORT_SERR(i), 0xFFFFFFFFu);
+            }
+            continue;
+        }
+
+        ahci_port_state_t* state = (ahci_port_state_t*)ex;
+        
+        uint32_t p_is = ioread32(hba->iomem, AHCI_PORT_IS(i));
+        iowrite32(hba->iomem, AHCI_PORT_IS(i), p_is);
+
+        if (state->active && g_ahci_async_mode) {
+            uint32_t active = hba->port_active_slots[i];
+            uint32_t ci = ioread32(hba->iomem, AHCI_PORT_CI(i));
+            uint32_t finished = active & ~ci;
+
+            if (finished != 0u) {
+                for (int s = 0; s < 32; s++) {
+                    if ((finished & (1u << s)) != 0u) {
+                        sem_signal(&state->slot_sem[s]);
+                    }
+                }
+            }
+        }
+
+        uint32_t p_serr = ioread32(hba->iomem, AHCI_PORT_SERR(i));
+        if (p_serr) {
+            iowrite32(hba->iomem, AHCI_PORT_SERR(i), 0xFFFFFFFFu);
+        }
+    }
+
+    uint32_t ghc = ioread32(hba->iomem, AHCI_HBA_GHC);
+    iowrite32(hba->iomem, AHCI_HBA_GHC, ghc | HBA_GHC_IE);
+}
+
 void ahci_irq_handler(registers_t* regs) {
     (void)regs;
 
@@ -559,46 +613,10 @@ void ahci_irq_handler(registers_t* regs) {
             continue;
         }
 
-        for (int i = 0; i < AHCI_MAX_PORTS; i++) {
-            if ((is_glob & (1u << i)) == 0u) {
-                continue;
-            }
+        uint32_t ghc = ioread32(hba->iomem, AHCI_HBA_GHC);
+        iowrite32(hba->iomem, AHCI_HBA_GHC, ghc & ~HBA_GHC_IE);
 
-            ahci_port_extended_t* ex = hba->ports[i];
-            if (!ex) {
-                uint32_t p_is = ioread32(hba->iomem, AHCI_PORT_IS(i));
-                iowrite32(hba->iomem, AHCI_PORT_IS(i), p_is);
-
-                uint32_t p_serr = ioread32(hba->iomem, AHCI_PORT_SERR(i));
-                if (p_serr) {
-                    iowrite32(hba->iomem, AHCI_PORT_SERR(i), 0xFFFFFFFFu);
-                }
-                continue;
-            }
-
-            ahci_port_state_t* state = (ahci_port_state_t*)ex;
-            uint32_t p_is = ioread32(hba->iomem, AHCI_PORT_IS(i));
-            iowrite32(hba->iomem, AHCI_PORT_IS(i), p_is);
-
-            if (state->active && g_ahci_async_mode) {
-                uint32_t active = hba->port_active_slots[i];
-                uint32_t ci = ioread32(hba->iomem, AHCI_PORT_CI(i));
-                uint32_t finished = active & ~ci;
-
-                if (finished != 0u) {
-                    for (int s = 0; s < 32; s++) {
-                        if ((finished & (1u << s)) != 0u) {
-                            sem_signal(&state->slot_sem[s]);
-                        }
-                    }
-                }
-            }
-
-            uint32_t p_serr = ioread32(hba->iomem, AHCI_PORT_SERR(i));
-            if (p_serr) {
-                iowrite32(hba->iomem, AHCI_PORT_SERR(i), 0xFFFFFFFFu);
-            }
-        }
+        queue_work(hba->wq, &hba->irq_work);
     }
 
     spinlock_release(&g_ahci_hba_list_lock);
@@ -1092,6 +1110,12 @@ static void ahci_hba_destroy(ahci_hba_t* hba) {
 
     ahci_hba_list_remove(hba);
 
+    if (hba->wq) {
+        destroy_workqueue(hba->wq);
+
+        hba->wq = 0;
+    }
+
     kfree(hba);
 }
 
@@ -1210,6 +1234,16 @@ static int ahci_probe(pci_device_t* pdev) {
     if (!hba) {
         return -1;
     }
+
+    hba->wq = create_workqueue("ahciwrk"); /* ahci worker */
+
+    if (!hba->wq) {
+        kfree(hba);
+
+        return -1;
+    }
+
+    init_work(&hba->irq_work, ahci_irq_bh);
 
     hba->pdev = pdev;
 
