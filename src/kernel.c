@@ -30,6 +30,7 @@
 #include <kernel/proc.h>
 
 #include <hal/ioapic.h>
+#include <hal/delay.h>
 #include <hal/mmio.h>
 #include <hal/pmio.h>
 #include <hal/apic.h>
@@ -140,6 +141,8 @@ static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
 
     gdt_init();
     idt_init();
+
+    hal_calibrate_tsc_hz();
 
     kernel_init_simd();
 
