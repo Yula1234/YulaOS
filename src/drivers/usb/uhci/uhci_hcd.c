@@ -6,6 +6,7 @@
 
 #include <kernel/workqueue.h>
 #include <kernel/proc.h>
+#include <kernel/sched.h>
 
 #include <hal/pmio.h>
 #include <hal/lock.h>
@@ -76,8 +77,22 @@ typedef struct {
     void* qh_free;
     dlist_head_t qh_pages;
 
+    spinlock_t sync_lock;
+    dlist_head_t sync_waits;
+
     uhci_intr_pipe_t intr_pipes[16];
 } uhci_hcd_impl_t;
+
+typedef struct {
+    dlist_head_t node;
+
+    semaphore_t sem;
+
+    uhci_qh_t* qh;
+    volatile uint8_t done;
+} uhci_sync_wait_t;
+
+extern volatile uint32_t timer_ticks;
 
 typedef struct {
     dlist_head_t node;
@@ -472,23 +487,73 @@ static void uhci_sched_remove_qh(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
     spinlock_release_safe(&u->sched_lock, flags);
 }
 
-static int uhci_wait_qh_done(uhci_qh_t* qh, uint32_t timeout_us) {
-    uint32_t waited = 0;
-
-    for (;;) {
-        __sync_synchronize();
-
-        if (qh->element & UHCI_PTR_T) {
-            return 1;
-        }
-
-        if (timeout_us && waited >= timeout_us) {
-            return 0;
-        }
-
-        proc_usleep(1000);
-        waited += 1000;
+static uint32_t uhci_timeout_deadline_tick(uint32_t timeout_us) {
+    if (timeout_us == 0) {
+        return 0;
     }
+
+    uint64_t ms64 = ((uint64_t)timeout_us + 999ull) / 1000ull;
+    if (ms64 == 0) {
+        ms64 = 1;
+    }
+    if (ms64 > 0xFFFFFFFFull) {
+        ms64 = 0xFFFFFFFFull;
+    }
+
+    uint64_t t = (uint64_t)timer_ticks + ms64;
+    if (t > 0xFFFFFFFFull) {
+        t = 0xFFFFFFFFull;
+    }
+
+    return (uint32_t)t;
+}
+
+static void uhci_sync_wait_init(uhci_sync_wait_t* w, uhci_qh_t* qh) {
+    if (!w) {
+        return;
+    }
+
+    memset(w, 0, sizeof(*w));
+    dlist_init(&w->node);
+    sem_init(&w->sem, 0);
+    w->qh = qh;
+    w->done = 0;
+}
+
+static int uhci_sync_wait_arm(uhci_hcd_impl_t* u, uhci_sync_wait_t* w) {
+    if (!u || !w || !w->qh) {
+        return 0;
+    }
+
+    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
+    dlist_add_tail(&w->node, &u->sync_waits);
+    spinlock_release_safe(&u->sync_lock, flags);
+
+    return 1;
+}
+
+static void uhci_sync_wait_disarm(uhci_hcd_impl_t* u, uhci_sync_wait_t* w) {
+    if (!u || !w) {
+        return;
+    }
+
+    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
+    (void)dlist_remove_node_if_present(&u->sync_waits, &w->node);
+    spinlock_release_safe(&u->sync_lock, flags);
+}
+
+static int uhci_sync_wait_sleep(uhci_sync_wait_t* w, uint32_t timeout_us) {
+    if (!w) {
+        return 0;
+    }
+
+    const uint32_t deadline = uhci_timeout_deadline_tick(timeout_us);
+    if (deadline == 0) {
+        sem_wait(&w->sem);
+        return 1;
+    }
+
+    return sem_wait_timeout(&w->sem, deadline) != 0;
 }
 
 static void uhci_td_chain_free_pool(uhci_hcd_impl_t* u, uhci_td_t* td) {
@@ -692,7 +757,13 @@ static int uhci_hcd_control_xfer(
 
     uhci_sched_insert_head_qh(u, qh);
 
-    const int ok = uhci_wait_qh_done(qh, timeout_us);
+    uhci_sync_wait_t wait;
+    uhci_sync_wait_init(&wait, qh);
+    (void)uhci_sync_wait_arm(u, &wait);
+
+    const int ok = uhci_sync_wait_sleep(&wait, timeout_us);
+
+    uhci_sync_wait_disarm(u, &wait);
 
     uhci_sched_remove_qh(u, qh);
 
@@ -870,7 +941,13 @@ static int uhci_hcd_bulk_xfer(
 
     uhci_sched_insert_head_qh(u, qh);
 
-    const int ok = uhci_wait_qh_done(qh, timeout_us);
+    uhci_sync_wait_t wait;
+    uhci_sync_wait_init(&wait, qh);
+    (void)uhci_sync_wait_arm(u, &wait);
+
+    const int ok = uhci_sync_wait_sleep(&wait, timeout_us);
+
+    uhci_sync_wait_disarm(u, &wait);
 
     uhci_sched_remove_qh(u, qh);
 
@@ -1127,6 +1204,33 @@ static void uhci_irq_bh(work_struct_t* work) {
         }
     }
 
+    {
+        uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
+
+        dlist_head_t* it = u->sync_waits.next;
+        while (it != &u->sync_waits) {
+            uhci_sync_wait_t* w = container_of(it, uhci_sync_wait_t, node);
+            it = it->next;
+
+            if (!w->qh || w->done) {
+                continue;
+            }
+
+            __sync_synchronize();
+
+            if ((w->qh->element & UHCI_PTR_T) == 0u) {
+                continue;
+            }
+
+            w->done = 1;
+            dlist_del(&w->node);
+
+            sem_signal(&w->sem);
+        }
+
+        spinlock_release_safe(&u->sync_lock, flags);
+    }
+
     uhci_writew(u, UHCI_REG_USBSTS, UHCI_USBSTS_CLEAR_ALL);
 }
 
@@ -1298,6 +1402,9 @@ static int uhci_probe(pci_device_t* pdev) {
     u->qh_free = 0;
     dlist_init(&u->td_pages);
     dlist_init(&u->qh_pages);
+
+    spinlock_init(&u->sync_lock);
+    dlist_init(&u->sync_waits);
 
     u->pdev = pdev;
 
