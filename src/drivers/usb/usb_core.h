@@ -41,6 +41,9 @@ void usb_request_enumeration(usb_hcd_t* hcd);
 void usb_device_set_class_private(usb_device_t* dev, void* p);
 void* usb_device_get_class_private(usb_device_t* dev);
 
+void usb_device_get(usb_device_t* dev);
+void usb_device_put(usb_device_t* dev);
+
 int usb_enumerate_child_device(usb_device_t* parent, uint8_t hub_port, usb_speed_t speed);
 
 void usb_detach_device(usb_device_t* dev);
