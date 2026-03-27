@@ -5,16 +5,16 @@
 #include <drivers/pci/pci.h>
 #include <drivers/driver.h>
 
-#include <hal/irq.h>
-
-#include <lib/string.h>
-#include <lib/dlist.h>
-
 #include <mm/iomem.h>
 #include <mm/heap.h>
 #include <mm/dma.h>
 
+#include <lib/string.h>
+#include <lib/dlist.h>
+
 #include <kernel/smp/cpu.h>
+
+#include <hal/irq.h>
 
 #include "ahci.h"
 
