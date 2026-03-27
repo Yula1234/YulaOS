@@ -10,4 +10,18 @@
 
 #define __cacheline_aligned __attribute__((aligned(HAL_CACHELINE_SIZE)))
 
+#ifndef __cplusplus
+
+#include <lib/compiler.h>
+
+static inline size_t align_up(size_t v, size_t a) {
+    if (unlikely(a == 0u)) {
+        return v;
+    }
+
+    return (v + a - 1u) & ~(a - 1u);
+}
+
+#endif
+
 #endif
