@@ -15,6 +15,7 @@
 #include <lib/string.h>
 #include <lib/dlist.h>
 
+#include <hal/delay.h>
 #include <hal/irq.h>
 
 #include "ahci.h"
@@ -772,11 +773,18 @@ static uint64_t ahci_identify_device(ahci_port_extended_t* ex) {
     cmdfis->command = ATA_CMD_IDENTIFY;
     cmdfis->device = 0;
 
-    int spin = 0;
+    uint32_t timeout_us = 1000000u;
+
     while ((ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
-        && spin < 1000000) {
-        spin++;
-        __asm__ volatile("pause");
+        && timeout_us > 0u) {
+        
+        udelay(10u);
+
+        if (timeout_us >= 10u) {
+            timeout_us -= 10u;
+        } else {
+            timeout_us = 0u;
+        }
     }
 
     iowrite32(hba->iomem, AHCI_PORT_CI(port_no), 1u << slot);
@@ -918,14 +926,21 @@ static int ahci_send_command(
 
     spinlock_release(&state->lock);
 
-    int spin = 0;
+    uint32_t timeout_us = 1000000u;
+
     while ((ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
-           && spin < 1000000) {
-        spin++;
-        __asm__ volatile("pause");
+           && timeout_us > 0u) {
+
+        udelay(10u);
+
+        if (timeout_us >= 10u) {
+            timeout_us -= 10u;
+        } else {
+            timeout_us = 0u;
+        }
     }
 
-    if (spin >= 1000000) {
+    if (timeout_us == 0u) {
         __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
 
         const int reset_ok = ahci_port_comreset(ex);
@@ -1043,26 +1058,24 @@ static int ahci_port_comreset(ahci_port_extended_t* ex) {
     iowrite32(hba->iomem, AHCI_PORT_IS(port_no), 0xFFFFFFFFu);
     iowrite32(hba->iomem, AHCI_PORT_SCTL(port_no), 0u);
 
-    int wait = 0;
-    while ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 0u && wait < 100000) {
-        wait++;
-        __asm__ volatile("pause");
+    uint32_t wait_us = 0u;
+
+    while ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 0u && wait_us < 100000u) {
+        udelay(10u);
+        wait_us += 10u;
     }
 
     iowrite32(hba->iomem, AHCI_PORT_SCTL(port_no), 1u);
 
-    wait = 0;
-    while (wait < 100000) {
-        wait++;
-        __asm__ volatile("pause");
-    }
+    mdelay(1u);
 
     iowrite32(hba->iomem, AHCI_PORT_SCTL(port_no), 0u);
 
-    wait = 0;
-    while ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 3u && wait < 500000) {
-        wait++;
-        __asm__ volatile("pause");
+    wait_us = 0u;
+
+    while ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 3u && wait_us < 500000u) {
+        udelay(100u);
+        wait_us += 100u;
     }
 
     if ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 3u) {
