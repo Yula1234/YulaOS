@@ -10,6 +10,14 @@ extern "C" {
 
 int hal_cpu_index(void);
 
+__attribute__((always_inline)) static inline void cpu_relax(void) {
+#if defined(__i386__) || defined(__x86_64__)
+    __asm__ volatile("pause" ::: "memory");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
+}
+
 #ifdef __cplusplus
 }
 #endif
