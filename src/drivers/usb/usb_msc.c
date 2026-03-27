@@ -64,6 +64,8 @@ typedef struct __attribute__((packed)) {
 typedef struct {
     usb_device_t* dev;
 
+    uint32_t refs_;
+
     uint8_t iface;
 
     uint8_t ep_in;
@@ -83,8 +85,13 @@ typedef struct {
 
     block_device_t* bdev;
     char* bdev_name;
+
     int disk_id;
 } usb_msc_dev_t;
+
+static void usb_msc_dev_retain(void* private_data);
+static void usb_msc_dev_release(void* private_data);
+static void usb_msc_bdev_destroy(block_device_t* bdev);
 
 
 static idr_t g_usb_msc_idr;
@@ -599,6 +606,10 @@ static int usb_msc_create_and_register_bdev(usb_msc_dev_t* d, uint32_t block_siz
     bdev->ops = &g_usb_msc_bdev_ops;
     bdev->private_data = d;
 
+    bdev->private_retain = usb_msc_dev_retain;
+    bdev->private_release = usb_msc_dev_release;
+    bdev->destroy = usb_msc_bdev_destroy;
+
     if (bdev_register(bdev) != 0) {
         kfree(name);
         idr_remove(&g_usb_msc_idr, disk_id);
@@ -621,17 +632,57 @@ static void usb_msc_unregister_and_destroy_bdev(usb_msc_dev_t* d) {
         (void)bdev_unregister(d->bdev_name);
     }
 
+    if (d->bdev_name) {
+        d->bdev_name = 0;
+    }
+
+    d->bdev = 0;
+}
+
+static void usb_msc_dev_retain(void* private_data) {
+    usb_msc_dev_t* d = (usb_msc_dev_t*)private_data;
+    if (!d) {
+        return;
+    }
+
+    __atomic_fetch_add(&d->refs_, 1u, __ATOMIC_RELAXED);
+}
+
+static void usb_msc_dev_release(void* private_data) {
+    usb_msc_dev_t* d = (usb_msc_dev_t*)private_data;
+    if (!d) {
+        return;
+    }
+
+    const uint32_t old = __atomic_fetch_sub(&d->refs_, 1u, __ATOMIC_ACQ_REL);
+    if (old != 1u) {
+        return;
+    }
+
     if (d->disk_id > 0) {
         idr_remove(&g_usb_msc_idr, d->disk_id);
         d->disk_id = 0;
     }
 
-    if (d->bdev_name) {
-        kfree(d->bdev_name);
-        d->bdev_name = 0;
+    if (d->dev) {
+        usb_device_put(d->dev);
+        d->dev = 0;
     }
 
-    d->bdev = 0;
+    kfree(d);
+}
+
+static void usb_msc_bdev_destroy(block_device_t* bdev) {
+    if (!bdev) {
+        return;
+    }
+
+    if (bdev->name) {
+        kfree((void*)bdev->name);
+        bdev->name = 0;
+    }
+
+    kfree(bdev);
 }
 
 
@@ -755,7 +806,10 @@ static int usb_msc_probe(usb_device_t* dev, const uint8_t* cfg, uint16_t cfg_len
         return 0;
     }
 
+    usb_device_get(dev);
+
     d->dev = dev;
+    d->refs_ = 1u;
 
     d->iface = iface;
 
@@ -795,6 +849,7 @@ static int usb_msc_probe(usb_device_t* dev, const uint8_t* cfg, uint16_t cfg_len
     }
 
     if (!usb_msc_create_and_register_bdev(d, block_size, block_count)) {
+        usb_device_put(dev);
         kfree(d);
         return 0;
     }
@@ -822,7 +877,7 @@ static void usb_msc_disconnect(usb_device_t* dev) {
 
     usb_msc_unregister_and_destroy_bdev(d);
 
-    kfree(d);
+    usb_msc_dev_release(d);
 }
 
 
