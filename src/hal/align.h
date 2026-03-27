@@ -14,6 +14,8 @@
 
 #include <lib/compiler.h>
 
+#include <stddef.h>
+
 static inline size_t align_up(size_t v, size_t a) {
     if (unlikely(a == 0u)) {
         return v;
