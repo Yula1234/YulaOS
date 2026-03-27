@@ -17,6 +17,39 @@ static inline uint32_t get_eflags(void) {
     return eflags;
 }
 
+static inline void irq_disable(void) {
+    __asm__ volatile("cli" ::: "memory");
+}
+
+static inline void irq_enable(void) {
+    __asm__ volatile("sti" ::: "memory");
+}
+
+static inline uint32_t irq_save(void) {
+    uint32_t flags;
+
+    __asm__ volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "memory"
+    );
+
+    return flags;
+}
+
+static inline void irq_restore(uint32_t flags) {
+    __asm__ volatile(
+        "pushl %0\n\t"
+        "popfl"
+        :
+        : "r"(flags)
+        : "memory", "cc"
+    );
+}
+
 void irq_install_handler(int irq_no, irq_handler_t handler, void* ctx);
 
 void irq_install_vector_handler(int vector, irq_handler_t handler, void* ctx);
