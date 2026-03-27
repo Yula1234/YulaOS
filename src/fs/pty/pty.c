@@ -1,16 +1,21 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <hal/lock.h>
-#include <kernel/sched.h>
 #include <kernel/waitq/poll_waitq.h>
+#include <kernel/sched.h>
 #include <kernel/proc.h>
+
 #include <lib/string.h>
-#include <mm/heap.h>
+#include <lib/idr.h>
+
 #include <yos/ioctl.h>
 
-#include "pty.h"
+#include <hal/lock.h>
+
+#include <mm/heap.h>
+
 #include "pty_ld_bridge.h"
+#include "pty.h"
 
 #define PTY_BUF_SIZE 4096u
 #define PTY_BATCH    1024u
@@ -59,16 +64,7 @@ static void pty_poll_waitq_finalize(void* ctx);
 
 static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n);
 
-static __cacheline_aligned mutex_t pty_id_lock;
-static uint32_t pty_next_id = 1u;
-
-__attribute__((unused)) static uint32_t pty_alloc_id(void) {
-    mutex_lock(&pty_id_lock);
-    uint32_t id = pty_next_id++;
-    if (pty_next_id == 0u) pty_next_id = 1u;
-    mutex_unlock(&pty_id_lock);
-    return id;
-}
+static idr_t g_pty_idr;
 
 static void pty_make_pts_name(char out[32], uint32_t id) {
     char tmp[11];
@@ -282,6 +278,8 @@ static void pty_pair_destroy(pty_pair_t* p) {
     }
 
     if (do_unregister && slave_id != 0u) {
+        idr_remove(&g_pty_idr, (int)slave_id);
+
         char name[32];
         pty_make_pts_name(name, slave_id);
 
@@ -998,18 +996,18 @@ static int pty_ptmx_open(vfs_node_t* node) {
 
     memset(slave, 0, sizeof(*slave));
 
-    char pts_name[32];
-    mutex_lock(&pty_id_lock);
-    for (;;) {
-        uint32_t id = pty_next_id++;
-        if (pty_next_id == 0u) pty_next_id = 1u;
-        p->id = id;
+    int id = idr_alloc(&g_pty_idr, p);
 
-        pty_make_pts_name(pts_name, p->id);
-        if (!devfs_fetch(pts_name)) {
-            break;
-        }
+    if (id < 0) {
+        pty_pair_release(p);
+        kfree(slave);
+        return -1;
     }
+
+    p->id = (uint32_t)id;
+
+    char pts_name[32];
+    pty_make_pts_name(pts_name, p->id);
 
     node->flags |= VFS_FLAG_PTY_MASTER;
     node->ops = &pty_master_ops;
@@ -1032,15 +1030,17 @@ static int pty_ptmx_open(vfs_node_t* node) {
 
     pty_pair_retain(p);
     devfs_register(slave);
+
     if (devfs_fetch(pts_name) != slave) {
+        idr_remove(&g_pty_idr, id);
+
         pty_pair_release(p);
         pty_pair_release(p);
+
         kfree(slave);
-        mutex_unlock(&pty_id_lock);
+
         return -1;
     }
-
-    mutex_unlock(&pty_id_lock);
 
     uint32_t flags = spinlock_acquire_safe(&p->lock);
     p->slave_node = slave;
@@ -1067,7 +1067,7 @@ void pty_init(void) {
         return;
     }
 
-    mutex_init(&pty_id_lock);
+    idr_init(&g_pty_idr);
 
     ptmx_ops.read = 0;
     ptmx_ops.write = 0;
