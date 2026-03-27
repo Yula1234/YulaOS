@@ -299,6 +299,11 @@ void mouse_irq_handler(registers_t* regs) {
     }
 }
 
+static void mouse_irq_handler_trampoline(registers_t* regs, void* ctx) {
+    (void)ctx;
+    mouse_irq_handler(regs);
+}
+
 void mouse_init() {
     if (mouse_pmio_init() != 0) {
         return;
@@ -327,7 +332,7 @@ void mouse_init() {
     mouse_write_unlocked(0xF4);
     (void)mouse_read_unlocked();
 
-    irq_install_handler(12, mouse_irq_handler);
+    irq_install_handler(12, mouse_irq_handler_trampoline, 0);
 
     (void)pic_unmask_irq(12u);
 

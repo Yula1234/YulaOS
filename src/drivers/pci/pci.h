@@ -86,7 +86,7 @@ typedef struct pci_driver {
 
 int pci_register_driver(pci_driver_t* driver);
 
-int pci_request_irq(pci_device_t* dev, irq_handler_t handler);
+int pci_request_irq(pci_device_t* dev, irq_handler_t handler, void* ctx);
 
 uint32_t pci_dev_read32(const pci_device_t* dev, uint8_t offset);
 void pci_dev_write32(pci_device_t* dev, uint8_t offset, uint32_t value);

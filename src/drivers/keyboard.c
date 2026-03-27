@@ -334,6 +334,11 @@ void keyboard_irq_handler(registers_t* regs) {
     kbd_handle_scancode(scancode);
 }
 
+static void keyboard_irq_handler_trampoline(registers_t* regs, void* ctx) {
+    (void)ctx;
+    keyboard_irq_handler(regs);
+}
+
 int kbd_try_read_char(char* out) {
     if (!out) return 0;
     uint32_t flags = spinlock_acquire_safe(&kbd_buf_lock);
@@ -525,5 +530,5 @@ void kbd_init(void) {
     poll_waitq_init(&kbd_poll_waitq);
     spinlock_init(&kbd_scancode_lock);
     spinlock_init(&kbd_buf_lock);
-    irq_install_handler(1, keyboard_irq_handler);
+    irq_install_handler(1, keyboard_irq_handler_trampoline, 0);
 }

@@ -89,8 +89,6 @@ extern uint32_t* kernel_page_directory;
 
 extern void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
 
-static irq_handler_t irq_handlers[16] = {0};
-irq_handler_t irq_vector_handlers[256] = {0};
 static volatile int g_legacy_pic_enabled = 1;
 
 extern void smp_tlb_ipi_handler(void);
@@ -180,19 +178,37 @@ void idt_load(void) {
     __asm__ volatile ("lidt %0" : : "m"(idtp));
 }
 
-void irq_install_handler(int irq_no, irq_handler_t handler) {
-    if (irq_no < 0 || irq_no >= 16) return;
-    irq_handlers[irq_no] = handler;
+typedef struct {
+    irq_handler_t func;
+    void* ctx;
+} irq_entry_t;
+
+static irq_entry_t irq_handlers[16];
+irq_entry_t irq_vector_handlers[256];
+
+void irq_install_handler(int irq_no, irq_handler_t handler, void* ctx) {
+    if (irq_no < 0 || irq_no >= 16) {
+        return;
+    }
+
+    irq_handlers[irq_no].func = handler;
+    irq_handlers[irq_no].ctx = ctx;
 
     int vec = 32 + irq_no;
+
     if (vec >= 0 && vec < 256) {
-        irq_vector_handlers[vec] = handler;
+        irq_vector_handlers[vec].func = handler;
+        irq_vector_handlers[vec].ctx = ctx;
     }
 }
 
-void irq_install_vector_handler(int vector, irq_handler_t handler) {
-    if (vector < 0 || vector >= 256) return;
-    irq_vector_handlers[vector] = handler;
+void irq_install_vector_handler(int vector, irq_handler_t handler, void* ctx) {
+    if (vector < 0 || vector >= 256) {
+        return;
+    }
+
+    irq_vector_handlers[vector].func = handler;
+    irq_vector_handlers[vector].ctx = ctx;
 }
 
 void irq_set_legacy_pic_enabled(int enabled) {
@@ -583,8 +599,10 @@ void isr_handler(registers_t* regs) {
             goto out;
         }
 
-        if (irq_vector_handlers[regs->int_no]) {
-            irq_vector_handlers[regs->int_no](regs);
+        if (irq_vector_handlers[regs->int_no].func) {
+            irq_vector_handlers[regs->int_no].func(
+                regs, irq_vector_handlers[regs->int_no].ctx
+            );
         }
 
         if (curr) {
@@ -758,7 +776,7 @@ out:
 }
 
 irq_handler_t irq_get_handler(int irq_no) {
-    if (irq_no >= 0 && irq_no < 16) return irq_handlers[irq_no];
+    if (irq_no >= 0 && irq_no < 16) return irq_handlers[irq_no].func;
     return 0;
 }
 

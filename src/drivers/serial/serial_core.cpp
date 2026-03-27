@@ -146,6 +146,11 @@ static void serial_core_irq_handler(registers_t* regs) {
     pump_tx_irq_unlocked();
 }
 
+static void serial_core_irq_handler_trampoline(registers_t* regs, void* ctx) {
+    (void)ctx;
+    serial_core_irq_handler(regs);
+}
+
 }
 
 extern "C" void serial_core_init(uint16_t port) {
@@ -163,7 +168,7 @@ extern "C" void serial_core_init(uint16_t port) {
 
     uart_disable_thre_irq();
 
-    irq_install_handler(4, serial_core_irq_handler);
+    irq_install_handler(4, serial_core_irq_handler_trampoline, nullptr);
 
     outb(0x21, static_cast<uint8_t>(inb(0x21) & ~(1u << 4)));
 }

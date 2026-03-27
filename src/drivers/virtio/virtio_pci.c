@@ -239,6 +239,11 @@ static void virtio_pci_global_register_dev(virtio_pci_dev_t* dev) {
     spinlock_release_safe(&g_virtio_devs_lock, iflags);
 }
 
+static void virtio_pci_irq_handler_trampoline(registers_t* regs, void* ctx) {
+    (void)ctx;
+    virtio_pci_irq_handler(regs);
+}
+
 int virtio_pci_find_device(uint16_t vendor_id, uint16_t device_id, virtio_pci_dev_t* out_dev) {
     if (!out_dev) return 0;
 
@@ -482,10 +487,18 @@ int virtio_pci_enable_msi(virtio_pci_dev_t* dev, uint8_t vector) {
     c->msix_config = 0;
     __sync_synchronize();
 
-    irq_install_vector_handler(vector, virtio_pci_irq_handler);
+    irq_install_vector_handler(vector, virtio_pci_irq_handler_trampoline, 0);
     dev->msi_enabled = 1;
     dev->msi_vector = vector;
     return 1;
+}
+
+static void virtio_pci_intx_trampoline(registers_t* regs, void* ctx) {
+    void (*handler)(registers_t*) = (void (*)(registers_t*))ctx;
+
+    if (handler) {
+        handler(regs);
+    }
 }
 
 int virtio_pci_enable_intx(virtio_pci_dev_t* dev, void (*handler)(registers_t*)) {
@@ -495,7 +508,7 @@ int virtio_pci_enable_intx(virtio_pci_dev_t* dev, void (*handler)(registers_t*))
 
     uint8_t irq_line = dev->irq_line;
 
-    irq_install_handler(irq_line, handler);
+    irq_install_handler(irq_line, virtio_pci_intx_trampoline, (void*)handler);
 
     if (ioapic_is_initialized() && cpu_count > 0 && cpus[0].id >= 0) {
         uint32_t gsi;

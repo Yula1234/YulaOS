@@ -1097,6 +1097,11 @@ static void uhci_irq_handler(registers_t* regs) {
     uhci_hub_poll();
 }
 
+static void uhci_irq_handler_trampoline(registers_t* regs, void* ctx) {
+    (void)ctx;
+    uhci_irq_handler(regs);
+}
+
 static inline uint16_t uhci_port_reg(uint8_t port) {
     if (port == 1) return UHCI_REG_USBPORTSC1;
     return UHCI_REG_USBPORTSC2;
@@ -2025,7 +2030,7 @@ static void uhci_route_irq(uint8_t irq_line) {
         return;
     }
 
-    irq_install_handler(irq_line, uhci_irq_handler);
+    irq_install_handler(irq_line, uhci_irq_handler_trampoline, 0);
 
     if (ioapic_is_initialized() && cpu_count > 0 && cpus[0].id >= 0) {
         uint32_t gsi;

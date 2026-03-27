@@ -417,17 +417,18 @@ int pci_register_driver(pci_driver_t* driver) {
     return kernel::pci::g_registry.register_driver(driver);
 }
 
-int pci_request_irq(pci_device_t* dev, irq_handler_t handler) {
+int pci_request_irq(pci_device_t* dev, irq_handler_t handler, void* ctx) {
     if (!dev || !handler) {
         return 0;
     }
 
     const uint8_t irq_line = dev->irq_line;
+
     if (irq_line >= 16u) {
         return 0;
     }
 
-    irq_install_handler((int)irq_line, handler);
+    irq_install_handler((int)irq_line, handler, ctx);
 
     if (ioapic_is_initialized() && cpu_count > 0 && cpus[0].id >= 0) {
         uint32_t gsi = 0u;
