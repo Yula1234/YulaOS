@@ -5,18 +5,40 @@
 #include <drivers/pci/pci.h>
 #include <drivers/driver.h>
 
-#include <hal/mmio.h>
 #include <hal/irq.h>
 
 #include <lib/string.h>
 #include <lib/dlist.h>
 
+#include <mm/iomem.h>
 #include <mm/heap.h>
 #include <mm/dma.h>
 
 #include <kernel/smp/cpu.h>
 
 #include "ahci.h"
+
+#define AHCI_HBA_CAP  0x00u
+#define AHCI_HBA_GHC  0x04u
+#define AHCI_HBA_IS   0x08u
+#define AHCI_HBA_PI   0x0Cu
+#define AHCI_HBA_VS   0x10u
+
+#define AHCI_PORT_BASE(p) (0x100u + ((p) * 0x80u))
+#define AHCI_PORT_CLB(p)  (AHCI_PORT_BASE(p) + 0x00u)
+#define AHCI_PORT_CLBU(p) (AHCI_PORT_BASE(p) + 0x04u)
+#define AHCI_PORT_FB(p)   (AHCI_PORT_BASE(p) + 0x08u)
+#define AHCI_PORT_FBU(p)  (AHCI_PORT_BASE(p) + 0x0Cu)
+#define AHCI_PORT_IS(p)   (AHCI_PORT_BASE(p) + 0x10u)
+#define AHCI_PORT_IE(p)   (AHCI_PORT_BASE(p) + 0x14u)
+#define AHCI_PORT_CMD(p)  (AHCI_PORT_BASE(p) + 0x18u)
+#define AHCI_PORT_TFD(p)  (AHCI_PORT_BASE(p) + 0x20u)
+#define AHCI_PORT_SIG(p)  (AHCI_PORT_BASE(p) + 0x24u)
+#define AHCI_PORT_SSTS(p) (AHCI_PORT_BASE(p) + 0x28u)
+#define AHCI_PORT_SCTL(p) (AHCI_PORT_BASE(p) + 0x2Cu)
+#define AHCI_PORT_SERR(p) (AHCI_PORT_BASE(p) + 0x30u)
+#define AHCI_PORT_SACT(p) (AHCI_PORT_BASE(p) + 0x34u)
+#define AHCI_PORT_CI(p)   (AHCI_PORT_BASE(p) + 0x38u)
 
 #define HBA_PxCMD_ST 0x0001
 #define HBA_PxCMD_FRE 0x0010
@@ -58,8 +80,7 @@ typedef struct {
 } ahci_port_extended_t;
 
 struct ahci_hba_s {
-    volatile HBA_MEM* mmio;
-    mmio_region_t* mmio_region;
+    __iomem* iomem;
 
     pci_device_t* pdev;
 
@@ -83,8 +104,26 @@ static int g_ahci_async_mode = 0;
 static uint32_t g_ahci_disk_seq = 0;
 static block_device_t* g_ahci_first_bdev = 0;
 
-static void stop_cmd(volatile HBA_PORT* port);
-static void start_cmd(volatile HBA_PORT* port);
+static void stop_cmd(ahci_hba_t* hba, int port_no);
+static void start_cmd(ahci_hba_t* hba, int port_no);
+
+static inline uint32_t ahci_read(ahci_hba_t* hba, uint32_t offset) {
+    return ioread32(hba->iomem, offset);
+}
+
+static inline void ahci_write(ahci_hba_t* hba, uint32_t offset, uint32_t value) {
+    iowrite32(hba->iomem, offset, value);
+}
+
+static inline uint32_t ahci_hba_port_read(ahci_hba_t* hba, int port_no, uint32_t offset) {
+    (void)port_no;
+    return ioread32(hba->iomem, offset);
+}
+
+static inline void ahci_hba_port_write(ahci_hba_t* hba, int port_no, uint32_t offset, uint32_t value) {
+    (void)port_no;
+    iowrite32(hba->iomem, offset, value);
+}
 
 static ahci_port_extended_t* ahci_first_port(void) {
     if (!g_ahci_first_bdev || !g_ahci_first_bdev->private_data) {
@@ -280,8 +319,8 @@ static void ahci_port_destroy(ahci_port_extended_t* ex) {
 
     ahci_port_state_t* state = (ahci_port_state_t*)ex;
 
-    if (state->active && state->port_mmio) {
-        stop_cmd((volatile HBA_PORT*)state->port_mmio);
+    if (state->active && hba) {
+        stop_cmd(hba, port_no);
     }
 
     for (int i = 0; i < 32; i++) {
@@ -312,7 +351,6 @@ static void ahci_port_destroy(ahci_port_extended_t* ex) {
         state->clb_virt = 0;
     }
 
-    state->port_mmio = 0;
     state->active = 0;
 
     if (hba && port_no >= 0 && port_no < AHCI_MAX_PORTS) {
@@ -456,33 +494,37 @@ int ahci_msi_configure_cpu(int cpu_index) {
     return ok;
 }
 
-static int find_cmdslot(volatile HBA_PORT* port, ahci_hba_t* hba, int port_no) {
-    uint32_t slots = (port->sact | port->ci | hba->port_active_slots[port_no]);
+static int find_cmdslot(ahci_hba_t* hba, int port_no) {
+    const uint32_t sact = ahci_hba_port_read(hba, port_no, AHCI_PORT_SACT(port_no));
+    const uint32_t ci = ahci_hba_port_read(hba, port_no, AHCI_PORT_CI(port_no));
+    const uint32_t active = hba->port_active_slots[port_no];
+
+    const uint32_t slots = sact | ci | active;
 
     if (slots == 0xFFFFFFFFu) {
         return -1;
     }
 
-    uint32_t free_mask = ~slots;
-    uint32_t first_free_bit;
+    const uint32_t free_mask = ~slots;
+    uint32_t first_free_bit = 0u;
 
     __asm__ volatile("bsf %1, %0" : "=r"(first_free_bit) : "r"(free_mask));
 
     return (int)first_free_bit;
 }
 
-static void stop_cmd(volatile HBA_PORT* port) {
-    port->cmd &= ~HBA_PxCMD_ST;
-    port->cmd &= ~HBA_PxCMD_FRE;
+static void stop_cmd(ahci_hba_t* hba, int port_no) {
+    uint32_t cmd = ahci_hba_port_read(hba, port_no, AHCI_PORT_CMD(port_no));
+    cmd &= ~HBA_PxCMD_ST;
+    cmd &= ~HBA_PxCMD_FRE;
+    ahci_hba_port_write(hba, port_no, AHCI_PORT_CMD(port_no), cmd);
 
     int timeout = 1000000;
 
     while (timeout--) {
-        if ((port->cmd & HBA_PxCMD_FR) != 0u) {
-            continue;
-        }
-
-        if ((port->cmd & HBA_PxCMD_CR) != 0u) {
+        const uint32_t curr_cmd = ahci_hba_port_read(hba, port_no, AHCI_PORT_CMD(port_no));
+        
+        if ((curr_cmd & HBA_PxCMD_FR) != 0u || (curr_cmd & HBA_PxCMD_CR) != 0u) {
             continue;
         }
 
@@ -490,13 +532,15 @@ static void stop_cmd(volatile HBA_PORT* port) {
     }
 }
 
-static void start_cmd(volatile HBA_PORT* port) {
-    while ((port->cmd & HBA_PxCMD_CR) != 0u) {
-        /* Wait for port to become free */
+static void start_cmd(ahci_hba_t* hba, int port_no) {
+    while ((ahci_hba_port_read(hba, port_no, AHCI_PORT_CMD(port_no)) & HBA_PxCMD_CR) != 0u) {
+        __asm__ volatile("pause" ::: "memory");
     }
 
-    port->cmd |= HBA_PxCMD_FRE;
-    port->cmd |= HBA_PxCMD_ST;
+    uint32_t cmd = ahci_hba_port_read(hba, port_no, AHCI_PORT_CMD(port_no));
+    cmd |= HBA_PxCMD_FRE;
+    cmd |= HBA_PxCMD_ST;
+    ahci_hba_port_write(hba, port_no, AHCI_PORT_CMD(port_no), cmd);
 }
 
 void ahci_irq_handler(registers_t* regs) {
@@ -506,13 +550,11 @@ void ahci_irq_handler(registers_t* regs) {
 
     ahci_hba_t* hba;
     dlist_for_each_entry(hba, &g_ahci_hba_list, list_node) {
-        volatile HBA_MEM* mmio = hba->mmio;
-
-        if (!mmio) {
+        if (!hba->iomem) {
             continue;
         }
 
-        uint32_t is_glob = mmio->is;
+        uint32_t is_glob = ioread32(hba->iomem, AHCI_HBA_IS);
         if (is_glob == 0u) {
             continue;
         }
@@ -524,22 +566,24 @@ void ahci_irq_handler(registers_t* regs) {
 
             ahci_port_extended_t* ex = hba->ports[i];
             if (!ex) {
-                volatile HBA_PORT* port = &mmio->ports[i];
-                port->is = port->is;
-                if (port->serr) {
-                    port->serr = 0xFFFFFFFFu;
+                uint32_t p_is = ioread32(hba->iomem, AHCI_PORT_IS(i));
+                iowrite32(hba->iomem, AHCI_PORT_IS(i), p_is);
+
+                uint32_t p_serr = ioread32(hba->iomem, AHCI_PORT_SERR(i));
+                if (p_serr) {
+                    iowrite32(hba->iomem, AHCI_PORT_SERR(i), 0xFFFFFFFFu);
                 }
                 continue;
             }
 
             ahci_port_state_t* state = (ahci_port_state_t*)ex;
-            volatile HBA_PORT* port = (volatile HBA_PORT*)state->port_mmio;
-
-            port->is = port->is;
+            uint32_t p_is = ioread32(hba->iomem, AHCI_PORT_IS(i));
+            iowrite32(hba->iomem, AHCI_PORT_IS(i), p_is);
 
             if (state->active && g_ahci_async_mode) {
                 uint32_t active = hba->port_active_slots[i];
-                uint32_t finished = active & ~port->ci;
+                uint32_t ci = ioread32(hba->iomem, AHCI_PORT_CI(i));
+                uint32_t finished = active & ~ci;
 
                 if (finished != 0u) {
                     for (int s = 0; s < 32; s++) {
@@ -550,8 +594,9 @@ void ahci_irq_handler(registers_t* regs) {
                 }
             }
 
-            if (port->serr) {
-                port->serr = 0xFFFFFFFFu;
+            uint32_t p_serr = ioread32(hba->iomem, AHCI_PORT_SERR(i));
+            if (p_serr) {
+                iowrite32(hba->iomem, AHCI_PORT_SERR(i), 0xFFFFFFFFu);
             }
         }
     }
@@ -574,9 +619,7 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
     }
 
     ahci_port_state_t* state = (ahci_port_state_t*)ex;
-    volatile HBA_PORT* port = &hba->mmio->ports[port_no];
-
-    stop_cmd(port);
+    stop_cmd(hba, port_no);
 
     uint32_t clb_phys = 0;
 
@@ -587,8 +630,8 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
         return 0;
     }
     
-    port->clb = clb_phys;
-    port->clbu = 0;
+    iowrite32(hba->iomem, AHCI_PORT_CLB(port_no), clb_phys);
+    iowrite32(hba->iomem, AHCI_PORT_CLBU(port_no), 0u);
 
     uint32_t fb_phys = 0;
     
@@ -601,8 +644,8 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
         return 0;
     }
 
-    port->fb = fb_phys;
-    port->fbu = 0;
+    iowrite32(hba->iomem, AHCI_PORT_FB(port_no), fb_phys);
+    iowrite32(hba->iomem, AHCI_PORT_FBU(port_no), 0u);
 
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)state->clb_virt;
 
@@ -650,13 +693,12 @@ static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
     spinlock_init(&state->lock);
     hba->port_active_slots[port_no] = 0;
 
-    port->serr = 0xFFFFFFFFu;
-    port->is = 0xFFFFFFFFu;
-    port->ie = 0x7800002Fu;
+    iowrite32(hba->iomem, AHCI_PORT_SERR(port_no), 0xFFFFFFFFu);
+    iowrite32(hba->iomem, AHCI_PORT_IS(port_no), 0xFFFFFFFFu);
+    iowrite32(hba->iomem, AHCI_PORT_IE(port_no), 0x7800002Fu);
 
-    start_cmd(port);
+    start_cmd(hba, port_no);
 
-    state->port_mmio = (HBA_PORT*)port;
     state->active = 1;
 
     ex->port_no = port_no;
@@ -677,13 +719,18 @@ static uint64_t ahci_identify_device(ahci_port_extended_t* ex) {
         return 0;
     }
 
+    ahci_hba_t* hba = ex->hba;
+    const int port_no = ex->port_no;
+
+    if (!hba || !hba->iomem) {
+        return 0;
+    }
+
     ahci_port_state_t* state = (ahci_port_state_t*)ex;
-    volatile HBA_PORT* port = state->port_mmio;
 
-    port->is = 0xFFFFFFFFu;
+    iowrite32(hba->iomem, AHCI_PORT_IS(port_no), 0xFFFFFFFFu);
 
-    int port_no = ex->port_no;
-    int slot = find_cmdslot(port, ex->hba, port_no);
+    int slot = find_cmdslot(hba, port_no);
     if (slot == -1) {
         return 0;
     }
@@ -711,20 +758,20 @@ static uint64_t ahci_identify_device(ahci_port_extended_t* ex) {
     cmdfis->device = 0;
 
     int spin = 0;
-    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
+    while ((ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
         && spin < 1000000) {
         spin++;
         __asm__ volatile("pause");
     }
 
-    port->ci = 1u << slot;
+    iowrite32(hba->iomem, AHCI_PORT_CI(port_no), 1u << slot);
 
     while (1) {
-        if ((port->ci & (1u << slot)) == 0u) {
+        if ((ioread32(hba->iomem, AHCI_PORT_CI(port_no)) & (1u << slot)) == 0u) {
             break;
         }
 
-        if ((port->is & (1u << 30)) != 0u) {
+        if ((ioread32(hba->iomem, AHCI_PORT_IS(port_no)) & (1u << 30)) != 0u) {
             return 0;
         }
     }
@@ -772,6 +819,11 @@ static int ahci_send_command(
         return 0;
     }
 
+    ahci_hba_t* hba = ex->hba;
+    if (!hba || !hba->iomem) {
+        return 0;
+    }
+
     const uint32_t byte_count = count * AHCI_SECTOR_SIZE;
     const uint32_t dma_dir = is_write ? DMA_DIR_TO_DEVICE : DMA_DIR_FROM_DEVICE;
 
@@ -795,14 +847,12 @@ static int ahci_send_command(
 
     spinlock_acquire(&state->lock);
 
-    volatile HBA_PORT* port = (volatile HBA_PORT*)state->port_mmio;
-
-    if ((port->is & (1u << 30)) != 0u) {
-        port->is = 0xFFFFFFFFu;
-        port->serr = 0xFFFFFFFFu;
+    if ((ioread32(hba->iomem, AHCI_PORT_IS(port_no)) & (1u << 30)) != 0u) {
+        iowrite32(hba->iomem, AHCI_PORT_IS(port_no), 0xFFFFFFFFu);
+        iowrite32(hba->iomem, AHCI_PORT_SERR(port_no), 0xFFFFFFFFu);
     }
 
-    const int slot = find_cmdslot(port, ex->hba, port_no);
+    const int slot = find_cmdslot(hba, port_no);
 
     if (slot < 0
         || slot >= 32) {
@@ -854,7 +904,7 @@ static int ahci_send_command(
     spinlock_release(&state->lock);
 
     int spin = 0;
-    while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
+    while ((ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
            && spin < 1000000) {
         spin++;
         __asm__ volatile("pause");
@@ -872,8 +922,8 @@ static int ahci_send_command(
         }
 
         spinlock_acquire(&state->lock);
-        
-        const int new_slot = find_cmdslot(port, ex->hba, port_no);
+
+        const int new_slot = find_cmdslot(hba, port_no);
 
         if (new_slot == -1) {
             spinlock_release(&state->lock);
@@ -912,20 +962,20 @@ static int ahci_send_command(
 
         spinlock_release(&state->lock);
 
-        port->ci = 1u << new_slot;
+        iowrite32(hba->iomem, AHCI_PORT_CI(port_no), 1u << new_slot);
 
         if (g_ahci_async_mode && can_wait_irq) {
             sem_wait(&state->slot_sem[new_slot]);
         } else {
-            while ((port->ci & (1u << new_slot)) != 0u) {
+            while ((ioread32(hba->iomem, AHCI_PORT_CI(port_no)) & (1u << new_slot)) != 0u) {
                 __asm__ volatile("pause");
             }
         }
 
         __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << new_slot));
 
-        if ((port->is & (1u << 30)) == 0u
-            && (port->tfd & AHCI_DEV_ERR) == 0u) {
+        if ((ioread32(hba->iomem, AHCI_PORT_IS(port_no)) & (1u << 30)) == 0u
+            && (ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & AHCI_DEV_ERR) == 0u) {
             result = 1;
         }
 
@@ -934,12 +984,12 @@ static int ahci_send_command(
         return result;
     }
 
-    port->ci = 1u << slot;
+    iowrite32(hba->iomem, AHCI_PORT_CI(port_no), 1u << slot);
 
     if (g_ahci_async_mode && can_wait_irq) {
         sem_wait(&state->slot_sem[slot]);
     } else {
-        while ((port->ci & (1u << slot)) != 0u) {
+        while ((ioread32(hba->iomem, AHCI_PORT_CI(port_no)) & (1u << slot)) != 0u) {
             __asm__ volatile("pause");
         }
     }
@@ -948,8 +998,8 @@ static int ahci_send_command(
 
     result = 1;
 
-    if ((port->is & (1u << 30)) != 0u
-        || (port->tfd & AHCI_DEV_ERR) != 0u) {
+    if ((ioread32(hba->iomem, AHCI_PORT_IS(port_no)) & (1u << 30)) != 0u
+        || (ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & AHCI_DEV_ERR) != 0u) {
         
         result = 0;
         ahci_port_comreset(ex);
@@ -965,27 +1015,26 @@ static int ahci_port_comreset(ahci_port_extended_t* ex) {
         return 0;
     }
 
-    ahci_port_state_t* state = (ahci_port_state_t*)ex;
-    volatile HBA_PORT* port = (volatile HBA_PORT*)state->port_mmio;
+    ahci_hba_t* hba = ex->hba;
+    const int port_no = ex->port_no;
 
-    if (!port) {
+    if (!hba->iomem) {
         return 0;
     }
 
-    stop_cmd(port);
+    stop_cmd(hba, port_no);
 
-    port->serr = 0xFFFFFFFFu;
-    port->is = 0xFFFFFFFFu;
-
-    port->sctl = 0;
+    iowrite32(hba->iomem, AHCI_PORT_SERR(port_no), 0xFFFFFFFFu);
+    iowrite32(hba->iomem, AHCI_PORT_IS(port_no), 0xFFFFFFFFu);
+    iowrite32(hba->iomem, AHCI_PORT_SCTL(port_no), 0u);
 
     int wait = 0;
-    while ((port->ssts & 0xFu) != 0u && wait < 100000) {
+    while ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 0u && wait < 100000) {
         wait++;
         __asm__ volatile("pause");
     }
 
-    port->sctl = 1u;
+    iowrite32(hba->iomem, AHCI_PORT_SCTL(port_no), 1u);
 
     wait = 0;
     while (wait < 100000) {
@@ -993,23 +1042,23 @@ static int ahci_port_comreset(ahci_port_extended_t* ex) {
         __asm__ volatile("pause");
     }
 
-    port->sctl = 0;
+    iowrite32(hba->iomem, AHCI_PORT_SCTL(port_no), 0u);
 
     wait = 0;
-    while ((port->ssts & 0xFu) != 3u && wait < 500000) {
+    while ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 3u && wait < 500000) {
         wait++;
         __asm__ volatile("pause");
     }
 
-    if ((port->ssts & 0xFu) != 3u) {
-        start_cmd(port);
+    if ((ioread32(hba->iomem, AHCI_PORT_SSTS(port_no)) & 0xFu) != 3u) {
+        start_cmd(hba, port_no);
         return 0;
     }
 
-    port->serr = 0xFFFFFFFFu;
-    port->is = 0xFFFFFFFFu;
+    iowrite32(hba->iomem, AHCI_PORT_SERR(port_no), 0xFFFFFFFFu);
+    iowrite32(hba->iomem, AHCI_PORT_IS(port_no), 0xFFFFFFFFu);
 
-    start_cmd(port);
+    start_cmd(hba, port_no);
 
     return 1;
 }
@@ -1036,8 +1085,9 @@ static void ahci_hba_destroy(ahci_hba_t* hba) {
         ahci_port_destroy(ex);
     }
 
-    if (hba->mmio_region) {
-        mmio_release_region(hba->mmio_region);
+    if (hba->iomem) {
+        iomem_free(hba->iomem);
+        hba->iomem = 0;
     }
 
     ahci_hba_list_remove(hba);
@@ -1100,38 +1150,43 @@ uint32_t ahci_get_capacity(void) {
     return (uint32_t)ex->sector_count;
 }
 
-static int check_type(volatile HBA_PORT* port) {
-    uint32_t ssts = port->ssts;
+static int check_type(ahci_hba_t* hba, int port_no) {
+    const uint32_t ssts = ahci_hba_port_read(hba, port_no, AHCI_PORT_SSTS(port_no));
 
-    uint8_t ipm = (ssts >> 8) & 0x0Fu;
-    uint8_t det = ssts & 0x0Fu;
+    const uint8_t ipm = (uint8_t)((ssts >> 8) & 0x0Fu);
+    const uint8_t det = (uint8_t)(ssts & 0x0Fu);
 
-    if (det != 3 || ipm != 1) {
-        return 0;
-    }
+    if (det != 3u || ipm != 1u) return 0;
 
-    if (port->sig == 0xEB140101u) {
+    const uint32_t sig = ahci_hba_port_read(hba, port_no, AHCI_PORT_SIG(port_no));
+
+    if (sig == 0xEB140101u) {
         return 2;
     }
 
-    if (port->sig == 0xC33C0101u || port->sig == 0x96690101u) {
+    if (sig == 0xC33C0101u || sig == 0x96690101u) {
         return 0;
     }
 
     return 1;
 }
 
-static void ahci_reset_controller(volatile HBA_MEM* abar) {
-    abar->ghc |= HBA_GHC_AE;
-    abar->ghc |= 1u;
+static void ahci_reset_controller(ahci_hba_t* hba) {
+    uint32_t ghc = ahci_read(hba, AHCI_HBA_GHC);
+    ghc |= HBA_GHC_AE;
+    ghc |= 1u;
+    ahci_write(hba, AHCI_HBA_GHC, ghc);
 
-    while ((abar->ghc & 1u) != 0u) {
-        /* Wait for reset to complete */
+    while ((ahci_read(hba, AHCI_HBA_GHC) & 1u) != 0u) {
+        __asm__ volatile("pause" ::: "memory");
     }
 
-    abar->ghc |= HBA_GHC_AE;
-    abar->ghc |= HBA_GHC_IE;
+    ghc = ahci_read(hba, AHCI_HBA_GHC);
+    ghc |= HBA_GHC_AE;
+    ghc |= HBA_GHC_IE;
+    ahci_write(hba, AHCI_HBA_GHC, ghc);
 }
+
 
 static void ahci_remove(pci_device_t* pdev) {
     if (!pdev) {
@@ -1194,32 +1249,27 @@ static int ahci_probe(pci_device_t* pdev) {
         }
     }
 
-    uint32_t bar5_phys = pdev->bars[5].base_addr;
-    uint32_t bar5_size = pdev->bars[5].size;
-
-    if (bar5_size == 0u) {
-        bar5_size = sizeof(HBA_MEM);
+    if (pdev->bars[5].size == 0u) {
+        pdev->bars[5].size = 4096u; 
     }
 
-    hba->mmio_region = mmio_request_region(bar5_phys, bar5_size, "ahci_abar");
+    hba->iomem = pci_request_bar(pdev, 5u, "ahci_abar");
 
-    if (!hba->mmio_region) {
+    if (!hba->iomem) {
         kfree(hba);
         return -1;
     }
 
-    hba->mmio = (volatile HBA_MEM*)mmio_get_vaddr(hba->mmio_region);
+    ahci_reset_controller(hba);
 
-    ahci_reset_controller(hba->mmio);
-
-    const uint32_t pi = hba->mmio->pi;
+    const uint32_t pi = ahci_read(hba, AHCI_HBA_PI);
 
     for (int i = 0; i < AHCI_MAX_PORTS; i++) {
         if ((pi & (1u << i)) == 0u) {
             continue;
         }
 
-        if (check_type(&hba->mmio->ports[i]) != 1) {
+        if (check_type(hba, i) != 1) {
             continue;
         }
 

@@ -118,7 +118,6 @@ typedef struct {
 
 typedef struct {
     int active;
-    HBA_PORT* port_mmio;
     void* clb_virt;
     void* fb_virt;
     void* ctba_virt[32];
