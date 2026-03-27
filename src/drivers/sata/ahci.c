@@ -597,29 +597,26 @@ static void ahci_irq_bh(work_struct_t* work) {
     iowrite32(hba->iomem, AHCI_HBA_GHC, ghc | HBA_GHC_IE);
 }
 
-void ahci_irq_handler(registers_t* regs) {
+void ahci_irq_handler(registers_t* regs, void* ctx) {
     (void)regs;
 
-    spinlock_acquire(&g_ahci_hba_list_lock);
+    ahci_hba_t* hba = (ahci_hba_t*)ctx;
 
-    ahci_hba_t* hba;
-    dlist_for_each_entry(hba, &g_ahci_hba_list, list_node) {
-        if (!hba->iomem) {
-            continue;
-        }
-
-        uint32_t is_glob = ioread32(hba->iomem, AHCI_HBA_IS);
-        if (is_glob == 0u) {
-            continue;
-        }
-
-        uint32_t ghc = ioread32(hba->iomem, AHCI_HBA_GHC);
-        iowrite32(hba->iomem, AHCI_HBA_GHC, ghc & ~HBA_GHC_IE);
-
-        queue_work(hba->wq, &hba->irq_work);
+    if (!hba || !hba->iomem) {
+        return;
     }
 
-    spinlock_release(&g_ahci_hba_list_lock);
+    uint32_t is_glob = ioread32(hba->iomem, AHCI_HBA_IS);
+
+    if (is_glob == 0u) {
+        return;
+    }
+
+    uint32_t ghc = ioread32(hba->iomem, AHCI_HBA_GHC);
+
+    iowrite32(hba->iomem, AHCI_HBA_GHC, ghc & ~HBA_GHC_IE);
+
+    queue_work(hba->wq, &hba->irq_work);
 }
 
 static ahci_port_extended_t* ahci_port_create(ahci_hba_t* hba, int port_no) {
@@ -1269,14 +1266,14 @@ static int ahci_probe(pci_device_t* pdev) {
     hba->msi_vector = (uint8_t)msi_vec;
 
     if (msi_ok) {
-        irq_install_vector_handler(msi_vec, ahci_irq_handler);
+        irq_install_vector_handler(msi_vec, ahci_irq_handler, hba);
         hba->msi_enabled = 1;
     } else {
         irq_free_vector(hba->msi_vector);
         
         hba->msi_vector = 0;
 
-        if (!pci_request_irq(pdev, ahci_irq_handler)) {
+        if (!pci_request_irq(pdev, ahci_irq_handler, hba)) {
             ahci_hba_destroy(hba);
 
             return -1;
