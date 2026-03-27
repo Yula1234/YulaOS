@@ -2,7 +2,11 @@
 
 #include <drivers/usb/usb_core.h>
 
+#include <kernel/workqueue.h>
+
 #include <kernel/proc.h>
+
+#include <hal/lock.h>
 
 #include <mm/heap.h>
 
@@ -49,6 +53,14 @@ typedef struct {
     uint16_t intr_len;
 
     usb_intr_pipe_t* intr;
+
+    workqueue_t* wq;
+    work_struct_t work;
+
+    spinlock_t lock;
+    uint8_t pending[32];
+    uint16_t pending_len;
+    uint8_t dying;
 } usb_hub_t;
 
 static int hub_get_descriptor(usb_device_t* dev, usb_hub_descriptor_t* out) {
@@ -183,6 +195,75 @@ static void hub_handle_port_change(usb_hub_t* hub, uint8_t port) {
     usb_enumerate_child_device(hub->dev, port, hub_port_get_speed(&st));
 }
 
+static void hub_pending_set_bit(usb_hub_t* hub, uint32_t bit) {
+    if (!hub) {
+        return;
+    }
+
+    const uint32_t idx = bit / 8u;
+    const uint32_t mask = 1u << (bit % 8u);
+
+    if (idx >= (uint32_t)hub->pending_len) {
+        return;
+    }
+
+    hub->pending[idx] |= (uint8_t)mask;
+}
+
+static void hub_pending_or_bitmap(usb_hub_t* hub, const uint8_t* src, uint16_t len) {
+    if (!hub || !src || len == 0) {
+        return;
+    }
+
+    const uint16_t n = len > hub->pending_len ? hub->pending_len : len;
+    for (uint16_t i = 0; i < n; i++) {
+        hub->pending[i] |= src[i];
+    }
+}
+
+static void hub_work(work_struct_t* work) {
+    usb_hub_t* hub = container_of(work, usb_hub_t, work);
+    if (!hub || !hub->dev) {
+        return;
+    }
+
+    uint8_t bitmap[32];
+    uint16_t len = 0;
+
+    uint32_t flags = spinlock_acquire_safe(&hub->lock);
+
+    if (hub->dying) {
+        spinlock_release_safe(&hub->lock, flags);
+        return;
+    }
+
+    len = hub->pending_len;
+    if (len > sizeof(bitmap)) {
+        len = sizeof(bitmap);
+    }
+
+    memcpy(bitmap, hub->pending, len);
+    memset(hub->pending, 0, len);
+
+    spinlock_release_safe(&hub->lock, flags);
+
+    for (uint32_t port = 1; port <= hub->port_count; port++) {
+        const uint32_t bit = port;
+        const uint32_t idx = bit / 8u;
+        const uint32_t mask = 1u << (bit % 8u);
+
+        if (idx >= len) {
+            continue;
+        }
+
+        if ((bitmap[idx] & mask) == 0) {
+            continue;
+        }
+
+        hub_handle_port_change(hub, (uint8_t)port);
+    }
+}
+
 static void hub_intr_cb(void* ctx, const uint8_t* data, uint32_t len) {
     usb_hub_t* hub = (usb_hub_t*)ctx;
     if (!hub || !hub->dev || !data || len == 0) {
@@ -194,27 +275,16 @@ static void hub_intr_cb(void* ctx, const uint8_t* data, uint32_t len) {
         return;
     }
 
-    uint8_t bitmap[32];
-    if (use_len > sizeof(bitmap)) {
-        return;
+    uint32_t flags = spinlock_acquire_safe(&hub->lock);
+
+    if (!hub->dying) {
+        hub_pending_or_bitmap(hub, data, use_len);
     }
 
-    memcpy(bitmap, data, use_len);
+    spinlock_release_safe(&hub->lock, flags);
 
-    for (uint32_t port = 1; port <= hub->port_count; port++) {
-        const uint32_t bit = port;
-        const uint32_t idx = bit / 8u;
-        const uint32_t mask = 1u << (bit % 8u);
-
-        if (idx >= use_len) {
-            continue;
-        }
-
-        if ((bitmap[idx] & mask) == 0) {
-            continue;
-        }
-
-        hub_handle_port_change(hub, (uint8_t)port);
+    if (hub->wq) {
+        queue_work(hub->wq, &hub->work);
     }
 }
 
@@ -293,6 +363,10 @@ static void usb_hub_disconnect(usb_device_t* dev) {
         return;
     }
 
+    uint32_t flags = spinlock_acquire_safe(&hub->lock);
+    hub->dying = 1;
+    spinlock_release_safe(&hub->lock, flags);
+
     for (uint8_t port = 1; port <= hub->port_count; port++) {
         usb_detach_child_device(dev, port);
     }
@@ -305,6 +379,11 @@ static void usb_hub_disconnect(usb_device_t* dev) {
     if (hub->intr_buf) {
         kfree(hub->intr_buf);
         hub->intr_buf = 0;
+    }
+
+    if (hub->wq) {
+        destroy_workqueue(hub->wq);
+        hub->wq = 0;
     }
 
     usb_device_set_class_private(dev, 0);
@@ -350,6 +429,22 @@ static int usb_hub_probe(usb_device_t* dev, const uint8_t* cfg, uint16_t cfg_len
         return 0;
     }
 
+    hub->pending_len = hub->intr_len;
+    if (hub->pending_len > sizeof(hub->pending)) {
+        hub->pending_len = sizeof(hub->pending);
+    }
+
+    spinlock_init(&hub->lock);
+    hub->dying = 0;
+    memset(hub->pending, 0, sizeof(hub->pending));
+
+    init_work(&hub->work, hub_work);
+    hub->wq = create_workqueue("usbhub");
+    if (!hub->wq) {
+        kfree(hub);
+        return 0;
+    }
+
     hub->intr_buf = (uint8_t*)kmalloc(hub->intr_len);
     if (!hub->intr_buf) {
         kfree(hub);
@@ -384,9 +479,13 @@ static int usb_hub_probe(usb_device_t* dev, const uint8_t* cfg, uint16_t cfg_len
         return 0;
     }
 
-    for (uint8_t port = 1; port <= hub->port_count; port++) {
-        hub_handle_port_change(hub, port);
+    uint32_t lock_flags = spinlock_acquire_safe(&hub->lock);
+    for (uint32_t port = 1; port <= hub->port_count; port++) {
+        hub_pending_set_bit(hub, port);
     }
+    spinlock_release_safe(&hub->lock, lock_flags);
+
+    queue_work(hub->wq, &hub->work);
 
     return 1;
 }
