@@ -77,9 +77,6 @@ typedef struct {
     dlist_head_t qh_pages;
 
     uhci_intr_pipe_t intr_pipes[16];
-
-    task_t* poll_thread;
-    volatile uint8_t poll_stop;
 } uhci_hcd_impl_t;
 
 typedef struct {
@@ -1151,23 +1148,6 @@ static void uhci_irq_handler(registers_t* regs, void* ctx) {
     queue_work(u->wq, &u->irq_work);
 }
 
-static void uhci_poll_thread(void* arg) {
-    uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)arg;
-    if (!u) {
-        return;
-    }
-
-    while (!u->poll_stop) {
-        for (uint32_t i = 0; i < (uint32_t)(sizeof(u->intr_pipes) / sizeof(u->intr_pipes[0])); i++) {
-            if (u->intr_pipes[i].used) {
-                uhci_intr_poll_one(u, &u->intr_pipes[i]);
-            }
-        }
-
-        proc_usleep(2000);
-    }
-}
-
 static int uhci_hcd_start(usb_hcd_t* hcd) {
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
     if (!u || !u->regs) {
@@ -1184,9 +1164,6 @@ static int uhci_hcd_start(usb_hcd_t* hcd) {
 
     uhci_writew(u, UHCI_REG_USBCMD, (uint16_t)(UHCI_USBCMD_RUN | UHCI_USBCMD_CF | UHCI_USBCMD_MAXP));
 
-    u->poll_stop = 0;
-    u->poll_thread = proc_spawn_kthread("uhci_poll", PRIO_LOW, uhci_poll_thread, u);
-
     return 1;
 }
 
@@ -1195,8 +1172,6 @@ static void uhci_hcd_stop(usb_hcd_t* hcd) {
     if (!u || !u->regs) {
         return;
     }
-
-    u->poll_stop = 1;
 
     uhci_writew(u, UHCI_REG_USBINTR, 0);
     uhci_writew(u, UHCI_REG_USBCMD, 0);
