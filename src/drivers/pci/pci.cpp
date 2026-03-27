@@ -347,16 +347,6 @@ static inline void pci_write8(uint8_t bus, uint8_t slot, uint8_t func, uint8_t o
     pci_write(bus, slot, func, aligned, reg);
 }
 
-static uint16_t pci_get_vendor(uint8_t bus, uint8_t slot, uint8_t func) {
-    return static_cast<uint16_t>(pci_read(bus, slot, func, 0u) & 0xFFFFu);
-}
-
-static uint16_t pci_get_class_sub(uint8_t bus, uint8_t slot, uint8_t func) {
-    const uint32_t reg = pci_read(bus, slot, func, 0x08u);
-    
-    return static_cast<uint16_t>((reg >> 16) & 0xFFFFu);
-}
-
 static void pci_enable_bus_master(uint8_t bus, uint8_t slot, uint8_t func) {
     const uint32_t command = pci_read(bus, slot, func, 0x04u);
 
@@ -375,47 +365,6 @@ uint32_t pci_get_bar5(uint8_t bus, uint8_t slot, uint8_t func) {
     const uint32_t bar5 = pci_read(bus, slot, func, 0x24u);
     
     return bar5 & 0xFFFFFFF0u;
-}
-
-uint32_t pci_find_ide_bar4(void) {
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            const uint16_t vendor = pci_get_vendor(static_cast<uint8_t>(bus), slot, 0);
-
-            if (vendor != 0xFFFFu) {
-                if (pci_get_class_sub(static_cast<uint8_t>(bus), slot, 0) == 0x0101u) {
-                    pci_enable_bus_master(static_cast<uint8_t>(bus), slot, 0);
-                    return pci_get_bar4(static_cast<uint8_t>(bus), slot, 0);
-                }
-            }
-        }
-    }
-
-    return 0u;
-}
-
-uint32_t pci_find_ahci_device(uint8_t* out_bus, uint8_t* out_slot, uint8_t* out_func) {
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            for (uint8_t func = 0; func < 8; func++) {
-                const uint16_t vendor = pci_get_vendor(static_cast<uint8_t>(bus), slot, func);
-                if (vendor == 0xFFFFu) {
-                    continue;
-                }
-
-                const uint16_t class_sub = pci_get_class_sub(static_cast<uint8_t>(bus), slot, func);
-                if (class_sub == 0x0106u) {
-                    *out_bus = static_cast<uint8_t>(bus);
-                    *out_slot = slot;
-                    *out_func = func;
-                    
-                    return 1;
-                }
-            }
-        }
-    }
-
-    return 0;
 }
 
 int pci_msi_configure(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector, uint8_t dest_apic_id) {
@@ -566,5 +515,32 @@ int pci_dev_enable_msi(pci_device_t* dev, uint8_t vector, uint8_t dest_apic_id) 
 
     return pci_msi_configure(dev->bus, dev->slot, dev->func, vector, dest_apic_id);
 }
+
+__iomem* pci_request_bar(pci_device_t* dev, uint8_t bar_idx, const char* name) {
+    if (!dev || bar_idx >= 6u) {
+        return nullptr;
+    }
+
+    const pci_bar_t* bar = &dev->bars[bar_idx];
+
+    if (bar->base_addr == 0u || bar->size == 0u) {
+        return nullptr;
+    }
+
+    if (bar->type == PCI_BAR_TYPE_MMIO) {
+        return iomem_request_mmio(bar->base_addr, bar->size, name);
+    }
+    
+    if (bar->type == PCI_BAR_TYPE_IO) {
+        if (bar->base_addr > 0xFFFFu || bar->size > 0xFFFFu) {
+            return nullptr;
+        }
+
+        return iomem_request_pmio((uint16_t)bar->base_addr, (uint16_t)bar->size, name);
+    }
+
+    return nullptr;
+}
+
 
 }
