@@ -12,6 +12,13 @@ typedef void (*irq_handler_t)(registers_t*);
 extern "C" {
 #endif
 
+static inline uint32_t get_eflags(void) {
+    uint32_t eflags = 0u;
+    __asm__ volatile("pushfl; popl %0" : "=r"(eflags) : : "memory");
+
+    return eflags;
+}
+
 void irq_install_handler(int irq_no, irq_handler_t handler);
 
 void irq_install_vector_handler(int vector, irq_handler_t handler);
