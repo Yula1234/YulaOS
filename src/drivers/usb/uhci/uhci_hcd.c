@@ -9,9 +9,9 @@
 #include <kernel/sched.h>
 
 #include <hal/pmio.h>
-#include <hal/lock.h>
+#include <drivers/usb/usb_core.h>
 
-#include <mm/dma.h>
+#include <mm/dma/api.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
 
@@ -69,13 +69,14 @@ typedef struct {
 
     uhci_qh_t* sched_head;
 
-    spinlock_t dma_pool_lock;
+    dma_pool_t* td_pool;
+    dma_pool_t* qh_pool;
+    dma_pool_t* setup_pool;
 
-    void* td_free;
-    dlist_head_t td_pages;
+    void* ctrl_data_buf;
+    uint32_t ctrl_data_phys;
 
-    void* qh_free;
-    dlist_head_t qh_pages;
+    mutex_t ctrl_mutex;
 
     spinlock_t sync_lock;
     dlist_head_t sync_waits;
@@ -94,109 +95,11 @@ typedef struct {
 
 extern volatile uint32_t timer_ticks;
 
-typedef struct {
-    dlist_head_t node;
-
-    void* vaddr;
-    uint32_t phys;
-} uhci_dma_page_t;
-
-typedef struct {
-    uint32_t next;
-    uint32_t phys;
-} uhci_pool_link_t;
-
 static uhci_td_t* uhci_td_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys);
 static void uhci_td_free(uhci_hcd_impl_t* u, uhci_td_t* td);
 
 static uhci_qh_t* uhci_qh_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys);
 static void uhci_qh_free(uhci_hcd_impl_t* u, uhci_qh_t* qh);
-
-static inline void* uhci_pool_pop(void** head) {
-    if (!head || !*head) {
-        return 0;
-    }
-
-    void* obj = *head;
-    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
-
-    *head = (void*)(uintptr_t)l->next;
-    return obj;
-}
-
-static inline void uhci_pool_push(void** head, void* obj) {
-    if (!head || !obj) {
-        return;
-    }
-
-    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
-    l->next = (uint32_t)(uintptr_t)(*head);
-
-    *head = obj;
-}
-
-static int uhci_pool_grow(uhci_hcd_impl_t* u, dlist_head_t* pages, void** free_head, uint32_t obj_size) {
-    if (!u || !pages || !free_head || obj_size == 0) {
-        return 0;
-    }
-
-    uint32_t phys = 0;
-    void* page = dma_alloc_coherent(PAGE_SIZE, &phys);
-    if (!page || !phys) {
-        return 0;
-    }
-
-    if ((phys & 0xFu) != 0u) {
-        dma_free_coherent(page, PAGE_SIZE, phys);
-        return 0;
-    }
-
-    uhci_dma_page_t* rec = (uhci_dma_page_t*)kzalloc(sizeof(*rec));
-    if (!rec) {
-        dma_free_coherent(page, PAGE_SIZE, phys);
-        return 0;
-    }
-
-    dlist_init(&rec->node);
-    rec->vaddr = page;
-    rec->phys = phys;
-
-    memset(page, 0, PAGE_SIZE);
-
-    const uint32_t count = (uint32_t)(PAGE_SIZE / obj_size);
-    for (uint32_t i = 0; i < count; i++) {
-        uint8_t* obj = (uint8_t*)page + (i * obj_size);
-        uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
-
-        l->next = (uint32_t)(uintptr_t)(*free_head);
-        l->phys = phys + (i * obj_size);
-
-        *free_head = obj;
-    }
-
-    dlist_add_tail(&rec->node, pages);
-    return 1;
-}
-
-static void uhci_pool_destroy(dlist_head_t* pages) {
-    if (!pages) {
-        return;
-    }
-
-    dlist_head_t* it = pages->next;
-    while (it && it != pages) {
-        uhci_dma_page_t* p = container_of(it, uhci_dma_page_t, node);
-        it = it->next;
-
-        dlist_del(&p->node);
-
-        if (p->vaddr) {
-            dma_free_coherent(p->vaddr, PAGE_SIZE, p->phys);
-        }
-
-        kfree(p);
-    }
-}
 
 static inline uint16_t uhci_readw(uhci_hcd_impl_t* u, uint16_t reg) {
     uint16_t v = 0;
@@ -332,26 +235,12 @@ static uhci_td_t* uhci_td_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys) {
         return 0;
     }
 
-    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
-
-    if (!u->td_free) {
-        if (!uhci_pool_grow(u, &u->td_pages, &u->td_free, sizeof(uhci_td_t))) {
-            spinlock_release_safe(&u->dma_pool_lock, flags);
-            return 0;
-        }
-    }
-
-    void* obj = uhci_pool_pop(&u->td_free);
-    spinlock_release_safe(&u->dma_pool_lock, flags);
-
-    if (!obj) {
+    uint32_t phys = 0;
+    uhci_td_t* td = (uhci_td_t*)dma_pool_alloc(u->td_pool, &phys);
+    if (!td || !phys) {
         return 0;
     }
 
-    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
-    const uint32_t phys = l->phys;
-
-    uhci_td_t* td = (uhci_td_t*)obj;
     memset(td, 0, sizeof(*td));
     td->sw_phys = phys;
 
@@ -367,13 +256,7 @@ static void uhci_td_free(uhci_hcd_impl_t* u, uhci_td_t* td) {
         return;
     }
 
-    const uint32_t phys = td->sw_phys;
-    uhci_pool_link_t* l = (uhci_pool_link_t*)td;
-    l->phys = phys;
-
-    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
-    uhci_pool_push(&u->td_free, td);
-    spinlock_release_safe(&u->dma_pool_lock, flags);
+    dma_pool_free(u->td_pool, td);
 }
 
 static uhci_qh_t* uhci_qh_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys) {
@@ -381,26 +264,12 @@ static uhci_qh_t* uhci_qh_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys) {
         return 0;
     }
 
-    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
-
-    if (!u->qh_free) {
-        if (!uhci_pool_grow(u, &u->qh_pages, &u->qh_free, sizeof(uhci_qh_t))) {
-            spinlock_release_safe(&u->dma_pool_lock, flags);
-            return 0;
-        }
-    }
-
-    void* obj = uhci_pool_pop(&u->qh_free);
-    spinlock_release_safe(&u->dma_pool_lock, flags);
-
-    if (!obj) {
+    uint32_t phys = 0;
+    uhci_qh_t* qh = (uhci_qh_t*)dma_pool_alloc(u->qh_pool, &phys);
+    if (!qh || !phys) {
         return 0;
     }
 
-    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
-    const uint32_t phys = l->phys;
-
-    uhci_qh_t* qh = (uhci_qh_t*)obj;
     memset(qh, 0, sizeof(*qh));
     qh->sw_phys = phys;
 
@@ -416,13 +285,7 @@ static void uhci_qh_free(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
         return;
     }
 
-    const uint32_t phys = qh->sw_phys;
-    uhci_pool_link_t* l = (uhci_pool_link_t*)qh;
-    l->phys = phys;
-
-    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
-    uhci_pool_push(&u->qh_free, qh);
-    spinlock_release_safe(&u->dma_pool_lock, flags);
+    dma_pool_free(u->qh_pool, qh);
 }
 
 static void uhci_sched_insert_head_qh(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
@@ -592,9 +455,12 @@ static int uhci_hcd_control_xfer(
         ep0_mps = 64;
     }
 
+    mutex_lock(&u->ctrl_mutex);
+
     uint32_t setup_phys = 0;
-    usb_setup_packet_t* setup_dma = (usb_setup_packet_t*)dma_alloc_coherent(sizeof(*setup_dma), &setup_phys);
+    usb_setup_packet_t* setup_dma = (usb_setup_packet_t*)dma_pool_alloc(u->setup_pool, &setup_phys);
     if (!setup_dma || !setup_phys) {
+        mutex_unlock(&u->ctrl_mutex);
         return -1;
     }
 
@@ -606,18 +472,27 @@ static int uhci_hcd_control_xfer(
     const uint8_t dir_in = (setup->bmRequestType & USB_REQ_TYPE_DIR_IN) ? 1u : 0u;
 
     if (length) {
-        data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
-        if (!data_dma || !data_phys) {
-            dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
-            return -1;
+        if (length > PAGE_SIZE) {
+            data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
+            if (!data_dma || !data_phys) {
+                dma_pool_free(u->setup_pool, setup_dma);
+                mutex_unlock(&u->ctrl_mutex);
+                return -1;
+            }
+        } else {
+            data_dma = (uint8_t*)u->ctrl_data_buf;
+            data_phys = u->ctrl_data_phys;
         }
 
         if (dir_in) {
             memset(data_dma, 0, length);
         } else {
             if (!data) {
-                dma_free_coherent(data_dma, length, data_phys);
-                dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+                dma_pool_free(u->setup_pool, setup_dma);
+                if (length > PAGE_SIZE) {
+                    dma_free_coherent(data_dma, length, data_phys);
+                }
+                mutex_unlock(&u->ctrl_mutex);
                 return -1;
             }
 
@@ -629,10 +504,13 @@ static int uhci_hcd_control_xfer(
     uhci_td_t* td_setup = uhci_td_alloc(u, &td_setup_phys);
     if (!td_setup) {
         if (data_dma) {
-            dma_free_coherent(data_dma, length, data_phys);
+            if (length > PAGE_SIZE) {
+                dma_free_coherent(data_dma, length, data_phys);
+            }
         }
 
-        dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+        dma_pool_free(u->setup_pool, setup_dma);
+        mutex_unlock(&u->ctrl_mutex);
         return -1;
     }
 
@@ -668,10 +546,13 @@ static int uhci_hcd_control_xfer(
             uhci_td_chain_free_pool(u, td_first);
 
             if (data_dma) {
-                dma_free_coherent(data_dma, length, data_phys);
+                if (length > PAGE_SIZE) {
+                    dma_free_coherent(data_dma, length, data_phys);
+                }
             }
 
-            dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+            dma_pool_free(u->setup_pool, setup_dma);
+            mutex_unlock(&u->ctrl_mutex);
             return -1;
         }
 
@@ -709,10 +590,13 @@ static int uhci_hcd_control_xfer(
         uhci_td_chain_free_pool(u, td_first);
 
         if (data_dma) {
-            dma_free_coherent(data_dma, length, data_phys);
+            if (length > PAGE_SIZE) {
+                dma_free_coherent(data_dma, length, data_phys);
+            }
         }
 
-        dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+        dma_pool_free(u->setup_pool, setup_dma);
+        mutex_unlock(&u->ctrl_mutex);
         return -1;
     }
 
@@ -745,10 +629,13 @@ static int uhci_hcd_control_xfer(
         uhci_td_chain_free_pool(u, td_first);
 
         if (data_dma) {
-            dma_free_coherent(data_dma, length, data_phys);
+            if (length > PAGE_SIZE) {
+                dma_free_coherent(data_dma, length, data_phys);
+            }
         }
 
-        dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+        dma_pool_free(u->setup_pool, setup_dma);
+        mutex_unlock(&u->ctrl_mutex);
         return -1;
     }
 
@@ -776,10 +663,14 @@ static int uhci_hcd_control_xfer(
         uhci_td_chain_free_pool(u, td_first);
 
         if (data_dma) {
-            dma_free_coherent(data_dma, length, data_phys);
+            if (length > PAGE_SIZE) {
+                dma_free_coherent(data_dma, length, data_phys);
+            }
         }
 
-        dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+        dma_pool_free(u->setup_pool, setup_dma);
+
+        mutex_unlock(&u->ctrl_mutex);
 
         return -1;
     }
@@ -805,16 +696,19 @@ static int uhci_hcd_control_xfer(
     }
 
     qh->element = UHCI_PTR_T;
-
     uhci_qh_free(u, qh);
 
     uhci_td_chain_free_pool(u, td_first);
 
     if (data_dma) {
-        dma_free_coherent(data_dma, length, data_phys);
+        if (length > PAGE_SIZE) {
+            dma_free_coherent(data_dma, length, data_phys);
+        }
     }
 
-    dma_free_coherent(setup_dma, sizeof(*setup_dma), setup_phys);
+    dma_pool_free(u->setup_pool, setup_dma);
+
+    mutex_unlock(&u->ctrl_mutex);
 
     return success ? (int)length : -1;
 }
@@ -1376,8 +1270,26 @@ static void uhci_destroy(uhci_hcd_impl_t* u) {
         u->frame_list_phys = 0;
     }
 
-    uhci_pool_destroy(&u->td_pages);
-    uhci_pool_destroy(&u->qh_pages);
+    if (u->ctrl_data_buf) {
+        dma_free_coherent(u->ctrl_data_buf, PAGE_SIZE, u->ctrl_data_phys);
+        u->ctrl_data_buf = 0;
+        u->ctrl_data_phys = 0;
+    }
+
+    if (u->setup_pool) {
+        dma_pool_destroy(u->setup_pool);
+        u->setup_pool = 0;
+    }
+
+    if (u->td_pool) {
+        dma_pool_destroy(u->td_pool);
+        u->td_pool = 0;
+    }
+
+    if (u->qh_pool) {
+        dma_pool_destroy(u->qh_pool);
+        u->qh_pool = 0;
+    }
 
     if (u->regs) {
         pmio_release_region(u->regs);
@@ -1397,12 +1309,6 @@ static int uhci_probe(pci_device_t* pdev) {
         return -1;
     }
 
-    spinlock_init(&u->dma_pool_lock);
-    u->td_free = 0;
-    u->qh_free = 0;
-    dlist_init(&u->td_pages);
-    dlist_init(&u->qh_pages);
-
     spinlock_init(&u->sync_lock);
     dlist_init(&u->sync_waits);
 
@@ -1410,6 +1316,18 @@ static int uhci_probe(pci_device_t* pdev) {
 
     spinlock_init(&u->sched_lock);
     u->sched_head = 0;
+
+    u->td_pool = dma_pool_create("uhci_td", sizeof(uhci_td_t), 16u);
+    u->qh_pool = dma_pool_create("uhci_qh", sizeof(uhci_qh_t), 16u);
+    u->setup_pool = dma_pool_create("usb_setup", sizeof(usb_setup_packet_t), 8u);
+
+    u->ctrl_data_buf = dma_alloc_coherent(PAGE_SIZE, &u->ctrl_data_phys);
+    mutex_init(&u->ctrl_mutex);
+
+    if (!u->td_pool || !u->qh_pool || !u->setup_pool || !u->ctrl_data_buf || !u->ctrl_data_phys) {
+        uhci_destroy(u);
+        return -1;
+    }
 
     u->wq = create_workqueue("uhci");
     if (!u->wq) {
