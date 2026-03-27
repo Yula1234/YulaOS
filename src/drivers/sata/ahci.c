@@ -141,15 +141,13 @@ static int ahci_bdev_flush(block_device_t* dev);
 static const block_ops_t g_ahci_bdev_ops = {
     .read_sectors = ahci_bdev_read_sectors,
     .write_sectors = ahci_bdev_write_sectors,
+
     .flush = ahci_bdev_flush,
 };
 
 static int ahci_send_command(
-    ahci_port_extended_t* ex,
-    uint32_t lba,
-    uint8_t* buf,
-    int is_write,
-    uint32_t count
+    ahci_port_extended_t* ex, uint32_t lba,
+    uint8_t* buf, int is_write, uint32_t count
 );
 
 static uint64_t ahci_identify_device(ahci_port_extended_t* ex);
@@ -745,18 +743,10 @@ static uint64_t ahci_identify_device(ahci_port_extended_t* ex) {
 }
 
 static int ahci_send_command(
-    ahci_port_extended_t* ex,
-    uint32_t lba,
-    uint8_t* buf,
-    int is_write,
-    uint32_t count
+    ahci_port_extended_t* ex, uint32_t lba,
+    uint8_t* buf, int is_write, uint32_t count
 ) {
     if (!ex) {
-        return 0;
-    }
-
-    int port_no = ex->port_no;
-    if (port_no < 0 || port_no >= 32) {
         return 0;
     }
 
@@ -764,21 +754,44 @@ static int ahci_send_command(
         return 0;
     }
 
-    if (count == 0 || count > AHCI_MAX_IO_SECTORS) {
+    if (count == 0u
+        || count > AHCI_MAX_IO_SECTORS) {
         return 0;
     }
 
-    uint32_t eflags;
-    __asm__ volatile("pushfl; popl %0" : "=r"(eflags) : : "memory");
-    int can_wait_irq = ((eflags & 0x200u) != 0u);
+    const int port_no = ex->port_no;
 
-    uint32_t byte_count = count * AHCI_SECTOR_SIZE;
+    if (port_no < 0
+        || port_no >= 32) {
+        return 0;
+    }
 
     ahci_port_state_t* state = (ahci_port_state_t*)ex;
 
     if (!state->active) {
         return 0;
     }
+
+    const uint32_t byte_count = count * AHCI_SECTOR_SIZE;
+    const uint32_t dma_dir = is_write ? DMA_DIR_TO_DEVICE : DMA_DIR_FROM_DEVICE;
+
+    dma_sg_list_t* sg = dma_map_buffer(buf, byte_count, dma_dir);
+
+    if (!sg) {
+        return 0;
+    }
+
+    if (sg->count > AHCI_MAX_PRDT_ENTRIES) {
+        dma_unmap_buffer(sg);
+
+        return 0;
+    }
+
+    uint32_t eflags = get_eflags();
+
+    const int can_wait_irq = ((eflags & 0x200u) != 0u);
+
+    int result = 0;
 
     spinlock_acquire(&state->lock);
 
@@ -789,9 +802,13 @@ static int ahci_send_command(
         port->serr = 0xFFFFFFFFu;
     }
 
-    int slot = find_cmdslot(port, ex->hba, port_no);
-    if (slot == -1 || slot < 0 || slot >= 32) {
+    const int slot = find_cmdslot(port, ex->hba, port_no);
+
+    if (slot < 0
+        || slot >= 32) {
         spinlock_release(&state->lock);
+        dma_unmap_buffer(sg);
+
         return 0;
     }
 
@@ -804,52 +821,27 @@ static int ahci_send_command(
     cmdheader->w = is_write ? 1 : 0;
     cmdheader->c = 0;
     cmdheader->p = 1;
-    cmdheader->prdtl = 0;
+    cmdheader->prdtl = (uint16_t)sg->count;
 
     HBA_CMD_TBL* cmdtbl = (HBA_CMD_TBL*)(state->ctba_virt[slot]);
     memset(cmdtbl, 0, 4096);
 
-    uint32_t bytes_remaining = byte_count;
-    uint32_t current_vaddr = (uint32_t)buf;
-    uint16_t prdt_count = 0;
+    for (uint32_t i = 0u; i < sg->count; i++) {
+        const dma_sg_elem_t* elem = &sg->elems[i];
 
-    while (bytes_remaining > 0u && prdt_count < (uint16_t)AHCI_MAX_PRDT_ENTRIES) {
-        uint32_t phys_addr = dma_virt_to_phys((void*)current_vaddr);
-        if (phys_addr == 0u) {
-            __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
-            spinlock_release(&state->lock);
-            return 0;
-        }
-
-        uint32_t offset_in_page = current_vaddr & 0xFFFu;
-        uint32_t chunk_size = 4096u - offset_in_page;
-        if (chunk_size > bytes_remaining) {
-            chunk_size = bytes_remaining;
-        }
-
-        cmdtbl->prdt_entry[prdt_count].dba = phys_addr;
-        cmdtbl->prdt_entry[prdt_count].dbau = 0;
-        cmdtbl->prdt_entry[prdt_count].dbc = chunk_size - 1u;
-        cmdtbl->prdt_entry[prdt_count].i = 0;
-
-        prdt_count++;
-        current_vaddr += chunk_size;
-        bytes_remaining -= chunk_size;
+        cmdtbl->prdt_entry[i].dba = (uint32_t)(elem->phys_addr & 0xFFFFFFFFu);
+        cmdtbl->prdt_entry[i].dbau = (uint32_t)(elem->phys_addr >> 32);
+        cmdtbl->prdt_entry[i].dbc = elem->length - 1u;
+        cmdtbl->prdt_entry[i].i = 0;
     }
 
-    if (bytes_remaining > 0u) {
-        __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
-        spinlock_release(&state->lock);
-        return 0;
-    }
-
-    cmdtbl->prdt_entry[prdt_count - 1u].i = 1;
-    cmdheader->prdtl = prdt_count;
+    cmdtbl->prdt_entry[sg->count - 1u].i = 1;
 
     FIS_REG_H2D* cmdfis = (FIS_REG_H2D*)(&cmdtbl->cfis);
     cmdfis->fis_type = FIS_TYPE_REG_H2D;
     cmdfis->c = 1;
     cmdfis->command = is_write ? ATA_CMD_WRITE_DMA_EX : ATA_CMD_READ_DMA_EX;
+    
     cmdfis->lba0 = (uint8_t)lba;
     cmdfis->lba1 = (uint8_t)(lba >> 8);
     cmdfis->lba2 = (uint8_t)(lba >> 16);
@@ -863,71 +855,86 @@ static int ahci_send_command(
 
     int spin = 0;
     while ((port->tfd & (AHCI_DEV_BUSY | AHCI_DEV_DRQ)) != 0u
-        && spin < 1000000) {
+           && spin < 1000000) {
         spin++;
         __asm__ volatile("pause");
     }
 
     if (spin >= 1000000) {
         __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
+
+        const int reset_ok = ahci_port_comreset(ex);
+
+        if (!reset_ok) {
+            dma_unmap_buffer(sg);
+
+            return 0;
+        }
+
+        spinlock_acquire(&state->lock);
         
-        if (ahci_port_comreset(ex)) {
-            spinlock_acquire(&state->lock);
-            int new_slot = find_cmdslot(port, ex->hba, port_no);
-            if (new_slot != -1) {
-                __sync_fetch_and_or(&ex->hba->port_active_slots[port_no], (1u << new_slot));
-                
-                HBA_CMD_HEADER* new_cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
-                new_cmdheader += new_slot;
-                new_cmdheader->cfl = sizeof(FIS_REG_H2D) / 4u;
-                new_cmdheader->w = is_write ? 1 : 0;
-                new_cmdheader->c = 0;
-                new_cmdheader->p = 1;
-                new_cmdheader->prdtl = cmdheader->prdtl;
-                
-                HBA_CMD_TBL* new_cmdtbl = (HBA_CMD_TBL*)(state->ctba_virt[new_slot]);
-                memcpy(new_cmdtbl, cmdtbl, 4096);
-                
-                FIS_REG_H2D* new_cmdfis = (FIS_REG_H2D*)(&new_cmdtbl->cfis);
-                new_cmdfis->fis_type = FIS_TYPE_REG_H2D;
-                new_cmdfis->c = 1;
-                new_cmdfis->command = is_write ? ATA_CMD_WRITE_DMA_EX : ATA_CMD_READ_DMA_EX;
-                new_cmdfis->lba0 = (uint8_t)lba;
-                new_cmdfis->lba1 = (uint8_t)(lba >> 8);
-                new_cmdfis->lba2 = (uint8_t)(lba >> 16);
-                new_cmdfis->device = 1u << 6;
-                new_cmdfis->lba3 = (uint8_t)(lba >> 24);
-                new_cmdfis->countl = (uint8_t)count;
-                
-                state->slot_sem[new_slot].count = 0;
-                spinlock_release(&state->lock);
-                
-                port->ci = 1u << new_slot;
-                
-                if (g_ahci_async_mode && can_wait_irq) {
-                    sem_wait(&state->slot_sem[new_slot]);
-                } else {
-                    while ((port->ci & (1u << new_slot)) != 0u) {
-                        __asm__ volatile("pause");
-                    }
-                }
-                
-                __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << new_slot));
-                
-                if ((port->is & (1u << 30)) == 0u
-                    && (port->tfd & AHCI_DEV_ERR) == 0u) {
-                    return 1;
-                }
-            } else {
-                spinlock_release(&state->lock);
+        const int new_slot = find_cmdslot(port, ex->hba, port_no);
+
+        if (new_slot == -1) {
+            spinlock_release(&state->lock);
+            dma_unmap_buffer(sg);
+
+            return 0;
+        }
+
+        __sync_fetch_and_or(&ex->hba->port_active_slots[port_no], (1u << new_slot));
+
+        HBA_CMD_HEADER* new_cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
+        new_cmdheader += new_slot;
+
+        new_cmdheader->cfl = sizeof(FIS_REG_H2D) / 4u;
+        new_cmdheader->w = is_write ? 1 : 0;
+        new_cmdheader->c = 0;
+        new_cmdheader->p = 1;
+        new_cmdheader->prdtl = cmdheader->prdtl;
+
+        HBA_CMD_TBL* new_cmdtbl = (HBA_CMD_TBL*)(state->ctba_virt[new_slot]);
+        memcpy(new_cmdtbl, cmdtbl, 4096);
+
+        FIS_REG_H2D* new_cmdfis = (FIS_REG_H2D*)(&new_cmdtbl->cfis);
+        new_cmdfis->fis_type = FIS_TYPE_REG_H2D;
+        new_cmdfis->c = 1;
+        new_cmdfis->command = is_write ? ATA_CMD_WRITE_DMA_EX : ATA_CMD_READ_DMA_EX;
+
+        new_cmdfis->lba0 = (uint8_t)lba;
+        new_cmdfis->lba1 = (uint8_t)(lba >> 8);
+        new_cmdfis->lba2 = (uint8_t)(lba >> 16);
+        new_cmdfis->device = 1u << 6;
+        new_cmdfis->lba3 = (uint8_t)(lba >> 24);
+        new_cmdfis->countl = (uint8_t)count;
+
+        state->slot_sem[new_slot].count = 0;
+
+        spinlock_release(&state->lock);
+
+        port->ci = 1u << new_slot;
+
+        if (g_ahci_async_mode && can_wait_irq) {
+            sem_wait(&state->slot_sem[new_slot]);
+        } else {
+            while ((port->ci & (1u << new_slot)) != 0u) {
+                __asm__ volatile("pause");
             }
         }
-        return 0;
+
+        __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << new_slot));
+
+        if ((port->is & (1u << 30)) == 0u
+            && (port->tfd & AHCI_DEV_ERR) == 0u) {
+            result = 1;
+        }
+
+        dma_unmap_buffer(sg);
+
+        return result;
     }
 
     port->ci = 1u << slot;
-
-    int success = 1;
 
     if (g_ahci_async_mode && can_wait_irq) {
         sem_wait(&state->slot_sem[slot]);
@@ -939,14 +946,18 @@ static int ahci_send_command(
 
     __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
 
+    result = 1;
+
     if ((port->is & (1u << 30)) != 0u
         || (port->tfd & AHCI_DEV_ERR) != 0u) {
-        success = 0;
         
+        result = 0;
         ahci_port_comreset(ex);
     }
 
-    return success;
+    dma_unmap_buffer(sg);
+
+    return result;
 }
 
 static int ahci_port_comreset(ahci_port_extended_t* ex) {
