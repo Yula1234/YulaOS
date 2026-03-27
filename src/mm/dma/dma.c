@@ -2,13 +2,14 @@
 /* Copyright (C) 2026 Yula1234 */
 
 #include <mm/heap.h>
-#include <mm/dma.h>
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 
 #include <arch/i386/paging.h>
 
 #include <lib/string.h>
+
+#include "api.h"
 
 #ifndef PAGE_SIZE
 

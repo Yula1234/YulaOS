@@ -24,6 +24,8 @@ typedef struct dma_sg_list {
     uint32_t direction;
 } dma_sg_list_t;
 
+typedef struct dma_pool dma_pool_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,6 +37,14 @@ dma_sg_list_t* dma_map_buffer(void* vaddr, size_t size, uint32_t direction);
 void dma_unmap_buffer(dma_sg_list_t* sg);
 
 uint32_t dma_virt_to_phys(void* vaddr);
+
+dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align);
+
+void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys);
+
+void dma_pool_free(dma_pool_t* pool, void* vaddr);
+
+void dma_pool_destroy(dma_pool_t* pool);
 
 #ifdef __cplusplus
 }
