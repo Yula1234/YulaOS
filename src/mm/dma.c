@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <mm/heap.h>
 #include <mm/dma.h>
 #include <mm/pmm.h>
 #include <mm/vmm.h>
@@ -82,6 +83,98 @@ void dma_free_coherent(void* vaddr, size_t size, uint32_t phys) {
     pmm_free_pages((void*)(uintptr_t)phys, order);
 
     vmm_unreserve_pages(vaddr, pages);
+}
+
+dma_sg_list_t* dma_map_buffer(void* vaddr, size_t size, uint32_t direction) {
+    if (!vaddr
+        || size == 0u) {
+        return 0;
+    }
+
+    dma_sg_list_t* sg = (dma_sg_list_t*)kmalloc(sizeof(dma_sg_list_t));
+
+    if (!sg) {
+        return 0;
+    }
+
+    memset(sg, 0, sizeof(*sg));
+
+    const uint32_t max_elems = (uint32_t)(size / PAGE_SIZE) + 2u;
+
+    dma_sg_elem_t* elems = (dma_sg_elem_t*)kmalloc(max_elems * sizeof(dma_sg_elem_t));
+
+    if (!elems) {
+        kfree(sg);
+
+        return 0;
+    }
+
+    memset(elems, 0, max_elems * sizeof(*elems));
+
+    uint32_t remaining = (uint32_t)size;
+    uint32_t current_vaddr = (uint32_t)(uintptr_t)vaddr;
+
+    uint32_t elem_count = 0u;
+
+    uint64_t last_phys = 0u;
+    uint32_t last_len = 0u;
+
+    while (remaining > 0u) {
+        const uint32_t phys = paging_get_phys(kernel_page_directory, current_vaddr);
+
+        if (phys == 0u) {
+            kfree(elems);
+            kfree(sg);
+
+            return 0;
+        }
+
+        const uint32_t page_offset = current_vaddr & 0xFFFu;
+        uint32_t chunk = 4096u - page_offset;
+
+        if (chunk > remaining) {
+            chunk = remaining;
+        }
+
+        if (elem_count > 0u
+            && last_phys + last_len == phys) {
+
+            last_len += chunk;
+            elems[elem_count - 1u].length = last_len;
+
+        } else {
+            elems[elem_count].phys_addr = phys;
+            elems[elem_count].length = chunk;
+
+            elem_count++;
+
+            last_phys = phys;
+            last_len = chunk;
+        }
+
+        current_vaddr += chunk;
+        remaining -= chunk;
+    }
+
+    sg->elems = elems;
+    sg->count = elem_count;
+    sg->capacity = max_elems;
+    sg->direction = direction;
+
+    return sg;
+}
+
+void dma_unmap_buffer(dma_sg_list_t* sg) {
+    if (!sg) {
+        return;
+    }
+
+    if (sg->elems) {
+        kfree(sg->elems);
+        sg->elems = 0;
+    }
+
+    kfree(sg);
 }
 
 uint32_t dma_virt_to_phys(void* vaddr) {
