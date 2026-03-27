@@ -12,6 +12,7 @@
 
 #include <mm/dma.h>
 #include <mm/heap.h>
+#include <mm/pmm.h>
 
 #include <lib/string.h>
 #include <lib/dlist.h>
@@ -67,11 +68,123 @@ typedef struct {
 
     uhci_qh_t* sched_head;
 
+    spinlock_t dma_pool_lock;
+
+    void* td_free;
+    dlist_head_t td_pages;
+
+    void* qh_free;
+    dlist_head_t qh_pages;
+
     uhci_intr_pipe_t intr_pipes[16];
 
     task_t* poll_thread;
     volatile uint8_t poll_stop;
 } uhci_hcd_impl_t;
+
+typedef struct {
+    dlist_head_t node;
+
+    void* vaddr;
+    uint32_t phys;
+} uhci_dma_page_t;
+
+typedef struct {
+    uint32_t next;
+    uint32_t phys;
+} uhci_pool_link_t;
+
+static uhci_td_t* uhci_td_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys);
+static void uhci_td_free(uhci_hcd_impl_t* u, uhci_td_t* td);
+
+static uhci_qh_t* uhci_qh_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys);
+static void uhci_qh_free(uhci_hcd_impl_t* u, uhci_qh_t* qh);
+
+static inline void* uhci_pool_pop(void** head) {
+    if (!head || !*head) {
+        return 0;
+    }
+
+    void* obj = *head;
+    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
+
+    *head = (void*)(uintptr_t)l->next;
+    return obj;
+}
+
+static inline void uhci_pool_push(void** head, void* obj) {
+    if (!head || !obj) {
+        return;
+    }
+
+    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
+    l->next = (uint32_t)(uintptr_t)(*head);
+
+    *head = obj;
+}
+
+static int uhci_pool_grow(uhci_hcd_impl_t* u, dlist_head_t* pages, void** free_head, uint32_t obj_size) {
+    if (!u || !pages || !free_head || obj_size == 0) {
+        return 0;
+    }
+
+    uint32_t phys = 0;
+    void* page = dma_alloc_coherent(PAGE_SIZE, &phys);
+    if (!page || !phys) {
+        return 0;
+    }
+
+    if ((phys & 0xFu) != 0u) {
+        dma_free_coherent(page, PAGE_SIZE, phys);
+        return 0;
+    }
+
+    uhci_dma_page_t* rec = (uhci_dma_page_t*)kzalloc(sizeof(*rec));
+    if (!rec) {
+        dma_free_coherent(page, PAGE_SIZE, phys);
+        return 0;
+    }
+
+    dlist_init(&rec->node);
+    rec->vaddr = page;
+    rec->phys = phys;
+
+    memset(page, 0, PAGE_SIZE);
+
+    const uint32_t count = (uint32_t)(PAGE_SIZE / obj_size);
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t* obj = (uint8_t*)page + (i * obj_size);
+        uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
+
+        l->next = (uint32_t)(uintptr_t)(*free_head);
+        l->phys = phys + (i * obj_size);
+
+        *free_head = obj;
+    }
+
+    dlist_add_tail(&rec->node, pages);
+    return 1;
+}
+
+static void uhci_pool_destroy(dlist_head_t* pages) {
+    if (!pages) {
+        return;
+    }
+
+    dlist_head_t* it = pages->next;
+    while (it && it != pages) {
+        uhci_dma_page_t* p = container_of(it, uhci_dma_page_t, node);
+        it = it->next;
+
+        dlist_del(&p->node);
+
+        if (p->vaddr) {
+            dma_free_coherent(p->vaddr, PAGE_SIZE, p->phys);
+        }
+
+        kfree(p);
+    }
+}
 
 static inline uint16_t uhci_readw(uhci_hcd_impl_t* u, uint16_t reg) {
     uint16_t v = 0;
@@ -145,19 +258,16 @@ static int uhci_alloc_schedule(uhci_hcd_impl_t* u) {
         return 0;
     }
 
-    u->async_qh = (uhci_qh_t*)dma_alloc_coherent(sizeof(uhci_qh_t), &u->async_qh_phys);
-    if (!u->async_qh || !u->async_qh_phys) {
-        dma_free_coherent(u->frame_list, UHCI_FRAME_LIST_BYTES, u->frame_list_phys);
-        u->frame_list = 0;
-        u->frame_list_phys = 0;
-        return 0;
+    u->async_qh = 0;
+    u->async_qh_phys = 0;
+
+    {
+        uint32_t qh_phys = 0;
+        u->async_qh = uhci_qh_alloc(u, &qh_phys);
+        u->async_qh_phys = qh_phys;
     }
 
-    if ((u->async_qh_phys & 0xFu) != 0u) {
-        dma_free_coherent(u->async_qh, sizeof(uhci_qh_t), u->async_qh_phys);
-        u->async_qh = 0;
-        u->async_qh_phys = 0;
-
+    if (!u->async_qh || !u->async_qh_phys) {
         dma_free_coherent(u->frame_list, UHCI_FRAME_LIST_BYTES, u->frame_list_phys);
         u->frame_list = 0;
         u->frame_list_phys = 0;
@@ -179,20 +289,32 @@ static int uhci_alloc_schedule(uhci_hcd_impl_t* u) {
     return 1;
 }
 
-static uhci_td_t* uhci_td_alloc(uint32_t* out_phys) {
-    uint32_t phys = 0;
-    uhci_td_t* td = (uhci_td_t*)dma_alloc_coherent(sizeof(*td), &phys);
-    if (!td || !phys) {
+static uhci_td_t* uhci_td_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys) {
+    if (!u) {
         return 0;
     }
 
-    if ((phys & 0xFu) != 0u) {
-        dma_free_coherent(td, sizeof(*td), phys);
+    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
+
+    if (!u->td_free) {
+        if (!uhci_pool_grow(u, &u->td_pages, &u->td_free, sizeof(uhci_td_t))) {
+            spinlock_release_safe(&u->dma_pool_lock, flags);
+            return 0;
+        }
+    }
+
+    void* obj = uhci_pool_pop(&u->td_free);
+    spinlock_release_safe(&u->dma_pool_lock, flags);
+
+    if (!obj) {
         return 0;
     }
 
+    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
+    const uint32_t phys = l->phys;
+
+    uhci_td_t* td = (uhci_td_t*)obj;
     memset(td, 0, sizeof(*td));
-
     td->sw_phys = phys;
 
     if (out_phys) {
@@ -202,20 +324,46 @@ static uhci_td_t* uhci_td_alloc(uint32_t* out_phys) {
     return td;
 }
 
-static uhci_qh_t* uhci_qh_alloc(uint32_t* out_phys) {
-    uint32_t phys = 0;
-    uhci_qh_t* qh = (uhci_qh_t*)dma_alloc_coherent(sizeof(*qh), &phys);
-    if (!qh || !phys) {
+static void uhci_td_free(uhci_hcd_impl_t* u, uhci_td_t* td) {
+    if (!u || !td) {
+        return;
+    }
+
+    const uint32_t phys = td->sw_phys;
+    uhci_pool_link_t* l = (uhci_pool_link_t*)td;
+    l->phys = phys;
+
+    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
+    uhci_pool_push(&u->td_free, td);
+    spinlock_release_safe(&u->dma_pool_lock, flags);
+}
+
+static uhci_qh_t* uhci_qh_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys) {
+    if (!u) {
         return 0;
     }
 
-    if ((phys & 0xFu) != 0u) {
-        dma_free_coherent(qh, sizeof(*qh), phys);
+    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
+
+    if (!u->qh_free) {
+        if (!uhci_pool_grow(u, &u->qh_pages, &u->qh_free, sizeof(uhci_qh_t))) {
+            spinlock_release_safe(&u->dma_pool_lock, flags);
+            return 0;
+        }
+    }
+
+    void* obj = uhci_pool_pop(&u->qh_free);
+    spinlock_release_safe(&u->dma_pool_lock, flags);
+
+    if (!obj) {
         return 0;
     }
 
+    uhci_pool_link_t* l = (uhci_pool_link_t*)obj;
+    const uint32_t phys = l->phys;
+
+    uhci_qh_t* qh = (uhci_qh_t*)obj;
     memset(qh, 0, sizeof(*qh));
-
     qh->sw_phys = phys;
 
     if (out_phys) {
@@ -223,6 +371,20 @@ static uhci_qh_t* uhci_qh_alloc(uint32_t* out_phys) {
     }
 
     return qh;
+}
+
+static void uhci_qh_free(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
+    if (!u || !qh) {
+        return;
+    }
+
+    const uint32_t phys = qh->sw_phys;
+    uhci_pool_link_t* l = (uhci_pool_link_t*)qh;
+    l->phys = phys;
+
+    uint32_t flags = spinlock_acquire_safe(&u->dma_pool_lock);
+    uhci_pool_push(&u->qh_free, qh);
+    spinlock_release_safe(&u->dma_pool_lock, flags);
 }
 
 static void uhci_sched_insert_head_qh(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
@@ -306,14 +468,11 @@ static int uhci_wait_qh_done(uhci_qh_t* qh, uint32_t timeout_us) {
     }
 }
 
-static void uhci_td_chain_free(uhci_td_t* td) {
+static void uhci_td_chain_free_pool(uhci_hcd_impl_t* u, uhci_td_t* td) {
     while (td) {
         uhci_td_t* next = (uhci_td_t*)(uintptr_t)td->sw_next;
 
-        const uint32_t phys = td->sw_phys;
-
-        dma_free_coherent(td, sizeof(*td), phys);
-
+        uhci_td_free(u, td);
         td = next;
     }
 }
@@ -379,7 +538,7 @@ static int uhci_hcd_control_xfer(
     }
 
     uint32_t td_setup_phys = 0;
-    uhci_td_t* td_setup = uhci_td_alloc(&td_setup_phys);
+    uhci_td_t* td_setup = uhci_td_alloc(u, &td_setup_phys);
     if (!td_setup) {
         if (data_dma) {
             dma_free_coherent(data_dma, length, data_phys);
@@ -416,9 +575,9 @@ static int uhci_hcd_control_xfer(
         uint16_t pkt = remaining > ep0_mps ? ep0_mps : (uint16_t)remaining;
 
         uint32_t td_phys = 0;
-        uhci_td_t* td = uhci_td_alloc(&td_phys);
+        uhci_td_t* td = uhci_td_alloc(u, &td_phys);
         if (!td) {
-            uhci_td_chain_free(td_first);
+            uhci_td_chain_free_pool(u, td_first);
 
             if (data_dma) {
                 dma_free_coherent(data_dma, length, data_phys);
@@ -457,9 +616,9 @@ static int uhci_hcd_control_xfer(
     }
 
     uint32_t td_status_phys = 0;
-    uhci_td_t* td_status = uhci_td_alloc(&td_status_phys);
+    uhci_td_t* td_status = uhci_td_alloc(u, &td_status_phys);
     if (!td_status) {
-        uhci_td_chain_free(td_first);
+        uhci_td_chain_free_pool(u, td_first);
 
         if (data_dma) {
             dma_free_coherent(data_dma, length, data_phys);
@@ -493,9 +652,9 @@ static int uhci_hcd_control_xfer(
     td_status->buffer = 0;
 
     uint32_t qh_phys = 0;
-    uhci_qh_t* qh = uhci_qh_alloc(&qh_phys);
+    uhci_qh_t* qh = uhci_qh_alloc(u, &qh_phys);
     if (!qh) {
-        uhci_td_chain_free(td_first);
+        uhci_td_chain_free_pool(u, td_first);
 
         if (data_dma) {
             dma_free_coherent(data_dma, length, data_phys);
@@ -516,9 +675,9 @@ static int uhci_hcd_control_xfer(
 
     if (!ok) {
         qh->element = UHCI_PTR_T;
-        dma_free_coherent(qh, sizeof(*qh), qh_phys);
+        uhci_qh_free(u, qh);
 
-        uhci_td_chain_free(td_first);
+        uhci_td_chain_free_pool(u, td_first);
 
         if (data_dma) {
             dma_free_coherent(data_dma, length, data_phys);
@@ -550,9 +709,10 @@ static int uhci_hcd_control_xfer(
     }
 
     qh->element = UHCI_PTR_T;
-    dma_free_coherent(qh, sizeof(*qh), qh_phys);
 
-    uhci_td_chain_free(td_first);
+    uhci_qh_free(u, qh);
+
+    uhci_td_chain_free_pool(u, td_first);
 
     if (data_dma) {
         dma_free_coherent(data_dma, length, data_phys);
@@ -623,9 +783,9 @@ static int uhci_hcd_bulk_xfer(
         uint16_t pkt = remaining > max_packet ? max_packet : (uint16_t)remaining;
 
         uint32_t td_phys = 0;
-        uhci_td_t* td = uhci_td_alloc(&td_phys);
+        uhci_td_t* td = uhci_td_alloc(u, &td_phys);
         if (!td) {
-            uhci_td_chain_free(td_first);
+            uhci_td_chain_free_pool(u, td_first);
             dma_free_coherent(data_dma, length, data_phys);
             return -1;
         }
@@ -673,9 +833,9 @@ static int uhci_hcd_bulk_xfer(
     }
 
     uint32_t qh_phys = 0;
-    uhci_qh_t* qh = uhci_qh_alloc(&qh_phys);
+    uhci_qh_t* qh = uhci_qh_alloc(u, &qh_phys);
     if (!qh) {
-        uhci_td_chain_free(td_first);
+        uhci_td_chain_free_pool(u, td_first);
         dma_free_coherent(data_dma, length, data_phys);
         return -1;
     }
@@ -691,9 +851,9 @@ static int uhci_hcd_bulk_xfer(
 
     if (!ok) {
         qh->element = UHCI_PTR_T;
-        dma_free_coherent(qh, sizeof(*qh), qh_phys);
+        uhci_qh_free(u, qh);
 
-        uhci_td_chain_free(td_first);
+        uhci_td_chain_free_pool(u, td_first);
         dma_free_coherent(data_dma, length, data_phys);
 
         return -1;
@@ -742,9 +902,10 @@ static int uhci_hcd_bulk_xfer(
     }
 
     qh->element = UHCI_PTR_T;
-    dma_free_coherent(qh, sizeof(*qh), qh_phys);
 
-    uhci_td_chain_free(td_first);
+    uhci_qh_free(u, qh);
+
+    uhci_td_chain_free_pool(u, td_first);
     dma_free_coherent(data_dma, length, data_phys);
 
     return success ? (int)total : -1;
@@ -802,11 +963,11 @@ static void uhci_intr_pipe_free(uhci_hcd_impl_t* u, uhci_intr_pipe_t* p) {
 
         p->qh->element = UHCI_PTR_T;
 
-        dma_free_coherent(p->qh, sizeof(*p->qh), p->qh_phys);
+        uhci_qh_free(u, p->qh);
     }
 
     if (p->td) {
-        dma_free_coherent(p->td, sizeof(*p->td), p->td_phys);
+        uhci_td_free(u, p->td);
     }
 
     if (p->buf) {
@@ -865,8 +1026,8 @@ static usb_intr_pipe_t* uhci_hcd_intr_open(
 
     memset(p->buf, 0, p->ep_in_mps);
 
-    p->td = uhci_td_alloc(&p->td_phys);
-    p->qh = uhci_qh_alloc(&p->qh_phys);
+    p->td = uhci_td_alloc(u, &p->td_phys);
+    p->qh = uhci_qh_alloc(u, &p->qh_phys);
 
     if (!p->td || !p->qh) {
         uhci_intr_pipe_free(u, p);
@@ -1093,7 +1254,7 @@ static void uhci_destroy(uhci_hcd_impl_t* u) {
     }
 
     if (u->async_qh) {
-        dma_free_coherent(u->async_qh, sizeof(*u->async_qh), u->async_qh_phys);
+        uhci_qh_free(u, u->async_qh);
         u->async_qh = 0;
         u->async_qh_phys = 0;
     }
@@ -1103,6 +1264,9 @@ static void uhci_destroy(uhci_hcd_impl_t* u) {
         u->frame_list = 0;
         u->frame_list_phys = 0;
     }
+
+    uhci_pool_destroy(&u->td_pages);
+    uhci_pool_destroy(&u->qh_pages);
 
     if (u->regs) {
         pmio_release_region(u->regs);
@@ -1121,6 +1285,12 @@ static int uhci_probe(pci_device_t* pdev) {
     if (!u) {
         return -1;
     }
+
+    spinlock_init(&u->dma_pool_lock);
+    u->td_free = 0;
+    u->qh_free = 0;
+    dlist_init(&u->td_pages);
+    dlist_init(&u->qh_pages);
 
     u->pdev = pdev;
 
