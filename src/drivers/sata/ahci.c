@@ -120,6 +120,19 @@ static inline uint32_t ahci_read(ahci_hba_t* hba, uint32_t offset) {
     return ioread32(hba->iomem, offset);
 }
 
+static void ahci_bdev_destroy(block_device_t* bdev) {
+    if (!bdev) {
+        return;
+    }
+
+    if (bdev->name) {
+        kfree((void*)bdev->name);
+        bdev->name = 0;
+    }
+
+    kfree(bdev);
+}
+
 static inline void ahci_write(ahci_hba_t* hba, uint32_t offset, uint32_t value) {
     iowrite32(hba->iomem, offset, value);
 }
@@ -288,6 +301,8 @@ static int ahci_create_and_register_bdev(ahci_port_extended_t* ex) {
     bdev->ops = &g_ahci_bdev_ops;
     bdev->private_data = ex;
 
+    bdev->destroy = ahci_bdev_destroy;
+
     if (bdev_register(bdev) != 0) {
         kfree(name);
         kfree(bdev);
@@ -319,12 +334,7 @@ static void ahci_unregister_and_destroy_bdev(ahci_port_extended_t* ex) {
 
     idr_remove(&g_ahci_idr, ex->disk_id);
 
-    if (ex->bdev_name) {
-        kfree(ex->bdev_name);
-        ex->bdev_name = 0;
-    }
-
-    kfree(ex->bdev);
+    ex->bdev_name = 0;
     ex->bdev = 0;
 }
 
