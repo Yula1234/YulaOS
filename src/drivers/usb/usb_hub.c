@@ -24,6 +24,9 @@
 #define USB_HUB_FEATURE_PORT_POWER 8u
 
 #define USB_HUB_FEATURE_C_PORT_CONNECTION 16u
+#define USB_HUB_FEATURE_C_PORT_ENABLE 17u
+#define USB_HUB_FEATURE_C_PORT_SUSPEND 18u
+#define USB_HUB_FEATURE_C_PORT_OVER_CURRENT 19u
 #define USB_HUB_FEATURE_C_PORT_RESET 20u
 
 #define USB_HUB_PORT_STATUS_CONNECTION (1u << 0)
@@ -167,14 +170,33 @@ static void hub_handle_port_change(usb_hub_t* hub, uint8_t port) {
 
     const uint16_t ch = usb_le16_read(&st.wPortChange);
 
+    int connection_changed = 0;
+
     if (ch) {
         if (ch & (1u << 0)) {
             (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_CONNECTION);
+            connection_changed = 1;
+        }
+
+        if (ch & (1u << 1)) {
+            (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_ENABLE);
+        }
+
+        if (ch & (1u << 2)) {
+            (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_SUSPEND);
+        }
+
+        if (ch & (1u << 3)) {
+            (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_OVER_CURRENT);
         }
 
         if (ch & (1u << 4)) {
             (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_RESET);
         }
+    }
+
+    if (!connection_changed) {
+        return;
     }
 
     if (!hub_port_connected(&st)) {
@@ -186,6 +208,8 @@ static void hub_handle_port_change(usb_hub_t* hub, uint8_t port) {
     proc_usleep(60000);
 
     (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_RESET);
+
+    (void)hub_port_clear_feature(hub->dev, port, USB_HUB_FEATURE_C_PORT_ENABLE);
 
     memset(&st, 0, sizeof(st));
     if (!hub_port_get_status(hub->dev, port, &st)) {
