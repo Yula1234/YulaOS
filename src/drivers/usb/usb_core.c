@@ -15,10 +15,88 @@
 
 extern volatile uint32_t timer_ticks;
 
+typedef struct {
+    spinlock_t lock;
+    dlist_head_t list;
+} usb_intr_wrap_list_t;
+
+typedef struct {
+    usb_intr_pipe_t* pipe;
+    usb_device_t* dev;
+
+    usb_intr_cb_t cb;
+    void* cb_ctx;
+
+    uint32_t refs_;
+    int closing;
+
+    dlist_head_t node;
+} usb_intr_wrap_t;
+
+static usb_intr_wrap_list_t g_usb_intr_wraps = {
+    .lock = {0},
+    .list = {0},
+};
+
+static void usb_intr_wrap_init_once(void) {
+    static int inited = 0;
+    if (inited) {
+        return;
+    }
+
+    spinlock_init(&g_usb_intr_wraps.lock);
+    dlist_init(&g_usb_intr_wraps.list);
+
+    inited = 1;
+}
+
+static void usb_intr_wrap_get(usb_intr_wrap_t* w) {
+    if (!w) {
+        return;
+    }
+
+    __atomic_fetch_add(&w->refs_, 1u, __ATOMIC_RELAXED);
+}
+
+static void usb_intr_wrap_put(usb_intr_wrap_t* w) {
+    if (!w) {
+        return;
+    }
+
+    const uint32_t old = __atomic_fetch_sub(&w->refs_, 1u, __ATOMIC_ACQ_REL);
+    if (old != 1u) {
+        return;
+    }
+
+    if (w->dev) {
+        usb_device_put(w->dev);
+        w->dev = 0;
+    }
+
+    kfree(w);
+}
+
+static void usb_intr_trampoline(void* ctx, const uint8_t* data, uint32_t len) {
+    usb_intr_wrap_t* w = (usb_intr_wrap_t*)ctx;
+    if (!w) {
+        return;
+    }
+
+    usb_intr_wrap_get(w);
+
+    if (!__atomic_load_n(&w->closing, __ATOMIC_ACQUIRE) && w->cb) {
+        w->cb(w->cb_ctx, data, len);
+    }
+
+    usb_intr_wrap_put(w);
+}
+
 struct usb_device {
     usb_hcd_t* hcd;
 
     usb_device_info_t info;
+
+    uint32_t refs_;
 
     uint8_t root_port;
 
@@ -295,16 +373,49 @@ usb_intr_pipe_t* usb_device_intr_open(
         return 0;
     }
 
-    return dev->hcd->ops->intr_open(
+    if (!cb) {
+        return 0;
+    }
+
+    usb_intr_wrap_init_once();
+
+    usb_intr_wrap_t* w = (usb_intr_wrap_t*)kzalloc(sizeof(*w));
+    if (!w) {
+        return 0;
+    }
+
+    usb_device_get(dev);
+
+    w->dev = dev;
+    w->cb = cb;
+    w->cb_ctx = cb_ctx;
+
+    w->refs_ = 1u;
+    w->closing = 0;
+
+    usb_intr_pipe_t* pipe = dev->hcd->ops->intr_open(
         dev->hcd,
         dev->info.dev_addr,
         dev->info.speed,
         ep_num,
         max_packet,
         interval,
-        cb,
-        cb_ctx
+        usb_intr_trampoline,
+        w
     );
+
+    if (!pipe) {
+        usb_intr_wrap_put(w);
+        return 0;
+    }
+
+    w->pipe = pipe;
+
+    uint32_t flags = spinlock_acquire_safe(&g_usb_intr_wraps.lock);
+    dlist_add_tail(&w->node, &g_usb_intr_wraps.list);
+    spinlock_release_safe(&g_usb_intr_wraps.lock, flags);
+
+    return pipe;
 }
 
 void usb_device_intr_close(usb_device_t* dev, usb_intr_pipe_t* pipe) {
@@ -312,7 +423,31 @@ void usb_device_intr_close(usb_device_t* dev, usb_intr_pipe_t* pipe) {
         return;
     }
 
+    usb_intr_wrap_t* victim = 0;
+
+    uint32_t flags = spinlock_acquire_safe(&g_usb_intr_wraps.lock);
+    dlist_head_t* it = g_usb_intr_wraps.list.next;
+    while (it != &g_usb_intr_wraps.list) {
+        usb_intr_wrap_t* w = container_of(it, usb_intr_wrap_t, node);
+        it = it->next;
+
+        if (w->pipe == pipe) {
+            dlist_del(&w->node);
+            victim = w;
+            break;
+        }
+    }
+    spinlock_release_safe(&g_usb_intr_wraps.lock, flags);
+
+    if (victim) {
+        __atomic_store_n(&victim->closing, 1, __ATOMIC_RELEASE);
+    }
+
     dev->hcd->ops->intr_close(dev->hcd, pipe);
+
+    if (victim) {
+        usb_intr_wrap_put(victim);
+    }
 }
 
 static int usb_control(
@@ -405,6 +540,8 @@ static usb_device_t* usb_device_alloc(usb_hcd_t* hcd) {
     }
 
     dev->hcd = hcd;
+
+    dev->refs_ = 1u;
     return dev;
 }
 
@@ -419,6 +556,25 @@ static void usb_device_free(usb_device_t* dev) {
     }
 
     kfree(dev);
+}
+
+__attribute__((noinline)) void usb_device_get(usb_device_t* dev) {
+    if (!dev) {
+        return;
+    }
+
+    __atomic_fetch_add(&dev->refs_, 1u, __ATOMIC_RELAXED);
+}
+
+__attribute__((noinline)) void usb_device_put(usb_device_t* dev) {
+    if (!dev) {
+        return;
+    }
+
+    const uint32_t old = __atomic_fetch_sub(&dev->refs_, 1u, __ATOMIC_ACQ_REL);
+    if (old == 1u) {
+        usb_device_free(dev);
+    }
 }
 
 static int usb_fetch_full_config(
@@ -534,7 +690,7 @@ void usb_detach_device(usb_device_t* dev) {
 
     usb_class_disconnect(dev);
 
-    usb_device_free(dev);
+    usb_device_put(dev);
 }
 
 void usb_detach_child_device(usb_device_t* parent, uint8_t hub_port) {
@@ -574,7 +730,7 @@ void usb_detach_child_device(usb_device_t* parent, uint8_t hub_port) {
     }
 
     usb_class_disconnect(victim);
-    usb_device_free(victim);
+    usb_device_put(victim);
 }
 
 static usb_device_t* usb_find_root_device(usb_bus_t* bus, uint8_t root_port) {
@@ -617,7 +773,7 @@ static void usb_detach_root_port(usb_bus_t* bus, uint8_t port) {
     }
 
     usb_class_disconnect(victim);
-    usb_device_free(victim);
+    usb_device_put(victim);
 }
 
 static int usb_enumerate_new_device(
