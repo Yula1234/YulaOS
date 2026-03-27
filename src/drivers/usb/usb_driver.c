@@ -3,9 +3,14 @@
 #include <drivers/usb/usb_core.h>
 #include <drivers/usb/usb_hub.h>
 #include <drivers/usb/usb_hid_boot.h>
+#include <drivers/usb/usb_msc.h>
 
 static int usb_driver_init(void) {
     if (!usb_hub_init()) {
+        return 0;
+    }
+
+    if (!usb_msc_init()) {
         return 0;
     }
 
