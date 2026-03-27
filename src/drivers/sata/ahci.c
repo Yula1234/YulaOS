@@ -5,9 +5,9 @@
 #include <drivers/pci/pci.h>
 #include <drivers/driver.h>
 
+#include <mm/dma/api.h>
 #include <mm/iomem.h>
 #include <mm/heap.h>
-#include <mm/dma.h>
 
 #include <kernel/workqueue.h>
 #include <kernel/smp/cpu.h>
