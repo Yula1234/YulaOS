@@ -34,9 +34,22 @@ static int bdev_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void*
 static int bdev_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer);
 
 
+static void bdev_node_private_retain(void* private_data) {
+    bdev_retain((block_device_t*)private_data);
+}
+
+static void bdev_node_private_release(void* private_data) {
+    bdev_release((block_device_t*)private_data);
+}
+
+
 void bdev_retain(block_device_t* dev) {
     if (unlikely(!dev)) {
         return;
+    }
+
+    if (dev->private_retain && dev->private_data) {
+        dev->private_retain(dev->private_data);
     }
 
     __atomic_fetch_add(&dev->refs_, 1u, __ATOMIC_RELAXED);
@@ -47,9 +60,18 @@ void bdev_release(block_device_t* dev) {
         return;
     }
 
+    if (dev->private_release && dev->private_data) {
+        dev->private_release(dev->private_data);
+    }
+
     const uint32_t old_refs = __atomic_fetch_sub(&dev->refs_, 1u, __ATOMIC_ACQ_REL);
 
     if (old_refs == 1u) {
+        if (dev->destroy) {
+            dev->destroy(dev);
+            return;
+        }
+
         kfree(dev);
     }
 }
@@ -111,6 +133,10 @@ int bdev_register(block_device_t* dev) {
     }
 
     dev->refs_ = 1;
+
+    if (dev->private_retain && dev->private_data) {
+        dev->private_retain(dev->private_data);
+    }
 
     bdev_init_node_template(dev);
 
@@ -267,16 +293,15 @@ static void bdev_init_node_template(block_device_t* dev) {
 
     dev->node_template.ops = &g_bdev_vfs_ops;
     dev->node_template.private_data = dev;
+
+    dev->node_template.private_retain = bdev_node_private_retain;
+    dev->node_template.private_release = bdev_node_private_release;
 }
 
 static int bdev_vfs_open(vfs_node_t* node) {
     if (!node || !node->private_data) {
         return -1;
     }
-
-    block_device_t* dev = (block_device_t*)node->private_data;
-
-    bdev_retain(dev);
 
     return 0;
 }
@@ -285,10 +310,6 @@ static int bdev_vfs_close(vfs_node_t* node) {
     if (!node || !node->private_data) {
         return -1;
     }
-
-    block_device_t* dev = (block_device_t*)node->private_data;
-
-    bdev_release(dev);
 
     return 0;
 }

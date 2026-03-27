@@ -42,6 +42,11 @@ typedef struct block_device {
 
     void* private_data;
 
+    void (*private_retain)(void* private_data);
+    void (*private_release)(void* private_data);
+
+    void (*destroy)(struct block_device* dev);
+
     vfs_node_t node_template;
 
     uint32_t refs_;
