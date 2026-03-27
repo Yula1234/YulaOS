@@ -200,6 +200,32 @@ static inline void uhci_writel(uhci_hcd_impl_t* u, uint16_t reg, uint32_t v) {
     (void)pmio_writel(u->regs, reg, v);
 }
 
+static void uhci_wait_frame_advance(uhci_hcd_impl_t* u) {
+    if (!u || !u->regs) {
+        proc_usleep(1000);
+        return;
+    }
+
+    uint16_t start = 0;
+    (void)pmio_readw(u->regs, UHCI_REG_USBFRNUM, &start);
+
+    const uint16_t start_frame = (uint16_t)(start & 0x03FFu);
+
+    for (uint32_t waited = 0; waited < 2000u; waited += 50u) {
+        uint16_t cur = 0;
+        (void)pmio_readw(u->regs, UHCI_REG_USBFRNUM, &cur);
+
+        const uint16_t cur_frame = (uint16_t)(cur & 0x03FFu);
+        if (cur_frame != start_frame) {
+            return;
+        }
+
+        proc_usleep(50);
+    }
+
+    proc_usleep(1000);
+}
+
 static uint16_t uhci_port_reg(uint8_t port) {
     return port == 1 ? UHCI_REG_USBPORTSC1 : UHCI_REG_USBPORTSC2;
 }
@@ -673,6 +699,8 @@ static int uhci_hcd_control_xfer(
 
     uhci_sched_remove_qh(u, qh);
 
+    uhci_wait_frame_advance(u);
+
     if (!ok) {
         qh->element = UHCI_PTR_T;
         uhci_qh_free(u, qh);
@@ -849,6 +877,8 @@ static int uhci_hcd_bulk_xfer(
 
     uhci_sched_remove_qh(u, qh);
 
+    uhci_wait_frame_advance(u);
+
     if (!ok) {
         qh->element = UHCI_PTR_T;
         uhci_qh_free(u, qh);
@@ -960,6 +990,8 @@ static void uhci_intr_pipe_free(uhci_hcd_impl_t* u, uhci_intr_pipe_t* p) {
 
     if (p->qh) {
         uhci_sched_remove_qh(u, p->qh);
+
+        uhci_wait_frame_advance(u);
 
         p->qh->element = UHCI_PTR_T;
 
