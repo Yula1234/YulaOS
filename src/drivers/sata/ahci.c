@@ -14,6 +14,7 @@
 
 #include <lib/string.h>
 #include <lib/dlist.h>
+#include <lib/idr.h>
 
 #include <hal/delay.h>
 #include <hal/irq.h>
@@ -78,6 +79,8 @@ typedef struct {
     block_device_t* bdev;
     char* bdev_name;
 
+    uint32_t disk_id;
+
     ahci_hba_t* hba;
 } ahci_port_extended_t;
 
@@ -106,7 +109,8 @@ static spinlock_t g_ahci_hba_list_lock;
 
 static int g_ahci_async_mode = 0;
 
-static uint32_t g_ahci_disk_seq = 0;
+static idr_t g_ahci_idr;
+
 static block_device_t* g_ahci_first_bdev = 0;
 
 static void stop_cmd(ahci_hba_t* hba, int port_no);
@@ -263,9 +267,17 @@ static int ahci_create_and_register_bdev(ahci_port_extended_t* ex) {
         return 0;
     }
 
-    uint32_t disk_index = __sync_fetch_and_add(&g_ahci_disk_seq, 1u);
-    char* name = ahci_alloc_disk_name(disk_index);
+    int disk_id = idr_alloc(&g_ahci_idr, ex);
+    if (disk_id < 0) {
+        kfree(bdev);
+        return 0;
+    }
+
+    ex->disk_id = disk_id;
+
+    char* name = ahci_alloc_disk_name((uint32_t)disk_id);
     if (!name) {
+        idr_remove(&g_ahci_idr, disk_id);
         kfree(bdev);
         return 0;
     }
@@ -304,6 +316,8 @@ static void ahci_unregister_and_destroy_bdev(ahci_port_extended_t* ex) {
     if (g_ahci_first_bdev == ex->bdev) {
         g_ahci_first_bdev = 0;
     }
+
+    idr_remove(&g_ahci_idr, ex->disk_id);
 
     if (ex->bdev_name) {
         kfree(ex->bdev_name);
@@ -1362,8 +1376,11 @@ static pci_driver_t g_ahci_pci_driver = {
 };
 
 static int ahci_driver_init(void) {
-    dlist_init(&g_ahci_hba_list);
     spinlock_init(&g_ahci_hba_list_lock);
+
+    dlist_init(&g_ahci_hba_list);
+
+    idr_init(&g_ahci_idr);
 
     return pci_register_driver(&g_ahci_pci_driver);
 }

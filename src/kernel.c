@@ -298,7 +298,7 @@ static void kmain_devices_init(void) {
 }
 
 static void kmain_fs_init(void) {
-    block_device_t* root_bdev = bdev_find_by_name("sd0");
+    block_device_t* root_bdev = bdev_find_by_name("sd1");
 
     if (!root_bdev) {
         root_bdev = bdev_first();
