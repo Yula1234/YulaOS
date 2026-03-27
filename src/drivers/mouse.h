@@ -29,6 +29,7 @@ void mouse_init(void);
 void mouse_handler(void);
 void mouse_process_byte(uint8_t data);
 void mouse_irq_handler(registers_t* regs);
+void mouse_inject_delta(int dx, int dy, int buttons);
 
 void mouse_wait(uint8_t type);
 void mouse_write(uint8_t a);

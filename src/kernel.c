@@ -14,7 +14,6 @@
 #include <drivers/fbdev.h>
 #include <drivers/gpu0.h>
 #include <drivers/ne2k.h>
-#include <drivers/uhci.h>
 #include <drivers/acpi.h>
 #include <drivers/vga.h>
 
@@ -65,12 +64,6 @@ extern uint32_t kernel_end;
 extern void put_pixel(int x, int y, uint32_t color);
 
 extern void smp_boot_aps(void);
-
-#ifndef ENABLE_UHCI
-#define ENABLE_UHCI 1
-#endif
-
-static int g_enable_uhci = ENABLE_UHCI;
 
 typedef struct {
     uint32_t mod_start;
@@ -148,10 +141,6 @@ static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
 
     lapic_init();
     lapic_timer_init(KERNEL_TIMER_HZ);
-
-    if (g_enable_uhci) {
-        uhci_quiesce_early();
-    }
 }
 
 static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
@@ -373,10 +362,6 @@ static void kmain_smp_init(void) {
 }
 
 static void kmain_spawn_service_tasks(void) {
-    if (g_enable_uhci) {
-        proc_spawn_kthread("uhci", PRIO_LOW, uhci_late_init_task, 0);
-    }
-
     proc_spawn_kthread("rcu", PRIO_LOW, rcu_gc_task, 0);
 
     proc_spawn_kthread("reaper", PRIO_HIGH, reaper_task_func, 0);

@@ -1,0 +1,14 @@
+#ifndef DRIVERS_USB_USB_HUB_H
+#define DRIVERS_USB_USB_HUB_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int usb_hub_init(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

@@ -197,6 +197,37 @@ static vfs_ops_t mouse_ops = {
 
 static vfs_node_t mouse_node = { .name = "mouse", .ops = &mouse_ops, .size = sizeof(mouse_state_t) };
 
+void mouse_inject_delta(int dx, int dy, int buttons) {
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+
+    mouse_buttons = buttons & 0x07;
+
+    mouse_x += dx;
+    mouse_y += dy;
+
+    int max_w = (int)fb_width;
+    int max_h = (int)fb_height;
+    if (virtio_gpu_is_active()) {
+        const virtio_gpu_fb_t* fb = virtio_gpu_get_fb();
+        if (fb && fb->width > 0u && fb->height > 0u) {
+            max_w = (int)fb->width;
+            max_h = (int)fb->height;
+        }
+    }
+    if (max_w < 1) max_w = 1;
+    if (max_h < 1) max_h = 1;
+
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
+    if (mouse_x >= max_w) mouse_x = max_w - 1;
+    if (mouse_y >= max_h) mouse_y = max_h - 1;
+
+    __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory");
+
+    poll_waitq_wake_all(&mouse_poll_waitq);
+}
+
 void mouse_vfs_init(void) {
     poll_waitq_init(&mouse_poll_waitq);
     devfs_register(&mouse_node);

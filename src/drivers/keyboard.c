@@ -142,6 +142,18 @@ static void send_key_to_focused(char code) {
     kbd_put_char(code);
 }
 
+void kbd_inject_char(char c) {
+    if (!c) {
+        return;
+    }
+
+    kbd_put_char(c);
+}
+
+void kbd_inject_scancode(uint8_t scancode) {
+    kbd_handle_scancode(scancode);
+}
+
 void kbd_handle_scancode(uint8_t scancode) {
     char send_code = 0;
     char send_code_term0 = 0;

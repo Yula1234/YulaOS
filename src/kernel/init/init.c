@@ -10,7 +10,6 @@
 #include <kernel/proc.h>
 
 #include <drivers/pc_speaker.h>
-#include <drivers/uhci.h>
 #include <drivers/vga.h>
 
 #include <fs/yulafs.h>
@@ -146,12 +145,6 @@ void init_task(void* arg) {
     pc_speaker_beep();
 
     init_task_spawn_shell_loop(self, tty);
-}
-
-void uhci_late_init_task(void* arg) {
-    (void)arg;
-    uhci_init();
-    uhci_late_init();
 }
 
 void idle_task_func(void* arg) {

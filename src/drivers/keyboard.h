@@ -20,6 +20,8 @@ void kbd_init(void);
 void kbd_handle_scancode(uint8_t scancode);
 void keyboard_irq_handler(registers_t* regs);
 int  kbd_try_read_char(char* out);
+void kbd_inject_char(char c);
+void kbd_inject_scancode(uint8_t scancode);
 
 void kbd_vfs_init();
 
