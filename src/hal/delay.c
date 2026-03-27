@@ -50,10 +50,16 @@ void hal_calibrate_tsc_hz(void) {
 
     const uint64_t t0 = rdtsc_read();
 
+    uint16_t last_count = 0xFFFFu;
+
     for (;;) {
-        if (pit_read_counter0() == 0u) {
+        const uint16_t count = pit_read_counter0();
+
+        if (count > last_count) {
             break;
         }
+
+        last_count = count;
 
         __asm__ volatile("pause" ::: "memory");
     }
