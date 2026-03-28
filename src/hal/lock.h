@@ -12,28 +12,13 @@
 #include <stdint.h>
 
 #include <kernel/locking/spinlock.h>
+#include <kernel/locking/sem.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct task;
-
-typedef struct {
-    volatile int count;
-
-    spinlock_t lock;
-    
-    dlist_head_t wait_list;
-} semaphore_t;
-
-void sem_init(semaphore_t* sem, int init_count);
-void sem_reset(semaphore_t* sem, int value);
-void sem_wait(semaphore_t* sem);
-int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick);
-void sem_signal(semaphore_t* sem);
-void sem_signal_all(semaphore_t* sem);
-int sem_try_acquire(semaphore_t* sem);
 
 typedef struct {
     semaphore_t sem;
