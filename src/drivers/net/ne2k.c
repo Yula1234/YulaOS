@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <hal/io.h>
-#include <hal/pmio.h>
 #include <hal/lock.h>
-
-#include <drivers/ne2k.h>
+#include <hal/pmio.h>
+#include <hal/io.h>
 
 #include <kernel/proc.h>
 
@@ -15,6 +13,7 @@
 
 #include <fs/vfs.h>
 
+#include "ne2k.h"
 
 #define NE2K_REG_CR     0x00u
 #define NE2K_REG_PSTART 0x01u

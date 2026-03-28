@@ -10,10 +10,10 @@
 #include <drivers/block/bdev.h>
 #include <drivers/pc_speaker.h>
 #include <drivers/sata/ahci.h>
+#include <drivers/net/ne2k.h>
 #include <drivers/driver.h>
 #include <drivers/fbdev.h>
 #include <drivers/gpu0.h>
-#include <drivers/ne2k.h>
 #include <drivers/acpi.h>
 #include <drivers/vga.h>
 
