@@ -9,7 +9,7 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 
-#include <drivers/pc_speaker.h>
+#include <drivers/audio/pc_speaker.h>
 #include <drivers/vga.h>
 
 #include <fs/yulafs.h>

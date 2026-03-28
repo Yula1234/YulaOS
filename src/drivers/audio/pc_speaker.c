@@ -4,9 +4,9 @@
 #include <hal/delay.h>
 #include <hal/pmio.h>
 
-#include <drivers/pc_speaker.h>
-
 #include <lib/compiler.h>
+
+#include "pc_speaker.h"
 
 #define PIT_FREQUENCY      1193180u
 

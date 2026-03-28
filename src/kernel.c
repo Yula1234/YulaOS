@@ -2,13 +2,13 @@
 // Copyright (C) 2025 Yula1234
 
 #include <drivers/serial/serial_core.h>
+#include <drivers/audio/pc_speaker.h>
 #include <drivers/serial/ns16550.h>
 #include <drivers/input/keyboard.h>
 #include <drivers/serial/ttyS0.h>
 #include <drivers/virtio/vgpu.h>
 #include <drivers/input/mouse.h>
 #include <drivers/block/bdev.h>
-#include <drivers/pc_speaker.h>
 #include <drivers/sata/ahci.h>
 #include <drivers/net/ne2k.h>
 #include <drivers/driver.h>
