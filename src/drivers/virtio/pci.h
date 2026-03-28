@@ -8,6 +8,8 @@
 
 #include <drivers/pci/pci.h>
 
+#include <kernel/workqueue.h>
+
 #include <mm/iomem.h>
 
 #include <stdint.h>
@@ -20,6 +22,9 @@ typedef struct {
     pci_device_t* pci;
 
     __iomem* bar_iomem[6];
+
+    work_struct_t irq_work;
+    workqueue_t* wq;
 
     uint8_t common_bar;
     uint32_t common_off;

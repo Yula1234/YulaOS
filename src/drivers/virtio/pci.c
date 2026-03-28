@@ -17,6 +17,7 @@
 
 #include <kernel/smp/cpu.h>
 
+#include <lib/dlist.h>
 #include <lib/string.h>
 
 #include <stddef.h>
@@ -105,6 +106,20 @@ static __iomem* vpci_device_cfg_io(virtio_pci_dev_t* dev) {
     }
 
     return vpci_bar_io(dev, dev->device_cfg_bar);
+}
+
+static void virtio_pci_irq_bh(work_struct_t* work) {
+    virtio_pci_dev_t* dev = container_of(work, virtio_pci_dev_t, irq_work);
+    if (!dev) {
+        return;
+    }
+
+    for (uint32_t q = 0; q < dev->queue_count; q++) {
+        virtqueue_t* vq = (virtqueue_t*)dev->queues[q];
+        if (vq) {
+            virtqueue_handle_irq(vq);
+        }
+    }
 }
 
 static spinlock_t g_virtio_devs_lock;
@@ -501,11 +516,8 @@ void virtio_pci_irq_handler(registers_t* regs) {
             continue;
         }
 
-        for (uint32_t q = 0; q < dev->queue_count; q++) {
-            virtqueue_t* vq = (virtqueue_t*)dev->queues[q];
-            if (vq) {
-                virtqueue_handle_irq(vq);
-            }
+        if (dev->wq) {
+            queue_work(dev->wq, &dev->irq_work);
         }
     }
 
@@ -639,7 +651,7 @@ static int virtio_pci_probe(pci_device_t* pdev) {
         return -1;
     }
 
-    virtio_pci_dev_t* p = kmalloc(sizeof(*p));
+    virtio_pci_dev_t* p = kzalloc(sizeof(*p));
     if (!p) {
         return -1;
     }
@@ -648,7 +660,17 @@ static int virtio_pci_probe(pci_device_t* pdev) {
 
     p->pci = pdev;
 
+    init_work(&p->irq_work, virtio_pci_irq_bh);
+
+    p->wq = create_workqueue("virtiopci");
+    if (!p->wq) {
+        kfree(p);
+        return -1;
+    }
+
     if (!virtio_pci_map_modern_caps(p)) {
+        destroy_workqueue(p->wq);
+        p->wq = 0;
         kfree(p);
         return -1;
     }
@@ -658,6 +680,10 @@ static int virtio_pci_probe(pci_device_t* pdev) {
     virtio_device_t* v = kmalloc(sizeof(*v));
     if (!v) {
         virtio_pci_free_all_bars(p);
+
+        destroy_workqueue(p->wq);
+        p->wq = 0;
+
         kfree(p);
         return -1;
     }
@@ -672,6 +698,10 @@ static int virtio_pci_probe(pci_device_t* pdev) {
     const int rc = virtio_register_device(v);
     if (rc != 0) {
         virtio_pci_free_all_bars(p);
+
+        destroy_workqueue(p->wq);
+        p->wq = 0;
+
         kfree(v);
         kfree(p);
         return -1;
