@@ -9,7 +9,7 @@ typedef void (*irq_handler_t)(registers_t* regs, void* ctx);
 extern "C" {
 #endif
 
-static inline uint32_t get_eflags(void) {
+__attribute__((always_inline)) static inline uint32_t get_eflags(void) {
     uint32_t eflags = 0u;
 
     __asm__ volatile("pushfl; popl %0" : "=r"(eflags) : : "memory");
@@ -17,15 +17,15 @@ static inline uint32_t get_eflags(void) {
     return eflags;
 }
 
-static inline void irq_disable(void) {
+__attribute__((always_inline)) static inline void irq_disable(void) {
     __asm__ volatile("cli" ::: "memory");
 }
 
-static inline void irq_enable(void) {
+__attribute__((always_inline)) static inline void irq_enable(void) {
     __asm__ volatile("sti" ::: "memory");
 }
 
-static inline uint32_t irq_save(void) {
+__attribute__((always_inline)) static inline uint32_t irq_save(void) {
     uint32_t flags;
 
     __asm__ volatile(
@@ -40,7 +40,7 @@ static inline uint32_t irq_save(void) {
     return flags;
 }
 
-static inline void irq_restore(uint32_t flags) {
+__attribute__((always_inline)) static inline void irq_restore(uint32_t flags) {
     __asm__ volatile(
         "pushl %0\n\t"
         "popfl"

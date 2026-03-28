@@ -58,11 +58,6 @@ static inline uint32_t irq_save_disable(void) {
     return flags;
 }
 
-__attribute__((always_inline))
-static inline void irq_restore(uint32_t flags) {
-    __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory", "cc");
-}
-
 static int check_user_buffer_writable_present(task_t* task, void* buf, uint32_t size);
 
 static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
