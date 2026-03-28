@@ -970,7 +970,7 @@ static int virtio_gpu_probe(virtio_device_t* vdev) {
     g_vgpu.fb.size_bytes = (uint32_t)size64;
 
     uint32_t fb_phys = 0u;
-    void* fb_virt = dma_alloc_coherent(g_vgpu.fb.size_bytes, &fb_phys);
+    void* fb_virt = dma_alloc_coherent_wc(g_vgpu.fb.size_bytes, &fb_phys);
     if (!fb_virt || fb_phys == 0u) {
         vgpu_cleanup_state();
         return -1;
