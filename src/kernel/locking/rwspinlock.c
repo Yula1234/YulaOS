@@ -4,6 +4,7 @@
 #include <lib/compiler.h>
 
 #include <hal/cpu.h>
+#include <hal/irq.h>
 
 #include "rwspinlock.h"
 
@@ -106,16 +107,7 @@ void rwspinlock_release_write(rwspinlock_t* rw) {
 }
 
 uint32_t rwspinlock_acquire_read_safe(rwspinlock_t* rw) {
-    uint32_t flags;
-
-    __asm__ volatile(
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "cli"
-        : "=r"(flags)
-        :
-        : "memory"
-    );
+    uint32_t flags = irq_save();
 
     rwspinlock_acquire_read(rw);
 
@@ -126,21 +118,12 @@ void rwspinlock_release_read_safe(rwspinlock_t* rw, uint32_t flags) {
     rwspinlock_release_read(rw);
 
     if (flags & 0x200u) {
-        __asm__ volatile("sti");
+        irq_enable();
     }
 }
 
 uint32_t rwspinlock_acquire_write_safe(rwspinlock_t* rw) {
-    uint32_t flags;
-
-    __asm__ volatile(
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "cli"
-        : "=r"(flags)
-        :
-        : "memory"
-    );
+    uint32_t flags = irq_save();
 
     rwspinlock_acquire_write(rw);
 
@@ -151,7 +134,7 @@ void rwspinlock_release_write_safe(rwspinlock_t* rw, uint32_t flags) {
     rwspinlock_release_write(rw);
 
     if (flags & 0x200u) {
-        __asm__ volatile("sti");
+        irq_enable();
     }
 }
 
@@ -242,16 +225,7 @@ void percpu_rwspinlock_release_write(percpu_rwspinlock_t* rw) {
 }
 
 uint32_t percpu_rwspinlock_acquire_read_safe(percpu_rwspinlock_t* rw) {
-    uint32_t flags;
-
-    __asm__ volatile(
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "cli"
-        : "=r"(flags)
-        :
-        : "memory"
-    );
+    uint32_t flags = irq_save();
 
     percpu_rwspinlock_acquire_read(rw);
 
@@ -262,21 +236,12 @@ void percpu_rwspinlock_release_read_safe(percpu_rwspinlock_t* rw, uint32_t flags
     percpu_rwspinlock_release_read(rw);
 
     if (flags & 0x200u) {
-        __asm__ volatile("sti");
+        irq_enable();
     }
 }
 
 uint32_t percpu_rwspinlock_acquire_write_safe(percpu_rwspinlock_t* rw) {
-    uint32_t flags;
-
-    __asm__ volatile(
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "cli"
-        : "=r"(flags)
-        :
-        : "memory"
-    );
+    uint32_t flags = irq_save();
 
     percpu_rwspinlock_acquire_write(rw);
 
@@ -287,6 +252,6 @@ void percpu_rwspinlock_release_write_safe(percpu_rwspinlock_t* rw, uint32_t flag
     percpu_rwspinlock_release_write(rw);
 
     if (flags & 0x200u) {
-        __asm__ volatile("sti");
+        irq_enable();
     }
 }
