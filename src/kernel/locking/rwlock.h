@@ -14,23 +14,6 @@
 extern "C" {
 #endif
 
-/*
- * Modern Reader-Writer Lock Implementation.
- *
- * This implementation provides a scalable, sleeping reader-writer lock.
- * It uses a single atomic 32-bit integer for state tracking to allow
- * lock-free fast paths, backed by explicit wait queues for the slow path.
- *
- * The lock exhibits strict Writer Preference: if a writer is waiting, new
- * readers will not be granted the lock, preventing writer starvation under
- * heavy read workloads.
- *
- * State bit layout:
- *  - Bit 31: RWLOCK_WRITER (a writer currently holds the lock).
- *  - Bit 30: RWLOCK_WAITING_WRITER (one or more writers are queued).
- *  - Bit 29: RWLOCK_WAITING_READER (one or more readers are queued).
- *  - Bits 0-28: Active reader count.
- */
 typedef struct {
     volatile uint32_t state_;
     volatile uintptr_t writer_owner_;
