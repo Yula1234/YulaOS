@@ -14,25 +14,13 @@
 #include <kernel/locking/spinlock.h>
 #include <kernel/locking/sem.h>
 #include <kernel/locking/mutex.h>
+#include <kernel/locking/rwlock.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct task;
-
-typedef struct {
-    semaphore_t lock;
-    semaphore_t write_sem;
-    semaphore_t turnstile;
-    int readers;
-} rwlock_t;
-
-void rwlock_init(rwlock_t* rw);
-void rwlock_acquire_read(rwlock_t* rw);
-void rwlock_release_read(rwlock_t* rw);
-void rwlock_acquire_write(rwlock_t* rw);
-void rwlock_release_write(rwlock_t* rw);
 
 typedef struct {
     volatile uint32_t state;
