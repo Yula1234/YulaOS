@@ -34,7 +34,7 @@ static uint32_t size_to_order(size_t size) {
     return order;
 }
 
-void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags) {
+__attribute__((always_inline)) static inline void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags) {
     if (size == 0u || !out_phys) {
         return 0;
     }
