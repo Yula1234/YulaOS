@@ -13,32 +13,13 @@
 
 #include <kernel/locking/spinlock.h>
 #include <kernel/locking/sem.h>
+#include <kernel/locking/mutex.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct task;
-
-typedef struct {
-    semaphore_t sem;
-} mutex_t;
-
-static inline void mutex_init(mutex_t* m) {
-    sem_init(&m->sem, 1);
-}
-
-static inline void mutex_lock(mutex_t* m) {
-    sem_wait(&m->sem);
-}
-
-static inline void mutex_unlock(mutex_t* m) {
-    sem_signal(&m->sem);
-}
-
-static inline int mutex_try_lock(mutex_t* m) {
-    return sem_try_acquire(&m->sem);
-}
 
 typedef struct {
     semaphore_t lock;
