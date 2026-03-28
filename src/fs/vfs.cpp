@@ -11,6 +11,7 @@ extern "C" {
 
 #include <kernel/proc.h>
 #include <kernel/uaccess/uaccess.h>
+#include <kernel/panic.h>
 #include <hal/lock.h>
 #include <arch/i386/paging.h>
 #include <mm/heap.h>

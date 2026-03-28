@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
 
-#include <drivers/vga.h>
+#include <drivers/fbdev.h>
+
 #include <lib/string.h>
 #include <lib/dlist.h>
 #include <fs/yulafs.h>
@@ -17,7 +18,6 @@
 #include <hal/io.h>
 #include <hal/simd.h>
 #include <hal/apic.h>
-#include <drivers/fbdev.h>
 #include <kernel/input_focus.h>
 
 #include <lib/hash_map.h>
@@ -28,16 +28,17 @@
 
 #include "sched.h"
 #include "proc.h"
-#include <kernel/sched.h>
+#include "elf.h"
+#include "syscall.h"
+#include "panic.h"
+
 #include <kernel/smp/mb.h>
 #include <kernel/output/kprintf.h>
 #include <kernel/term/term.h>
 #include <kernel/tty/tty_service.h>
 #include <kernel/tty/tty_internal.h>
 #include <kernel/waitq/poll_waitq.h>
-#include <kernel/syscall.h>
 #include <kernel/futex/futex.h>
-#include "elf.h"
 #include <kernel/smp/cpu.h>
 
 #define PID_L2_BITS 10

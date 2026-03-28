@@ -3,6 +3,7 @@
 
 #include <kernel/waitq/poll_waitq.h>
 #include <kernel/sched.h>
+#include <kernel/panic.h>
 #include <kernel/proc.h>
 
 #include <lib/string.h>

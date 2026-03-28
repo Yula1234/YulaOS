@@ -1,27 +1,30 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include "yulafs.h"
-#include "bcache.h"
-
-#include "../drivers/block/bdev.h"
-#include "../drivers/vga.h"
-
-#include "../kernel/proc.h"
-#include "../kernel/panic.h"
-#include "../kernel/output/kprintf.h"
-#include "../lib/string.h"
-#include "../mm/heap.h"
-
-#include <hal/lock.h>
+#include <kernel/output/kprintf.h>
 #include <kernel/smp/cpu.h>
+#include <kernel/panic.h>
+#include <kernel/proc.h>
+
+#include <lib/cpp/unique_ptr.h>
+#include <lib/cpp/semaphore.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/mutex.h>
-#include <lib/cpp/semaphore.h>
-#include <lib/cpp/unique_ptr.h>
-#include <lib/rbtree.h>
 
 #include <lib/hash_map.h>
+#include <lib/string.h>
+#include <lib/rbtree.h>
+
+#include <drivers/block/bdev.h>
+#include <drivers/vga.h>
+
+#include <hal/lock.h>
+#include <hal/cpu.h>
+
+#include <mm/heap.h>
+
+#include "yulafs.h"
+#include "bcache.h"
 
 #define PTRS_PER_BLOCK (YFS_BLOCK_SIZE / 4)
 #define BLOCKS_PER_GROUP (YFS_BLOCK_SIZE * 8)
