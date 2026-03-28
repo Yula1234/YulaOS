@@ -364,6 +364,14 @@ int usb_cancel_urb(usb_device_t* dev, usb_urb_t* urb) {
     return dev->hcd->ops->cancel_urb(dev->hcd, urb);
 }
 
+void usb_device_endpoint_reset(usb_device_t* dev, uint8_t ep_addr) {
+    if (!dev || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->endpoint_reset) {
+        return;
+    }
+
+    dev->hcd->ops->endpoint_reset(dev->hcd, dev->info.dev_addr, ep_addr);
+}
+
 int usb_device_control_xfer(
     usb_device_t* dev,
     const usb_setup_packet_t* setup,
@@ -849,6 +857,13 @@ void usb_detach_device(usb_device_t* dev) {
         return;
     }
 
+    usb_hcd_t* hcd = dev->hcd;
+    const uint8_t dev_addr = dev->info.dev_addr;
+
+    if (hcd && hcd->ops && hcd->ops->device_unplug) {
+        hcd->ops->device_unplug(hcd, dev_addr);
+    }
+
     usb_bus_t* bus = usb_bus_find(dev->hcd);
     if (!bus) {
         return;
@@ -892,6 +907,10 @@ void usb_detach_child_device(usb_device_t* parent, uint8_t hub_port) {
     }
 
     if (victim) {
+        if (parent->hcd && parent->hcd->ops && parent->hcd->ops->device_unplug) {
+            parent->hcd->ops->device_unplug(parent->hcd, victim->info.dev_addr);
+        }
+
         dlist_del(&victim->node);
         usb_addr_clear(bus, victim->info.dev_addr);
     }
@@ -935,6 +954,10 @@ static void usb_detach_root_port(usb_bus_t* bus, uint8_t port) {
 
     victim = usb_find_root_device(bus, port);
     if (victim) {
+        if (bus->hcd && bus->hcd->ops && bus->hcd->ops->device_unplug) {
+            bus->hcd->ops->device_unplug(bus->hcd, victim->info.dev_addr);
+        }
+
         dlist_del(&victim->node);
         usb_addr_clear(bus, victim->info.dev_addr);
     }
@@ -1047,6 +1070,21 @@ static int usb_enumerate_new_device(
     lock_flags = spinlock_acquire_safe(&bus->lock);
     dlist_add_tail(&dev->node, &bus->dev_list);
     spinlock_release_safe(&bus->lock, lock_flags);
+
+    if (hcd->ops->device_address) {
+        const int addr_rc = hcd->ops->device_address(hcd, dev);
+        if (addr_rc != 0) {
+            lock_flags = spinlock_acquire_safe(&bus->lock);
+            dlist_del(&dev->node);
+            usb_addr_clear(bus, addr);
+            spinlock_release_safe(&bus->lock, lock_flags);
+
+            kfree(cfg_buf);
+            usb_device_put(dev);
+
+            return 0;
+        }
+    }
 
     usb_try_probe_classes(dev);
 

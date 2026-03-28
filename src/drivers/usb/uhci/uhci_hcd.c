@@ -1506,6 +1506,59 @@ static int uhci_hcd_root_port_reset(usb_hcd_t* hcd, uint8_t port) {
     return ((st & UHCI_PORTSC_CCS) != 0u) && ((st & UHCI_PORTSC_PE) != 0u);
 }
 
+static int uhci_hcd_device_address(usb_hcd_t* hcd, struct usb_device* dev) {
+    (void)hcd;
+    (void)dev;
+
+    return 0;
+}
+
+static void uhci_hcd_device_unplug(usb_hcd_t* hcd, uint8_t dev_addr) {
+    uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
+    if (!u || dev_addr == 0u) {
+        return;
+    }
+
+    dlist_head_t cancel;
+    dlist_init(&cancel);
+
+    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
+
+    dlist_head_t* it = u->xfer_waits.next;
+    while (it != &u->xfer_waits) {
+        uhci_wait_entry_t* e = container_of(it, uhci_wait_entry_t, node);
+        it = it->next;
+
+        if (!e->urb || e->urb->dev_addr != dev_addr) {
+            continue;
+        }
+
+        dlist_del(&e->node);
+        dlist_add_tail(&e->node, &cancel);
+    }
+
+    spinlock_release_safe(&u->sync_lock, flags);
+
+    while (!dlist_empty(&cancel)) {
+        uhci_wait_entry_t* e = container_of(cancel.next, uhci_wait_entry_t, node);
+
+        dlist_del(&e->node);
+        uhci_complete_urb(u, e, 1);
+    }
+
+    for (uint32_t i = 0u; i < (uint32_t)(sizeof(u->intr_pipes) / sizeof(u->intr_pipes[0])); i++) {
+        if (u->intr_pipes[i].used && u->intr_pipes[i].addr == dev_addr) {
+            uhci_intr_pipe_free(u, &u->intr_pipes[i]);
+        }
+    }
+}
+
+static void uhci_hcd_endpoint_reset(usb_hcd_t* hcd, uint8_t dev_addr, uint8_t ep_addr) {
+    (void)hcd;
+    (void)dev_addr;
+    (void)ep_addr;
+}
+
 static const usb_hcd_ops_t g_uhci_hcd_ops = {
     .start = uhci_hcd_start,
     .stop = uhci_hcd_stop,
@@ -1516,6 +1569,10 @@ static const usb_hcd_ops_t g_uhci_hcd_ops = {
 
     .submit_urb = uhci_hcd_submit_urb,
     .cancel_urb = uhci_hcd_cancel_urb,
+
+    .device_address = uhci_hcd_device_address,
+    .device_unplug = uhci_hcd_device_unplug,
+    .endpoint_reset = uhci_hcd_endpoint_reset,
 
     .intr_open = uhci_hcd_intr_open,
     .intr_close = uhci_hcd_intr_close,

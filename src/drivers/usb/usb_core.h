@@ -57,6 +57,12 @@ int usb_submit_urb(usb_device_t* dev, usb_urb_t* urb);
 
 int usb_cancel_urb(usb_device_t* dev, usb_urb_t* urb);
 
+/*
+ * Notify the host controller after CLEAR_FEATURE(ENDPOINT_HALT) so it can drop any
+ * internal DATA0/DATA1 state. ep_addr is the USB endpoint address (same as wIndex).
+ */
+void usb_device_endpoint_reset(usb_device_t* dev, uint8_t ep_addr);
+
 int usb_device_control_xfer(
     usb_device_t* dev,
     const usb_setup_packet_t* setup,

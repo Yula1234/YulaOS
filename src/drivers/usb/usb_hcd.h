@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+struct usb_device;
+
 typedef struct usb_hcd usb_hcd_t;
 
 typedef struct {
@@ -33,6 +35,24 @@ typedef struct {
     int (*submit_urb)(usb_hcd_t* hcd, usb_urb_t* urb);
 
     int (*cancel_urb)(usb_hcd_t* hcd, usb_urb_t* urb);
+
+    /*
+     * Called after the device is enumerated and has a valid address on the bus.
+     * xHCI uses this to assign a device slot; may return a negative errno-style value.
+     */
+    int (*device_address)(usb_hcd_t* hcd, struct usb_device* dev);
+
+    /*
+     * Called when the device is disconnected; release controller state for dev_addr
+     * (cancel in-flight transfers, drop endpoint contexts, etc.).
+     */
+    void (*device_unplug)(usb_hcd_t* hcd, uint8_t dev_addr);
+
+    /*
+     * Host-controller hook after CLEAR_FEATURE(ENDPOINT_HALT). ep_addr is the USB
+     * endpoint address (wIndex: number in bits 0–3, direction in bit 7).
+     */
+    void (*endpoint_reset)(usb_hcd_t* hcd, uint8_t dev_addr, uint8_t ep_addr);
 
     usb_intr_pipe_t* (*intr_open)(
         usb_hcd_t* hcd,

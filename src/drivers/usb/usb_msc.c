@@ -158,7 +158,12 @@ static int usb_msc_clear_halt(usb_device_t* dev, uint8_t ep_addr) {
     setup.wIndex = ep_addr;
     setup.wLength = 0;
 
-    return usb_device_control_xfer(dev, &setup, 0, 0, 1000000u) >= 0;
+    const int r = usb_device_control_xfer(dev, &setup, 0, 0, 1000000u);
+    if (r >= 0) {
+        usb_device_endpoint_reset(dev, ep_addr);
+    }
+
+    return r >= 0;
 }
 
 static int usb_msc_bulk_only_reset(usb_msc_dev_t* d) {
