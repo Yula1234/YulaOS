@@ -4,6 +4,7 @@
 #include <drivers/serial/serial_core.h>
 #include <drivers/serial/ns16550.h>
 #include <drivers/serial/ttyS0.h>
+#include <drivers/virtio/vgpu.h>
 #include <drivers/block/bdev.h>
 #include <drivers/pc_speaker.h>
 #include <drivers/sata/ahci.h>
@@ -252,11 +253,6 @@ static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
     return memory_end_addr;
 }
 
-static void kmain_video_init(uint32_t memory_end_addr) {
-    map_framebuffer(memory_end_addr);
-    g_fb_mapped = 1;
-}
-
 static void kmain_platform_init(void) {
     acpi_init();
     ensure_bsp_cpu_index_zero();
@@ -282,7 +278,10 @@ static void kmain_devices_init(void) {
     drivers_init_stage(DRIVER_STAGE_CORE);
 
     fb_select_active();
-    map_framebuffer(g_kernel_memory_end);
+    
+    if (!virtio_gpu_is_active()) {
+        map_framebuffer(g_kernel_memory_end);
+    }
     g_fb_mapped = 1;
 
     vga_init_graphics();
@@ -383,8 +382,6 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     g_kernel_memory_end = memory_end_addr;
 
     cpp_call_global_ctors();
-
-    kmain_video_init(memory_end_addr);
     
     kmain_platform_init();
     kmain_tasks_init();
