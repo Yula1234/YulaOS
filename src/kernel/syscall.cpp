@@ -1,40 +1,43 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
-#include <arch/i386/paging.h>
-#include <lib/string.h>
+#include <kernel/waitq/poll_waitq.h>
+#include <kernel/ipc/ipc_endpoint.h>
+#include <kernel/uaccess/uaccess.h>
+#include <kernel/tty/tty_bridge.h>
+#include <kernel/futex/futex.h>
+#include <kernel/input_focus.h>
+#include <kernel/smp/cpu.h>
+
+#include <drivers/virtio/vgpu.h>
+#include <drivers/keyboard.h>
+#include <drivers/fbdev.h>
+#include <drivers/vga.h>
+
+#include <fs/yulafs.h>
+#include <fs/pipe.h>
+#include <fs/vfs.h>
+
 #include <hal/lock.h>
 #include <hal/simd.h>
 #include <hal/apic.h>
 
-#include <drivers/fbdev.h>
-#include <drivers/vga.h>
-#include <drivers/keyboard.h>
-#include <drivers/virtio/virtio_gpu.h>
-#include <kernel/tty/tty_bridge.h>
-#include <kernel/input_focus.h>
-#include <kernel/panic.h>
+#include <mm/heap.h>
+#include <mm/pmm.h>
+#include <mm/vma.h>
 #include <mm/shm.h>
-#include <kernel/ipc/ipc_endpoint.h>
-#include <kernel/waitq/poll_waitq.h>
+
 #include <yos/ioctl.h>
 #include <yos/proc.h>
 
-#include <fs/vfs.h>
-#include <fs/yulafs.h>
-#include <fs/pipe.h>
+#include <arch/i386/paging.h>
 
-#include <mm/pmm.h>
-#include <mm/heap.h>
-#include <mm/vma.h>
-
-#include <kernel/uaccess/uaccess.h>
-#include <kernel/futex/futex.h>
+#include <lib/string.h>
 
 #include "syscall.h"
 #include "sched.h"
 #include "proc.h"
-#include <kernel/smp/cpu.h>
+#include "panic.h"
 
 extern volatile uint32_t timer_ticks;
 

@@ -6,7 +6,7 @@
 #include <fs/vfs.h>
 #include <drivers/mouse.h>
 #include <drivers/fbdev.h>
-#include <drivers/virtio/virtio_gpu.h>
+#include <drivers/virtio/vgpu.h>
 
 #include <kernel/input_focus.h>
 #include <kernel/proc.h>

@@ -13,7 +13,7 @@
 
 #include "fbdev.h"
 
-#include <drivers/virtio/virtio_gpu.h>
+#include <drivers/virtio/vgpu.h>
 
 uint32_t* fb_ptr = 0;
 uint32_t  fb_width = 0;

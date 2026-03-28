@@ -3,7 +3,7 @@
 
 #include <drivers/acpi.h>
 #include <drivers/fbdev.h>
-#include <drivers/virtio/virtio_gpu.h>
+#include <drivers/virtio/vgpu.h>
 
 #include <hal/apic.h>
 #include <hal/io.h>

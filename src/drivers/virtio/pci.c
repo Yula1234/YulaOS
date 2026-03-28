@@ -6,7 +6,7 @@
 #include <drivers/acpi.h>
 #include <drivers/driver.h>
 #include <drivers/pci/pci.h>
-#include <drivers/virtio/virtio_core.h>
+#include <drivers/virtio/core.h>
 
 #include <mm/heap.h>
 #include <mm/iomem.h>
@@ -22,7 +22,7 @@
 
 #include <stddef.h>
 
-#include "virtio_pci.h"
+#include "pci.h"
 #include "virtqueue.h"
 
 #define VIRTIO_PCI_CAP_ID 0x09u

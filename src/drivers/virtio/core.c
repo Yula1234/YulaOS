@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <drivers/virtio/virtio_core.h>
+#include <drivers/virtio/core.h>
 
 #include <hal/lock.h>
 
