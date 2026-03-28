@@ -4,7 +4,6 @@
 #include <arch/i386/idt.h>
 
 #include <fs/vfs.h>
-#include <drivers/mouse.h>
 #include <drivers/fbdev.h>
 #include <drivers/virtio/vgpu.h>
 

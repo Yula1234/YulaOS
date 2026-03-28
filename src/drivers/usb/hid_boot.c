@@ -4,8 +4,8 @@
 #include <drivers/usb/core.h>
 #include <drivers/usb/hid_boot.h>
 
-#include <drivers/keyboard.h>
-#include <drivers/mouse.h>
+#include <drivers/input/keyboard.h>
+#include <drivers/input/mouse.h>
 
 #include <kernel/proc.h>
 

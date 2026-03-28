@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <kernel/input_focus.h>
-#include <drivers/keyboard.h>
-#include <drivers/mouse.h>
+#include <drivers/input/keyboard.h>
+#include <drivers/input/mouse.h>
+
+#include "input_focus.h"
 
 static uint32_t g_input_focus_pid;
 

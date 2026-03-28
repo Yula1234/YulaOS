@@ -11,8 +11,8 @@
 #include <kernel/smp/cpu.h>
 #include <kernel/smp/mb.h>
 
+#include <drivers/input/keyboard.h>
 #include <drivers/virtio/vgpu.h>
-#include <drivers/keyboard.h>
 #include <drivers/fbdev.h>
 #include <drivers/vga.h>
 

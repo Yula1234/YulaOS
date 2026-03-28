@@ -5,8 +5,8 @@
 #include <mm/pmm.h>
 
 #include <drivers/vga.h>
-#include <drivers/mouse.h>
-#include <drivers/keyboard.h>
+#include <drivers/input/mouse.h>
+#include <drivers/input/keyboard.h>
 #include <drivers/fbdev.h>
 
 #include <kernel/syscall.h>
