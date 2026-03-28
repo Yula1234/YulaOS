@@ -8,21 +8,35 @@
 
 #include <drivers/pci/pci.h>
 
+#include <mm/iomem.h>
+
 #include <stdint.h>
 
 struct virtqueue;
 
+#define VPCI_NO_CAP_BAR 6u
+
 typedef struct {
     pci_device_t* pci;
 
+    __iomem* bar_iomem[6];
+
+    uint8_t common_bar;
+    uint32_t common_off;
+
+    uint8_t notify_bar;
+    uint32_t notify_off;
+
+    uint8_t isr_bar;
+    uint32_t isr_off;
+
+    uint8_t device_cfg_bar;
+    uint32_t device_cfg_off;
+
+    uint32_t notify_off_multiplier;
+
     int msi_enabled;
     uint8_t msi_vector;
-
-    volatile void* common_cfg;
-    volatile void* notify_base;
-    uint32_t notify_off_multiplier;
-    volatile uint8_t* isr_cfg;
-    volatile void* device_cfg;
 
     struct virtqueue* queues[8];
     uint32_t queue_count;

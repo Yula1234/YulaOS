@@ -5,6 +5,7 @@
 #define DRIVERS_VIRTQUEUE_H
 
 #include <hal/lock.h>
+#include <mm/iomem.h>
 
 #include <stdint.h>
 
@@ -56,7 +57,8 @@ typedef struct virtqueue {
     vring_avail_t* avail;
     vring_used_t* used;
 
-    volatile uint16_t* notify_addr;
+    __iomem* notify_iomem;
+    uint32_t notify_iomem_off;
 
     void* ring_mem;
     uint32_t ring_order;
@@ -78,7 +80,7 @@ typedef struct virtqueue {
     spinlock_t lock;
 } virtqueue_t;
 
-int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, volatile uint16_t* notify_addr);
+int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, __iomem* notify_region, uint32_t notify_offset);
 void virtqueue_destroy(virtqueue_t* vq);
 
 int virtqueue_submit(virtqueue_t* vq,

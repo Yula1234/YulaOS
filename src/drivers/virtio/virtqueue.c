@@ -8,6 +8,8 @@
 
 #include <lib/string.h>
 
+#include <mm/iomem.h>
+
 #include "virtqueue.h"
 
 static inline uint16_t vq_mod(uint16_t x, uint16_t size) {
@@ -124,14 +126,15 @@ static void virtqueue_token_free_locked(virtqueue_t* vq, virtqueue_token_t* toke
     vq->token_num_free = (uint16_t)(vq->token_num_free + 1u);
 }
 
-int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, volatile uint16_t* notify_addr) {
+int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, __iomem* notify_region, uint32_t notify_offset) {
     if (!vq || size == 0) return 0;
 
     memset(vq, 0, sizeof(*vq));
 
     vq->queue_index = queue_index;
     vq->size = size;
-    vq->notify_addr = notify_addr;
+    vq->notify_iomem = notify_region;
+    vq->notify_iomem_off = notify_offset;
 
     spinlock_init(&vq->lock);
 
@@ -223,7 +226,8 @@ void virtqueue_destroy(virtqueue_t* vq) {
     vq->desc = 0;
     vq->avail = 0;
     vq->used = 0;
-    vq->notify_addr = 0;
+    vq->notify_iomem = 0;
+    vq->notify_iomem_off = 0;
 }
 
 static int virtqueue_alloc_desc_chain(virtqueue_t* vq, uint16_t count, uint16_t* out_head) {
@@ -330,8 +334,8 @@ int virtqueue_submit(virtqueue_t* vq,
 
     __sync_synchronize();
 
-    if (vq->notify_addr) {
-        *vq->notify_addr = vq->queue_index;
+    if (vq->notify_iomem) {
+        iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
     }
 
     spinlock_release_safe(&vq->lock, iflags);
@@ -410,8 +414,8 @@ int virtqueue_submit_cb(virtqueue_t* vq,
 
     __sync_synchronize();
 
-    if (vq->notify_addr) {
-        *vq->notify_addr = vq->queue_index;
+    if (vq->notify_iomem) {
+        iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
     }
 
     spinlock_release_safe(&vq->lock, iflags);

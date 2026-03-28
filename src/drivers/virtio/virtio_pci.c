@@ -9,6 +9,7 @@
 #include <drivers/virtio/virtio_core.h>
 
 #include <mm/heap.h>
+#include <mm/iomem.h>
 
 #include <hal/io.h>
 #include <hal/ioapic.h>
@@ -35,42 +36,23 @@
 
 #define PCI_CAP_ID_MSIX 0x11u
 
-typedef struct __attribute__((packed)) {
-    uint8_t cap_vndr;
-    uint8_t cap_next;
-    uint8_t cap_len;
-    uint8_t cfg_type;
-    uint8_t bar;
-    uint8_t id;
-    uint8_t padding[2];
-    uint32_t offset;
-    uint32_t length;
-} virtio_pci_cap_t;
-
-typedef struct __attribute__((packed)) {
-    virtio_pci_cap_t cap;
-    uint32_t notify_off_multiplier;
-} virtio_pci_notify_cap_t;
-
-typedef struct __attribute__((packed)) {
-    uint32_t device_feature_select;
-    uint32_t device_feature;
-    uint32_t driver_feature_select;
-    uint32_t driver_feature;
-    uint16_t msix_config;
-    uint16_t num_queues;
-    uint8_t device_status;
-    uint8_t config_generation;
-
-    uint16_t queue_select;
-    uint16_t queue_size;
-    uint16_t queue_msix_vector;
-    uint16_t queue_enable;
-    uint16_t queue_notify_off;
-    uint64_t queue_desc;
-    uint64_t queue_avail;
-    uint64_t queue_used;
-} virtio_pci_common_cfg_t;
+/* Offsets within virtio PCI common config (virtio 1.0). */
+#define VPCI_COMMON_DEVICE_FEAT_SEL    0u
+#define VPCI_COMMON_DEVICE_FEAT        4u
+#define VPCI_COMMON_DRIVER_FEAT_SEL    8u
+#define VPCI_COMMON_DRIVER_FEAT       12u
+#define VPCI_COMMON_MSIX_CONFIG       16u
+#define VPCI_COMMON_NUM_QUEUES        18u
+#define VPCI_COMMON_DEVICE_STATUS     20u
+#define VPCI_COMMON_CONFIG_GENERATION 21u
+#define VPCI_COMMON_QUEUE_SELECT      22u
+#define VPCI_COMMON_QUEUE_SIZE        24u
+#define VPCI_COMMON_QUEUE_MSIX_VEC    26u
+#define VPCI_COMMON_QUEUE_ENABLE      28u
+#define VPCI_COMMON_QUEUE_NOTIFY_OFF  30u
+#define VPCI_COMMON_QUEUE_DESC        32u
+#define VPCI_COMMON_QUEUE_AVAIL       40u
+#define VPCI_COMMON_QUEUE_USED        48u
 
 static void virtio_pci_dev_enable_mmio_master(pci_device_t* pci) {
     if (!pci) {
@@ -86,59 +68,46 @@ static void virtio_pci_dev_enable_mmio_master(pci_device_t* pci) {
     pci_dev_write16(pci, 0x04, cmd);
 }
 
-static int virtio_pci_mmio_bar_base(const pci_device_t* pci, uint8_t bar_idx, uint32_t* out_base) {
-    if (!pci || bar_idx >= 6u || !out_base) {
-        return 0;
+static void virtio_pci_free_all_bars(virtio_pci_dev_t* dev) {
+    if (!dev) {
+        return;
     }
 
-    const pci_bar_t* b = &pci->bars[bar_idx];
-
-    if (b->type != PCI_BAR_TYPE_MMIO || b->size == 0u) {
-        return 0;
-    }
-
-    if (b->is_64bit == 0u) {
-        if (b->base_addr == 0u) {
-            return 0;
+    for (uint32_t i = 0; i < 6u; i++) {
+        if (dev->bar_iomem[i]) {
+            iomem_free(dev->bar_iomem[i]);
+            dev->bar_iomem[i] = 0;
         }
-
-        *out_base = b->base_addr;
-        return 1;
     }
-
-    if (bar_idx + 1u >= 6u) {
-        return 0;
-    }
-
-    const uint8_t off = (uint8_t)(0x10u + bar_idx * 4u);
-    const uint32_t hi = pci_dev_read32(pci, (uint8_t)(off + 4u));
-
-    if (hi != 0u) {
-        return 0;
-    }
-
-    const uint32_t lo = b->base_addr != 0u ? b->base_addr : (pci_dev_read32(pci, off) & ~0x0Fu);
-    if (lo == 0u) {
-        return 0;
-    }
-
-    *out_base = lo;
-    return 1;
 }
 
-static void map_mmio_region_uc(uint32_t phys_base, uint32_t length) {
-    if (length == 0) return;
-
-    uint32_t start = phys_base & ~0xFFFu;
-    uint32_t end = phys_base + length;
-    end = (end + 0xFFFu) & ~0xFFFu;
-
-    for (uint32_t p = start; p < end; p += 4096u) {
-        paging_map(kernel_page_directory, p, p, 0x13u);
-        if (p + 4096u < p) break;
+static __iomem* vpci_bar_io(virtio_pci_dev_t* dev, uint8_t bar) {
+    if (!dev || !dev->pci || bar >= 6u) {
+        return 0;
     }
 
-    __sync_synchronize();
+    if (dev->bar_iomem[bar]) {
+        return dev->bar_iomem[bar];
+    }
+
+    dev->bar_iomem[bar] = pci_request_bar(dev->pci, bar, "virtio_pci");
+    return dev->bar_iomem[bar];
+}
+
+static __iomem* vpci_common_io(virtio_pci_dev_t* dev) {
+    if (!dev || dev->common_bar >= VPCI_NO_CAP_BAR) {
+        return 0;
+    }
+
+    return vpci_bar_io(dev, dev->common_bar);
+}
+
+static __iomem* vpci_device_cfg_io(virtio_pci_dev_t* dev) {
+    if (!dev || dev->device_cfg_bar >= VPCI_NO_CAP_BAR) {
+        return 0;
+    }
+
+    return vpci_bar_io(dev, dev->device_cfg_bar);
 }
 
 static int virtio_pci_enable_msix_entry0(virtio_pci_dev_t* dev, uint8_t irq_vector) {
@@ -166,14 +135,12 @@ static int virtio_pci_enable_msix_entry0(virtio_pci_dev_t* dev, uint8_t irq_vect
             uint8_t bir = (uint8_t)(table & 0x7u);
             uint32_t table_off = table & ~0x7u;
 
-            uint32_t bar_base;
-            if (!virtio_pci_mmio_bar_base(pci, bir, &bar_base)) {
+            __iomem* tbl_io = vpci_bar_io(dev, bir);
+            if (!tbl_io) {
                 return 0;
             }
 
-            map_mmio_region_uc(bar_base + table_off, 4096u);
-
-            volatile uint32_t* entry = (volatile uint32_t*)(uintptr_t)(bar_base + table_off);
+            uint32_t entry_off = table_off;
 
             uint8_t dest_apic_id = 0;
             if (cpu_count > 0 && cpus[0].id >= 0) {
@@ -184,11 +151,13 @@ static int virtio_pci_enable_msix_entry0(virtio_pci_dev_t* dev, uint8_t irq_vect
             uint32_t msg_addr_hi = 0u;
             uint32_t msg_data = (uint32_t)irq_vector;
 
-            entry[0] = msg_addr_lo;
-            entry[1] = msg_addr_hi;
-            entry[2] = msg_data;
-            entry[3] = 0u;
-
+            iowrite32(tbl_io, entry_off + 12u, 1u);
+            __sync_synchronize();
+            iowrite32(tbl_io, entry_off + 0u, msg_addr_lo);
+            iowrite32(tbl_io, entry_off + 4u, msg_addr_hi);
+            iowrite32(tbl_io, entry_off + 8u, msg_data);
+            __sync_synchronize();
+            iowrite32(tbl_io, entry_off + 12u, 0u);
             __sync_synchronize();
 
             msg_ctl &= (uint16_t)~(1u << 14);
@@ -255,6 +224,16 @@ int virtio_pci_map_modern_caps(virtio_pci_dev_t* dev) {
 
     pci_device_t* pci = dev->pci;
 
+    dev->common_bar = VPCI_NO_CAP_BAR;
+    dev->notify_bar = VPCI_NO_CAP_BAR;
+    dev->isr_bar = VPCI_NO_CAP_BAR;
+    dev->device_cfg_bar = VPCI_NO_CAP_BAR;
+    dev->common_off = 0;
+    dev->notify_off = 0;
+    dev->isr_off = 0;
+    dev->device_cfg_off = 0;
+    dev->notify_off_multiplier = 0;
+
     virtio_pci_dev_enable_mmio_master(pci);
 
     uint32_t cmdsts = pci_dev_read32(pci, 0x04);
@@ -272,33 +251,44 @@ int virtio_pci_map_modern_caps(virtio_pci_dev_t* dev) {
             uint8_t cfg_type = pci_dev_read8(pci, cap + 3);
             uint8_t bar = pci_dev_read8(pci, cap + 4);
             uint32_t offset = pci_dev_read32(pci, cap + 8);
-            uint32_t length = pci_dev_read32(pci, cap + 12);
 
-            uint32_t bar_base;
-            if (!virtio_pci_mmio_bar_base(pci, bar, &bar_base)) {
+            if (bar >= 6u) {
                 cap = cap_next;
                 continue;
             }
 
-            uint32_t phys = bar_base + offset;
-            map_mmio_region_uc(phys, length);
+            const pci_bar_t* pb = &pci->bars[bar];
+            if (pb->type != PCI_BAR_TYPE_MMIO || pb->size == 0u) {
+                cap = cap_next;
+                continue;
+            }
 
             if (cfg_type == VIRTIO_PCI_CAP_COMMON_CFG) {
-                dev->common_cfg = (volatile void*)phys;
+                dev->common_bar = bar;
+                dev->common_off = offset;
             } else if (cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG) {
-                dev->notify_base = (volatile void*)phys;
+                dev->notify_bar = bar;
+                dev->notify_off = offset;
                 dev->notify_off_multiplier = pci_dev_read32(pci, cap + 16);
             } else if (cfg_type == VIRTIO_PCI_CAP_ISR_CFG) {
-                dev->isr_cfg = (volatile uint8_t*)phys;
+                dev->isr_bar = bar;
+                dev->isr_off = offset;
             } else if (cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG) {
-                dev->device_cfg = (volatile void*)phys;
+                dev->device_cfg_bar = bar;
+                dev->device_cfg_off = offset;
             }
         }
 
         cap = cap_next;
     }
 
-    if (!dev->common_cfg || !dev->notify_base || !dev->isr_cfg) {
+    if (dev->common_bar >= VPCI_NO_CAP_BAR || dev->notify_bar >= VPCI_NO_CAP_BAR || dev->isr_bar >= VPCI_NO_CAP_BAR) {
+        virtio_pci_free_all_bars(dev);
+        return 0;
+    }
+
+    if (!vpci_bar_io(dev, dev->common_bar) || !vpci_bar_io(dev, dev->notify_bar) || !vpci_bar_io(dev, dev->isr_bar)) {
+        virtio_pci_free_all_bars(dev);
         return 0;
     }
 
@@ -306,61 +296,79 @@ int virtio_pci_map_modern_caps(virtio_pci_dev_t* dev) {
 }
 
 void virtio_pci_reset(virtio_pci_dev_t* dev) {
-    if (!dev || !dev->common_cfg) return;
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
-    c->device_status = 0;
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return;
+    }
+
+    iowrite8(io, dev->common_off + VPCI_COMMON_DEVICE_STATUS, 0);
     __sync_synchronize();
 }
 
 void virtio_pci_set_status(virtio_pci_dev_t* dev, uint8_t status) {
-    if (!dev || !dev->common_cfg) return;
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
-    c->device_status = status;
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return;
+    }
+
+    iowrite8(io, dev->common_off + VPCI_COMMON_DEVICE_STATUS, status);
     __sync_synchronize();
 }
 
 void virtio_pci_add_status(virtio_pci_dev_t* dev, uint8_t status_bits) {
-    if (!dev || !dev->common_cfg) return;
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
-    uint8_t s = c->device_status;
-    c->device_status = (uint8_t)(s | status_bits);
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return;
+    }
+
+    uint32_t co = dev->common_off;
+    uint8_t s = ioread8(io, co + VPCI_COMMON_DEVICE_STATUS);
+    iowrite8(io, co + VPCI_COMMON_DEVICE_STATUS, (uint8_t)(s | status_bits));
     __sync_synchronize();
 }
 
 uint64_t virtio_pci_read_device_features(virtio_pci_dev_t* dev) {
-    if (!dev || !dev->common_cfg) return 0;
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return 0;
+    }
 
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
+    uint32_t co = dev->common_off;
 
-    c->device_feature_select = 0;
+    iowrite32(io, co + VPCI_COMMON_DEVICE_FEAT_SEL, 0u);
     __sync_synchronize();
-    uint32_t lo = c->device_feature;
+    uint32_t lo = ioread32(io, co + VPCI_COMMON_DEVICE_FEAT);
 
-    c->device_feature_select = 1;
+    iowrite32(io, co + VPCI_COMMON_DEVICE_FEAT_SEL, 1u);
     __sync_synchronize();
-    uint32_t hi = c->device_feature;
+    uint32_t hi = ioread32(io, co + VPCI_COMMON_DEVICE_FEAT);
 
     return ((uint64_t)hi << 32) | lo;
 }
 
 void virtio_pci_write_driver_features(virtio_pci_dev_t* dev, uint64_t features) {
-    if (!dev || !dev->common_cfg) return;
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return;
+    }
 
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
+    uint32_t co = dev->common_off;
 
-    c->driver_feature_select = 0;
+    iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT_SEL, 0u);
     __sync_synchronize();
-    c->driver_feature = (uint32_t)(features & 0xFFFFFFFFu);
+    iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT, (uint32_t)(features & 0xFFFFFFFFu));
 
-    c->driver_feature_select = 1;
+    iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT_SEL, 1u);
     __sync_synchronize();
-    c->driver_feature = (uint32_t)((features >> 32) & 0xFFFFFFFFu);
+    iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT, (uint32_t)((features >> 32) & 0xFFFFFFFFu));
 
     __sync_synchronize();
 }
 
 int virtio_pci_negotiate_features(virtio_pci_dev_t* dev, uint64_t wanted_features, uint64_t* out_accepted_features) {
-    if (!dev || !dev->common_cfg) return 0;
+    if (!vpci_common_io(dev)) {
+        return 0;
+    }
 
     virtio_pci_add_status(dev, VIRTIO_STATUS_ACKNOWLEDGE);
     virtio_pci_add_status(dev, VIRTIO_STATUS_DRIVER);
@@ -377,8 +385,12 @@ int virtio_pci_negotiate_features(virtio_pci_dev_t* dev, uint64_t wanted_feature
 
     virtio_pci_add_status(dev, VIRTIO_STATUS_FEATURES_OK);
 
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
-    uint8_t s = c->device_status;
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return 0;
+    }
+
+    uint8_t s = ioread8(io, dev->common_off + VPCI_COMMON_DEVICE_STATUS);
     if ((s & VIRTIO_STATUS_FEATURES_OK) == 0u) {
         virtio_pci_add_status(dev, VIRTIO_STATUS_FAILED);
         return 0;
@@ -392,14 +404,19 @@ int virtio_pci_negotiate_features(virtio_pci_dev_t* dev, uint64_t wanted_feature
 }
 
 int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint16_t queue_index, uint16_t requested_size) {
-    if (!dev || !dev->common_cfg || !dev->notify_base || !out_vq) return 0;
+    __iomem* io = vpci_common_io(dev);
+    __iomem* nio = (!dev || dev->notify_bar >= VPCI_NO_CAP_BAR) ? 0 : vpci_bar_io(dev, dev->notify_bar);
 
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
+    if (!io || !nio || !out_vq) {
+        return 0;
+    }
 
-    c->queue_select = queue_index;
+    uint32_t co = dev->common_off;
+
+    iowrite16(io, co + VPCI_COMMON_QUEUE_SELECT, queue_index);
     __sync_synchronize();
 
-    uint16_t max_size = c->queue_size;
+    uint16_t max_size = ioread16(io, co + VPCI_COMMON_QUEUE_SIZE);
     if (max_size == 0) {
         return 0;
     }
@@ -409,14 +426,13 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
         qsz = requested_size;
     }
 
-    c->queue_size = qsz;
+    iowrite16(io, co + VPCI_COMMON_QUEUE_SIZE, qsz);
     __sync_synchronize();
 
-    uint16_t notify_off = c->queue_notify_off;
+    uint16_t notify_idx = ioread16(io, co + VPCI_COMMON_QUEUE_NOTIFY_OFF);
+    uint32_t notify_word_off = dev->notify_off + (uint32_t)notify_idx * dev->notify_off_multiplier;
 
-    uintptr_t notify_addr = (uintptr_t)dev->notify_base + (uintptr_t)notify_off * (uintptr_t)dev->notify_off_multiplier;
-
-    if (!virtqueue_init((virtqueue_t*)out_vq, queue_index, qsz, (volatile uint16_t*)notify_addr)) {
+    if (!virtqueue_init((virtqueue_t*)out_vq, queue_index, qsz, nio, notify_word_off)) {
         return 0;
     }
 
@@ -424,34 +440,29 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
     uint32_t avail_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->avail);
     uint32_t used_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->used);
 
-    volatile uint8_t* cfg = (volatile uint8_t*)c;
-
-    volatile uint32_t* qd = (volatile uint32_t*)(cfg + offsetof(virtio_pci_common_cfg_t, queue_desc));
-    qd[0] = desc_phys;
+    iowrite32(io, co + VPCI_COMMON_QUEUE_DESC, desc_phys);
     __sync_synchronize();
-    qd[1] = 0u;
+    iowrite32(io, co + VPCI_COMMON_QUEUE_DESC + 4u, 0u);
     __sync_synchronize();
 
-    volatile uint32_t* qa = (volatile uint32_t*)(cfg + offsetof(virtio_pci_common_cfg_t, queue_avail));
-    qa[0] = avail_phys;
+    iowrite32(io, co + VPCI_COMMON_QUEUE_AVAIL, avail_phys);
     __sync_synchronize();
-    qa[1] = 0u;
+    iowrite32(io, co + VPCI_COMMON_QUEUE_AVAIL + 4u, 0u);
     __sync_synchronize();
 
-    volatile uint32_t* qu = (volatile uint32_t*)(cfg + offsetof(virtio_pci_common_cfg_t, queue_used));
-    qu[0] = used_phys;
+    iowrite32(io, co + VPCI_COMMON_QUEUE_USED, used_phys);
     __sync_synchronize();
-    qu[1] = 0u;
+    iowrite32(io, co + VPCI_COMMON_QUEUE_USED + 4u, 0u);
     __sync_synchronize();
 
     if (dev->msi_enabled) {
-        c->queue_msix_vector = 0;
+        iowrite16(io, co + VPCI_COMMON_QUEUE_MSIX_VEC, 0);
     } else {
-        c->queue_msix_vector = VIRTIO_PCI_NO_VECTOR;
+        iowrite16(io, co + VPCI_COMMON_QUEUE_MSIX_VEC, VIRTIO_PCI_NO_VECTOR);
     }
 
     __sync_synchronize();
-    c->queue_enable = 1;
+    iowrite16(io, co + VPCI_COMMON_QUEUE_ENABLE, 1);
     __sync_synchronize();
 
     virtio_pci_register_queue(dev, (virtqueue_t*)out_vq);
@@ -460,7 +471,9 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
 }
 
 int virtio_pci_enable_msi(virtio_pci_dev_t* dev, uint8_t vector) {
-    if (!dev) return 0;
+    if (!dev) {
+        return 0;
+    }
 
     virtio_pci_global_register_dev(dev);
 
@@ -470,8 +483,12 @@ int virtio_pci_enable_msi(virtio_pci_dev_t* dev, uint8_t vector) {
         return 0;
     }
 
-    volatile virtio_pci_common_cfg_t* c = (volatile virtio_pci_common_cfg_t*)dev->common_cfg;
-    c->msix_config = 0;
+    __iomem* io = vpci_common_io(dev);
+    if (!io) {
+        return 0;
+    }
+
+    iowrite16(io, dev->common_off + VPCI_COMMON_MSIX_CONFIG, 0);
     __sync_synchronize();
 
     irq_install_vector_handler(vector, virtio_pci_irq_handler_trampoline, 0);
@@ -538,9 +555,12 @@ void virtio_pci_irq_handler(registers_t* regs) {
 
     for (uint32_t i = 0; i < g_virtio_devs_count; i++) {
         virtio_pci_dev_t* dev = g_virtio_devs[i];
-        if (!dev || !dev->isr_cfg) continue;
+        if (!dev || dev->isr_bar >= VPCI_NO_CAP_BAR) continue;
 
-        uint8_t isr = *dev->isr_cfg;
+        __iomem* isr_io = vpci_bar_io(dev, dev->isr_bar);
+        if (!isr_io) continue;
+
+        uint8_t isr = ioread8(isr_io, dev->isr_off);
         if ((isr & 0x1u) == 0u) {
             continue;
         }
@@ -615,38 +635,46 @@ static int virtio_pci_ops_enable_intx(virtio_device_t* vdev, void (*handler)(reg
 
 static uint8_t virtio_pci_ops_read_config8(virtio_device_t* vdev, uint32_t offset) {
     virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
-    if (!p || !p->device_cfg) {
+    __iomem* dio = vpci_device_cfg_io(p);
+
+    if (!dio) {
         return 0;
     }
 
-    return *(volatile uint8_t*)((uint8_t*)p->device_cfg + offset);
+    return ioread8(dio, p->device_cfg_off + offset);
 }
 
 static uint16_t virtio_pci_ops_read_config16(virtio_device_t* vdev, uint32_t offset) {
     virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
-    if (!p || !p->device_cfg) {
+    __iomem* dio = vpci_device_cfg_io(p);
+
+    if (!dio) {
         return 0;
     }
 
-    return *(volatile uint16_t*)((uint8_t*)p->device_cfg + offset);
+    return ioread16(dio, p->device_cfg_off + offset);
 }
 
 static uint32_t virtio_pci_ops_read_config32(virtio_device_t* vdev, uint32_t offset) {
     virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
-    if (!p || !p->device_cfg) {
+    __iomem* dio = vpci_device_cfg_io(p);
+
+    if (!dio) {
         return 0;
     }
 
-    return *(volatile uint32_t*)((uint8_t*)p->device_cfg + offset);
+    return ioread32(dio, p->device_cfg_off + offset);
 }
 
 static void virtio_pci_ops_write_config32(virtio_device_t* vdev, uint32_t offset, uint32_t val) {
     virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
-    if (!p || !p->device_cfg) {
+    __iomem* dio = vpci_device_cfg_io(p);
+
+    if (!dio) {
         return;
     }
 
-    *(volatile uint32_t*)((uint8_t*)p->device_cfg + offset) = val;
+    iowrite32(dio, p->device_cfg_off + offset, val);
 }
 
 static void virtio_pci_ops_notify(virtio_device_t* vdev, uint16_t queue_index) {
@@ -693,6 +721,7 @@ static int virtio_pci_probe(pci_device_t* pdev) {
 
     virtio_device_t* v = kmalloc(sizeof(*v));
     if (!v) {
+        virtio_pci_free_all_bars(p);
         kfree(p);
         return -1;
     }
@@ -706,6 +735,7 @@ static int virtio_pci_probe(pci_device_t* pdev) {
 
     const int rc = virtio_register_device(v);
     if (rc != 0) {
+        virtio_pci_free_all_bars(p);
         kfree(v);
         kfree(p);
         return -1;
