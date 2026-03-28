@@ -12,6 +12,7 @@
 
 #include <kernel/output/kprintf.h>
 #include <kernel/smp/cpu.h>
+#include <kernel/smp/mb.h>
 #include <mm/heap.h>
 
 extern "C" {
@@ -471,15 +472,15 @@ static int pci_msix_configure(
         const uint32_t msg_data = static_cast<uint32_t>(vector);
 
         iowrite32(table_io, entry_off + 12u, 1u);
-        __sync_synchronize();
+        smp_wmb();
 
         iowrite32(table_io, entry_off + 0u, msg_addr_lo);
         iowrite32(table_io, entry_off + 4u, msg_addr_hi);
         iowrite32(table_io, entry_off + 8u, msg_data);
-        __sync_synchronize();
+        smp_wmb();
 
         iowrite32(table_io, entry_off + 12u, 0u);
-        __sync_synchronize();
+        smp_wmb();
 
         iomem_free(table_io);
 

@@ -29,6 +29,7 @@
 #include "sched.h"
 #include "proc.h"
 #include <kernel/sched.h>
+#include <kernel/smp/mb.h>
 #include <kernel/output/kprintf.h>
 #include <kernel/term/term.h>
 #include <kernel/tty/tty_service.h>
@@ -2491,7 +2492,7 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
             __atomic_store_n(&t->sleep_cpu, new_cpu_idx, __ATOMIC_RELEASE);
             __atomic_store_n(&t->wake_tick, wake_tick, __ATOMIC_RELEASE);
 
-            __sync_synchronize();
+            smp_wmb();
 
             proc::detail::cpu_sleep_insert_locked(cpu, t);
             break;
@@ -2524,7 +2525,7 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         __atomic_store_n(&t->sleep_cpu, new_cpu_idx, __ATOMIC_RELEASE);
         __atomic_store_n(&t->wake_tick, wake_tick, __ATOMIC_RELEASE);
 
-        __sync_synchronize();
+        smp_wmb();
 
         proc::detail::cpu_sleep_insert_locked(cpu, t);
         break;

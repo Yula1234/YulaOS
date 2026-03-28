@@ -9,6 +9,7 @@
 #include <hal/lock.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
+#include <kernel/smp/mb.h>
 #include <arch/i386/gdt.h>
 #include <arch/i386/idt.h>
 #include <arch/i386/paging.h>
@@ -249,7 +250,7 @@ static int tlb_alloc_request(uint32_t start, uint32_t end, uint32_t mask) {
     tlb_reqs[idx].pending_mask = mask;
     tlb_reqs[idx].in_use = 1;
 
-    __sync_synchronize();
+    smp_wmb();
 
     spinlock_release_safe(&tlb_queue_lock, flags);
 

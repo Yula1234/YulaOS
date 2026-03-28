@@ -17,6 +17,8 @@
 
 #include <kernel/smp/cpu.h>
 
+#include <kernel/smp/mb.h>
+
 #include <lib/dlist.h>
 #include <lib/string.h>
 
@@ -247,7 +249,7 @@ void virtio_pci_reset(virtio_pci_dev_t* dev) {
     }
 
     iowrite8(io, dev->common_off + VPCI_COMMON_DEVICE_STATUS, 0);
-    __sync_synchronize();
+    smp_wmb();
 }
 
 void virtio_pci_set_status(virtio_pci_dev_t* dev, uint8_t status) {
@@ -257,7 +259,7 @@ void virtio_pci_set_status(virtio_pci_dev_t* dev, uint8_t status) {
     }
 
     iowrite8(io, dev->common_off + VPCI_COMMON_DEVICE_STATUS, status);
-    __sync_synchronize();
+    smp_wmb();
 }
 
 void virtio_pci_add_status(virtio_pci_dev_t* dev, uint8_t status_bits) {
@@ -269,7 +271,7 @@ void virtio_pci_add_status(virtio_pci_dev_t* dev, uint8_t status_bits) {
     uint32_t co = dev->common_off;
     uint8_t s = ioread8(io, co + VPCI_COMMON_DEVICE_STATUS);
     iowrite8(io, co + VPCI_COMMON_DEVICE_STATUS, (uint8_t)(s | status_bits));
-    __sync_synchronize();
+    smp_wmb();
 }
 
 uint64_t virtio_pci_read_device_features(virtio_pci_dev_t* dev) {
@@ -281,11 +283,11 @@ uint64_t virtio_pci_read_device_features(virtio_pci_dev_t* dev) {
     uint32_t co = dev->common_off;
 
     iowrite32(io, co + VPCI_COMMON_DEVICE_FEAT_SEL, 0u);
-    __sync_synchronize();
+    smp_mb();
     uint32_t lo = ioread32(io, co + VPCI_COMMON_DEVICE_FEAT);
 
     iowrite32(io, co + VPCI_COMMON_DEVICE_FEAT_SEL, 1u);
-    __sync_synchronize();
+    smp_mb();
     uint32_t hi = ioread32(io, co + VPCI_COMMON_DEVICE_FEAT);
 
     return ((uint64_t)hi << 32) | lo;
@@ -300,14 +302,14 @@ void virtio_pci_write_driver_features(virtio_pci_dev_t* dev, uint64_t features) 
     uint32_t co = dev->common_off;
 
     iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT_SEL, 0u);
-    __sync_synchronize();
+    smp_mb();
     iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT, (uint32_t)(features & 0xFFFFFFFFu));
 
     iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT_SEL, 1u);
-    __sync_synchronize();
+    smp_mb();
     iowrite32(io, co + VPCI_COMMON_DRIVER_FEAT, (uint32_t)((features >> 32) & 0xFFFFFFFFu));
 
-    __sync_synchronize();
+    smp_wmb();
 }
 
 int virtio_pci_negotiate_features(virtio_pci_dev_t* dev, uint64_t wanted_features, uint64_t* out_accepted_features) {
@@ -359,7 +361,7 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
     uint32_t co = dev->common_off;
 
     iowrite16(io, co + VPCI_COMMON_QUEUE_SELECT, queue_index);
-    __sync_synchronize();
+    smp_mb();
 
     uint16_t max_size = ioread16(io, co + VPCI_COMMON_QUEUE_SIZE);
     if (max_size == 0) {
@@ -372,7 +374,7 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
     }
 
     iowrite16(io, co + VPCI_COMMON_QUEUE_SIZE, qsz);
-    __sync_synchronize();
+    smp_mb();
 
     uint16_t notify_idx = ioread16(io, co + VPCI_COMMON_QUEUE_NOTIFY_OFF);
     uint32_t notify_word_off = dev->notify_off + (uint32_t)notify_idx * dev->notify_off_multiplier;
@@ -387,19 +389,19 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
     uint32_t used_phys = dma_virt_to_phys((void*)vq->used);
 
     iowrite32(io, co + VPCI_COMMON_QUEUE_DESC, desc_phys);
-    __sync_synchronize();
+    smp_wmb();
     iowrite32(io, co + VPCI_COMMON_QUEUE_DESC + 4u, 0u);
-    __sync_synchronize();
+    smp_wmb();
 
     iowrite32(io, co + VPCI_COMMON_QUEUE_AVAIL, avail_phys);
-    __sync_synchronize();
+    smp_wmb();
     iowrite32(io, co + VPCI_COMMON_QUEUE_AVAIL + 4u, 0u);
-    __sync_synchronize();
+    smp_wmb();
 
     iowrite32(io, co + VPCI_COMMON_QUEUE_USED, used_phys);
-    __sync_synchronize();
+    smp_wmb();
     iowrite32(io, co + VPCI_COMMON_QUEUE_USED + 4u, 0u);
-    __sync_synchronize();
+    smp_wmb();
 
     if (dev->msi_enabled) {
         iowrite16(io, co + VPCI_COMMON_QUEUE_MSIX_VEC, 0);
@@ -407,9 +409,9 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
         iowrite16(io, co + VPCI_COMMON_QUEUE_MSIX_VEC, VIRTIO_PCI_NO_VECTOR);
     }
 
-    __sync_synchronize();
+    smp_wmb();
     iowrite16(io, co + VPCI_COMMON_QUEUE_ENABLE, 1);
-    __sync_synchronize();
+    smp_wmb();
 
     virtio_pci_register_queue(dev, (virtqueue_t*)out_vq);
 
@@ -440,7 +442,7 @@ int virtio_pci_enable_msi(virtio_pci_dev_t* dev, uint8_t vector) {
     }
 
     iowrite16(io, dev->common_off + VPCI_COMMON_MSIX_CONFIG, 0);
-    __sync_synchronize();
+    smp_wmb();
 
     irq_install_vector_handler(vector, virtio_pci_irq_handler_trampoline, 0);
     dev->msi_enabled = 1;

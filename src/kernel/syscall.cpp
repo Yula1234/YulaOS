@@ -7,7 +7,9 @@
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/futex/futex.h>
 #include <kernel/input_focus.h>
+#include <kernel/syscall.h>
 #include <kernel/smp/cpu.h>
+#include <kernel/smp/mb.h>
 
 #include <drivers/virtio/vgpu.h>
 #include <drivers/keyboard.h>
@@ -1910,7 +1912,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             result = -2;
             goto out;
         }
-        __sync_synchronize();
+        smp_mb();
 
         int ready = 0;
         for (uint32_t i = 0; i < nfds; i++) {

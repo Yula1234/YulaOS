@@ -8,6 +8,8 @@
 
 #include <mm/iomem.h>
 
+#include <kernel/smp/mb.h>
+
 #include "virtqueue.h"
 
 static inline uint16_t vq_mod(uint16_t x, uint16_t size) {
@@ -316,11 +318,11 @@ int virtqueue_submit(virtqueue_t* vq,
     uint16_t avail_slot = vq_mod(vq->avail_idx, vq->size);
     vq->avail->ring[avail_slot] = head;
 
-    __sync_synchronize();
+    smp_wmb();
     vq->avail_idx++;
     vq->avail->idx = vq->avail_idx;
 
-    __sync_synchronize();
+    smp_wmb();
 
     if (vq->notify_iomem) {
         iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
@@ -396,11 +398,11 @@ int virtqueue_submit_cb(virtqueue_t* vq,
     uint16_t avail_slot = vq_mod(vq->avail_idx, vq->size);
     vq->avail->ring[avail_slot] = head;
 
-    __sync_synchronize();
+    smp_wmb();
     vq->avail_idx++;
     vq->avail->idx = vq->avail_idx;
 
-    __sync_synchronize();
+    smp_wmb();
 
     if (vq->notify_iomem) {
         iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
@@ -458,8 +460,8 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
 
     uint32_t iflags = spinlock_acquire_safe(&vq->lock);
 
-    __sync_synchronize();
     uint16_t used_idx = vq->used->idx;
+    smp_rmb();
 
     while (vq->last_used_idx != used_idx) {
         uint16_t slot = vq_mod(vq->last_used_idx, vq->size);

@@ -1,7 +1,7 @@
+#include <drivers/virtio/virtqueue.h>
 #include <drivers/virtio/vgpu.h>
 #include <drivers/virtio/core.h>
 #include <drivers/virtio/pci.h>
-#include <drivers/virtio/virtqueue.h>
 
 #include <mm/dma/api.h>
 #include <mm/heap.h>
@@ -10,6 +10,7 @@
 #include <hal/lock.h>
 #include <hal/irq.h>
 
+#include <kernel/smp/mb.h>
 #include <kernel/proc.h>
 
 #include <lib/string.h>
@@ -1124,7 +1125,7 @@ int virtio_gpu_flush_rect(int x, int y, int w, int h) {
         return 0;
     }
 
-    __asm__ volatile("sfence" ::: "memory");
+    smp_wmb();
 
     uint64_t offset64 = (uint64_t)(uint32_t)y1 * (uint64_t)g_vgpu.fb.pitch + (uint64_t)(uint32_t)x1 * 4ull;
     if (offset64 > (uint64_t)g_vgpu.fb.size_bytes) {

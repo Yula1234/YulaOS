@@ -15,6 +15,7 @@
 #include <hal/delay.h>
 #include <hal/pmio.h>
 
+#include <kernel/smp/mb.h>
 #include <mm/dma/api.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
@@ -253,7 +254,7 @@ static int uhci_alloc_schedule(uhci_hcd_impl_t* u) {
         u->frame_list[i] = (u->async_qh_phys | UHCI_PTR_QH);
     }
 
-    __sync_synchronize();
+    smp_wmb();
 
     return 1;
 }
@@ -331,7 +332,7 @@ static void uhci_sched_insert_head_qh(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
 
     u->async_qh->link = qh->sw_phys | UHCI_PTR_QH;
 
-    __sync_synchronize();
+    smp_wmb();
 
     spinlock_release_safe(&u->sched_lock, flags);
 }
@@ -373,7 +374,7 @@ static void uhci_sched_remove_qh(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
         }
     }
 
-    __sync_synchronize();
+    smp_wmb();
 
     spinlock_release_safe(&u->sched_lock, flags);
 }
@@ -548,7 +549,7 @@ static void uhci_complete_urb(uhci_hcd_impl_t* u, uhci_wait_entry_t* e, int canc
         int success = 1;
 
         for (uhci_td_t* td = p->td_first; td; td = (uhci_td_t*)(uintptr_t)td->sw_next) {
-            __sync_synchronize();
+            smp_rmb();
 
             const uint32_t st = td->status;
             if (uhci_td_status_failed(st)) {
@@ -574,7 +575,7 @@ static void uhci_complete_urb(uhci_hcd_impl_t* u, uhci_wait_entry_t* e, int canc
         uhci_td_t* td = p->td_first;
 
         while (td) {
-            __sync_synchronize();
+            smp_rmb();
 
             const uint32_t st = td->status;
             if (uhci_td_status_failed(st)) {
@@ -1216,7 +1217,7 @@ static void uhci_intr_arm(uhci_intr_pipe_t* p) {
 
     p->qh->element = p->td->sw_phys;
 
-    __sync_synchronize();
+    smp_wmb();
 }
 
 static uhci_intr_pipe_t* uhci_intr_pipe_alloc(uhci_hcd_impl_t* u) {
@@ -1343,7 +1344,7 @@ static void uhci_intr_poll_one(uhci_hcd_impl_t* u, uhci_intr_pipe_t* p) {
         return;
     }
 
-    __sync_synchronize();
+    smp_rmb();
 
     const uint32_t st = p->td->status;
     if (st & UHCI_TD_CTRL_ACTIVE) {
@@ -1395,7 +1396,7 @@ static void uhci_irq_bh(work_struct_t* work) {
                 continue;
             }
 
-            __sync_synchronize();
+            smp_rmb();
 
             if ((e->qh->element & UHCI_PTR_T) == 0u) {
                 continue;
