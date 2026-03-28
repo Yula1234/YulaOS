@@ -6,6 +6,7 @@
 #include <hal/simd.h>
 #include <drivers/fbdev.h>
 #include <drivers/virtio/vgpu.h>
+#include <kernel/smp/mb.h>
 
 #include "vga.h"
 
@@ -302,9 +303,9 @@ void vga_clear(uint32_t color) {
         "add $16, %1\n\t"
         "dec %2\n\t"
         "jnz .loop_clear_fast\n\t"
-        "sfence\n\t"
         : : "r"(color), "r"(ptr), "r"(count) : "memory", "xmm0", "cc"
     );
+    smp_wmb();
 }
 
 void vga_set_color(uint32_t fg, uint32_t bg) {
@@ -643,7 +644,7 @@ static inline void vga_flip_sse2_impl(uint8_t* dst_base, uint32_t dst_pitch, int
         }
     }
  
-    __asm__ volatile ("sfence" ::: "memory");
+    smp_wmb();
 }
 
 __attribute__((target("avx"))) __attribute__((unused))
@@ -783,7 +784,7 @@ static void vga_flip_avx_impl(uint8_t* dst_base, uint32_t dst_pitch, int x1, int
          }
      }
  
-     __asm__ volatile ("sfence" ::: "memory");
+     smp_wmb();
      __asm__ volatile ("vzeroupper" ::: "memory");
  }
 
@@ -925,7 +926,7 @@ static inline void vga_flip_dirty_sse2_impl(uint8_t* dst_base, uint32_t dst_pitc
         }
     }
  
-    __asm__ volatile ("sfence" ::: "memory");
+    smp_wmb();
 }
 
 __attribute__((target("avx")))
@@ -1065,7 +1066,7 @@ static void vga_flip_dirty_avx_impl(uint8_t* dst_base, uint32_t dst_pitch, int x
          }
      }
  
-     __asm__ volatile ("sfence" ::: "memory");
+     smp_wmb();
      __asm__ volatile ("vzeroupper" ::: "memory");
  }
  
@@ -1220,7 +1221,7 @@ static void vga_present_rect_sse2_impl(uint8_t* dst_base, uint32_t dst_pitch, co
          vga_present_row_sse2(d8, s8, row_bytes);
      }
  
-     __asm__ volatile("sfence" ::: "memory");
+     smp_wmb();
 }
  
 __attribute__((target("avx")))
@@ -1236,7 +1237,7 @@ static void vga_present_rect_avx_impl(uint8_t* dst_base, uint32_t dst_pitch, con
          vga_present_row_avx(d8, s8, row_bytes);
      }
  
-     __asm__ volatile("sfence" ::: "memory");
+     smp_wmb();
      __asm__ volatile("vzeroupper" ::: "memory");
 }
  
