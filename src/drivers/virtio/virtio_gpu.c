@@ -1,4 +1,5 @@
 #include <drivers/virtio/virtio_gpu.h>
+#include <drivers/virtio/virtio_core.h>
 #include <drivers/virtio/virtio_pci.h>
 #include <drivers/virtio/virtqueue.h>
 
@@ -16,7 +17,6 @@
 
 extern volatile uint32_t timer_ticks;
 
-#define VIRTIO_GPU_PCI_DEVICE_ID 0x1050u
 #define VIRTIO_GPU_QUEUE_CTRL 0u
 
 #define VIRTIO_GPU_F_VIRGL 0u
@@ -206,7 +206,7 @@ typedef struct {
     int active;
     int virgl_supported;
     int virgl_ctx_ready;
-    virtio_pci_dev_t dev;
+    virtio_device_t* vdev;
     virtqueue_t ctrlq;
     mutex_t lock;
     int ctrlq_async_failed;
@@ -226,6 +226,14 @@ typedef struct {
 } virtio_gpu_state_t;
 
 static virtio_gpu_state_t g_vgpu;
+
+static virtio_pci_dev_t* vgpu_pci_dev(void) {
+    if (!g_vgpu.vdev) {
+        return 0;
+    }
+
+    return (virtio_pci_dev_t*)g_vgpu.vdev->transport_data;
+}
 
 #define VGPU_CTRLQ_QSZ 64u
 #define VGPU_CTRLQ_TIMEOUT_TICKS 30000u
@@ -549,10 +557,11 @@ static void vgpu_mark_inactive_locked(void) {
 static void vgpu_cleanup_state(void) {
     vgpu_mark_inactive_locked();
 
-    if (g_vgpu.dev.msi_enabled && g_vgpu.dev.msi_vector > 0) {
-        irq_free_vector(g_vgpu.dev.msi_vector);
-        g_vgpu.dev.msi_enabled = 0;
-        g_vgpu.dev.msi_vector = 0;
+    virtio_pci_dev_t* pci = vgpu_pci_dev();
+    if (pci && pci->msi_enabled && pci->msi_vector > 0) {
+        irq_free_vector(pci->msi_vector);
+        pci->msi_enabled = 0;
+        pci->msi_vector = 0;
     }
 
     vgpu_attached_reset(&g_vgpu.attached);
@@ -612,6 +621,8 @@ static void vgpu_cleanup_state(void) {
     g_vgpu.scanout_bound_resource_id = 0;
     memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
     g_vgpu.resource_id = 0;
+
+    g_vgpu.vdev = 0;
 }
 
 static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_t expected_resp_type) {
@@ -863,55 +874,53 @@ static int vgpu_get_display_info(uint32_t* out_w, uint32_t* out_h, uint32_t* out
     return 1;
 }
 
-int virtio_gpu_init(void) {
+static int virtio_gpu_probe(virtio_device_t* vdev) {
+    if (!vdev || !vdev->ops) {
+        return -1;
+    }
+
+    const virtio_ops_t* ops = vdev->ops;
+
     memset(&g_vgpu, 0, sizeof(g_vgpu));
     mutex_init(&g_vgpu.lock);
     vgpu_attached_reset(&g_vgpu.attached);
 
-    if (!virtio_pci_find_device(VIRTIO_PCI_VENDOR_ID, VIRTIO_GPU_PCI_DEVICE_ID, &g_vgpu.dev)) {
-        vgpu_cleanup_state();
-        return 0;
-    }
+    g_vgpu.vdev = vdev;
 
-    if (!virtio_pci_map_modern_caps(&g_vgpu.dev)) {
-        vgpu_cleanup_state();
-        return 0;
-    }
-
-    virtio_pci_reset(&g_vgpu.dev);
+    ops->reset(vdev);
 
     uint64_t accepted = 0;
     uint64_t wanted = VIRTIO_F_VERSION_1 | (1ull << VIRTIO_GPU_F_VIRGL);
-    if (!virtio_pci_negotiate_features(&g_vgpu.dev, wanted, &accepted)) {
+    if (!ops->negotiate_features(vdev, wanted, &accepted)) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
     g_vgpu.virgl_supported = (accepted & (1ull << VIRTIO_GPU_F_VIRGL)) != 0ull;
 
     int msi_vec = irq_alloc_vector();
     int msi_ok = 0;
-    
+
     if (msi_vec >= 0) {
-        msi_ok = virtio_pci_enable_msi(&g_vgpu.dev, (uint8_t)msi_vec);
+        msi_ok = ops->enable_msi(vdev, (uint8_t)msi_vec);
         if (!msi_ok) {
             irq_free_vector(msi_vec);
         }
     }
-    
+
     if (!msi_ok) {
-        (void)virtio_pci_enable_intx(&g_vgpu.dev, virtio_pci_irq_handler);
+        (void)ops->enable_intx(vdev, virtio_pci_irq_handler);
     }
 
-    if (!virtio_pci_queue_init(&g_vgpu.dev, &g_vgpu.ctrlq, VIRTIO_GPU_QUEUE_CTRL, (uint16_t)VGPU_CTRLQ_QSZ)) {
+    if (!ops->setup_queue(vdev, VIRTIO_GPU_QUEUE_CTRL, &g_vgpu.ctrlq, (uint16_t)VGPU_CTRLQ_QSZ)) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     g_vgpu.ctrl_cmd = pmm_alloc_block();
     g_vgpu.ctrl_resp = pmm_alloc_block();
     if (!g_vgpu.ctrl_cmd || !g_vgpu.ctrl_resp) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     memset(g_vgpu.ctrl_cmd, 0, PAGE_SIZE);
@@ -923,7 +932,7 @@ int virtio_gpu_init(void) {
     g_vgpu.async_ctrl_slots = kzalloc((size_t)VGPU_CTRLQ_ASYNC_SLOTS * sizeof(vgpu_ctrlq_async_slot_t));
     if (!g_vgpu.async_ctrl_slots) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     {
@@ -935,7 +944,7 @@ int virtio_gpu_init(void) {
 
             if (!slots[i].cmd || !slots[i].resp) {
                 vgpu_cleanup_state();
-                return 0;
+                return -1;
             }
 
             memset(slots[i].cmd, 0, PAGE_SIZE);
@@ -953,14 +962,14 @@ int virtio_gpu_init(void) {
     uint32_t scanout = 0;
     if (!vgpu_get_display_info(&w, &h, &scanout)) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     uint64_t pitch64 = (uint64_t)w * 4ull;
     uint64_t size64 = pitch64 * (uint64_t)h;
     if (pitch64 == 0 || pitch64 > 0xFFFFFFFFu || size64 == 0 || size64 > 0xFFFFFFFFu) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     g_vgpu.scanout_id = scanout;
@@ -974,13 +983,13 @@ int virtio_gpu_init(void) {
     uint32_t order = vgpu_pages_order_for_bytes(g_vgpu.fb.size_bytes);
     if (order > PMM_MAX_ORDER) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     void* fb_phys = pmm_alloc_pages(order);
     if (!fb_phys) {
         vgpu_cleanup_state();
-        return 0;
+        return -1;
     }
 
     if (paging_pat_is_supported()) {
@@ -1019,7 +1028,7 @@ int virtio_gpu_init(void) {
         if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
             mutex_unlock(&g_vgpu.lock);
             vgpu_cleanup_state();
-            return 0;
+            return -1;
         }
     }
 
@@ -1036,7 +1045,7 @@ int virtio_gpu_init(void) {
         if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
             mutex_unlock(&g_vgpu.lock);
             vgpu_cleanup_state();
-            return 0;
+            return -1;
         }
     }
 
@@ -1046,8 +1055,23 @@ int virtio_gpu_init(void) {
     memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
     g_vgpu.active = 1;
 
-    virtio_pci_add_status(&g_vgpu.dev, VIRTIO_STATUS_DRIVER_OK);
-    return 1;
+    ops->add_status(vdev, VIRTIO_STATUS_DRIVER_OK);
+    return 0;
+}
+
+static virtio_driver_t virtio_gpu_driver = {
+    .name = "virtio-gpu",
+    .device_type = VIRTIO_ID_GPU,
+    .probe = virtio_gpu_probe,
+    .remove = 0,
+};
+
+void virtio_gpu_register_driver(void) {
+    virtio_register_driver(&virtio_gpu_driver);
+}
+
+int virtio_gpu_init(void) {
+    return g_vgpu.active ? 1 : 0;
 }
 
 int virtio_gpu_is_active(void) {

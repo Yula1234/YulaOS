@@ -92,7 +92,11 @@ static bool match_id(const pci_device_t& dev, const pci_device_id_t& id) {
         return false;
     }
 
-    if ((id.match_flags & PCI_MATCH_DEVICE_ID) != 0u
+    if ((id.match_flags & PCI_MATCH_DEVICE_ID_RANGE) != 0u) {
+        if (dev.device_id < id.device_id || dev.device_id > id.device_id_last) {
+            return false;
+        }
+    } else if ((id.match_flags & PCI_MATCH_DEVICE_ID) != 0u
         && dev.device_id != id.device_id) {
         return false;
     }

@@ -2,7 +2,6 @@
 // Copyright (C) 2025 Yula1234
 
 #include <drivers/serial/serial_core.h>
-#include <drivers/virtio/virtio_gpu.h>
 #include <drivers/serial/ns16550.h>
 #include <drivers/serial/ttyS0.h>
 #include <drivers/block/bdev.h>
@@ -59,7 +58,9 @@
 volatile uint32_t kernel_simd_caps;
 volatile uint64_t kernel_xsave_mask;
 
-extern uint32_t kernel_end; 
+extern uint32_t kernel_end;
+
+static uint32_t g_kernel_memory_end; 
 
 extern void put_pixel(int x, int y, uint32_t color);
 
@@ -252,10 +253,7 @@ static uint32_t kmain_memory_init(const multiboot_info_t* mb_info) {
 }
 
 static void kmain_video_init(uint32_t memory_end_addr) {
-    virtio_gpu_init();
-    fb_select_active();
     map_framebuffer(memory_end_addr);
-
     g_fb_mapped = 1;
 }
 
@@ -266,7 +264,6 @@ static void kmain_platform_init(void) {
 
 static void kmain_devices_init(void) {
     vga_init();
-    vga_init_graphics();
 
     ns16550_init(NS16550_COM1);
 
@@ -284,6 +281,11 @@ static void kmain_devices_init(void) {
 
     drivers_init_stage(DRIVER_STAGE_CORE);
 
+    fb_select_active();
+    map_framebuffer(g_kernel_memory_end);
+    g_fb_mapped = 1;
+
+    vga_init_graphics();
 }
 
 static void kmain_fs_init(void) {
@@ -378,6 +380,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     kmain_cpu_init(magic, mb_info);
 
     uint32_t memory_end_addr = kmain_memory_init(mb_info);
+    g_kernel_memory_end = memory_end_addr;
 
     cpp_call_global_ctors();
 

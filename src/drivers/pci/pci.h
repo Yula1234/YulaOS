@@ -25,12 +25,14 @@ int pci_msi_configure(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector, u
 #define PCI_MATCH_CLASS      (1u << 2)
 #define PCI_MATCH_SUBCLASS   (1u << 3)
 #define PCI_MATCH_PROG_IF    (1u << 4)
+#define PCI_MATCH_DEVICE_ID_RANGE (1u << 5)
 
 typedef struct pci_device_id {
     uint32_t match_flags;
 
     uint16_t vendor_id;
     uint16_t device_id;
+    uint16_t device_id_last;
 
     uint8_t class_code;
     uint8_t subclass;

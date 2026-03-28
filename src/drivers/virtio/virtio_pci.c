@@ -4,7 +4,11 @@
 #include <arch/i386/paging.h>
 
 #include <drivers/acpi.h>
+#include <drivers/driver.h>
 #include <drivers/pci/pci.h>
+#include <drivers/virtio/virtio_core.h>
+
+#include <mm/heap.h>
 
 #include <hal/io.h>
 #include <hal/ioapic.h>
@@ -14,6 +18,8 @@
 #include <kernel/smp/cpu.h>
 
 #include <lib/string.h>
+
+#include <stddef.h>
 
 #include "virtio_pci.h"
 #include "virtqueue.h"
@@ -66,65 +72,57 @@ typedef struct __attribute__((packed)) {
     uint64_t queue_used;
 } virtio_pci_common_cfg_t;
 
-static inline uint8_t pci_read8_local(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint32_t reg = pci_read(bus, slot, func, offset & 0xFC);
-    return (uint8_t)((reg >> ((offset & 3u) * 8u)) & 0xFFu);
-}
+static void virtio_pci_dev_enable_mmio_master(pci_device_t* pci) {
+    if (!pci) {
+        return;
+    }
 
-static inline uint16_t pci_read16_local(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint32_t reg = pci_read(bus, slot, func, offset & 0xFC);
-    return (uint16_t)((reg >> ((offset & 2u) * 8u)) & 0xFFFFu);
-}
-
-static inline void pci_write16_local(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint16_t value) {
-    uint8_t aligned = offset & 0xFC;
-    uint32_t reg = pci_read(bus, slot, func, aligned);
-    uint32_t shift = (uint32_t)(offset & 2u) * 8u;
-    reg &= ~(0xFFFFu << shift);
-    reg |= ((uint32_t)value << shift);
-    pci_write(bus, slot, func, aligned, reg);
-}
-
-static inline void pci_write8_local(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint8_t value) {
-    uint8_t aligned = offset & 0xFC;
-    uint32_t reg = pci_read(bus, slot, func, aligned);
-    uint32_t shift = (uint32_t)(offset & 3u) * 8u;
-    reg &= ~(0xFFu << shift);
-    reg |= ((uint32_t)value << shift);
-    pci_write(bus, slot, func, aligned, reg);
-}
-
-static void pci_enable_mem_busmaster(uint8_t bus, uint8_t slot, uint8_t func) {
-    uint32_t cmdsts = pci_read(bus, slot, func, 0x04);
+    uint32_t cmdsts = pci_dev_read32(pci, 0x04);
     uint16_t cmd = (uint16_t)(cmdsts & 0xFFFFu);
 
-    cmd |= 0x0002u;   // Memory Space
-    cmd |= 0x0004u;   // Bus Master
-    cmd &= (uint16_t)~0x0400u; // Interrupt Disable
+    cmd |= 0x0006u;
+    cmd &= (uint16_t)~0x0400u;
 
-    pci_write16_local(bus, slot, func, 0x04, cmd);
+    pci_dev_write16(pci, 0x04, cmd);
 }
 
-static int pci_get_bar32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t bar_index, uint32_t* out_base) {
-    if (!out_base || bar_index >= 6) return 0;
-
-    uint8_t off = (uint8_t)(0x10u + (uint8_t)(bar_index * 4u));
-    uint32_t lo = pci_read(bus, slot, func, off);
-
-    if (lo & 1u) {
+static int virtio_pci_mmio_bar_base(const pci_device_t* pci, uint8_t bar_idx, uint32_t* out_base) {
+    if (!pci || bar_idx >= 6u || !out_base) {
         return 0;
     }
 
-    uint32_t type = (lo >> 1) & 3u;
-    if (type == 2u) {
-        if (bar_index == 5) return 0;
-        uint32_t hi = pci_read(bus, slot, func, (uint8_t)(off + 4u));
-        if (hi != 0) {
-            return 0;
-        }
+    const pci_bar_t* b = &pci->bars[bar_idx];
+
+    if (b->type != PCI_BAR_TYPE_MMIO || b->size == 0u) {
+        return 0;
     }
 
-    *out_base = lo & ~0xFu;
+    if (b->is_64bit == 0u) {
+        if (b->base_addr == 0u) {
+            return 0;
+        }
+
+        *out_base = b->base_addr;
+        return 1;
+    }
+
+    if (bar_idx + 1u >= 6u) {
+        return 0;
+    }
+
+    const uint8_t off = (uint8_t)(0x10u + bar_idx * 4u);
+    const uint32_t hi = pci_dev_read32(pci, (uint8_t)(off + 4u));
+
+    if (hi != 0u) {
+        return 0;
+    }
+
+    const uint32_t lo = b->base_addr != 0u ? b->base_addr : (pci_dev_read32(pci, off) & ~0x0Fu);
+    if (lo == 0u) {
+        return 0;
+    }
+
+    *out_base = lo;
     return 1;
 }
 
@@ -139,33 +137,37 @@ static void map_mmio_region_uc(uint32_t phys_base, uint32_t length) {
         paging_map(kernel_page_directory, p, p, 0x13u);
         if (p + 4096u < p) break;
     }
+
+    __sync_synchronize();
 }
 
 static int virtio_pci_enable_msix_entry0(virtio_pci_dev_t* dev, uint8_t irq_vector) {
-    if (!dev) {
+    if (!dev || !dev->pci) {
         return 0;
     }
 
-    uint32_t cmdsts = pci_read(dev->bus, dev->slot, dev->func, 0x04);
+    pci_device_t* pci = dev->pci;
+
+    uint32_t cmdsts = pci_dev_read32(pci, 0x04);
     uint16_t status = (uint16_t)((cmdsts >> 16) & 0xFFFFu);
     if ((status & 0x0010u) == 0u) {
         return 0;
     }
 
-    uint8_t cap = pci_read8_local(dev->bus, dev->slot, dev->func, 0x34);
+    uint8_t cap = pci_dev_read8(pci, 0x34);
     for (int iter = 0; iter < 64 && cap != 0; iter++) {
-        uint8_t cap_id = pci_read8_local(dev->bus, dev->slot, dev->func, cap + 0);
-        uint8_t cap_next = pci_read8_local(dev->bus, dev->slot, dev->func, cap + 1);
+        uint8_t cap_id = pci_dev_read8(pci, cap + 0);
+        uint8_t cap_next = pci_dev_read8(pci, cap + 1);
 
         if (cap_id == PCI_CAP_ID_MSIX) {
-            uint16_t msg_ctl = pci_read16_local(dev->bus, dev->slot, dev->func, cap + 2);
+            uint16_t msg_ctl = pci_dev_read16(pci, cap + 2);
 
-            uint32_t table = pci_read(dev->bus, dev->slot, dev->func, cap + 4);
+            uint32_t table = pci_dev_read32(pci, cap + 4);
             uint8_t bir = (uint8_t)(table & 0x7u);
             uint32_t table_off = table & ~0x7u;
 
             uint32_t bar_base;
-            if (!pci_get_bar32(dev->bus, dev->slot, dev->func, bir, &bar_base)) {
+            if (!virtio_pci_mmio_bar_base(pci, bir, &bar_base)) {
                 return 0;
             }
 
@@ -191,11 +193,11 @@ static int virtio_pci_enable_msix_entry0(virtio_pci_dev_t* dev, uint8_t irq_vect
 
             msg_ctl &= (uint16_t)~(1u << 14);
             msg_ctl |= (uint16_t)(1u << 15);
-            pci_write16_local(dev->bus, dev->slot, dev->func, cap + 2, msg_ctl);
+            pci_dev_write16(pci, cap + 2, msg_ctl);
 
             uint16_t command = (uint16_t)(cmdsts & 0xFFFFu);
             command |= (uint16_t)(1u << 10);
-            pci_write16_local(dev->bus, dev->slot, dev->func, 0x04, command);
+            pci_dev_write16(pci, 0x04, command);
 
             return 1;
         }
@@ -244,67 +246,36 @@ static void virtio_pci_irq_handler_trampoline(registers_t* regs, void* ctx) {
     virtio_pci_irq_handler(regs);
 }
 
-int virtio_pci_find_device(uint16_t vendor_id, uint16_t device_id, virtio_pci_dev_t* out_dev) {
-    if (!out_dev) return 0;
-
-    memset(out_dev, 0, sizeof(*out_dev));
-
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            for (uint8_t func = 0; func < 8; func++) {
-                uint32_t id = pci_read((uint8_t)bus, slot, func, 0x00);
-                uint16_t vendor = (uint16_t)(id & 0xFFFFu);
-                if (vendor == 0xFFFFu) continue;
-
-                uint16_t dev_id = (uint16_t)((id >> 16) & 0xFFFFu);
-                if (vendor != vendor_id || dev_id != device_id) continue;
-
-                uint32_t irq_info = pci_read((uint8_t)bus, slot, func, 0x3C);
-
-                out_dev->bus = (uint8_t)bus;
-                out_dev->slot = slot;
-                out_dev->func = func;
-                out_dev->vendor_id = vendor;
-                out_dev->device_id = dev_id;
-                out_dev->irq_line = (uint8_t)(irq_info & 0xFFu);
-                out_dev->msi_enabled = 0;
-                out_dev->msi_vector = 0;
-                out_dev->queue_count = 0;
-
-                return 1;
-            }
-        }
-    }
-
-    return 0;
-}
-
 int virtio_pci_map_modern_caps(virtio_pci_dev_t* dev) {
-    if (!dev) return 0;
-
-    virtio_pci_global_init_once();
-
-    pci_enable_mem_busmaster(dev->bus, dev->slot, dev->func);
-
-    uint32_t cmdsts = pci_read(dev->bus, dev->slot, dev->func, 0x04);
-    uint16_t status = (uint16_t)((cmdsts >> 16) & 0xFFFFu);
-    if ((status & 0x0010u) == 0u) {
+    if (!dev || !dev->pci) {
         return 0;
     }
 
-    uint8_t cap = pci_read8_local(dev->bus, dev->slot, dev->func, 0x34);
+    virtio_pci_global_init_once();
+
+    pci_device_t* pci = dev->pci;
+
+    virtio_pci_dev_enable_mmio_master(pci);
+
+    uint32_t cmdsts = pci_dev_read32(pci, 0x04);
+    uint16_t st = (uint16_t)((cmdsts >> 16) & 0xFFFFu);
+    if ((st & 0x0010u) == 0u) {
+        return 0;
+    }
+
+    uint8_t cap = pci_dev_read8(pci, 0x34);
     for (int iter = 0; iter < 64 && cap != 0; iter++) {
-        uint8_t cap_id = pci_read8_local(dev->bus, dev->slot, dev->func, cap + 0);
-        uint8_t cap_next = pci_read8_local(dev->bus, dev->slot, dev->func, cap + 1);
+        uint8_t cap_id = pci_dev_read8(pci, cap + 0);
+        uint8_t cap_next = pci_dev_read8(pci, cap + 1);
 
         if (cap_id == VIRTIO_PCI_CAP_ID) {
-            uint8_t cfg_type = pci_read8_local(dev->bus, dev->slot, dev->func, cap + 3);
-            uint8_t bar = pci_read8_local(dev->bus, dev->slot, dev->func, cap + 4);
-            uint32_t offset = pci_read(dev->bus, dev->slot, dev->func, cap + 8);
-            uint32_t length = pci_read(dev->bus, dev->slot, dev->func, cap + 12);
+            uint8_t cfg_type = pci_dev_read8(pci, cap + 3);
+            uint8_t bar = pci_dev_read8(pci, cap + 4);
+            uint32_t offset = pci_dev_read32(pci, cap + 8);
+            uint32_t length = pci_dev_read32(pci, cap + 12);
 
             uint32_t bar_base;
-            if (!pci_get_bar32(dev->bus, dev->slot, dev->func, bar, &bar_base)) {
+            if (!virtio_pci_mmio_bar_base(pci, bar, &bar_base)) {
                 cap = cap_next;
                 continue;
             }
@@ -316,7 +287,7 @@ int virtio_pci_map_modern_caps(virtio_pci_dev_t* dev) {
                 dev->common_cfg = (volatile void*)phys;
             } else if (cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG) {
                 dev->notify_base = (volatile void*)phys;
-                dev->notify_off_multiplier = pci_read(dev->bus, dev->slot, dev->func, cap + 16);
+                dev->notify_off_multiplier = pci_dev_read32(pci, cap + 16);
             } else if (cfg_type == VIRTIO_PCI_CAP_ISR_CFG) {
                 dev->isr_cfg = (volatile uint8_t*)phys;
             } else if (cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG) {
@@ -453,9 +424,25 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
     uint32_t avail_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->avail);
     uint32_t used_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->used);
 
-    c->queue_desc = (uint64_t)desc_phys;
-    c->queue_avail = (uint64_t)avail_phys;
-    c->queue_used = (uint64_t)used_phys;
+    volatile uint8_t* cfg = (volatile uint8_t*)c;
+
+    volatile uint32_t* qd = (volatile uint32_t*)(cfg + offsetof(virtio_pci_common_cfg_t, queue_desc));
+    qd[0] = desc_phys;
+    __sync_synchronize();
+    qd[1] = 0u;
+    __sync_synchronize();
+
+    volatile uint32_t* qa = (volatile uint32_t*)(cfg + offsetof(virtio_pci_common_cfg_t, queue_avail));
+    qa[0] = avail_phys;
+    __sync_synchronize();
+    qa[1] = 0u;
+    __sync_synchronize();
+
+    volatile uint32_t* qu = (volatile uint32_t*)(cfg + offsetof(virtio_pci_common_cfg_t, queue_used));
+    qu[0] = used_phys;
+    __sync_synchronize();
+    qu[1] = 0u;
+    __sync_synchronize();
 
     if (dev->msi_enabled) {
         c->queue_msix_vector = 0;
@@ -502,11 +489,11 @@ static void virtio_pci_intx_trampoline(registers_t* regs, void* ctx) {
 }
 
 int virtio_pci_enable_intx(virtio_pci_dev_t* dev, void (*handler)(registers_t*)) {
-    if (!dev || !handler) return 0;
+    if (!dev || !handler || !dev->pci) return 0;
 
     virtio_pci_global_register_dev(dev);
 
-    uint8_t irq_line = dev->irq_line;
+    uint8_t irq_line = dev->pci->irq_line;
 
     irq_install_handler(irq_line, virtio_pci_intx_trampoline, (void*)handler);
 
@@ -568,3 +555,202 @@ void virtio_pci_irq_handler(registers_t* regs) {
 
     spinlock_release_safe(&g_virtio_devs_lock, iflags);
 }
+
+static uint16_t virtio_pci_virtio_id_from_pci_device_id(uint16_t pci_did) {
+    if (pci_did >= 0x1040u && pci_did <= 0x107Fu) {
+        return (uint16_t)(pci_did - 0x1040u);
+    }
+
+    if (pci_did >= 0x1000u && pci_did < 0x1040u) {
+        return (uint16_t)(pci_did - 0x1000u);
+    }
+
+    return 0;
+}
+
+static virtio_pci_dev_t* virtio_pci_dev_from_vdev(virtio_device_t* vdev) {
+    if (!vdev) {
+        return 0;
+    }
+
+    return (virtio_pci_dev_t*)vdev->transport_data;
+}
+
+static void virtio_pci_ops_reset(virtio_device_t* vdev) {
+    virtio_pci_reset(virtio_pci_dev_from_vdev(vdev));
+}
+
+static void virtio_pci_ops_add_status(virtio_device_t* vdev, uint8_t status_bits) {
+    virtio_pci_add_status(virtio_pci_dev_from_vdev(vdev), status_bits);
+}
+
+static uint64_t virtio_pci_ops_read_device_features(virtio_device_t* vdev) {
+    return virtio_pci_read_device_features(virtio_pci_dev_from_vdev(vdev));
+}
+
+static void virtio_pci_ops_write_driver_features(virtio_device_t* vdev, uint64_t features) {
+    virtio_pci_write_driver_features(virtio_pci_dev_from_vdev(vdev), features);
+}
+
+static int virtio_pci_ops_negotiate_features(virtio_device_t* vdev, uint64_t wanted, uint64_t* out_accepted) {
+    return virtio_pci_negotiate_features(virtio_pci_dev_from_vdev(vdev), wanted, out_accepted);
+}
+
+static int virtio_pci_ops_setup_queue(
+    virtio_device_t* vdev,
+    uint16_t queue_index,
+    struct virtqueue* vq,
+    uint16_t requested_size
+) {
+    return virtio_pci_queue_init(virtio_pci_dev_from_vdev(vdev), vq, queue_index, requested_size);
+}
+
+static int virtio_pci_ops_enable_msi(virtio_device_t* vdev, uint8_t vector) {
+    return virtio_pci_enable_msi(virtio_pci_dev_from_vdev(vdev), vector);
+}
+
+static int virtio_pci_ops_enable_intx(virtio_device_t* vdev, void (*handler)(registers_t* regs)) {
+    return virtio_pci_enable_intx(virtio_pci_dev_from_vdev(vdev), handler);
+}
+
+static uint8_t virtio_pci_ops_read_config8(virtio_device_t* vdev, uint32_t offset) {
+    virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
+    if (!p || !p->device_cfg) {
+        return 0;
+    }
+
+    return *(volatile uint8_t*)((uint8_t*)p->device_cfg + offset);
+}
+
+static uint16_t virtio_pci_ops_read_config16(virtio_device_t* vdev, uint32_t offset) {
+    virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
+    if (!p || !p->device_cfg) {
+        return 0;
+    }
+
+    return *(volatile uint16_t*)((uint8_t*)p->device_cfg + offset);
+}
+
+static uint32_t virtio_pci_ops_read_config32(virtio_device_t* vdev, uint32_t offset) {
+    virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
+    if (!p || !p->device_cfg) {
+        return 0;
+    }
+
+    return *(volatile uint32_t*)((uint8_t*)p->device_cfg + offset);
+}
+
+static void virtio_pci_ops_write_config32(virtio_device_t* vdev, uint32_t offset, uint32_t val) {
+    virtio_pci_dev_t* p = virtio_pci_dev_from_vdev(vdev);
+    if (!p || !p->device_cfg) {
+        return;
+    }
+
+    *(volatile uint32_t*)((uint8_t*)p->device_cfg + offset) = val;
+}
+
+static void virtio_pci_ops_notify(virtio_device_t* vdev, uint16_t queue_index) {
+    (void)vdev;
+    (void)queue_index;
+}
+
+static const virtio_ops_t virtio_pci_ops = {
+    .reset = virtio_pci_ops_reset,
+    .add_status = virtio_pci_ops_add_status,
+    .read_device_features = virtio_pci_ops_read_device_features,
+    .write_driver_features = virtio_pci_ops_write_driver_features,
+    .negotiate_features = virtio_pci_ops_negotiate_features,
+    .setup_queue = virtio_pci_ops_setup_queue,
+    .enable_msi = virtio_pci_ops_enable_msi,
+    .enable_intx = virtio_pci_ops_enable_intx,
+    .read_config8 = virtio_pci_ops_read_config8,
+    .read_config16 = virtio_pci_ops_read_config16,
+    .read_config32 = virtio_pci_ops_read_config32,
+    .write_config32 = virtio_pci_ops_write_config32,
+    .notify = virtio_pci_ops_notify,
+};
+
+static int virtio_pci_probe(pci_device_t* pdev) {
+    if (!pdev) {
+        return -1;
+    }
+
+    virtio_pci_dev_t* p = kmalloc(sizeof(*p));
+    if (!p) {
+        return -1;
+    }
+
+    memset(p, 0, sizeof(*p));
+
+    p->pci = pdev;
+
+    if (!virtio_pci_map_modern_caps(p)) {
+        kfree(p);
+        return -1;
+    }
+
+    const uint16_t virtio_id = virtio_pci_virtio_id_from_pci_device_id(pdev->device_id);
+
+    virtio_device_t* v = kmalloc(sizeof(*v));
+    if (!v) {
+        kfree(p);
+        return -1;
+    }
+
+    memset(v, 0, sizeof(*v));
+    v->transport_data = p;
+    v->ops = &virtio_pci_ops;
+    v->virtio_dev_id = virtio_id;
+    v->dev.name = "virtio";
+    v->dev.driver = 0;
+
+    const int rc = virtio_register_device(v);
+    if (rc != 0) {
+        kfree(v);
+        kfree(p);
+        return -1;
+    }
+
+    return 0;
+}
+
+static const pci_device_id_t g_virtio_pci_ids[] = {
+    {
+        .match_flags = PCI_MATCH_VENDOR_ID | PCI_MATCH_DEVICE_ID_RANGE,
+        .vendor_id = 0x1AF4u,
+        .device_id = 0x1000u,
+        .device_id_last = 0x107Fu,
+        .class_code = 0u,
+        .subclass = 0u,
+        .prog_if = 0u,
+    },
+    { .match_flags = 0u },
+};
+
+static pci_driver_t g_virtio_pci_driver = {
+    .base = {
+        .name = "virtio-pci",
+        .klass = DRIVER_CLASS_PSEUDO,
+        .stage = DRIVER_STAGE_CORE,
+        .init = 0,
+        .shutdown = 0,
+    },
+    .id_table = g_virtio_pci_ids,
+    .probe = virtio_pci_probe,
+    .remove = 0,
+};
+
+extern void virtio_gpu_register_driver(void);
+
+static int virtio_pci_transport_init(void) {
+    virtio_gpu_register_driver();
+    return pci_register_driver(&g_virtio_pci_driver);
+}
+
+DRIVER_REGISTER(
+    .name = "virtio-pci",
+    .klass = DRIVER_CLASS_PSEUDO,
+    .stage = DRIVER_STAGE_CORE,
+    .init = virtio_pci_transport_init,
+    .shutdown = 0
+);

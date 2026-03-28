@@ -6,19 +6,15 @@
 
 #include <arch/i386/idt.h>
 
+#include <drivers/pci/pci.h>
+
 #include <stdint.h>
 
 struct virtqueue;
 
 typedef struct {
-    uint8_t bus;
-    uint8_t slot;
-    uint8_t func;
+    pci_device_t* pci;
 
-    uint16_t vendor_id;
-    uint16_t device_id;
-
-    uint8_t irq_line;
     int msi_enabled;
     uint8_t msi_vector;
 
@@ -41,8 +37,6 @@ typedef struct {
 #define VIRTIO_STATUS_FAILED      0x80u
 
 #define VIRTIO_F_VERSION_1 (1ull << 32)
-
-int virtio_pci_find_device(uint16_t vendor_id, uint16_t device_id, virtio_pci_dev_t* out_dev);
 
 int virtio_pci_map_modern_caps(virtio_pci_dev_t* dev);
 
