@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <arch/i386/paging.h>
-
 #include <drivers/acpi.h>
 #include <drivers/driver.h>
 #include <drivers/pci/pci.h>
 #include <drivers/virtio/core.h>
 
+#include <mm/dma/api.h>
 #include <mm/heap.h>
 #include <mm/iomem.h>
 
@@ -436,9 +435,10 @@ int virtio_pci_queue_init(virtio_pci_dev_t* dev, struct virtqueue* out_vq, uint1
         return 0;
     }
 
-    uint32_t desc_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->desc);
-    uint32_t avail_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->avail);
-    uint32_t used_phys = paging_get_phys(kernel_page_directory, (uint32_t)(uintptr_t)((virtqueue_t*)out_vq)->used);
+    virtqueue_t* vq = (virtqueue_t*)out_vq;
+    uint32_t desc_phys = dma_virt_to_phys((void*)vq->desc);
+    uint32_t avail_phys = dma_virt_to_phys((void*)vq->avail);
+    uint32_t used_phys = dma_virt_to_phys((void*)vq->used);
 
     iowrite32(io, co + VPCI_COMMON_QUEUE_DESC, desc_phys);
     __sync_synchronize();

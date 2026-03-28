@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <arch/i386/paging.h>
-
-#include <mm/pmm.h>
+#include <mm/dma/api.h>
 #include <mm/heap.h>
 
 #include <lib/string.h>
@@ -29,18 +27,6 @@ static uint32_t virtqueue_ring_bytes(uint16_t qsz) {
     total += used_aligned;
     total = (total + 4095u) & ~4095u;
     return total;
-}
-
-static uint32_t virtqueue_ring_order(uint32_t bytes) {
-    uint32_t pages = (bytes + 4095u) >> 12;
-
-    uint32_t order = 0;
-    uint32_t pow2 = 1;
-    while (pow2 < pages && order < 31) {
-        pow2 <<= 1;
-        order++;
-    }
-    return order;
 }
 
 static void virtqueue_build_free_list(virtqueue_t* vq) {
@@ -139,15 +125,15 @@ int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, __iomem
     spinlock_init(&vq->lock);
 
     uint32_t ring_bytes = virtqueue_ring_bytes(size);
-    uint32_t order = virtqueue_ring_order(ring_bytes);
-
-    void* mem = pmm_alloc_pages(order);
-    if (!mem) return 0;
-
-    memset(mem, 0, (size_t)PAGE_SIZE << order);
+    uint32_t ring_phys = 0u;
+    void* mem = dma_alloc_coherent((size_t)ring_bytes, &ring_phys);
+    if (!mem || ring_phys == 0u) {
+        return 0;
+    }
 
     vq->ring_mem = mem;
-    vq->ring_order = order;
+    vq->ring_phys = ring_phys;
+    vq->ring_alloc_size = (size_t)ring_bytes;
 
     uint8_t* base = (uint8_t*)mem;
 
@@ -219,8 +205,10 @@ void virtqueue_destroy(virtqueue_t* vq) {
     vq->token_num_free = 0;
 
     if (vq->ring_mem) {
-        pmm_free_pages(vq->ring_mem, vq->ring_order);
+        dma_free_coherent(vq->ring_mem, vq->ring_alloc_size, vq->ring_phys);
         vq->ring_mem = 0;
+        vq->ring_phys = 0u;
+        vq->ring_alloc_size = 0u;
     }
 
     vq->desc = 0;

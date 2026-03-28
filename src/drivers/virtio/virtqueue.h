@@ -7,6 +7,7 @@
 #include <hal/lock.h>
 #include <mm/iomem.h>
 
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct __attribute__((packed)) {
@@ -61,7 +62,8 @@ typedef struct virtqueue {
     uint32_t notify_iomem_off;
 
     void* ring_mem;
-    uint32_t ring_order;
+    uint32_t ring_phys;
+    size_t ring_alloc_size;
 
     uint16_t free_head;
     uint16_t num_free;
