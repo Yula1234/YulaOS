@@ -39,7 +39,7 @@ typedef struct {
 } usb_intr_wrap_t;
 
 static usb_intr_wrap_list_t g_usb_intr_wraps = {
-    .lock = {0},
+    .lock = {{0}},
     .list = {0},
 };
 
