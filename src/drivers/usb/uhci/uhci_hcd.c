@@ -8,8 +8,8 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 
+#include <hal/delay.h>
 #include <hal/pmio.h>
-#include <drivers/usb/usb_core.h>
 
 #include <mm/dma/api.h>
 #include <mm/heap.h>
@@ -172,7 +172,9 @@ static void uhci_reset_controller(uhci_hcd_impl_t* u) {
     uhci_writew(u, UHCI_REG_USBCMD, 0);
 
     uhci_writew(u, UHCI_REG_USBCMD, UHCI_USBCMD_GRESET);
-    proc_usleep(UHCI_RESET_GRESET_DELAY_US);
+
+    udelay(UHCI_RESET_GRESET_DELAY_US);
+    
     uhci_writew(u, UHCI_REG_USBCMD, 0);
 
     uhci_writew(u, UHCI_REG_USBCMD, UHCI_USBCMD_HCRESET);
@@ -182,7 +184,7 @@ static void uhci_reset_controller(uhci_hcd_impl_t* u) {
             break;
         }
 
-        proc_usleep(UHCI_RESET_HCRESET_POLL_US);
+        udelay(UHCI_RESET_HCRESET_POLL_US);
     }
 
     uhci_writew(u, UHCI_REG_USBSTS, UHCI_USBSTS_CLEAR_ALL);
