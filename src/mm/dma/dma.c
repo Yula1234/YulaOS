@@ -34,7 +34,7 @@ static uint32_t size_to_order(size_t size) {
     return order;
 }
 
-void* dma_alloc_coherent(size_t size, uint32_t* out_phys) {
+void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags) {
     if (size == 0u || !out_phys) {
         return 0;
     }
@@ -54,8 +54,6 @@ void* dma_alloc_coherent(size_t size, uint32_t* out_phys) {
         return 0;
     }
     uint32_t virt_addr = (uint32_t)(uintptr_t)virt_ptr;
-
-    uint32_t pte_flags = PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
     
     for (uint32_t i = 0u; i < pages; i++) {
         paging_map(kernel_page_directory, 
@@ -68,6 +66,22 @@ void* dma_alloc_coherent(size_t size, uint32_t* out_phys) {
     
     *out_phys = phys_addr;
     return virt_ptr;
+}
+
+void* dma_alloc_coherent(size_t size, uint32_t* out_phys) {
+    return __dma_alloc(size, out_phys, PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT);
+}
+
+void* dma_alloc_coherent_wc(size_t size, uint32_t* out_phys) {
+    uint32_t flags = PTE_PRESENT | PTE_RW;
+    
+    if (paging_pat_is_supported()) {
+        flags |= PTE_PAT;
+    } else {
+        flags |= PTE_PCD | PTE_PWT; 
+    }
+    
+    return __dma_alloc(size, out_phys, flags);
 }
 
 void dma_free_coherent(void* vaddr, size_t size, uint32_t phys) {
