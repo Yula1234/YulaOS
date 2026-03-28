@@ -1,86 +1,108 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2025 Yula1234 */
+/* Copyright (C) 2026 Yula1234 */
+
+#include <lib/compiler.h>
 
 #include <hal/cpu.h>
 
 #include "rwspinlock.h"
 
+/*
+ * Bit layout for rwspinlock_t::state
+ *  - Bit 31: Writer Locked (Exclusive ownership)
+ *  - Bit 30: Writer Pending (Blocks new readers, prevents starvation)
+ *  - Bits 0-29: Active reader count
+ */
+#define RW_STATE_WRITER_LOCKED  0x80000000u
+#define RW_STATE_WRITER_PENDING 0x40000000u
+#define RW_STATE_READER_MASK    0x3FFFFFFFu
+
 void rwspinlock_init(rwspinlock_t* rw) {
+    if (unlikely(!rw)) {
+        return;
+    }
+
     rw->state = 0u;
+
+    spinlock_init(&rw->wait_lock);
 }
 
 void rwspinlock_acquire_read(rwspinlock_t* rw) {
-    uint32_t backoff = 1;
+    if (unlikely(!rw)) {
+        return;
+    }
+
+    uint32_t s;
 
     for (;;) {
-        uint32_t s = __atomic_load_n(&rw->state, __ATOMIC_ACQUIRE);
-        if ((s & (RWSPINLOCK_WRITER_ACTIVE | RWSPINLOCK_WRITER_PENDING)) != 0u) {
-            for (uint32_t i = 0; i < backoff; i++) {
-                __asm__ volatile("pause" ::: "memory");
-            }
+        s = __atomic_load_n(&rw->state, __ATOMIC_ACQUIRE);
 
-            if (backoff < 1024u) {
-                backoff <<= 1;
-            }
-
+        /*
+         * Spin-on-read: wait gently if a writer is active or pending.
+         * We do not attempt CAS while these bits are set, avoiding cache bouncing.
+         */
+        if (unlikely((s & (RW_STATE_WRITER_LOCKED | RW_STATE_WRITER_PENDING)) != 0u)) {
+            cpu_relax();
             continue;
         }
 
-        if ((s & RWSPINLOCK_READER_MASK) == RWSPINLOCK_READER_MASK) {
-            __asm__ volatile("pause" ::: "memory");
-            continue;
-        }
+        const int acquired = __atomic_compare_exchange_n(
+            &rw->state, &s, s + 1u, 0,
+            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED
+        );
 
-        if (__atomic_compare_exchange_n(
-                &rw->state,
-                &s,
-                s + 1u,
-                0,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            )) {
+        if (likely(acquired)) {
             return;
         }
     }
 }
 
 void rwspinlock_release_read(rwspinlock_t* rw) {
+    if (unlikely(!rw)) {
+        return;
+    }
+
     __atomic_fetch_sub(&rw->state, 1u, __ATOMIC_RELEASE);
 }
 
 void rwspinlock_acquire_write(rwspinlock_t* rw) {
-    uint32_t backoff = 1;
+    if (unlikely(!rw)) {
+        return;
+    }
 
-    __atomic_fetch_or(&rw->state, RWSPINLOCK_WRITER_PENDING, __ATOMIC_RELAXED);
+    spinlock_acquire(&rw->wait_lock);
+
+    __atomic_fetch_or(&rw->state, RW_STATE_WRITER_PENDING, __ATOMIC_ACQUIRE);
 
     for (;;) {
-        uint32_t expected = RWSPINLOCK_WRITER_PENDING;
+        uint32_t s = __atomic_load_n(&rw->state, __ATOMIC_ACQUIRE);
 
-        if (__atomic_compare_exchange_n(
-                &rw->state,
-                &expected,
-                RWSPINLOCK_WRITER_ACTIVE,
-                0,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            )) {
-            return;
+        if (likely((s & RW_STATE_READER_MASK) == 0u)) {
+            uint32_t expected = RW_STATE_WRITER_PENDING;
+
+            const int acquired = __atomic_compare_exchange_n(
+                &rw->state, &expected, RW_STATE_WRITER_LOCKED,
+                0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
+            );
+
+            if (likely(acquired)) {
+                return;
+            }
         }
 
-        __atomic_fetch_or(&rw->state, RWSPINLOCK_WRITER_PENDING, __ATOMIC_RELAXED);
-
-        for (uint32_t i = 0; i < backoff; i++) {
-            __asm__ volatile("pause" ::: "memory");
-        }
-
-        if (backoff < 1024u) {
-            backoff <<= 1;
-        }
+        cpu_relax();
     }
 }
 
 void rwspinlock_release_write(rwspinlock_t* rw) {
-    __atomic_fetch_and(&rw->state, ~RWSPINLOCK_WRITER_ACTIVE, __ATOMIC_RELEASE);
+    if (unlikely(!rw)) {
+        return;
+    }
+
+    __atomic_fetch_and(&rw->state, ~RW_STATE_WRITER_LOCKED, __ATOMIC_RELEASE);
+
+    /* Hand over the lock to the next queued writer, or allow readers */
+    spinlock_release(&rw->wait_lock);
 }
 
 uint32_t rwspinlock_acquire_read_safe(rwspinlock_t* rw) {
@@ -133,98 +155,90 @@ void rwspinlock_release_write_safe(rwspinlock_t* rw, uint32_t flags) {
     }
 }
 
+
 void percpu_rwspinlock_init(percpu_rwspinlock_t* rw) {
-    rw->writer_seq = 0u;
+    if (unlikely(!rw)) {
+        return;
+    }
+
+    rw->writer_active = 0u;
+    spinlock_init(&rw->writer_mutex);
 
     for (int i = 0; i < MAX_CPUS; i++) {
-        __atomic_store_n(&rw->readers[i].count, 0u, __ATOMIC_RELAXED);
+        rw->readers[i].count = 0u;
     }
 }
 
 void percpu_rwspinlock_acquire_read(percpu_rwspinlock_t* rw) {
+    if (unlikely(!rw)) {
+        return;
+    }
+
     const int cpu = hal_cpu_index();
-    uint32_t backoff = 1;
 
     for (;;) {
-        uint32_t seq = __atomic_load_n(&rw->writer_seq, __ATOMIC_ACQUIRE);
-        if ((seq & 1u) != 0u) {
-            for (uint32_t i = 0; i < backoff; i++) {
-                __asm__ volatile("pause" ::: "memory");
-            }
-
-            if (backoff < 1024u) {
-                backoff <<= 1;
-            }
-
+        /* Wait out the active writer gently */
+        if (unlikely(__atomic_load_n(&rw->writer_active, __ATOMIC_ACQUIRE) != 0u)) {
+            cpu_relax();
             continue;
         }
 
-        __atomic_fetch_add(&rw->readers[cpu].count, 1u, __ATOMIC_ACQ_REL);
+        __atomic_fetch_add(&rw->readers[cpu].count, 1u, __ATOMIC_SEQ_CST);
 
-        uint32_t seq2 = __atomic_load_n(&rw->writer_seq, __ATOMIC_ACQUIRE);
-        if (seq2 == seq && (seq2 & 1u) == 0u) {
+        if (likely(__atomic_load_n(&rw->writer_active, __ATOMIC_SEQ_CST) == 0u)) {
             return;
         }
 
-        __atomic_fetch_sub(&rw->readers[cpu].count, 1u, __ATOMIC_RELEASE);
+        /*
+         * A writer sneaked in just before we incremented.
+         * Back off, restore the count, and wait.
+         */
+        __atomic_fetch_sub(&rw->readers[cpu].count, 1u, __ATOMIC_SEQ_CST);
+
+        while (__atomic_load_n(&rw->writer_active, __ATOMIC_ACQUIRE) != 0u) {
+            cpu_relax();
+        }
     }
 }
 
 void percpu_rwspinlock_release_read(percpu_rwspinlock_t* rw) {
+    if (unlikely(!rw)) {
+        return;
+    }
+
     const int cpu = hal_cpu_index();
+
     __atomic_fetch_sub(&rw->readers[cpu].count, 1u, __ATOMIC_RELEASE);
 }
 
 void percpu_rwspinlock_acquire_write(percpu_rwspinlock_t* rw) {
-    uint32_t backoff = 1;
-
-    for (;;) {
-        uint32_t seq = __atomic_load_n(&rw->writer_seq, __ATOMIC_ACQUIRE);
-        if ((seq & 1u) != 0u) {
-            for (uint32_t i = 0; i < backoff; i++) {
-                __asm__ volatile("pause" ::: "memory");
-            }
-
-            if (backoff < 1024u) {
-                backoff <<= 1;
-            }
-
-            continue;
-        }
-
-        uint32_t desired = seq + 1u;
-        if (__atomic_compare_exchange_n(
-                &rw->writer_seq,
-                &seq,
-                desired,
-                0,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            )) {
-            break;
-        }
+    if (unlikely(!rw)) {
+        return;
     }
 
-    for (;;) {
-        int any = 0;
+    spinlock_acquire(&rw->writer_mutex);
 
-        for (int i = 0; i < MAX_CPUS; i++) {
-            if (__atomic_load_n(&rw->readers[i].count, __ATOMIC_ACQUIRE) != 0u) {
-                any = 1;
-                break;
-            }
+    /*
+     * SEQ_CST guarantees visibility of writer_active before we proceed
+     * to read the CPU-local reader counts.
+     */
+    __atomic_store_n(&rw->writer_active, 1u, __ATOMIC_SEQ_CST);
+
+    for (int i = 0; i < MAX_CPUS; i++) {
+        while (__atomic_load_n(&rw->readers[i].count, __ATOMIC_ACQUIRE) != 0u) {
+            cpu_relax();
         }
-
-        if (!any) {
-            return;
-        }
-
-        __asm__ volatile("pause" ::: "memory");
     }
 }
 
 void percpu_rwspinlock_release_write(percpu_rwspinlock_t* rw) {
-    __atomic_fetch_add(&rw->writer_seq, 1u, __ATOMIC_RELEASE);
+    if (unlikely(!rw)) {
+        return;
+    }
+
+    __atomic_store_n(&rw->writer_active, 0u, __ATOMIC_RELEASE);
+
+    spinlock_release(&rw->writer_mutex);
 }
 
 uint32_t percpu_rwspinlock_acquire_read_safe(percpu_rwspinlock_t* rw) {
