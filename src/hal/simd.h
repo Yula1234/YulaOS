@@ -184,4 +184,6 @@ static inline void fpu_restore(uint8_t* buffer) {
     __asm__ volatile("fxrstor (%0)" : : "r"(buffer) : "memory");
 }
 
+#define __vzeroupper() __asm__ volatile("vzeroupper")
+
 #endif

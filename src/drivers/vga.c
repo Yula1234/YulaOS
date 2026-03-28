@@ -475,7 +475,7 @@ static void vga_draw_rect_avx_impl(int x1, int y1, int draw_w, int draw_h, uint3
         row += stride;
     }
 
-    __asm__ volatile ("vzeroupper" ::: "memory");
+    __vzeroupper();
 }
 
 __attribute__((target("sse2")))
@@ -785,7 +785,7 @@ static void vga_flip_avx_impl(uint8_t* dst_base, uint32_t dst_pitch, int x1, int
      }
  
      smp_wmb();
-     __asm__ volatile ("vzeroupper" ::: "memory");
+     __vzeroupper();
  }
 
 void vga_draw_cursor(int x, int y) {
@@ -1067,7 +1067,7 @@ static void vga_flip_dirty_avx_impl(uint8_t* dst_base, uint32_t dst_pitch, int x
      }
  
      smp_wmb();
-     __asm__ volatile ("vzeroupper" ::: "memory");
+     __vzeroupper();
  }
  
 __attribute__((target("sse2")))
@@ -1238,7 +1238,7 @@ static void vga_present_rect_avx_impl(uint8_t* dst_base, uint32_t dst_pitch, con
      }
  
      smp_wmb();
-     __asm__ volatile("vzeroupper" ::: "memory");
+     __vzeroupper();
 }
  
 void vga_present_rect(const void* src, uint32_t src_stride, int x, int y, int w, int h) {

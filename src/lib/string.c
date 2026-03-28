@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #include <stdint.h>
 #include <hal/simd.h>
@@ -492,7 +492,7 @@ static void memcpy_avx_aligned_src(void* dest, const void* src, size_t n) {
         s += 128; d += 128; n -= 128;
     }
 
-    __asm__ volatile("vzeroupper" ::: "memory");
+    __vzeroupper();
 }
 
 __attribute__((target("avx")))
@@ -517,7 +517,7 @@ static void memcpy_avx_unaligned_src(void* dest, const void* src, size_t n) {
         s += 128; d += 128; n -= 128;
     }
 
-    __asm__ volatile("vzeroupper" ::: "memory");
+    __vzeroupper();
 }
 
 __attribute__((target("sse2"))) __attribute__((always_inline))
