@@ -1,6 +1,6 @@
 #include <kernel/term/term.h>
 
-#include <drivers/vga.h>
+#include <drivers/video/vga.h>
 
 namespace kernel::term {
 

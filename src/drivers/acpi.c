@@ -4,7 +4,6 @@
 #include <lib/string.h>
 #include <arch/i386/paging.h>
 #include <kernel/panic.h>
-#include <drivers/vga.h>
 #include <mm/pmm.h>
 #include <kernel/smp/cpu.h>
 

@@ -2,8 +2,8 @@
 
 #include <kernel/proc.h>
 
-#include <drivers/vga.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/vga.h>
+#include <drivers/video/fbdev.h>
 
 #include <kernel/term/term.h>
 #include <kernel/tty/tty_service.h>

@@ -2,7 +2,7 @@
 // Copyright (C) 2025 Yula1234
 
 #include <arch/i386/idt.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 
 extern void smp_panic_stop_other_cpus(void);
 

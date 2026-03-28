@@ -3,7 +3,7 @@
 #include <kernel/tty/tty_internal.h>
 #include <kernel/tty/tty_service.h>
 
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 
 #include <lib/cpp/new.h>
 

@@ -7,15 +7,15 @@
 #include <drivers/input/keyboard.h>
 #include <drivers/serial/ttyS0.h>
 #include <drivers/virtio/vgpu.h>
+#include <drivers/video/fbdev.h>
 #include <drivers/input/mouse.h>
+#include <drivers/video/gpu0.h>
 #include <drivers/block/bdev.h>
+#include <drivers/video/vga.h>
 #include <drivers/sata/ahci.h>
 #include <drivers/net/ne2k.h>
 #include <drivers/driver.h>
-#include <drivers/fbdev.h>
-#include <drivers/gpu0.h>
 #include <drivers/acpi.h>
-#include <drivers/vga.h>
 
 #include <kernel/symbols/symbols.h>
 #include <kernel/output/console.h>

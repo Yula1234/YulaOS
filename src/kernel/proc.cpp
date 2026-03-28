@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
 
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 
 #include <lib/string.h>
 #include <lib/dlist.h>

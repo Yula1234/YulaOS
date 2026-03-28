@@ -4,10 +4,9 @@
 #include <lib/string.h>
 #include <mm/pmm.h>
 
-#include <drivers/vga.h>
 #include <drivers/input/mouse.h>
 #include <drivers/input/keyboard.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 
 #include <kernel/syscall.h>
 #include <kernel/sched.h>

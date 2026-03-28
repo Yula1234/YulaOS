@@ -7,7 +7,6 @@
 #include <hal/lock.h>
 #include <hal/io.h>
 #include <hal/simd.h>
-#include <drivers/vga.h>
 #include <lib/rbtree.h>
 #include <kernel/panic.h>
 

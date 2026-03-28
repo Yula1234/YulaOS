@@ -10,7 +10,7 @@
 #include <kernel/proc.h>
 
 #include <drivers/audio/pc_speaker.h>
-#include <drivers/vga.h>
+#include <drivers/video/vga.h>
 
 #include <fs/yulafs.h>
 #include <fs/bcache.h>

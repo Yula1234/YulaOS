@@ -4,7 +4,7 @@
 #include <arch/i386/idt.h>
 
 #include <fs/vfs.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 #include <drivers/virtio/vgpu.h>
 
 #include <kernel/input_focus.h>

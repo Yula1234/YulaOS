@@ -13,7 +13,7 @@
 #include <arch/i386/gdt.h>
 #include <arch/i386/idt.h>
 #include <arch/i386/paging.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 #include <kernel/sched.h>
 #include "cpu.h"
 

@@ -8,7 +8,7 @@
 #include <kernel/proc.h>
 #include <kernel/input_focus.h>
 #include <kernel/waitq/poll_waitq.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 
 #include <hal/io.h>
 #include <hal/irq.h>

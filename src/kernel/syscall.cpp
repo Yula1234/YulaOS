@@ -13,8 +13,8 @@
 
 #include <drivers/input/keyboard.h>
 #include <drivers/virtio/vgpu.h>
-#include <drivers/fbdev.h>
-#include <drivers/vga.h>
+#include <drivers/video/fbdev.h>
+#include <drivers/video/vga.h>
 
 #include <fs/yulafs.h>
 #include <fs/pipe.h>

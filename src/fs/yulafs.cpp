@@ -16,7 +16,6 @@
 #include <lib/rbtree.h>
 
 #include <drivers/block/bdev.h>
-#include <drivers/vga.h>
 
 #include <hal/lock.h>
 #include <hal/cpu.h>

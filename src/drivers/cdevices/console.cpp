@@ -8,8 +8,6 @@
 #include <hal/lock.h>
 #include <yos/ioctl.h>
 
-#include <drivers/vga.h>
-
 #include <drivers/cdev.h>
 #include <drivers/driver.h>
 

@@ -13,7 +13,6 @@
 #include <lib/string.h>
 
 #include <drivers/virtio/vgpu.h>
-#include <drivers/gpu0.h>
 
 #include <mm/heap.h>
 #include <mm/shm.h>
@@ -25,6 +24,8 @@
 #include <fs/vfs.h>
 
 #include <yos/gpu.h>
+
+#include "gpu0.h"
 
 namespace kernel {
 namespace gpu0 {

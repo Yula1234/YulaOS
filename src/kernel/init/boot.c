@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Yula1234
 
 #include <drivers/acpi.h>
-#include <drivers/fbdev.h>
+#include <drivers/video/fbdev.h>
 #include <drivers/virtio/vgpu.h>
 
 #include <hal/apic.h>
