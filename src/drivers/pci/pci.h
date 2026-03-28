@@ -101,6 +101,7 @@ void pci_dev_write8(pci_device_t* dev, uint8_t offset, uint8_t value);
 
 void pci_dev_enable_busmaster(pci_device_t* dev);
 int pci_dev_enable_msi(pci_device_t* dev, uint8_t vector, uint8_t dest_apic_id);
+int pci_dev_enable_msix(pci_device_t* dev, uint16_t entry, uint8_t vector, uint8_t dest_apic_id);
 
 __iomem* pci_request_bar(pci_device_t* dev, uint8_t bar_idx, const char* name);
 

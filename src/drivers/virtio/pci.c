@@ -33,8 +33,6 @@
 
 #define VIRTIO_PCI_NO_VECTOR 0xFFFFu
 
-#define PCI_CAP_ID_MSIX 0x11u
-
 /* Offsets within virtio PCI common config (virtio 1.0). */
 #define VPCI_COMMON_DEVICE_FEAT_SEL    0u
 #define VPCI_COMMON_DEVICE_FEAT        4u
@@ -107,73 +105,6 @@ static __iomem* vpci_device_cfg_io(virtio_pci_dev_t* dev) {
     }
 
     return vpci_bar_io(dev, dev->device_cfg_bar);
-}
-
-static int virtio_pci_enable_msix_entry0(virtio_pci_dev_t* dev, uint8_t irq_vector) {
-    if (!dev || !dev->pci) {
-        return 0;
-    }
-
-    pci_device_t* pci = dev->pci;
-
-    uint32_t cmdsts = pci_dev_read32(pci, 0x04);
-    uint16_t status = (uint16_t)((cmdsts >> 16) & 0xFFFFu);
-    if ((status & 0x0010u) == 0u) {
-        return 0;
-    }
-
-    uint8_t cap = pci_dev_read8(pci, 0x34);
-    for (int iter = 0; iter < 64 && cap != 0; iter++) {
-        uint8_t cap_id = pci_dev_read8(pci, cap + 0);
-        uint8_t cap_next = pci_dev_read8(pci, cap + 1);
-
-        if (cap_id == PCI_CAP_ID_MSIX) {
-            uint16_t msg_ctl = pci_dev_read16(pci, cap + 2);
-
-            uint32_t table = pci_dev_read32(pci, cap + 4);
-            uint8_t bir = (uint8_t)(table & 0x7u);
-            uint32_t table_off = table & ~0x7u;
-
-            __iomem* tbl_io = vpci_bar_io(dev, bir);
-            if (!tbl_io) {
-                return 0;
-            }
-
-            uint32_t entry_off = table_off;
-
-            uint8_t dest_apic_id = 0;
-            if (cpu_count > 0 && cpus[0].id >= 0) {
-                dest_apic_id = (uint8_t)cpus[0].id;
-            }
-
-            uint32_t msg_addr_lo = 0xFEE00000u | ((uint32_t)dest_apic_id << 12);
-            uint32_t msg_addr_hi = 0u;
-            uint32_t msg_data = (uint32_t)irq_vector;
-
-            iowrite32(tbl_io, entry_off + 12u, 1u);
-            __sync_synchronize();
-            iowrite32(tbl_io, entry_off + 0u, msg_addr_lo);
-            iowrite32(tbl_io, entry_off + 4u, msg_addr_hi);
-            iowrite32(tbl_io, entry_off + 8u, msg_data);
-            __sync_synchronize();
-            iowrite32(tbl_io, entry_off + 12u, 0u);
-            __sync_synchronize();
-
-            msg_ctl &= (uint16_t)~(1u << 14);
-            msg_ctl |= (uint16_t)(1u << 15);
-            pci_dev_write16(pci, cap + 2, msg_ctl);
-
-            uint16_t command = (uint16_t)(cmdsts & 0xFFFFu);
-            command |= (uint16_t)(1u << 10);
-            pci_dev_write16(pci, 0x04, command);
-
-            return 1;
-        }
-
-        cap = cap_next;
-    }
-
-    return 0;
 }
 
 static spinlock_t g_virtio_devs_lock;
@@ -477,7 +408,12 @@ int virtio_pci_enable_msi(virtio_pci_dev_t* dev, uint8_t vector) {
 
     virtio_pci_global_register_dev(dev);
 
-    if (!virtio_pci_enable_msix_entry0(dev, vector)) {
+    uint8_t dest_apic_id = 0;
+    if (cpu_count > 0 && cpus[0].id >= 0) {
+        dest_apic_id = (uint8_t)cpus[0].id;
+    }
+
+    if (!pci_dev_enable_msix(dev->pci, 0, vector, dest_apic_id)) {
         dev->msi_enabled = 0;
         dev->msi_vector = 0;
         return 0;

@@ -25,6 +25,9 @@ namespace kernel::pci {
 constexpr uint32_t kPciConfigAddr = 0xCF8u;
 constexpr uint32_t kPciConfigData = 0xCFCu;
 
+constexpr uint8_t kPciCapIdMsi = 0x05u;
+constexpr uint8_t kPciCapIdMsix = 0x11u;
+
 struct PciDeviceNode {
     pci_device_t pub;
     dlist_head_t list_node;
@@ -385,7 +388,7 @@ int pci_msi_configure(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector, u
         const uint8_t cap_id = pci_read8(bus, slot, func, cap + 0);
         const uint8_t cap_next = pci_read8(bus, slot, func, cap + 1);
 
-        if (cap_id == 0x05u) {
+        if (cap_id == kernel::pci::kPciCapIdMsi) {
             uint16_t control = pci_read16(bus, slot, func, cap + 2);
             const int is_64 = (control & (1u << 7)) != 0u;
 
@@ -412,6 +415,83 @@ int pci_msi_configure(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector, u
         }
 
         cap = cap_next;
+    }
+
+    return 0;
+}
+
+static int pci_msix_configure(
+    pci_device_t* dev,
+    uint16_t entry,
+    uint8_t vector,
+    uint8_t dest_apic_id
+) {
+    if (!dev) {
+        return 0;
+    }
+
+    const uint32_t cmdsts = pci_dev_read32(dev, 0x04u);
+    const uint16_t status = static_cast<uint16_t>((cmdsts >> 16) & 0xFFFFu);
+
+    if ((status & 0x0010u) == 0u) {
+        return 0;
+    }
+
+    uint8_t cap = pci_dev_read8(dev, 0x34u);
+
+    for (int iter = 0; iter < 64 && cap != 0u; iter++) {
+        const uint8_t cap_id = pci_dev_read8(dev, static_cast<uint8_t>(cap + 0u));
+        const uint8_t cap_next = pci_dev_read8(dev, static_cast<uint8_t>(cap + 1u));
+
+        if (cap_id != kernel::pci::kPciCapIdMsix) {
+            cap = cap_next;
+            continue;
+        }
+
+        uint16_t msg_ctl = pci_dev_read16(dev, static_cast<uint8_t>(cap + 2u));
+
+        const uint16_t table_size = static_cast<uint16_t>((msg_ctl & 0x07FFu) + 1u);
+        if (entry >= table_size) {
+            return 0;
+        }
+
+        const uint32_t table = pci_dev_read32(dev, static_cast<uint8_t>(cap + 4u));
+        const uint8_t bir = static_cast<uint8_t>(table & 0x7u);
+        const uint32_t table_off = table & ~0x7u;
+
+        __iomem* table_io = pci_request_bar(dev, bir, "pci_msix");
+        if (!table_io) {
+            return 0;
+        }
+
+        const uint32_t entry_off = table_off + (static_cast<uint32_t>(entry) * 16u);
+
+        const uint32_t msg_addr_lo = 0xFEE00000u | (static_cast<uint32_t>(dest_apic_id) << 12);
+        const uint32_t msg_addr_hi = 0u;
+        const uint32_t msg_data = static_cast<uint32_t>(vector);
+
+        iowrite32(table_io, entry_off + 12u, 1u);
+        __sync_synchronize();
+
+        iowrite32(table_io, entry_off + 0u, msg_addr_lo);
+        iowrite32(table_io, entry_off + 4u, msg_addr_hi);
+        iowrite32(table_io, entry_off + 8u, msg_data);
+        __sync_synchronize();
+
+        iowrite32(table_io, entry_off + 12u, 0u);
+        __sync_synchronize();
+
+        iomem_free(table_io);
+
+        msg_ctl &= static_cast<uint16_t>(~(1u << 14));
+        msg_ctl |= static_cast<uint16_t>(1u << 15);
+        pci_dev_write16(dev, static_cast<uint8_t>(cap + 2u), msg_ctl);
+
+        uint16_t command = static_cast<uint16_t>(cmdsts & 0xFFFFu);
+        command |= static_cast<uint16_t>(1u << 10);
+        pci_dev_write16(dev, 0x04u, command);
+
+        return 1;
     }
 
     return 0;
@@ -519,6 +599,10 @@ int pci_dev_enable_msi(pci_device_t* dev, uint8_t vector, uint8_t dest_apic_id) 
     }
 
     return pci_msi_configure(dev->bus, dev->slot, dev->func, vector, dest_apic_id);
+}
+
+int pci_dev_enable_msix(pci_device_t* dev, uint16_t entry, uint8_t vector, uint8_t dest_apic_id) {
+    return pci_msix_configure(dev, entry, vector, dest_apic_id);
 }
 
 __iomem* pci_request_bar(pci_device_t* dev, uint8_t bar_idx, const char* name) {
