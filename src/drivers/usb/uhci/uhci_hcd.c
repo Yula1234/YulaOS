@@ -54,7 +54,7 @@ typedef struct {
 
     pci_device_t* pdev;
 
-    pmio_region_t* regs;
+    __iomem* iomem;
 
     workqueue_t* wq;
     work_struct_t irq_work;
@@ -102,33 +102,28 @@ static uhci_qh_t* uhci_qh_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys);
 static void uhci_qh_free(uhci_hcd_impl_t* u, uhci_qh_t* qh);
 
 static inline uint16_t uhci_readw(uhci_hcd_impl_t* u, uint16_t reg) {
-    uint16_t v = 0;
-    (void)pmio_readw(u->regs, reg, &v);
-    return v;
+    return ioread16(u->iomem, reg);
 }
 
 static inline void uhci_writew(uhci_hcd_impl_t* u, uint16_t reg, uint16_t v) {
-    (void)pmio_writew(u->regs, reg, v);
+    iowrite16(u->iomem, reg, v);
 }
 
 static inline void uhci_writel(uhci_hcd_impl_t* u, uint16_t reg, uint32_t v) {
-    (void)pmio_writel(u->regs, reg, v);
+    iowrite32(u->iomem, reg, v);
 }
 
 static void uhci_wait_frame_advance(uhci_hcd_impl_t* u) {
-    if (!u || !u->regs) {
+    if (!u || !u->iomem) {
         proc_usleep(1000);
         return;
     }
 
-    uint16_t start = 0;
-    (void)pmio_readw(u->regs, UHCI_REG_USBFRNUM, &start);
-
+    uint16_t start = uhci_readw(u, UHCI_REG_USBFRNUM);
     const uint16_t start_frame = (uint16_t)(start & 0x03FFu);
 
     for (uint32_t waited = 0; waited < 2000u; waited += 50u) {
-        uint16_t cur = 0;
-        (void)pmio_readw(u->regs, UHCI_REG_USBFRNUM, &cur);
+        uint16_t cur = uhci_readw(u, UHCI_REG_USBFRNUM);
 
         const uint16_t cur_frame = (uint16_t)(cur & 0x03FFu);
         if (cur_frame != start_frame) {
@@ -1088,7 +1083,7 @@ static void uhci_intr_poll_one(uhci_hcd_impl_t* u, uhci_intr_pipe_t* p) {
 static void uhci_irq_bh(work_struct_t* work) {
     uhci_hcd_impl_t* u = container_of(work, uhci_hcd_impl_t, irq_work);
 
-    if (!u || !u->regs) {
+    if (!u || !u->iomem) {
         return;
     }
 
@@ -1132,7 +1127,7 @@ static void uhci_irq_handler(registers_t* regs, void* ctx) {
     (void)regs;
 
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)ctx;
-    if (!u || !u->regs) {
+    if (!u || !u->iomem) {
         return;
     }
 
@@ -1148,7 +1143,7 @@ static void uhci_irq_handler(registers_t* regs, void* ctx) {
 
 static int uhci_hcd_start(usb_hcd_t* hcd) {
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
-    if (!u || !u->regs) {
+    if (!u || !u->iomem) {
         return 0;
     }
 
@@ -1158,7 +1153,7 @@ static int uhci_hcd_start(usb_hcd_t* hcd) {
     uhci_writel(u, UHCI_REG_USBFLBASE, u->frame_list_phys);
     uhci_writew(u, UHCI_REG_USBFRNUM, 0);
 
-    (void)pmio_writeb(u->regs, UHCI_REG_USBSOF, 0x40u);
+    iowrite8(u->iomem, UHCI_REG_USBSOF, 0x40u);
 
     uhci_writew(u, UHCI_REG_USBCMD, (uint16_t)(UHCI_USBCMD_RUN | UHCI_USBCMD_CF | UHCI_USBCMD_MAXP));
 
@@ -1167,7 +1162,7 @@ static int uhci_hcd_start(usb_hcd_t* hcd) {
 
 static void uhci_hcd_stop(usb_hcd_t* hcd) {
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
-    if (!u || !u->regs) {
+    if (!u || !u->iomem) {
         return;
     }
 
@@ -1291,9 +1286,9 @@ static void uhci_destroy(uhci_hcd_impl_t* u) {
         u->qh_pool = 0;
     }
 
-    if (u->regs) {
-        pmio_release_region(u->regs);
-        u->regs = 0;
+    if (u->iomem) {
+        iomem_free(u->iomem);
+        u->iomem = 0;
     }
 
     kfree(u);
@@ -1339,16 +1334,8 @@ static int uhci_probe(pci_device_t* pdev) {
 
     pci_dev_enable_busmaster(pdev);
 
-    const uint32_t bar4 = pci_dev_read32(pdev, 0x20u);
-    const uint16_t io_base = (uint16_t)(bar4 & 0xFFFCu);
-
-    if (!io_base) {
-        uhci_destroy(u);
-        return -1;
-    }
-
-    u->regs = pmio_request_region(io_base, 0x20u, "uhci");
-    if (!u->regs) {
+    u->iomem = pci_request_bar(pdev, 4u, "uhci");
+    if (!u->iomem) {
         uhci_destroy(u);
         return -1;
     }
