@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
 #ifndef DRIVERS_USB_USB_URB_H
 #define DRIVERS_USB_USB_URB_H
 
@@ -14,6 +17,7 @@ typedef struct usb_urb usb_urb_t;
 typedef enum {
     USB_URB_CONTROL = 0,
     USB_URB_BULK = 1,
+    USB_URB_ISOCH = 2,
 } usb_urb_type_t;
 
 enum {
@@ -21,6 +25,7 @@ enum {
     USB_URB_STATUS_IOERROR = -1,
     USB_URB_STATUS_TIMEOUT = -2,
     USB_URB_STATUS_CANCELLED = -3,
+    USB_URB_STATUS_NOT_SUPPORTED = -4,
 };
 
 typedef void (*usb_urb_complete_fn)(usb_urb_t* urb);
@@ -44,6 +49,10 @@ struct usb_urb {
     uint32_t transfer_buffer_length;
 
     uint8_t* toggle_io;
+
+    uint32_t iso_start_frame;
+    uint16_t iso_packet_count;
+    uint16_t iso_frame_interval;
 
     uint32_t timeout_us;
 

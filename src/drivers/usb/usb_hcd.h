@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
 #ifndef DRIVERS_USB_USB_HCD_H
 #define DRIVERS_USB_USB_HCD_H
 
@@ -15,9 +18,28 @@ struct usb_device;
 
 typedef struct usb_hcd usb_hcd_t;
 
+#define USB_PORT_PROTO_UNKNOWN 0u
+#define USB_PORT_PROTO_USB_1_1 1u
+#define USB_PORT_PROTO_USB_2   2u
+#define USB_PORT_PROTO_USB_3   3u
+
+#define USB_PORT_FLAG_SUSPENDED    (1u << 0)
+#define USB_PORT_FLAG_OVERCURRENT  (1u << 1)
+#define USB_PORT_FLAG_POWERED      (1u << 2)
+#define USB_PORT_FLAG_SUPER_SPEED  (1u << 3)
+
+#define USB_PORT_LINK_UNKNOWN 0u
+
 typedef struct {
     uint8_t connected;
     usb_speed_t speed;
+
+    uint32_t flags;
+
+    uint8_t port_protocol;
+    uint8_t link_state;
+    uint8_t reserved0;
+    uint8_t reserved1;
 } usb_port_status_t;
 
 typedef void (*usb_intr_cb_t)(void* ctx, const uint8_t* data, uint32_t len);
@@ -33,36 +55,21 @@ typedef struct {
     int (*root_port_reset)(usb_hcd_t* hcd, uint8_t port);
 
     int (*submit_urb)(usb_hcd_t* hcd, usb_urb_t* urb);
-
     int (*cancel_urb)(usb_hcd_t* hcd, usb_urb_t* urb);
 
-    /*
-     * Called after the device is enumerated and has a valid address on the bus.
-     * xHCI uses this to assign a device slot; may return a negative errno-style value.
-     */
     int (*device_address)(usb_hcd_t* hcd, struct usb_device* dev);
-
-    /*
-     * Called when the device is disconnected; release controller state for dev_addr
-     * (cancel in-flight transfers, drop endpoint contexts, etc.).
-     */
     void (*device_unplug)(usb_hcd_t* hcd, uint8_t dev_addr);
 
-    /*
-     * Host-controller hook after CLEAR_FEATURE(ENDPOINT_HALT). ep_addr is the USB
-     * endpoint address (wIndex: number in bits 0–3, direction in bit 7).
-     */
     void (*endpoint_reset)(usb_hcd_t* hcd, uint8_t dev_addr, uint8_t ep_addr);
 
+    void* (*alloc_buffer)(usb_hcd_t* hcd, size_t size, uint32_t* out_phys);
+    void (*free_buffer)(usb_hcd_t* hcd, void* vaddr, size_t size, uint32_t phys);
+
     usb_intr_pipe_t* (*intr_open)(
-        usb_hcd_t* hcd,
-        uint8_t dev_addr,
-        usb_speed_t speed,
-        uint8_t ep_num,
-        uint16_t max_packet,
-        uint8_t interval,
-        usb_intr_cb_t cb,
-        void* cb_ctx
+        usb_hcd_t* hcd, uint8_t dev_addr,
+        usb_speed_t speed, uint8_t ep_num,
+        uint16_t max_packet, uint8_t interval,
+        usb_intr_cb_t cb, void* cb_ctx
     );
 
     void (*intr_close)(usb_hcd_t* hcd, usb_intr_pipe_t* pipe);

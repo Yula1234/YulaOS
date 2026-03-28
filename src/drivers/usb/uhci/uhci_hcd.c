@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
 #include <drivers/usb/usb_core.h>
 #include <drivers/usb/usb_hcd.h>
 #include <drivers/usb/usb_urb.h>
@@ -1146,6 +1149,10 @@ static int uhci_hcd_submit_urb(usb_hcd_t* hcd, usb_urb_t* urb) {
     case USB_URB_BULK:
         return uhci_submit_bulk_urb(hcd, urb);
 
+    case USB_URB_ISOCH:
+        (void)hcd;
+        return -1;
+
     default:
         return -1;
     }
@@ -1463,15 +1470,39 @@ static uint8_t uhci_hcd_root_port_count(usb_hcd_t* hcd) {
     return 2;
 }
 
+static void* uhci_hcd_alloc_buffer(usb_hcd_t* hcd, size_t size, uint32_t* out_phys) {
+    (void)hcd;
+
+    if (!size || !out_phys) {
+        return 0;
+    }
+
+    return dma_alloc_coherent(size, out_phys);
+}
+
+static void uhci_hcd_free_buffer(usb_hcd_t* hcd, void* vaddr, size_t size, uint32_t phys) {
+    (void)hcd;
+
+    if (!vaddr || !size) {
+        return;
+    }
+
+    dma_free_coherent(vaddr, size, phys);
+}
+
 static int uhci_hcd_root_port_get_status(usb_hcd_t* hcd, uint8_t port, usb_port_status_t* out) {
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
     if (!u || !out || port == 0 || port > 2) {
         return 0;
     }
 
+    memset(out, 0, sizeof(*out));
+
     const uint16_t st = uhci_port_read(u, port);
 
     out->connected = (st & UHCI_PORTSC_CCS) ? 1u : 0u;
+    out->port_protocol = USB_PORT_PROTO_USB_1_1;
+    out->link_state = USB_PORT_LINK_UNKNOWN;
 
     if (!out->connected) {
         out->speed = USB_SPEED_FULL;
@@ -1479,6 +1510,10 @@ static int uhci_hcd_root_port_get_status(usb_hcd_t* hcd, uint8_t port, usb_port_
     }
 
     out->speed = (st & UHCI_PORTSC_LSDA) ? USB_SPEED_LOW : USB_SPEED_FULL;
+
+    if (st & UHCI_PORTSC_PE) {
+        out->flags |= USB_PORT_FLAG_POWERED;
+    }
 
     return 1;
 }
@@ -1573,6 +1608,9 @@ static const usb_hcd_ops_t g_uhci_hcd_ops = {
     .device_address = uhci_hcd_device_address,
     .device_unplug = uhci_hcd_device_unplug,
     .endpoint_reset = uhci_hcd_endpoint_reset,
+
+    .alloc_buffer = uhci_hcd_alloc_buffer,
+    .free_buffer = uhci_hcd_free_buffer,
 
     .intr_open = uhci_hcd_intr_open,
     .intr_close = uhci_hcd_intr_close,
