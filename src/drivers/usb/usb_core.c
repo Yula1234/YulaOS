@@ -10,6 +10,8 @@
 #include <lib/string.h>
 #include <lib/dlist.h>
 
+#include <stdint.h>
+
 #define USB_MAX_HCDS 8u
 #define USB_MAX_CLASS_DRIVERS 16u
 
@@ -310,6 +312,58 @@ const usb_device_info_t* usb_device_get_info(const usb_device_t* dev) {
     return &dev->info;
 }
 
+typedef struct {
+    semaphore_t sem;
+    int status;
+    uint32_t actual;
+    usb_urb_t urb;
+} usb_hcd_urb_sync_t;
+
+static void usb_urb_sync_complete(usb_urb_t* urb) {
+    usb_hcd_urb_sync_t* s = (usb_hcd_urb_sync_t*)urb->context;
+
+    s->status = urb->status;
+    s->actual = urb->actual_length;
+    sem_signal(&s->sem);
+}
+
+static uint32_t usb_core_timeout_deadline_tick(uint32_t timeout_us) {
+    if (timeout_us == 0u) {
+        return 0u;
+    }
+
+    uint64_t ms64 = ((uint64_t)timeout_us + 999ull) / 1000ull;
+    if (ms64 == 0ull) {
+        ms64 = 1ull;
+    }
+    if (ms64 > 0xFFFFFFFFull) {
+        ms64 = 0xFFFFFFFFull;
+    }
+
+    uint64_t t = (uint64_t)timer_ticks + ms64;
+    if (t > 0xFFFFFFFFull) {
+        t = 0xFFFFFFFFull;
+    }
+
+    return (uint32_t)t;
+}
+
+int usb_submit_urb(usb_device_t* dev, usb_urb_t* urb) {
+    if (!dev || !urb || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->submit_urb) {
+        return -1;
+    }
+
+    return dev->hcd->ops->submit_urb(dev->hcd, urb);
+}
+
+int usb_cancel_urb(usb_device_t* dev, usb_urb_t* urb) {
+    if (!dev || !urb || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->cancel_urb) {
+        return -1;
+    }
+
+    return dev->hcd->ops->cancel_urb(dev->hcd, urb);
+}
+
 int usb_device_control_xfer(
     usb_device_t* dev,
     const usb_setup_packet_t* setup,
@@ -317,20 +371,58 @@ int usb_device_control_xfer(
     uint16_t length,
     uint32_t timeout_us
 ) {
-    if (!dev || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->control_xfer) {
+    if (!dev || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->submit_urb) {
         return -1;
     }
 
-    return dev->hcd->ops->control_xfer(
-        dev->hcd,
-        dev->info.dev_addr,
-        dev->info.speed,
-        dev->info.ep0_mps,
-        setup,
-        data,
-        length,
-        timeout_us
-    );
+    if (!setup) {
+        return -1;
+    }
+
+    usb_hcd_urb_sync_t* s = (usb_hcd_urb_sync_t*)kzalloc(sizeof(*s));
+    if (!s) {
+        return -1;
+    }
+
+    sem_init(&s->sem, 0);
+
+    memset(&s->urb, 0, sizeof(s->urb));
+
+    s->urb.type = USB_URB_CONTROL;
+    s->urb.dev_addr = dev->info.dev_addr;
+    s->urb.speed = dev->info.speed;
+    s->urb.ep0_mps = dev->info.ep0_mps;
+    memcpy(&s->urb.setup, setup, sizeof(s->urb.setup));
+    s->urb.buffer = data;
+    s->urb.length = length;
+    s->urb.timeout_us = timeout_us;
+    s->urb.complete = usb_urb_sync_complete;
+    s->urb.context = s;
+
+    if (dev->hcd->ops->submit_urb(dev->hcd, &s->urb) != 0) {
+        kfree(s);
+
+        return -1;
+    }
+
+    if (timeout_us == 0u) {
+        sem_wait(&s->sem);
+    } else {
+        const uint32_t deadline = usb_core_timeout_deadline_tick(timeout_us);
+
+        if (sem_wait_timeout(&s->sem, deadline) == 0) {
+            (void)usb_cancel_urb(dev, &s->urb);
+            kfree(s);
+
+            return -1;
+        }
+    }
+
+    const int out = s->status;
+
+    kfree(s);
+
+    return out;
 }
 
 int usb_device_bulk_xfer(
@@ -343,22 +435,56 @@ int usb_device_bulk_xfer(
     uint32_t timeout_us,
     uint8_t* toggle_io
 ) {
-    if (!dev || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->bulk_xfer) {
+    if (!dev || !dev->hcd || !dev->hcd->ops || !dev->hcd->ops->submit_urb) {
         return -1;
     }
 
-    return dev->hcd->ops->bulk_xfer(
-        dev->hcd,
-        dev->info.dev_addr,
-        dev->info.speed,
-        ep_num,
-        dir_in,
-        max_packet,
-        data,
-        length,
-        timeout_us,
-        toggle_io
-    );
+    usb_hcd_urb_sync_t* s = (usb_hcd_urb_sync_t*)kzalloc(sizeof(*s));
+    if (!s) {
+        return -1;
+    }
+
+    sem_init(&s->sem, 0);
+
+    memset(&s->urb, 0, sizeof(s->urb));
+
+    s->urb.type = USB_URB_BULK;
+    s->urb.dev_addr = dev->info.dev_addr;
+    s->urb.speed = dev->info.speed;
+    s->urb.ep_num = ep_num;
+    s->urb.dir_in = dir_in;
+    s->urb.max_packet = max_packet;
+    s->urb.buffer = data;
+    s->urb.transfer_buffer_length = length;
+    s->urb.toggle_io = toggle_io;
+    s->urb.timeout_us = timeout_us;
+    s->urb.complete = usb_urb_sync_complete;
+    s->urb.context = s;
+
+    if (dev->hcd->ops->submit_urb(dev->hcd, &s->urb) != 0) {
+        kfree(s);
+
+        return -1;
+    }
+
+    if (timeout_us == 0u) {
+        sem_wait(&s->sem);
+    } else {
+        const uint32_t deadline = usb_core_timeout_deadline_tick(timeout_us);
+
+        if (sem_wait_timeout(&s->sem, deadline) == 0) {
+            (void)usb_cancel_urb(dev, &s->urb);
+            kfree(s);
+
+            return -1;
+        }
+    }
+
+    const int out = s->status;
+
+    kfree(s);
+
+    return out;
 }
 
 usb_intr_pipe_t* usb_device_intr_open(
@@ -460,11 +586,58 @@ static int usb_control(
     uint16_t length,
     uint32_t timeout_us
 ) {
-    if (!hcd || !hcd->ops || !hcd->ops->control_xfer) {
+    if (!hcd || !hcd->ops || !hcd->ops->submit_urb) {
         return -1;
     }
 
-    return hcd->ops->control_xfer(hcd, dev_addr, speed, ep0_mps, setup, data, length, timeout_us);
+    if (!setup) {
+        return -1;
+    }
+
+    usb_hcd_urb_sync_t* s = (usb_hcd_urb_sync_t*)kzalloc(sizeof(*s));
+    if (!s) {
+        return -1;
+    }
+
+    sem_init(&s->sem, 0);
+
+    memset(&s->urb, 0, sizeof(s->urb));
+
+    s->urb.type = USB_URB_CONTROL;
+    s->urb.dev_addr = dev_addr;
+    s->urb.speed = speed;
+    s->urb.ep0_mps = ep0_mps;
+    memcpy(&s->urb.setup, setup, sizeof(s->urb.setup));
+    s->urb.buffer = data;
+    s->urb.length = length;
+    s->urb.timeout_us = timeout_us;
+    s->urb.complete = usb_urb_sync_complete;
+    s->urb.context = s;
+
+    if (hcd->ops->submit_urb(hcd, &s->urb) != 0) {
+        kfree(s);
+
+        return -1;
+    }
+
+    if (timeout_us == 0u) {
+        sem_wait(&s->sem);
+    } else {
+        const uint32_t deadline = usb_core_timeout_deadline_tick(timeout_us);
+
+        if (sem_wait_timeout(&s->sem, deadline) == 0) {
+            (void)hcd->ops->cancel_urb(hcd, &s->urb);
+            kfree(s);
+
+            return -1;
+        }
+    }
+
+    const int out = s->status;
+
+    kfree(s);
+
+    return out;
 }
 
 static int usb_get_descriptor(

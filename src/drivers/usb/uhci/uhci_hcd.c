@@ -1,5 +1,6 @@
 #include <drivers/usb/usb_core.h>
 #include <drivers/usb/usb_hcd.h>
+#include <drivers/usb/usb_urb.h>
 
 #include <drivers/driver.h>
 #include <drivers/pci/pci.h>
@@ -73,27 +74,54 @@ typedef struct {
     dma_pool_t* qh_pool;
     dma_pool_t* setup_pool;
 
-    void* ctrl_data_buf;
-    uint32_t ctrl_data_phys;
-
-    mutex_t ctrl_mutex;
-
     spinlock_t sync_lock;
-    dlist_head_t sync_waits;
+    dlist_head_t xfer_waits;
 
     uhci_intr_pipe_t intr_pipes[16];
 } uhci_hcd_impl_t;
 
+typedef struct uhci_urb_priv uhci_urb_priv_t;
+
 typedef struct {
     dlist_head_t node;
 
-    semaphore_t sem;
+    uhci_qh_t* qh;
+    usb_urb_t* urb;
+} uhci_wait_entry_t;
+
+struct uhci_urb_priv {
+    uhci_td_t* td_first;
+    uhci_td_t* td_status;
 
     uhci_qh_t* qh;
-    volatile uint8_t done;
-} uhci_sync_wait_t;
 
-extern volatile uint32_t timer_ticks;
+    usb_setup_packet_t* setup_dma;
+    dma_sg_list_t* data_sg;
+    uint8_t* data_dma;
+    uint32_t data_phys;
+    uint16_t length;
+
+    uint8_t is_control;
+    uint8_t dir_in;
+
+    uint8_t* toggle_io;
+    uint8_t toggle_val;
+
+    void* user_buffer;
+    uint16_t ep0_mps;
+
+    uint8_t max_packet;
+    uint8_t ep_num;
+    uint8_t speed;
+    uint8_t dev_addr;
+
+    uint32_t bulk_length;
+};
+
+typedef struct {
+    uhci_wait_entry_t wait;
+    uhci_urb_priv_t priv;
+} uhci_urb_bundle_t;
 
 static uhci_td_t* uhci_td_alloc(uhci_hcd_impl_t* u, uint32_t* out_phys);
 static void uhci_td_free(uhci_hcd_impl_t* u, uhci_td_t* td);
@@ -347,75 +375,6 @@ static void uhci_sched_remove_qh(uhci_hcd_impl_t* u, uhci_qh_t* qh) {
     spinlock_release_safe(&u->sched_lock, flags);
 }
 
-static uint32_t uhci_timeout_deadline_tick(uint32_t timeout_us) {
-    if (timeout_us == 0) {
-        return 0;
-    }
-
-    uint64_t ms64 = ((uint64_t)timeout_us + 999ull) / 1000ull;
-    if (ms64 == 0) {
-        ms64 = 1;
-    }
-    if (ms64 > 0xFFFFFFFFull) {
-        ms64 = 0xFFFFFFFFull;
-    }
-
-    uint64_t t = (uint64_t)timer_ticks + ms64;
-    if (t > 0xFFFFFFFFull) {
-        t = 0xFFFFFFFFull;
-    }
-
-    return (uint32_t)t;
-}
-
-static void uhci_sync_wait_init(uhci_sync_wait_t* w, uhci_qh_t* qh) {
-    if (!w) {
-        return;
-    }
-
-    memset(w, 0, sizeof(*w));
-    dlist_init(&w->node);
-    sem_init(&w->sem, 0);
-    w->qh = qh;
-    w->done = 0;
-}
-
-static int uhci_sync_wait_arm(uhci_hcd_impl_t* u, uhci_sync_wait_t* w) {
-    if (!u || !w || !w->qh) {
-        return 0;
-    }
-
-    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
-    dlist_add_tail(&w->node, &u->sync_waits);
-    spinlock_release_safe(&u->sync_lock, flags);
-
-    return 1;
-}
-
-static void uhci_sync_wait_disarm(uhci_hcd_impl_t* u, uhci_sync_wait_t* w) {
-    if (!u || !w) {
-        return;
-    }
-
-    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
-    (void)dlist_remove_node_if_present(&u->sync_waits, &w->node);
-    spinlock_release_safe(&u->sync_lock, flags);
-}
-
-static int uhci_sync_wait_sleep(uhci_sync_wait_t* w, uint32_t timeout_us) {
-    if (!w) {
-        return 0;
-    }
-
-    const uint32_t deadline = uhci_timeout_deadline_tick(timeout_us);
-    if (deadline == 0) {
-        sem_wait(&w->sem);
-        return 1;
-    }
-
-    return sem_wait_timeout(&w->sem, deadline) != 0;
-}
-
 static void uhci_td_chain_free_pool(uhci_hcd_impl_t* u, uhci_td_t* td) {
     while (td) {
         uhci_td_t* next = (uhci_td_t*)(uintptr_t)td->sw_next;
@@ -429,11 +388,6 @@ static int uhci_td_status_failed(uint32_t st) {
     return (st & (UHCI_TD_CTRL_STALLED | UHCI_TD_CTRL_DBUFERR | UHCI_TD_CTRL_BABBLE | UHCI_TD_CTRL_CRCTIMEO | UHCI_TD_CTRL_BITSTUFF)) != 0u;
 }
 
-/*
- * Next USB packet for a scatter-gather buffer: one TD needs one contiguous DMA range.
- * Packet length is min(remaining, max_pkt, bytes left in the current SG segment).
- * Initialize *in_out_si and *in_out_seg_start to 0.
- */
 static uint32_t uhci_sg_next_packet(
     dma_sg_list_t* sg,
     uint32_t* in_out_si,
@@ -498,10 +452,6 @@ static uint32_t uhci_sg_contiguous_from_offset(dma_sg_list_t* sg, uint32_t offse
     return 0u;
 }
 
-/*
- * One UHCI TD is one USB transaction; the buffer must be physically contiguous for that
- * packet. If any max-packet-sized window crosses an SG break, fall back to a linear buffer.
- */
 static int uhci_sg_usb_requires_linear_coherent(dma_sg_list_t* sg, uint32_t length, uint32_t max_pkt) {
     uint32_t off = 0u;
 
@@ -528,8 +478,7 @@ static void uhci_ctrl_xfer_free_data(
     dma_sg_list_t* data_sg,
     uint8_t* data_dma,
     uint32_t length,
-    uint32_t data_phys,
-    void* ctrl_data_buf
+    uint32_t data_phys
 ) {
     if (data_sg) {
         dma_unmap_buffer(data_sg);
@@ -537,7 +486,7 @@ static void uhci_ctrl_xfer_free_data(
         return;
     }
 
-    if (length > PAGE_SIZE && data_dma && data_dma != (uint8_t*)ctrl_data_buf) {
+    if (length > 0 && data_dma) {
         dma_free_coherent(data_dma, length, data_phys);
     }
 }
@@ -554,35 +503,182 @@ static void uhci_bulk_xfer_free_data(dma_sg_list_t* data_sg, void* data_dma, uin
     }
 }
 
-static int uhci_hcd_control_xfer(
-    usb_hcd_t* hcd,
-    uint8_t dev_addr,
-    usb_speed_t speed,
-    uint16_t ep0_mps,
-    const usb_setup_packet_t* setup,
-    void* data,
-    uint16_t length,
-    uint32_t timeout_us
-) {
+static int uhci_xfer_wait_arm(uhci_hcd_impl_t* u, uhci_wait_entry_t* e) {
+    if (!u || !e || !e->qh || !e->urb) {
+        return 0;
+    }
+
+    dlist_init(&e->node);
+
+    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
+    dlist_add_tail(&e->node, &u->xfer_waits);
+    spinlock_release_safe(&u->sync_lock, flags);
+
+    return 1;
+}
+
+static void uhci_complete_urb(uhci_hcd_impl_t* u, uhci_wait_entry_t* e, int cancelled) {
+    usb_urb_t* urb = e ? e->urb : 0;
+    if (!u || !urb || !urb->hcpriv) {
+        return;
+    }
+
+    uhci_urb_bundle_t* bundle = (uhci_urb_bundle_t*)urb->hcpriv;
+    uhci_urb_priv_t* p = &bundle->priv;
+
+    if (!cancelled) {
+        uhci_sched_remove_qh(u, p->qh);
+        uhci_wait_frame_advance(u);
+    } else {
+        uhci_sched_remove_qh(u, p->qh);
+        uhci_wait_frame_advance(u);
+
+        if (p->qh) {
+            p->qh->element = UHCI_PTR_T;
+        }
+    }
+
+    if (cancelled) {
+        urb->status = USB_URB_STATUS_CANCELLED;
+        urb->actual_length = 0;
+    } else if (p->is_control) {
+        int success = 1;
+
+        for (uhci_td_t* td = p->td_first; td; td = (uhci_td_t*)(uintptr_t)td->sw_next) {
+            __sync_synchronize();
+
+            const uint32_t st = td->status;
+            if (uhci_td_status_failed(st)) {
+                success = 0;
+                break;
+            }
+
+            if (td == p->td_status) {
+                break;
+            }
+        }
+
+        if (success && p->dir_in && p->user_buffer && p->length && !p->data_sg) {
+            memcpy(p->user_buffer, p->data_dma, p->length);
+        }
+
+        urb->status = success ? (int)p->length : USB_URB_STATUS_IOERROR;
+        urb->actual_length = success ? (uint32_t)p->length : 0;
+    } else {
+        int success = 1;
+        uint32_t total = 0;
+
+        uhci_td_t* td = p->td_first;
+
+        while (td) {
+            __sync_synchronize();
+
+            const uint32_t st = td->status;
+            if (uhci_td_status_failed(st)) {
+                success = 0;
+                break;
+            }
+
+            uint32_t al = st & UHCI_TD_CTRL_ACTLEN_MASK;
+            uint32_t got = (al == UHCI_TD_CTRL_ACTLEN_MASK) ? 0u : (al + 1u);
+
+            if (got > p->max_packet) {
+                got = p->max_packet;
+            }
+
+            total += got;
+
+            if (got < p->max_packet) {
+                break;
+            }
+
+            td = (uhci_td_t*)(uintptr_t)td->sw_next;
+        }
+
+        if (total > p->bulk_length) {
+            total = p->bulk_length;
+        }
+
+        if (success && p->dir_in && p->data_dma) {
+            memcpy(p->user_buffer, p->data_dma, total);
+        }
+
+        if (p->toggle_io) {
+            *p->toggle_io = p->toggle_val & 1u;
+        }
+
+        urb->status = success ? (int)total : USB_URB_STATUS_IOERROR;
+        urb->actual_length = total;
+    }
+
+    if (p->qh) {
+        p->qh->element = UHCI_PTR_T;
+        uhci_qh_free(u, p->qh);
+        p->qh = 0;
+    }
+
+    uhci_td_chain_free_pool(u, p->td_first);
+    p->td_first = 0;
+
+    if (p->setup_dma) {
+        dma_pool_free(u->setup_pool, p->setup_dma);
+        p->setup_dma = 0;
+    }
+
+    if (p->is_control) {
+        uhci_ctrl_xfer_free_data(p->data_sg, p->data_dma, p->length, p->data_phys);
+    } else {
+        uhci_bulk_xfer_free_data(p->data_sg, p->data_dma, p->bulk_length, p->data_phys);
+    }
+
+    p->data_sg = 0;
+    p->data_dma = 0;
+
+    usb_urb_complete_fn complete = urb->complete;
+
+    kfree(bundle);
+    urb->hcpriv = 0;
+
+    if (complete) {
+        complete(urb);
+    }
+}
+
+static int uhci_submit_control_urb(usb_hcd_t* hcd, usb_urb_t* urb) {
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
-    if (!u || !setup) {
+    if (!u || !urb || urb->type != USB_URB_CONTROL) {
         return -1;
     }
 
+    const usb_setup_packet_t* setup = &urb->setup;
+    void* data = urb->buffer;
+    uint16_t length = urb->length;
+
+    uint16_t ep0_mps = urb->ep0_mps;
     if (ep0_mps == 0) {
         ep0_mps = 8;
     }
-
     if (ep0_mps > 64) {
         ep0_mps = 64;
     }
 
-    mutex_lock(&u->ctrl_mutex);
+    uhci_urb_bundle_t* bundle = (uhci_urb_bundle_t*)kzalloc(sizeof(*bundle));
+    if (!bundle) {
+        return -1;
+    }
+
+    uhci_urb_priv_t* pr = &bundle->priv;
+    pr->is_control = 1;
+    pr->user_buffer = data;
+    pr->length = length;
+    pr->ep0_mps = ep0_mps;
+    pr->dev_addr = urb->dev_addr;
+    pr->speed = (uint8_t)urb->speed;
 
     uint32_t setup_phys = 0;
     usb_setup_packet_t* setup_dma = (usb_setup_packet_t*)dma_pool_alloc(u->setup_pool, &setup_phys);
     if (!setup_dma || !setup_phys) {
-        mutex_unlock(&u->ctrl_mutex);
+        kfree(bundle);
         return -1;
     }
 
@@ -593,88 +689,69 @@ static int uhci_hcd_control_xfer(
     dma_sg_list_t* data_sg = 0;
 
     const uint8_t dir_in = (setup->bmRequestType & USB_REQ_TYPE_DIR_IN) ? 1u : 0u;
+    pr->dir_in = dir_in;
 
     if (length) {
-        if (length > PAGE_SIZE) {
-            if (data) {
-                data_sg = dma_map_buffer(data, length, dir_in ? DMA_DIR_FROM_DEVICE : DMA_DIR_TO_DEVICE);
+        if (data) {
+            data_sg = dma_map_buffer(data, length, dir_in ? DMA_DIR_FROM_DEVICE : DMA_DIR_TO_DEVICE);
 
-                if (!data_sg) {
-                    dma_pool_free(u->setup_pool, setup_dma);
-                    mutex_unlock(&u->ctrl_mutex);
+            if (!data_sg) {
+                dma_pool_free(u->setup_pool, setup_dma);
+                kfree(bundle);
+                return -1;
+            }
 
-                    return -1;
-                }
+            if (uhci_sg_usb_requires_linear_coherent(data_sg, length, (uint32_t)ep0_mps)) {
+                dma_unmap_buffer(data_sg);
+                data_sg = 0;
 
-                if (uhci_sg_usb_requires_linear_coherent(data_sg, length, (uint32_t)ep0_mps)) {
-                    dma_unmap_buffer(data_sg);
-                    data_sg = 0;
-
-                    data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
-
-                    if (!data_dma || !data_phys) {
-                        dma_pool_free(u->setup_pool, setup_dma);
-                        mutex_unlock(&u->ctrl_mutex);
-
-                        return -1;
-                    }
-
-                    if (dir_in) {
-                        memset(data_dma, 0, length);
-                    } else {
-                        memcpy(data_dma, data, length);
-                    }
-                }
-            } else if (dir_in) {
                 data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
 
                 if (!data_dma || !data_phys) {
                     dma_pool_free(u->setup_pool, setup_dma);
-                    mutex_unlock(&u->ctrl_mutex);
-
+                    kfree(bundle);
                     return -1;
                 }
 
-                memset(data_dma, 0, length);
-            } else {
-                dma_pool_free(u->setup_pool, setup_dma);
-                mutex_unlock(&u->ctrl_mutex);
+                if (dir_in) {
+                    memset(data_dma, 0, length);
+                } else {
+                    memcpy(data_dma, data, length);
+                }
+            }
+        } else if (dir_in) {
+            data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
 
+            if (!data_dma || !data_phys) {
+                dma_pool_free(u->setup_pool, setup_dma);
+                kfree(bundle);
                 return -1;
             }
+
+            memset(data_dma, 0, length);
         } else {
-            data_dma = (uint8_t*)u->ctrl_data_buf;
-            data_phys = u->ctrl_data_phys;
-
-            if (dir_in) {
-                memset(data_dma, 0, length);
-            } else {
-                if (!data) {
-                    dma_pool_free(u->setup_pool, setup_dma);
-                    mutex_unlock(&u->ctrl_mutex);
-
-                    return -1;
-                }
-
-                memcpy(data_dma, data, length);
-            }
+            dma_pool_free(u->setup_pool, setup_dma);
+            kfree(bundle);
+            return -1;
         }
     }
+
+    pr->data_sg = data_sg;
+    pr->data_dma = data_dma;
+    pr->data_phys = data_phys;
 
     uint32_t td_setup_phys = 0;
     uhci_td_t* td_setup = uhci_td_alloc(u, &td_setup_phys);
     if (!td_setup) {
-        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys);
         dma_pool_free(u->setup_pool, setup_dma);
-        mutex_unlock(&u->ctrl_mutex);
-
+        kfree(bundle);
         return -1;
     }
 
     td_setup->link = UHCI_PTR_T;
     td_setup->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE;
-    if (speed == USB_SPEED_LOW) {
+    if (urb->speed == USB_SPEED_LOW) {
         td_setup->status |= UHCI_TD_CTRL_LS;
     }
 
@@ -682,7 +759,7 @@ static int uhci_hcd_control_xfer(
         (uhci_td_maxlen_field(sizeof(*setup_dma)) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
         (0u << UHCI_TD_TOKEN_D_SHIFT) |
         (0u << UHCI_TD_TOKEN_ENDP_SHIFT) |
-        ((uint32_t)dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
+        ((uint32_t)urb->dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
         UHCI_TD_PID_SETUP;
 
     td_setup->buffer = setup_phys;
@@ -715,12 +792,9 @@ static int uhci_hcd_control_xfer(
 
             if (pkt32 == 0u || buf_phys == 0u) {
                 uhci_td_chain_free_pool(u, td_first);
-
-                uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
+                uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys);
                 dma_pool_free(u->setup_pool, setup_dma);
-                mutex_unlock(&u->ctrl_mutex);
-
+                kfree(bundle);
                 return -1;
             }
         } else {
@@ -734,12 +808,9 @@ static int uhci_hcd_control_xfer(
         uhci_td_t* td = uhci_td_alloc(u, &td_phys);
         if (!td) {
             uhci_td_chain_free_pool(u, td_first);
-
-            uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
+            uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys);
             dma_pool_free(u->setup_pool, setup_dma);
-            mutex_unlock(&u->ctrl_mutex);
-
+            kfree(bundle);
             return -1;
         }
 
@@ -748,7 +819,7 @@ static int uhci_hcd_control_xfer(
 
         td->link = UHCI_PTR_T;
         td->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE;
-        if (speed == USB_SPEED_LOW) {
+        if (urb->speed == USB_SPEED_LOW) {
             td->status |= UHCI_TD_CTRL_LS;
         }
         if (dir_in) {
@@ -759,7 +830,7 @@ static int uhci_hcd_control_xfer(
             (uhci_td_maxlen_field(pkt) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
             ((uint32_t)toggle << UHCI_TD_TOKEN_D_SHIFT) |
             (0u << UHCI_TD_TOKEN_ENDP_SHIFT) |
-            ((uint32_t)dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
+            ((uint32_t)urb->dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
             (dir_in ? UHCI_TD_PID_IN : UHCI_TD_PID_OUT);
 
         td->buffer = buf_phys;
@@ -775,12 +846,9 @@ static int uhci_hcd_control_xfer(
     uhci_td_t* td_status = uhci_td_alloc(u, &td_status_phys);
     if (!td_status) {
         uhci_td_chain_free_pool(u, td_first);
-
-        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys);
         dma_pool_free(u->setup_pool, setup_dma);
-        mutex_unlock(&u->ctrl_mutex);
-
+        kfree(bundle);
         return -1;
     }
 
@@ -789,7 +857,7 @@ static int uhci_hcd_control_xfer(
 
     td_status->link = UHCI_PTR_T;
     td_status->status = (3u << UHCI_TD_CTRL_C_ERR_SHIFT) | UHCI_TD_CTRL_ACTIVE | UHCI_TD_CTRL_IOC;
-    if (speed == USB_SPEED_LOW) {
+    if (urb->speed == USB_SPEED_LOW) {
         td_status->status |= UHCI_TD_CTRL_LS;
     }
 
@@ -802,7 +870,7 @@ static int uhci_hcd_control_xfer(
         (uhci_td_maxlen_field(0) << UHCI_TD_TOKEN_MAXLEN_SHIFT) |
         (1u << UHCI_TD_TOKEN_D_SHIFT) |
         (0u << UHCI_TD_TOKEN_ENDP_SHIFT) |
-        ((uint32_t)dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
+        ((uint32_t)urb->dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
         status_pid;
 
     td_status->buffer = 0;
@@ -811,95 +879,57 @@ static int uhci_hcd_control_xfer(
     uhci_qh_t* qh = uhci_qh_alloc(u, &qh_phys);
     if (!qh) {
         uhci_td_chain_free_pool(u, td_first);
-
-        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys);
         dma_pool_free(u->setup_pool, setup_dma);
-        mutex_unlock(&u->ctrl_mutex);
-
+        kfree(bundle);
         return -1;
     }
 
     qh->link = UHCI_PTR_T;
     qh->element = td_first->sw_phys;
 
+    pr->td_first = td_first;
+    pr->td_status = td_status;
+    pr->qh = qh;
+    pr->setup_dma = setup_dma;
+
+    urb->hcpriv = bundle;
+
+    bundle->wait.qh = qh;
+    bundle->wait.urb = urb;
+
     uhci_sched_insert_head_qh(u, qh);
 
-    uhci_sync_wait_t wait;
-    uhci_sync_wait_init(&wait, qh);
-    (void)uhci_sync_wait_arm(u, &wait);
-
-    const int ok = uhci_sync_wait_sleep(&wait, timeout_us);
-
-    uhci_sync_wait_disarm(u, &wait);
-
-    uhci_sched_remove_qh(u, qh);
-
-    uhci_wait_frame_advance(u);
-
-    if (!ok) {
+    if (!uhci_xfer_wait_arm(u, &bundle->wait)) {
         qh->element = UHCI_PTR_T;
         uhci_qh_free(u, qh);
-
         uhci_td_chain_free_pool(u, td_first);
-
-        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys);
         dma_pool_free(u->setup_pool, setup_dma);
-
-        mutex_unlock(&u->ctrl_mutex);
-
+        urb->hcpriv = 0;
+        kfree(bundle);
         return -1;
     }
 
-    int success = 1;
-
-    for (uhci_td_t* td = td_first; td; td = (uhci_td_t*)(uintptr_t)td->sw_next) {
-        __sync_synchronize();
-
-        const uint32_t st = td->status;
-        if (uhci_td_status_failed(st)) {
-            success = 0;
-            break;
-        }
-
-        if (td == td_status) {
-            break;
-        }
-    }
-
-    if (success && dir_in && data && length && !data_sg) {
-        memcpy(data, data_dma, length);
-    }
-
-    qh->element = UHCI_PTR_T;
-    uhci_qh_free(u, qh);
-
-    uhci_td_chain_free_pool(u, td_first);
-
-    uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
-
-    dma_pool_free(u->setup_pool, setup_dma);
-
-    mutex_unlock(&u->ctrl_mutex);
-
-    return success ? (int)length : -1;
+    return 0;
 }
 
-static int uhci_hcd_bulk_xfer(
-    usb_hcd_t* hcd,
-    uint8_t dev_addr,
-    usb_speed_t speed,
-    uint8_t ep_num,
-    uint8_t dir_in,
-    uint16_t max_packet,
-    void* data,
-    uint32_t length,
-    uint32_t timeout_us,
-    uint8_t* toggle_io
-) {
+static int uhci_submit_bulk_urb(usb_hcd_t* hcd, usb_urb_t* urb) {
     uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
-    if (!u || !dev_addr || ep_num > 15) {
+    if (!u || !urb || urb->type != USB_URB_BULK) {
+        return -1;
+    }
+
+    uint8_t dev_addr = urb->dev_addr;
+    usb_speed_t speed = urb->speed;
+    uint8_t ep_num = urb->ep_num;
+    uint8_t dir_in = urb->dir_in;
+    uint16_t max_packet = urb->max_packet;
+    void* data = urb->buffer;
+    uint32_t length = urb->transfer_buffer_length;
+    uint8_t* toggle_io = urb->toggle_io;
+
+    if (!dev_addr || ep_num > 15) {
         return -1;
     }
 
@@ -916,8 +946,28 @@ static int uhci_hcd_bulk_xfer(
     }
 
     if (length == 0) {
+        urb->status = 0;
+        urb->actual_length = 0;
+        if (urb->complete) {
+            urb->complete(urb);
+        }
         return 0;
     }
+
+    uhci_urb_bundle_t* bundle = (uhci_urb_bundle_t*)kzalloc(sizeof(*bundle));
+    if (!bundle) {
+        return -1;
+    }
+
+    uhci_urb_priv_t* pr = &bundle->priv;
+    pr->is_control = 0;
+    pr->user_buffer = data;
+    pr->bulk_length = length;
+    pr->max_packet = (uint8_t)max_packet;
+    pr->ep_num = ep_num;
+    pr->dev_addr = dev_addr;
+    pr->speed = (uint8_t)speed;
+    pr->toggle_io = toggle_io;
 
     uint8_t toggle = 0;
     if (toggle_io) {
@@ -929,6 +979,7 @@ static int uhci_hcd_bulk_xfer(
     dma_sg_list_t* data_sg = dma_map_buffer(data, length, dma_dir);
 
     if (!data_sg) {
+        kfree(bundle);
         return -1;
     }
 
@@ -942,6 +993,7 @@ static int uhci_hcd_bulk_xfer(
         data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
 
         if (!data_dma || !data_phys) {
+            kfree(bundle);
             return -1;
         }
 
@@ -951,6 +1003,11 @@ static int uhci_hcd_bulk_xfer(
             memcpy(data_dma, data, length);
         }
     }
+
+    pr->data_sg = data_sg;
+    pr->data_dma = data_dma;
+    pr->data_phys = data_phys;
+    pr->dir_in = dir_in;
 
     uhci_td_t* td_first = 0;
     uhci_td_t* td_prev = 0;
@@ -978,8 +1035,8 @@ static int uhci_hcd_bulk_xfer(
 
             if (pkt32 == 0u || buf_phys == 0u) {
                 uhci_td_chain_free_pool(u, td_first);
-                dma_unmap_buffer(data_sg);
-
+                uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
+                kfree(bundle);
                 return -1;
             }
         } else {
@@ -994,7 +1051,7 @@ static int uhci_hcd_bulk_xfer(
         if (!td) {
             uhci_td_chain_free_pool(u, td_first);
             uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
-
+            kfree(bundle);
             return -1;
         }
 
@@ -1036,6 +1093,8 @@ static int uhci_hcd_bulk_xfer(
         offset += pkt32;
     }
 
+    pr->toggle_val = toggle;
+
     if (td_prev) {
         td_prev->status |= UHCI_TD_CTRL_IOC;
     }
@@ -1045,87 +1104,84 @@ static int uhci_hcd_bulk_xfer(
     if (!qh) {
         uhci_td_chain_free_pool(u, td_first);
         uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
-
+        kfree(bundle);
         return -1;
     }
 
     qh->link = UHCI_PTR_T;
     qh->element = td_first->sw_phys;
 
+    pr->td_first = td_first;
+    pr->qh = qh;
+
+    urb->hcpriv = bundle;
+
+    bundle->wait.qh = qh;
+    bundle->wait.urb = urb;
+
     uhci_sched_insert_head_qh(u, qh);
 
-    uhci_sync_wait_t wait;
-    uhci_sync_wait_init(&wait, qh);
-    (void)uhci_sync_wait_arm(u, &wait);
-
-    const int ok = uhci_sync_wait_sleep(&wait, timeout_us);
-
-    uhci_sync_wait_disarm(u, &wait);
-
-    uhci_sched_remove_qh(u, qh);
-
-    uhci_wait_frame_advance(u);
-
-    if (!ok) {
+    if (!uhci_xfer_wait_arm(u, &bundle->wait)) {
         qh->element = UHCI_PTR_T;
         uhci_qh_free(u, qh);
-
         uhci_td_chain_free_pool(u, td_first);
         uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
-
+        urb->hcpriv = 0;
+        kfree(bundle);
         return -1;
     }
 
-    int success = 1;
-    uint32_t total = 0;
+    return 0;
+}
 
-    uhci_td_t* td = td_first;
+static int uhci_hcd_submit_urb(usb_hcd_t* hcd, usb_urb_t* urb) {
+    if (!hcd || !urb) {
+        return -1;
+    }
 
-    while (td) {
-        __sync_synchronize();
+    switch (urb->type) {
+    case USB_URB_CONTROL:
+        return uhci_submit_control_urb(hcd, urb);
 
-        const uint32_t st = td->status;
-        if (uhci_td_status_failed(st)) {
-            success = 0;
+    case USB_URB_BULK:
+        return uhci_submit_bulk_urb(hcd, urb);
+
+    default:
+        return -1;
+    }
+}
+
+static int uhci_hcd_cancel_urb(usb_hcd_t* hcd, usb_urb_t* urb) {
+    uhci_hcd_impl_t* u = (uhci_hcd_impl_t*)hcd->private_data;
+    if (!u || !urb || !urb->hcpriv) {
+        return -1;
+    }
+
+    uhci_wait_entry_t* found = 0;
+
+    uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
+
+    dlist_head_t* it = u->xfer_waits.next;
+    while (it != &u->xfer_waits) {
+        uhci_wait_entry_t* e = container_of(it, uhci_wait_entry_t, node);
+        it = it->next;
+
+        if (e->urb == urb) {
+            dlist_del(&e->node);
+            found = e;
             break;
         }
-
-        uint32_t al = st & UHCI_TD_CTRL_ACTLEN_MASK;
-        uint32_t got = (al == UHCI_TD_CTRL_ACTLEN_MASK) ? 0u : (al + 1u);
-
-        if (got > max_packet) {
-            got = max_packet;
-        }
-
-        total += got;
-
-        if (got < max_packet) {
-            break;
-        }
-
-        td = (uhci_td_t*)(uintptr_t)td->sw_next;
     }
 
-    if (total > length) {
-        total = length;
+    spinlock_release_safe(&u->sync_lock, flags);
+
+    if (!found) {
+        return -1;
     }
 
-    if (success && dir_in && data_dma) {
-        memcpy(data, data_dma, total);
-    }
+    uhci_complete_urb(u, found, 1);
 
-    if (toggle_io) {
-        *toggle_io = toggle & 1u;
-    }
-
-    qh->element = UHCI_PTR_T;
-
-    uhci_qh_free(u, qh);
-
-    uhci_td_chain_free_pool(u, td_first);
-    uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
-
-    return success ? (int)total : -1;
+    return 0;
 }
 
 static void uhci_intr_arm(uhci_intr_pipe_t* p) {
@@ -1318,30 +1374,38 @@ static void uhci_irq_bh(work_struct_t* work) {
     }
 
     {
+        dlist_head_t done;
+        dlist_init(&done);
+
         uint32_t flags = spinlock_acquire_safe(&u->sync_lock);
 
-        dlist_head_t* it = u->sync_waits.next;
-        while (it != &u->sync_waits) {
-            uhci_sync_wait_t* w = container_of(it, uhci_sync_wait_t, node);
+        dlist_head_t* it = u->xfer_waits.next;
+        while (it != &u->xfer_waits) {
+            uhci_wait_entry_t* e = container_of(it, uhci_wait_entry_t, node);
             it = it->next;
 
-            if (!w->qh || w->done) {
+            if (!e->qh || !e->urb) {
                 continue;
             }
 
             __sync_synchronize();
 
-            if ((w->qh->element & UHCI_PTR_T) == 0u) {
+            if ((e->qh->element & UHCI_PTR_T) == 0u) {
                 continue;
             }
 
-            w->done = 1;
-            dlist_del(&w->node);
-
-            sem_signal(&w->sem);
+            dlist_del(&e->node);
+            dlist_add_tail(&e->node, &done);
         }
 
         spinlock_release_safe(&u->sync_lock, flags);
+
+        while (!dlist_empty(&done)) {
+            uhci_wait_entry_t* e = container_of(done.next, uhci_wait_entry_t, node);
+
+            dlist_del(&e->node);
+            uhci_complete_urb(u, e, 0);
+        }
     }
 
     uhci_writew(u, UHCI_REG_USBSTS, UHCI_USBSTS_CLEAR_ALL);
@@ -1450,8 +1514,8 @@ static const usb_hcd_ops_t g_uhci_hcd_ops = {
     .root_port_get_status = uhci_hcd_root_port_get_status,
     .root_port_reset = uhci_hcd_root_port_reset,
 
-    .control_xfer = uhci_hcd_control_xfer,
-    .bulk_xfer = uhci_hcd_bulk_xfer,
+    .submit_urb = uhci_hcd_submit_urb,
+    .cancel_urb = uhci_hcd_cancel_urb,
 
     .intr_open = uhci_hcd_intr_open,
     .intr_close = uhci_hcd_intr_close,
@@ -1489,12 +1553,6 @@ static void uhci_destroy(uhci_hcd_impl_t* u) {
         u->frame_list_phys = 0;
     }
 
-    if (u->ctrl_data_buf) {
-        dma_free_coherent(u->ctrl_data_buf, PAGE_SIZE, u->ctrl_data_phys);
-        u->ctrl_data_buf = 0;
-        u->ctrl_data_phys = 0;
-    }
-
     if (u->setup_pool) {
         dma_pool_destroy(u->setup_pool);
         u->setup_pool = 0;
@@ -1529,7 +1587,7 @@ static int uhci_probe(pci_device_t* pdev) {
     }
 
     spinlock_init(&u->sync_lock);
-    dlist_init(&u->sync_waits);
+    dlist_init(&u->xfer_waits);
 
     u->pdev = pdev;
 
@@ -1540,10 +1598,7 @@ static int uhci_probe(pci_device_t* pdev) {
     u->qh_pool = dma_pool_create("uhci_qh", sizeof(uhci_qh_t), 16u);
     u->setup_pool = dma_pool_create("usb_setup", sizeof(usb_setup_packet_t), 8u);
 
-    u->ctrl_data_buf = dma_alloc_coherent(PAGE_SIZE, &u->ctrl_data_phys);
-    mutex_init(&u->ctrl_mutex);
-
-    if (!u->td_pool || !u->qh_pool || !u->setup_pool || !u->ctrl_data_buf || !u->ctrl_data_phys) {
+    if (!u->td_pool || !u->qh_pool || !u->setup_pool) {
         uhci_destroy(u);
         return -1;
     }

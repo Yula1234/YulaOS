@@ -5,6 +5,7 @@
 
 #include <drivers/usb/usb.h>
 #include <drivers/usb/usb_hcd.h>
+#include <drivers/usb/usb_urb.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,10 @@ void usb_detach_child_device(usb_device_t* parent, uint8_t hub_port);
 
 usb_hcd_t* usb_device_get_hcd(usb_device_t* dev);
 const usb_device_info_t* usb_device_get_info(const usb_device_t* dev);
+
+int usb_submit_urb(usb_device_t* dev, usb_urb_t* urb);
+
+int usb_cancel_urb(usb_device_t* dev, usb_urb_t* urb);
 
 int usb_device_control_xfer(
     usb_device_t* dev,

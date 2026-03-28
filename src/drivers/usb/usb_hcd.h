@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include <drivers/usb/usb.h>
+#include <drivers/usb/usb_urb.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,29 +30,9 @@ typedef struct {
     int (*root_port_get_status)(usb_hcd_t* hcd, uint8_t port, usb_port_status_t* out);
     int (*root_port_reset)(usb_hcd_t* hcd, uint8_t port);
 
-    int (*control_xfer)(
-        usb_hcd_t* hcd,
-        uint8_t dev_addr,
-        usb_speed_t speed,
-        uint16_t ep0_mps,
-        const usb_setup_packet_t* setup,
-        void* data,
-        uint16_t length,
-        uint32_t timeout_us
-    );
+    int (*submit_urb)(usb_hcd_t* hcd, usb_urb_t* urb);
 
-    int (*bulk_xfer)(
-        usb_hcd_t* hcd,
-        uint8_t dev_addr,
-        usb_speed_t speed,
-        uint8_t ep_num,
-        uint8_t dir_in,
-        uint16_t max_packet,
-        void* data,
-        uint32_t length,
-        uint32_t timeout_us,
-        uint8_t* toggle_io
-    );
+    int (*cancel_urb)(usb_hcd_t* hcd, usb_urb_t* urb);
 
     usb_intr_pipe_t* (*intr_open)(
         usb_hcd_t* hcd,
