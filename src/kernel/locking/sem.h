@@ -4,10 +4,11 @@
 #ifndef KERNEL_LOCKING_SEM_H
 #define KERNEL_LOCKING_SEM_H
 
+#include <lib/dlist.h>
+
 #include <stdint.h>
 
-#include <kernel/locking/spinlock.h>
-#include <lib/dlist.h>
+#include "spinlock.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,17 +16,6 @@ extern "C" {
 
 struct task;
 
-/*
- * Modern Counting Semaphore Implementation.
- *
- * The count represents the number of available tokens. Tasks waiting for
- * a token to become available are enqueued in the wait_list.
- *
- * The fast-path relies on a lock-free atomic compare-and-swap. If the
- * fast-path fails, tasks perform a brief optimistic spin using cpu_relax()
- * before falling back to a lock-protected slow-path. This dramatically
- * reduces context switch overhead under light to moderate contention.
- */
 typedef struct {
     volatile int count;
 

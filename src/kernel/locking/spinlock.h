@@ -4,10 +4,11 @@
 #ifndef KERNEL_LOCKING_SPINLOCK_H
 #define KERNEL_LOCKING_SPINLOCK_H
 
-#include <stdint.h>
-
 #include <kernel/smp/cpu_limits.h>
+
 #include <kernel/panic.h>
+
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {

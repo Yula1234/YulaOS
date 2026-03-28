@@ -4,10 +4,11 @@
 #ifndef KERNEL_LOCKING_MUTEX_H
 #define KERNEL_LOCKING_MUTEX_H
 
+#include <lib/dlist.h>
+
 #include <stdint.h>
 
-#include <kernel/locking/spinlock.h>
-#include <lib/dlist.h>
+#include "spinlock.h"
 
 #ifdef __cplusplus
 extern "C" {

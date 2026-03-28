@@ -1,16 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <kernel/locking/mutex.h>
-
 #include <kernel/panic.h>
-#include <kernel/proc.h>
 #include <kernel/sched.h>
-
-#include <hal/cpu.h>
-#include <hal/lock.h>
+#include <kernel/proc.h>
 
 #include <lib/compiler.h>
+
+#include <hal/cpu.h>
+
+#include "mutex.h"
 
 #define MUTEX_FLAG_WAITERS 1UL
 

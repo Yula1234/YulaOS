@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include <kernel/locking/spinlock.h>
+#include "spinlock.h"
 
 spinlock_qnode_t g_spinlock_qnodes[MAX_CPUS][SPINLOCK_QNODE_DEPTH];
 volatile uint32_t g_spinlock_qnode_tops[MAX_CPUS];

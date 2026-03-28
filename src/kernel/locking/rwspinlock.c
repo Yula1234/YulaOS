@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include <kernel/locking/rwspinlock.h>
 #include <hal/cpu.h>
+
+#include "rwspinlock.h"
 
 void rwspinlock_init(rwspinlock_t* rw) {
     rw->state = 0u;

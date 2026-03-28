@@ -1,26 +1,54 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2025 Yula1234 */
+/* Copyright (C) 2026 Yula1234 */
 
 #ifndef KERNEL_LOCKING_RWLOCK_H
 #define KERNEL_LOCKING_RWLOCK_H
 
-#include <kernel/locking/sem.h>
+#include <lib/dlist.h>
+
+#include <stdint.h>
+
+#include "spinlock.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/*
+ * Modern Reader-Writer Lock Implementation.
+ *
+ * This implementation provides a scalable, sleeping reader-writer lock.
+ * It uses a single atomic 32-bit integer for state tracking to allow
+ * lock-free fast paths, backed by explicit wait queues for the slow path.
+ *
+ * The lock exhibits strict Writer Preference: if a writer is waiting, new
+ * readers will not be granted the lock, preventing writer starvation under
+ * heavy read workloads.
+ *
+ * State bit layout:
+ *  - Bit 31: RWLOCK_WRITER (a writer currently holds the lock).
+ *  - Bit 30: RWLOCK_WAITING_WRITER (one or more writers are queued).
+ *  - Bit 29: RWLOCK_WAITING_READER (one or more readers are queued).
+ *  - Bits 0-28: Active reader count.
+ */
 typedef struct {
-    semaphore_t lock;
-    semaphore_t write_sem;
-    semaphore_t turnstile;
-    int readers;
+    volatile uint32_t state_;
+    volatile uintptr_t writer_owner_;
+
+    spinlock_t wait_lock_;
+
+    dlist_head_t read_waiters_;
+    dlist_head_t write_waiters_;
 } rwlock_t;
 
 void rwlock_init(rwlock_t* rw);
+
 void rwlock_acquire_read(rwlock_t* rw);
+
 void rwlock_release_read(rwlock_t* rw);
+
 void rwlock_acquire_write(rwlock_t* rw);
+
 void rwlock_release_write(rwlock_t* rw);
 
 #ifdef __cplusplus

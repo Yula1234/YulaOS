@@ -4,8 +4,9 @@
 #ifndef KERNEL_LOCKING_RWSPINLOCK_H
 #define KERNEL_LOCKING_RWSPINLOCK_H
 
-#include <hal/align.h>
 #include <kernel/smp/cpu_limits.h>
+
+#include <hal/align.h>
 
 #include <stdint.h>
 
