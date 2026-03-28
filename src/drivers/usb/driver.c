@@ -3,10 +3,10 @@
 
 #include <drivers/driver.h>
 
-#include <drivers/usb/usb_core.h>
-#include <drivers/usb/usb_hub.h>
-#include <drivers/usb/usb_hid_boot.h>
-#include <drivers/usb/usb_msc.h>
+#include <drivers/usb/core.h>
+#include <drivers/usb/hub.h>
+#include <drivers/usb/hid_boot.h>
+#include <drivers/usb/msc.h>
 
 static int usb_driver_init(void) {
     if (!usb_hub_init()) {

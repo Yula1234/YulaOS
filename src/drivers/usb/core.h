@@ -7,8 +7,8 @@
 #include <stdint.h>
 
 #include <drivers/usb/usb.h>
-#include <drivers/usb/usb_hcd.h>
-#include <drivers/usb/usb_urb.h>
+#include <drivers/usb/hcd.h>
+#include <drivers/usb/urb.h>
 
 #ifdef __cplusplus
 extern "C" {

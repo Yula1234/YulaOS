@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <drivers/usb/usb_core.h>
-#include <drivers/usb/usb_hcd.h>
-#include <drivers/usb/usb_urb.h>
+#include <drivers/usb/core.h>
+#include <drivers/usb/hcd.h>
+#include <drivers/usb/urb.h>
 
 #include <drivers/driver.h>
 #include <drivers/pci/pci.h>
