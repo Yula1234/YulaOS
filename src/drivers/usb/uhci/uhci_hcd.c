@@ -429,6 +429,131 @@ static int uhci_td_status_failed(uint32_t st) {
     return (st & (UHCI_TD_CTRL_STALLED | UHCI_TD_CTRL_DBUFERR | UHCI_TD_CTRL_BABBLE | UHCI_TD_CTRL_CRCTIMEO | UHCI_TD_CTRL_BITSTUFF)) != 0u;
 }
 
+/*
+ * Next USB packet for a scatter-gather buffer: one TD needs one contiguous DMA range.
+ * Packet length is min(remaining, max_pkt, bytes left in the current SG segment).
+ * Initialize *in_out_si and *in_out_seg_start to 0.
+ */
+static uint32_t uhci_sg_next_packet(
+    dma_sg_list_t* sg,
+    uint32_t* in_out_si,
+    uint32_t* in_out_seg_start,
+    uint32_t offset,
+    uint32_t max_pkt,
+    uint32_t remaining,
+    uint32_t* out_phys
+) {
+    uint32_t si = *in_out_si;
+    uint32_t seg_start = *in_out_seg_start;
+
+    while (si < sg->count) {
+        dma_sg_elem_t* e = &sg->elems[si];
+        const uint32_t seg_end = seg_start + e->length;
+
+        if (offset < seg_end) {
+            *in_out_si = si;
+            *in_out_seg_start = seg_start;
+
+            const uint32_t in_seg = seg_end - offset;
+            uint32_t pkt = remaining;
+
+            if (pkt > max_pkt) {
+                pkt = max_pkt;
+            }
+
+            if (pkt > in_seg) {
+                pkt = in_seg;
+            }
+
+            if (pkt == 0u) {
+                return 0u;
+            }
+
+            *out_phys = (uint32_t)(e->phys_addr + (offset - seg_start));
+
+            return pkt;
+        }
+
+        seg_start = seg_end;
+        si++;
+    }
+
+    return 0u;
+}
+
+static uint32_t uhci_sg_contiguous_from_offset(dma_sg_list_t* sg, uint32_t offset) {
+    uint32_t pos = 0u;
+
+    for (uint32_t i = 0u; i < sg->count; i++) {
+        const dma_sg_elem_t* e = &sg->elems[i];
+        const uint32_t seg_end = pos + e->length;
+
+        if (offset < seg_end) {
+            return seg_end - offset;
+        }
+
+        pos = seg_end;
+    }
+
+    return 0u;
+}
+
+/*
+ * One UHCI TD is one USB transaction; the buffer must be physically contiguous for that
+ * packet. If any max-packet-sized window crosses an SG break, fall back to a linear buffer.
+ */
+static int uhci_sg_usb_requires_linear_coherent(dma_sg_list_t* sg, uint32_t length, uint32_t max_pkt) {
+    uint32_t off = 0u;
+
+    while (off < length) {
+        uint32_t need = length - off;
+
+        if (need > max_pkt) {
+            need = max_pkt;
+        }
+
+        const uint32_t contig = uhci_sg_contiguous_from_offset(sg, off);
+
+        if (contig < need) {
+            return 1;
+        }
+
+        off += need;
+    }
+
+    return 0;
+}
+
+static void uhci_ctrl_xfer_free_data(
+    dma_sg_list_t* data_sg,
+    uint8_t* data_dma,
+    uint32_t length,
+    uint32_t data_phys,
+    void* ctrl_data_buf
+) {
+    if (data_sg) {
+        dma_unmap_buffer(data_sg);
+
+        return;
+    }
+
+    if (length > PAGE_SIZE && data_dma && data_dma != (uint8_t*)ctrl_data_buf) {
+        dma_free_coherent(data_dma, length, data_phys);
+    }
+}
+
+static void uhci_bulk_xfer_free_data(dma_sg_list_t* data_sg, void* data_dma, uint32_t length, uint32_t data_phys) {
+    if (data_sg) {
+        dma_unmap_buffer(data_sg);
+
+        return;
+    }
+
+    if (data_dma) {
+        dma_free_coherent(data_dma, length, data_phys);
+    }
+}
+
 static int uhci_hcd_control_xfer(
     usb_hcd_t* hcd,
     uint8_t dev_addr,
@@ -465,49 +590,85 @@ static int uhci_hcd_control_xfer(
 
     uint8_t* data_dma = 0;
     uint32_t data_phys = 0;
+    dma_sg_list_t* data_sg = 0;
 
     const uint8_t dir_in = (setup->bmRequestType & USB_REQ_TYPE_DIR_IN) ? 1u : 0u;
 
     if (length) {
         if (length > PAGE_SIZE) {
-            data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
-            if (!data_dma || !data_phys) {
+            if (data) {
+                data_sg = dma_map_buffer(data, length, dir_in ? DMA_DIR_FROM_DEVICE : DMA_DIR_TO_DEVICE);
+
+                if (!data_sg) {
+                    dma_pool_free(u->setup_pool, setup_dma);
+                    mutex_unlock(&u->ctrl_mutex);
+
+                    return -1;
+                }
+
+                if (uhci_sg_usb_requires_linear_coherent(data_sg, length, (uint32_t)ep0_mps)) {
+                    dma_unmap_buffer(data_sg);
+                    data_sg = 0;
+
+                    data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
+
+                    if (!data_dma || !data_phys) {
+                        dma_pool_free(u->setup_pool, setup_dma);
+                        mutex_unlock(&u->ctrl_mutex);
+
+                        return -1;
+                    }
+
+                    if (dir_in) {
+                        memset(data_dma, 0, length);
+                    } else {
+                        memcpy(data_dma, data, length);
+                    }
+                }
+            } else if (dir_in) {
+                data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
+
+                if (!data_dma || !data_phys) {
+                    dma_pool_free(u->setup_pool, setup_dma);
+                    mutex_unlock(&u->ctrl_mutex);
+
+                    return -1;
+                }
+
+                memset(data_dma, 0, length);
+            } else {
                 dma_pool_free(u->setup_pool, setup_dma);
                 mutex_unlock(&u->ctrl_mutex);
+
                 return -1;
             }
         } else {
             data_dma = (uint8_t*)u->ctrl_data_buf;
             data_phys = u->ctrl_data_phys;
-        }
 
-        if (dir_in) {
-            memset(data_dma, 0, length);
-        } else {
-            if (!data) {
-                dma_pool_free(u->setup_pool, setup_dma);
-                if (length > PAGE_SIZE) {
-                    dma_free_coherent(data_dma, length, data_phys);
+            if (dir_in) {
+                memset(data_dma, 0, length);
+            } else {
+                if (!data) {
+                    dma_pool_free(u->setup_pool, setup_dma);
+                    mutex_unlock(&u->ctrl_mutex);
+
+                    return -1;
                 }
-                mutex_unlock(&u->ctrl_mutex);
-                return -1;
-            }
 
-            memcpy(data_dma, data, length);
+                memcpy(data_dma, data, length);
+            }
         }
     }
 
     uint32_t td_setup_phys = 0;
     uhci_td_t* td_setup = uhci_td_alloc(u, &td_setup_phys);
     if (!td_setup) {
-        if (data_dma) {
-            if (length > PAGE_SIZE) {
-                dma_free_coherent(data_dma, length, data_phys);
-            }
-        }
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
 
         dma_pool_free(u->setup_pool, setup_dma);
         mutex_unlock(&u->ctrl_mutex);
+
         return -1;
     }
 
@@ -534,22 +695,51 @@ static int uhci_hcd_control_xfer(
     uint32_t remaining = length;
     uint32_t offset = 0;
 
+    uint32_t sg_si = 0u;
+    uint32_t sg_seg_start = 0u;
+
     while (remaining) {
-        uint16_t pkt = remaining > ep0_mps ? ep0_mps : (uint16_t)remaining;
+        uint32_t buf_phys = 0u;
+        uint32_t pkt32 = 0u;
+
+        if (data_sg) {
+            pkt32 = uhci_sg_next_packet(
+                data_sg,
+                &sg_si,
+                &sg_seg_start,
+                offset,
+                (uint32_t)ep0_mps,
+                remaining,
+                &buf_phys
+            );
+
+            if (pkt32 == 0u || buf_phys == 0u) {
+                uhci_td_chain_free_pool(u, td_first);
+
+                uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
+
+                dma_pool_free(u->setup_pool, setup_dma);
+                mutex_unlock(&u->ctrl_mutex);
+
+                return -1;
+            }
+        } else {
+            pkt32 = remaining > ep0_mps ? (uint32_t)ep0_mps : remaining;
+            buf_phys = data_phys + offset;
+        }
+
+        const uint16_t pkt = (uint16_t)pkt32;
 
         uint32_t td_phys = 0;
         uhci_td_t* td = uhci_td_alloc(u, &td_phys);
         if (!td) {
             uhci_td_chain_free_pool(u, td_first);
 
-            if (data_dma) {
-                if (length > PAGE_SIZE) {
-                    dma_free_coherent(data_dma, length, data_phys);
-                }
-            }
+            uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
 
             dma_pool_free(u->setup_pool, setup_dma);
             mutex_unlock(&u->ctrl_mutex);
+
             return -1;
         }
 
@@ -572,13 +762,13 @@ static int uhci_hcd_control_xfer(
             ((uint32_t)dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
             (dir_in ? UHCI_TD_PID_IN : UHCI_TD_PID_OUT);
 
-        td->buffer = data_phys + offset;
+        td->buffer = buf_phys;
 
         td_prev = td;
         toggle ^= 1u;
 
-        remaining -= pkt;
-        offset += pkt;
+        remaining -= pkt32;
+        offset += pkt32;
     }
 
     uint32_t td_status_phys = 0;
@@ -586,14 +776,11 @@ static int uhci_hcd_control_xfer(
     if (!td_status) {
         uhci_td_chain_free_pool(u, td_first);
 
-        if (data_dma) {
-            if (length > PAGE_SIZE) {
-                dma_free_coherent(data_dma, length, data_phys);
-            }
-        }
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
 
         dma_pool_free(u->setup_pool, setup_dma);
         mutex_unlock(&u->ctrl_mutex);
+
         return -1;
     }
 
@@ -625,14 +812,11 @@ static int uhci_hcd_control_xfer(
     if (!qh) {
         uhci_td_chain_free_pool(u, td_first);
 
-        if (data_dma) {
-            if (length > PAGE_SIZE) {
-                dma_free_coherent(data_dma, length, data_phys);
-            }
-        }
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
 
         dma_pool_free(u->setup_pool, setup_dma);
         mutex_unlock(&u->ctrl_mutex);
+
         return -1;
     }
 
@@ -659,11 +843,7 @@ static int uhci_hcd_control_xfer(
 
         uhci_td_chain_free_pool(u, td_first);
 
-        if (data_dma) {
-            if (length > PAGE_SIZE) {
-                dma_free_coherent(data_dma, length, data_phys);
-            }
-        }
+        uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
 
         dma_pool_free(u->setup_pool, setup_dma);
 
@@ -688,7 +868,7 @@ static int uhci_hcd_control_xfer(
         }
     }
 
-    if (success && dir_in && data && data_dma && length) {
+    if (success && dir_in && data && length && !data_sg) {
         memcpy(data, data_dma, length);
     }
 
@@ -697,11 +877,7 @@ static int uhci_hcd_control_xfer(
 
     uhci_td_chain_free_pool(u, td_first);
 
-    if (data_dma) {
-        if (length > PAGE_SIZE) {
-            dma_free_coherent(data_dma, length, data_phys);
-        }
-    }
+    uhci_ctrl_xfer_free_data(data_sg, data_dma, length, data_phys, u->ctrl_data_buf);
 
     dma_pool_free(u->setup_pool, setup_dma);
 
@@ -748,16 +924,32 @@ static int uhci_hcd_bulk_xfer(
         toggle = *toggle_io & 1u;
     }
 
-    uint32_t data_phys = 0;
-    uint8_t* data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
-    if (!data_dma || !data_phys) {
+    const uint32_t dma_dir = dir_in ? DMA_DIR_FROM_DEVICE : DMA_DIR_TO_DEVICE;
+
+    dma_sg_list_t* data_sg = dma_map_buffer(data, length, dma_dir);
+
+    if (!data_sg) {
         return -1;
     }
 
-    if (dir_in) {
-        memset(data_dma, 0, length);
-    } else {
-        memcpy(data_dma, data, length);
+    uint8_t* data_dma = 0;
+    uint32_t data_phys = 0u;
+
+    if (uhci_sg_usb_requires_linear_coherent(data_sg, length, (uint32_t)max_packet)) {
+        dma_unmap_buffer(data_sg);
+        data_sg = 0;
+
+        data_dma = (uint8_t*)dma_alloc_coherent(length, &data_phys);
+
+        if (!data_dma || !data_phys) {
+            return -1;
+        }
+
+        if (dir_in) {
+            memset(data_dma, 0, length);
+        } else {
+            memcpy(data_dma, data, length);
+        }
     }
 
     uhci_td_t* td_first = 0;
@@ -766,14 +958,43 @@ static int uhci_hcd_bulk_xfer(
     uint32_t remaining = length;
     uint32_t offset = 0;
 
+    uint32_t sg_si = 0u;
+    uint32_t sg_seg_start = 0u;
+
     while (remaining) {
-        uint16_t pkt = remaining > max_packet ? max_packet : (uint16_t)remaining;
+        uint32_t buf_phys = 0u;
+        uint32_t pkt32 = 0u;
+
+        if (data_sg) {
+            pkt32 = uhci_sg_next_packet(
+                data_sg,
+                &sg_si,
+                &sg_seg_start,
+                offset,
+                (uint32_t)max_packet,
+                remaining,
+                &buf_phys
+            );
+
+            if (pkt32 == 0u || buf_phys == 0u) {
+                uhci_td_chain_free_pool(u, td_first);
+                dma_unmap_buffer(data_sg);
+
+                return -1;
+            }
+        } else {
+            pkt32 = remaining > max_packet ? (uint32_t)max_packet : remaining;
+            buf_phys = data_phys + offset;
+        }
+
+        const uint16_t pkt = (uint16_t)pkt32;
 
         uint32_t td_phys = 0;
         uhci_td_t* td = uhci_td_alloc(u, &td_phys);
         if (!td) {
             uhci_td_chain_free_pool(u, td_first);
-            dma_free_coherent(data_dma, length, data_phys);
+            uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
+
             return -1;
         }
 
@@ -796,7 +1017,7 @@ static int uhci_hcd_bulk_xfer(
             ((uint32_t)dev_addr << UHCI_TD_TOKEN_DEVADDR_SHIFT) |
             (dir_in ? UHCI_TD_PID_IN : UHCI_TD_PID_OUT);
 
-        td->buffer = data_phys + offset;
+        td->buffer = buf_phys;
 
         if (!td_first) {
             td_first = td;
@@ -811,8 +1032,8 @@ static int uhci_hcd_bulk_xfer(
 
         toggle ^= 1u;
 
-        remaining -= pkt;
-        offset += pkt;
+        remaining -= pkt32;
+        offset += pkt32;
     }
 
     if (td_prev) {
@@ -823,7 +1044,8 @@ static int uhci_hcd_bulk_xfer(
     uhci_qh_t* qh = uhci_qh_alloc(u, &qh_phys);
     if (!qh) {
         uhci_td_chain_free_pool(u, td_first);
-        dma_free_coherent(data_dma, length, data_phys);
+        uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
+
         return -1;
     }
 
@@ -849,7 +1071,7 @@ static int uhci_hcd_bulk_xfer(
         uhci_qh_free(u, qh);
 
         uhci_td_chain_free_pool(u, td_first);
-        dma_free_coherent(data_dma, length, data_phys);
+        uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
 
         return -1;
     }
@@ -888,7 +1110,7 @@ static int uhci_hcd_bulk_xfer(
         total = length;
     }
 
-    if (success && dir_in) {
+    if (success && dir_in && data_dma) {
         memcpy(data, data_dma, total);
     }
 
@@ -901,7 +1123,7 @@ static int uhci_hcd_bulk_xfer(
     uhci_qh_free(u, qh);
 
     uhci_td_chain_free_pool(u, td_first);
-    dma_free_coherent(data_dma, length, data_phys);
+    uhci_bulk_xfer_free_data(data_sg, data_dma, length, data_phys);
 
     return success ? (int)total : -1;
 }
