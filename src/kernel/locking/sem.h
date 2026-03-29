@@ -6,6 +6,8 @@
 
 #include <lib/dlist.h>
 
+#include <hal/align.h>
+
 #include <stdint.h>
 
 #include "spinlock.h"
@@ -18,6 +20,7 @@ struct task;
 
 typedef struct {
     volatile int count;
+    uint8_t pad[HAL_CACHELINE_SIZE - sizeof(int)];
 
     spinlock_t lock;
     dlist_head_t wait_list;
