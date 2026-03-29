@@ -95,14 +95,55 @@ static constexpr uint32_t user_initial_eflags = 0x202u;
 
 static constexpr uint32_t heap_mmap_bump = 0x100000u;
 
-using AllTasksList = kernel::CDBLinkedList<task_t, &task_t::all_tasks_node>;
+static dlist_head_t all_tasks_head;
 
-static AllTasksList all_tasks;
-
-static uint32_t total_tasks = 0;
+static kernel::atomic<uint32_t> total_tasks{0u};
 static kernel::atomic<uint32_t> g_next_pid{1u};
 
-static percpu_rwspinlock_t task_list_lock;
+static spinlock_t all_tasks_write_lock;
+
+static inline dlist_head_t* all_tasks_next_rcu(dlist_head_t* node) noexcept {
+    return static_cast<dlist_head_t*>(__atomic_load_n(&node->next, __ATOMIC_ACQUIRE));
+}
+
+static inline dlist_head_t* all_tasks_prev_rcu(dlist_head_t* node) noexcept {
+    return static_cast<dlist_head_t*>(__atomic_load_n(&node->prev, __ATOMIC_ACQUIRE));
+}
+
+static inline void all_tasks_link_tail_locked(task_t* t) noexcept {
+    dlist_head_t* prev = proc::detail::all_tasks_prev_rcu(&proc::detail::all_tasks_head);
+
+    __atomic_store_n(&t->all_tasks_node.next, &proc::detail::all_tasks_head, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->all_tasks_node.prev, prev, __ATOMIC_RELEASE);
+
+    __atomic_store_n(&prev->next, &t->all_tasks_node, __ATOMIC_RELEASE);
+    __atomic_store_n(&proc::detail::all_tasks_head.prev, &t->all_tasks_node, __ATOMIC_RELEASE);
+}
+
+static inline void all_tasks_unlink_locked(dlist_head_t* node) noexcept {
+    if (!node) {
+        return;
+    }
+
+    dlist_head_t* prev = proc::detail::all_tasks_prev_rcu(node);
+    dlist_head_t* next = proc::detail::all_tasks_next_rcu(node);
+
+    if (!prev || !next) {
+        return;
+    }
+
+    __atomic_store_n(&prev->next, next, __ATOMIC_RELEASE);
+    __atomic_store_n(&next->prev, prev, __ATOMIC_RELEASE);
+}
+
+static void all_tasks_put_rcu(rcu_head_t* head) {
+    if (!head) {
+        return;
+    }
+
+    task_t* t = container_of(head, task_t, all_tasks_rcu);
+    proc_task_put(t);
+}
 
 struct ProcGroup {
     uint32_t pgid = 0;
@@ -817,48 +858,52 @@ uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap) {
 
     uint32_t count = 0;
 
-    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::RcuReadGuard rcu_guard;
 
-    for (task_t& t : proc::detail::all_tasks) {
+    dlist_head_t* it = proc::detail::all_tasks_next_rcu(&proc::detail::all_tasks_head);
+    while (it && it != &proc::detail::all_tasks_head) {
+        task_t* t = container_of(it, task_t, all_tasks_node);
+        it = proc::detail::all_tasks_next_rcu(it);
+
         if (count >= cap) {
             break;
         }
 
-        if (t.state == TASK_UNUSED) {
+        if (t->state == TASK_UNUSED) {
             continue;
         }
 
         uint32_t parent_pid;
         {
-            kernel::SpinLockNativeSafeGuard guard(t.state_lock);
-            parent_pid = t.parent_pid;
+            kernel::SpinLockNativeSafeGuard guard(t->state_lock);
+            parent_pid = t->parent_pid;
         }
 
         yos_proc_info_t* e = &out[count++];
-        e->pid = t.pid;
+        e->pid = t->pid;
         e->parent_pid = parent_pid;
-        e->state = (uint32_t)t.state;
-        e->priority = (uint32_t)t.priority;
-        e->mem_pages = (t.mem) ? t.mem->mem_pages : 0;
-        e->term_mode = (uint32_t)t.term_mode;
-        strlcpy(e->name, t.name, sizeof(e->name));
+        e->state = (uint32_t)t->state;
+        e->priority = (uint32_t)t->priority;
+        e->mem_pages = (t->mem) ? t->mem->mem_pages : 0;
+        e->term_mode = (uint32_t)t->term_mode;
+        strlcpy(e->name, t->name, sizeof(e->name));
     }
     return count;
 }
 
 void proc_init(void) {
-    proc::detail::total_tasks = 0;
+    proc::detail::total_tasks.store(0u, kernel::memory_order::relaxed);
 
     proc::detail::g_next_pid.store(1u, kernel::memory_order::relaxed);
 
     proc::detail::g_zombie_head.store(nullptr, kernel::memory_order::relaxed);
 
-    percpu_rwspinlock_init(&proc::detail::task_list_lock);
+    spinlock_init(&proc::detail::all_tasks_write_lock);
 
     spinlock_init(&proc::detail::g_pid_write_lock);
     memset(&proc::detail::g_pid_map, 0, sizeof(proc::detail::g_pid_map));
 
-    proc::detail::all_tasks.clear_links_unsafe();
+    dlist_init(&proc::detail::all_tasks_head);
 
     proc::detail::initial_fpu_state_size = fpu_state_size();
     kernel::unique_ptr<uint8_t, proc::detail::KfreeDeleter<uint8_t>> fpu_state_guard(
@@ -1492,11 +1537,12 @@ static task_t* alloc_task(void) {
     }
 
     {
-        kernel::PerCpuRwSpinLockNativeWriteGuard guard(proc::detail::task_list_lock);
+        kernel::SpinLockNativeGuard guard(proc::detail::all_tasks_write_lock);
 
         proc_task_retain(t);
-        proc::detail::all_tasks.push_back(*t);
-        proc::detail::total_tasks++;
+
+        proc::detail::all_tasks_link_tail_locked(t);
+        proc::detail::total_tasks.fetch_add(1u, kernel::memory_order::relaxed);
     }
 
     return t_guard.release();
@@ -1589,19 +1635,17 @@ void proc_free_resources(task_t* t) {
     
     bool removed_from_all_tasks = false;
     {
-        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        kernel::SpinLockNativeGuard guard(proc::detail::all_tasks_write_lock);
 
-        if (t->all_tasks_node.next && t->all_tasks_node.prev) {
-            dlist_del(&t->all_tasks_node);
+        if (dlist_node_linked(&t->all_tasks_node)) {
+            proc::detail::all_tasks_unlink_locked(&t->all_tasks_node);
             removed_from_all_tasks = true;
-        }
-        if (removed_from_all_tasks && proc::detail::total_tasks > 0) {
-            proc::detail::total_tasks--;
         }
     }
 
     if (removed_from_all_tasks) {
-        proc_task_put(t);
+        proc::detail::total_tasks.fetch_sub(1u, kernel::memory_order::relaxed);
+        call_rcu(&t->all_tasks_rcu, proc::detail::all_tasks_put_rcu);
     }
 
     proc_task_put(t);
@@ -1742,30 +1786,44 @@ task_t* proc_spawn_kthread(const char* name, task_prio_t prio, void (*entry)(voi
 }
 
 task_t* proc_get_list_head() {
-    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::RcuReadGuard rcu_guard;
 
-    if (proc::detail::all_tasks.empty()) {
-        return 0;
+    dlist_head_t* first = proc::detail::all_tasks_next_rcu(&proc::detail::all_tasks_head);
+    if (!first || first == &proc::detail::all_tasks_head) {
+        return nullptr;
     }
 
-    return &proc::detail::all_tasks.front();
+    task_t* t = container_of(first, task_t, all_tasks_node);
+    if (!proc_task_retain(t)) {
+        return nullptr;
+    }
+
+    return t;
 }
 uint32_t proc_task_count(void) {
-    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
-    return proc::detail::total_tasks;
+    return proc::detail::total_tasks.load(kernel::memory_order::relaxed);
 }
 
 task_t* proc_task_at(uint32_t idx) {
-    kernel::PerCpuRwSpinLockNativeReadSafeGuard guard(proc::detail::task_list_lock);
+    kernel::RcuReadGuard rcu_guard;
 
     uint32_t i = 0;
-    for (task_t& curr : proc::detail::all_tasks) {
+    dlist_head_t* it = proc::detail::all_tasks_next_rcu(&proc::detail::all_tasks_head);
+    while (it && it != &proc::detail::all_tasks_head) {
+        task_t* t = container_of(it, task_t, all_tasks_node);
+        it = proc::detail::all_tasks_next_rcu(it);
+
         if (i == idx) {
-            return &curr;
+            if (!proc_task_retain(t)) {
+                return nullptr;
+            }
+
+            return t;
         }
+
         i++;
     }
-    return 0;
+    return nullptr;
 }
 
 static int proc_alloc_kstack(task_t* t) {
@@ -2418,19 +2476,17 @@ task_t* proc_create_idle(int cpu_index) {
 
     bool removed_from_all_tasks = false;
     {
-        kernel::PerCpuRwSpinLockNativeWriteSafeGuard guard(proc::detail::task_list_lock);
+        kernel::SpinLockNativeGuard guard(proc::detail::all_tasks_write_lock);
 
-        if (t->all_tasks_node.next && t->all_tasks_node.prev) {
-            dlist_del(&t->all_tasks_node);
+        if (dlist_node_linked(&t->all_tasks_node)) {
+            proc::detail::all_tasks_unlink_locked(&t->all_tasks_node);
             removed_from_all_tasks = true;
-        }
-        if (removed_from_all_tasks && proc::detail::total_tasks > 0) {
-            proc::detail::total_tasks--;
         }
     }
 
     if (removed_from_all_tasks) {
-        proc_task_put(t);
+        proc::detail::total_tasks.fetch_sub(1u, kernel::memory_order::relaxed);
+        call_rcu(&t->all_tasks_rcu, proc::detail::all_tasks_put_rcu);
     }
 
     proc::detail::pid_map_remove(old_pid);

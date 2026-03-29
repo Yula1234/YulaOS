@@ -109,6 +109,7 @@ typedef struct task {
     char name[32];
 
     dlist_head_t all_tasks_node;
+    rcu_head_t all_tasks_rcu;
     
     struct rb_node rb_node;
 
