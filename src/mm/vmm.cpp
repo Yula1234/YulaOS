@@ -256,11 +256,6 @@ static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noex
         );
     }
 
-    smp_tlb_shootdown_range(
-        static_cast<uint32_t>(virt_base),
-        static_cast<uint32_t>(virt_base + (count * PAGE_SIZE))
-    );
-
     return true;
 }
 
