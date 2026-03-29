@@ -585,25 +585,6 @@ public:
     }
 
 private:
-    static bool heap_ptr_mapped(uintptr_t virt) noexcept {
-        if (kernel::unlikely(virt == 0u)) {
-            return false;
-        }
-
-        const uint32_t v = static_cast<uint32_t>(virt);
-
-        const uint32_t pde = kernel_page_directory[v >> 22];
-        if ((pde & PTE_PRESENT) == 0u) {
-            return false;
-        }
-
-        if ((pde & (1u << 7)) != 0u) {
-            return true;
-        }
-
-        return paging_get_present_pte(kernel_page_directory, v, nullptr) != 0;
-    }
-
     struct AlignedAllocHeader {
         uint32_t magic;
         uint32_t align;
@@ -661,14 +642,6 @@ private:
 
         const uintptr_t header_addr = addr - sizeof(AlignedAllocHeader);
         if (kernel::unlikely(!heap_range_contains(header_addr))) {
-            return false;
-        }
-
-        if (kernel::unlikely(!heap_ptr_mapped(header_addr))) {
-            return false;
-        }
-
-        if (kernel::unlikely(!heap_ptr_mapped(header_addr + sizeof(AlignedAllocHeader) - 1u))) {
             return false;
         }
 
@@ -812,10 +785,6 @@ private:
             return nullptr;
         }
 
-        if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(obj)))) {
-            panic("SLUB: freelist points to unmapped memory");
-        }
-
         const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(obj);
 
         if ((next_tagged & 1u) == 0u) {
@@ -836,10 +805,6 @@ private:
             panic("SLUB: push null object");
         }
 
-        if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(obj)))) {
-            panic("SLUB: free object is unmapped");
-        }
-
         *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(page.freelist) | 1u;
         page.freelist = obj;
     }
@@ -847,10 +812,6 @@ private:
     static void remote_free_object(KmemCache::PerCpuSlab& target, page_t& page, void* obj) noexcept {
         if (kernel::unlikely(!obj)) {
             panic("SLUB: remote free null object");
-        }
-
-        if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(obj)))) {
-            panic("SLUB: remote free object is unmapped");
         }
 
         page_remote_pending_inc(page);
@@ -884,10 +845,6 @@ private:
         uint32_t drained = 0u;
         void* it = list;
         while (it) {
-            if (kernel::unlikely(!heap_ptr_mapped(reinterpret_cast<uintptr_t>(it)))) {
-                panic("SLUB: remote free list contains unmapped node");
-            }
-
             const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(it);
             if (kernel::unlikely((next_tagged & 1u) == 0u)) {
                 panic("SLUB: remote free tag corrupt");
