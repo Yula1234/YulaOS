@@ -127,58 +127,12 @@ static int user_range_mappable(task_t* t, uintptr_t start, uintptr_t end_excl) {
         return 0;
     }
 
-    if (end_excl <= start) {
+    if (end_excl < start) {
         return 0;
     }
 
     if (start < 0x40000000u || end_excl > 0xC0000000u) {
         return 0;
-    }
-
-    uintptr_t cur = start;
-
-    while (cur < end_excl) {
-        const uint32_t v = (uint32_t)cur;
-
-        if (t->stack_bottom < t->stack_top
-            && v >= t->stack_bottom
-            && v < t->stack_top) {
-            uintptr_t lim = (uintptr_t)t->stack_top;
-            cur = (end_excl < lim) ? end_excl : lim;
-            continue;
-        }
-
-        if (t->mem->heap_start < t->mem->prog_break
-            && v >= t->mem->heap_start
-            && v < t->mem->prog_break) {
-            uintptr_t lim = (uintptr_t)t->mem->prog_break;
-            cur = (end_excl < lim) ? end_excl : lim;
-            continue;
-        }
-
-        vma_region_t* region = vma_find(t->mem, v);
-        if (!region) {
-            return 0;
-        }
-
-        cur = region->vaddr_end;
-
-        while (cur < end_excl && region != nullptr) {
-            dlist_head_t* next_node = region->list_node.next;
-
-            if (next_node == &t->mem->mmap_regions) {
-                return 0;
-            }
-
-            vma_region_t* next_region = container_of(next_node, vma_region_t, list_node);
-
-            if (next_region->vaddr_start > cur) {
-                return 0;
-            }
-
-            region = next_region;
-            cur = region->vaddr_end;
-        }
     }
 
     return 1;
