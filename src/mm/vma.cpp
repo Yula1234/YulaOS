@@ -17,8 +17,6 @@
 
 #include <lib/cpp/lock_guard.h>
 
-#include <string.h>
-
 extern "C" void smp_tlb_shootdown_range(uint32_t start, uint32_t end);
 
 namespace {

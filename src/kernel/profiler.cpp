@@ -8,7 +8,6 @@
 
 #include <lib/cpp/atomic.h>
 
-#include <limits.h>
 #include <stdint.h>
 
 namespace profiler_detail {
