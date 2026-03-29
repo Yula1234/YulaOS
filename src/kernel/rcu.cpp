@@ -1,14 +1,16 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <kernel/rcu.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/semaphore.h>
+#include <lib/cpp/atomic.h>
+#include <lib/compiler.h>
+
 #include <kernel/smp/cpu.h>
 #include <kernel/sched.h>
+#include <kernel/rcu.h>
+
 #include <hal/apic.h>
-#include <hal/lock.h>
-#include <lib/cpp/atomic.h>
-#include <lib/cpp/semaphore.h>
-#include <lib/cpp/lock_guard.h>
 
 static kernel::Semaphore g_rcu_sem{};
 static kernel::atomic<uint32_t> g_rcu_sem_ready{0u};
@@ -23,7 +25,7 @@ extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
     head->func = func;
 
     cpu_t* cpu = cpu_current();
-    if (!cpu) {
+    if (kernel::unlikely(!cpu)) {
         return;
     }
 
@@ -33,12 +35,8 @@ extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
     do {
         head->next = old_head;
     } while (!__atomic_compare_exchange_n(
-        &cpu->rcu_queue,
-        &old_head,
-        head,
-        true,
-        __ATOMIC_RELEASE,
-        __ATOMIC_RELAXED
+        &cpu->rcu_queue, &old_head, head,
+        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED
     ));
 
     uint32_t len = __atomic_fetch_add(&cpu->rcu_qlen, 1u, __ATOMIC_RELAXED);

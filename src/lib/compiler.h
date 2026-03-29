@@ -1,14 +1,17 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #ifndef LIB_COMPILER_H
 #define LIB_COMPILER_H
+
+#define ___always_inline __attribute__((always_inline))
+#define ___inline __attribute__((always_inline)) static inline
 
 #ifdef __cplusplus
 
 namespace kernel {
 
-[[nodiscard]] __attribute__((always_inline)) constexpr inline bool likely(bool value) noexcept {
+[[nodiscard]] ___always_inline constexpr inline bool likely(bool value) noexcept {
 #if defined(__GNUC__) || defined(__clang__)
     return __builtin_expect(!!value, 1);
 #else
@@ -16,7 +19,7 @@ namespace kernel {
 #endif
 }
 
-[[nodiscard]] __attribute__((always_inline)) constexpr inline bool unlikely(bool value) noexcept {
+[[nodiscard]] ___always_inline constexpr inline bool unlikely(bool value) noexcept {
 #if defined(__GNUC__) || defined(__clang__)
     return __builtin_expect(!!value, 0);
 #else
