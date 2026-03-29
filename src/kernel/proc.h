@@ -100,6 +100,7 @@ typedef struct fd_table {
     rcu_ptr_t* fds;
     uint32_t max_fds;
     int fd_next;
+    rcu_head_t rcu;
 } fd_table_t;
 
 typedef struct task {

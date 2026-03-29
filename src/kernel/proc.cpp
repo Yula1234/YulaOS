@@ -985,6 +985,23 @@ void file_desc_release(file_desc_t* d) {
     }
 }
 
+static void fd_table_release_rcu(rcu_head_t* head) {
+    fd_table_t* ft = container_of(head, fd_table_t, rcu);
+
+    if (ft->fds) {
+        for (uint32_t i = 0; i < ft->max_fds; i++) {
+            file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[i]));
+            if (d) {
+                file_desc_release(d);
+            }
+        }
+
+        kfree(ft->fds);
+    }
+
+    kfree(ft);
+}
+
 void proc_fd_table_release(fd_table_t* ft) {
     if (!ft) return;
 
@@ -995,21 +1012,7 @@ void proc_fd_table_release(fd_table_t* ft) {
     }
 
     if (old_refs == 1u) {
-        if (ft->fds) {
-            synchronize_rcu();
-
-            for (uint32_t i = 0; i < ft->max_fds; i++) {
-                file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[i]));
-                if (d) {
-                    file_desc_release(d);
-                }
-            }
-
-            kfree(ft->fds);
-            ft->fds = 0;
-        }
-
-        kfree(ft);
+        call_rcu(&ft->rcu, fd_table_release_rcu);
     }
 }
 
