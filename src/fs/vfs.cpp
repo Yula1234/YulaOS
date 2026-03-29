@@ -57,9 +57,11 @@ static int vfs_copy_from_user(void* dst, const void* user_src, uint32_t size) no
     return uaccess_copy_from_user(dst, user_src, size);
 }
 
-static uint32_t vfs_io_chunk_size(uint32_t remaining) noexcept {
-    const uint32_t max_chunk = 16u * 1024u;
-    return (remaining < max_chunk) ? remaining : max_chunk;
+static constexpr uint32_t k_vfs_io_chunk = 4096u;
+
+static uint32_t vfs_io_chunk_size(uint32_t remaining) noexcept
+{
+    return (remaining < k_vfs_io_chunk) ? remaining : k_vfs_io_chunk;
 }
 
 /*
@@ -2696,10 +2698,7 @@ extern "C" int vfs_read(int fd, void* buf, uint32_t size) {
         off = d.get()->offset;
     }
 
-    uint8_t* kbuf = (uint8_t*)kmalloc(vfs_io_chunk_size(size));
-    if (!kbuf && size != 0u) {
-        return -1;
-    }
+    uint8_t kbuf[k_vfs_io_chunk];
 
     int total = 0;
     uint32_t done = 0;
@@ -2725,10 +2724,6 @@ extern "C" int vfs_read(int fd, void* buf, uint32_t size) {
         if ((uint32_t)r < chunk) {
             break;
         }
-    }
-
-    if (kbuf) {
-        kfree(kbuf);
     }
 
     if (total > 0) {
@@ -2773,10 +2768,7 @@ extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
         vfs_fs_instance* inst = (vfs_fs_instance*)d.get()->node->fs_driver;
 
         if (inst && inst->type && inst->type->ops && inst->type->ops->append) {
-            uint8_t* kbuf = (uint8_t*)kmalloc(vfs_io_chunk_size(size));
-            if (!kbuf && size != 0u) {
-                return -1;
-            }
+            uint8_t kbuf[k_vfs_io_chunk];
 
             int total = 0;
             uint32_t done = 0;
@@ -2812,10 +2804,6 @@ extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
                 }
             }
 
-            if (kbuf) {
-                kfree(kbuf);
-            }
-
             if (total > 0) {
                 kernel::SpinLockNativeSafeGuard guard(d.get()->lock);
                 d.get()->offset = new_offset;
@@ -2825,10 +2813,7 @@ extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
         }
     }
 
-    uint8_t* kbuf = (uint8_t*)kmalloc(vfs_io_chunk_size(size));
-    if (!kbuf && size != 0u) {
-        return -1;
-    }
+    uint8_t kbuf[k_vfs_io_chunk];
 
     int total = 0;
     uint32_t done = 0;
@@ -2854,10 +2839,6 @@ extern "C" int vfs_write(int fd, const void* buf, uint32_t size) {
         if ((uint32_t)w < chunk) {
             break;
         }
-    }
-
-    if (kbuf) {
-        kfree(kbuf);
     }
 
     if (total > 0) {
