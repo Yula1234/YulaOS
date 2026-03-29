@@ -7,6 +7,7 @@
 #include <hal/lock.h>
 #include <hal/io.h>
 #include <hal/simd.h>
+#include <lib/compiler.h>
 #include <lib/rbtree.h>
 #include <kernel/panic.h>
 
@@ -248,8 +249,10 @@ void sched_add(task_t* t) {
 
 static task_t* pick_next_cfs(cpu_t* cpu) {
     task_t* left = cpu->runq_leftmost;
-    
-    if (!left) return nullptr;
+
+    if (kernel::unlikely(!left)) {
+        return nullptr;
+    }
     
     dequeue_task(cpu, left);
     left->is_queued = 0;
@@ -329,14 +332,14 @@ void sched_yield(void) {
 
     rcu_qs_count_inc();
 
-    if (prev && prev->state == TASK_RUNNING && prev->pid != 0) {
+    if (kernel::likely(prev && prev->state == TASK_RUNNING && prev->pid != 0)) {
         task_t* leftmost = me->runq_leftmost;
 
-        if (!leftmost) {
+        if (kernel::unlikely(!leftmost)) {
             return;
         }
 
-        if (prev->vruntime <= leftmost->vruntime) {
+        if (kernel::likely(prev->vruntime <= leftmost->vruntime)) {
             return;
         }
     }
@@ -352,7 +355,7 @@ void sched_yield(void) {
     );
     const bool irq_was_enabled = (irq_flags & 0x200u) != 0u;
 
-    if (prev && prev->state == TASK_RUNNING && prev != me->idle_task && prev->pid != 0) {
+    if (kernel::likely(prev && prev->state == TASK_RUNNING && prev != me->idle_task && prev->pid != 0)) {
         (void)proc_change_state(prev, TASK_RUNNABLE);
 
         if (prev->exec_start > 0) {
@@ -381,21 +384,21 @@ void sched_yield(void) {
             next = pick_next_cfs(me);
         }
 
-        if (!next) {
+        if (kernel::unlikely(!next)) {
             next = me->idle_task;
         }
 
-        if (!next) {
+        if (kernel::unlikely(!next)) {
             me->current_task = nullptr;
             __asm__ volatile("sti; hlt" ::: "memory");
             continue;
         }
 
-        if (next->state != TASK_ZOMBIE) {
+        if (kernel::likely(next->state != TASK_ZOMBIE)) {
             (void)proc_change_state(next, TASK_RUNNING);
         }
 
-        if (next == prev) {
+        if (kernel::unlikely(next == prev)) {
             if (next->pid == 0) {
                 __asm__ volatile("sti; hlt" ::: "memory");
             }
@@ -406,7 +409,7 @@ void sched_yield(void) {
             return;
         }
 
-        if (me->prev_task_during_switch != prev) {
+        if (kernel::unlikely(me->prev_task_during_switch != prev)) {
             sched_task_pin(prev);
             me->prev_task_during_switch = prev;
         }
@@ -417,7 +420,7 @@ void sched_yield(void) {
 
         fpu_set_ts();
 
-        if (prev) {
+        if (kernel::likely(prev)) {
             ctx_switch(&prev->esp, next->esp);
 
             if (me->prev_task_during_switch) {

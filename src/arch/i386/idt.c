@@ -16,6 +16,8 @@
 
 #include <kernel/output/kprintf.h>
 
+#include <lib/compiler.h>
+
 #ifdef KERNEL_PROFILE
 #include <kernel/profiler.h>
 #endif
@@ -530,18 +532,18 @@ void isr_handler(registers_t* regs) {
         goto out;
     }
 
-    if (regs->int_no >= 32) {
-        if (regs->int_no == 32) {
+    if (likely(regs->int_no >= 32)) {
+        if (likely(regs->int_no == 32)) {
             cpu->sched_ticks++;
 
-            if (cpu->index == 0) {
+            if (likely(cpu->index == 0)) {
                 timer_ticks++;
             }
 
             proc_check_sleepers(timer_ticks);
 
             cpu->stat_total_ticks++;
-            if (curr == cpu->idle_task) {
+            if (unlikely(curr == cpu->idle_task)) {
                 cpu->stat_idle_ticks++;
             }
 
@@ -564,21 +566,21 @@ void isr_handler(registers_t* regs) {
             }
 
             int from_user = (regs->cs == 0x1B);
-            if (from_user && curr && curr->state == TASK_RUNNING && curr->pid != 0) {
-                if (curr->exec_start > 0) {
+            if (likely(from_user && curr && curr->state == TASK_RUNNING && curr->pid != 0)) {
+                if (likely(curr->exec_start > 0)) {
                     uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
-                    if (delta_exec >= 1) {
+                    if (likely(delta_exec >= 1)) {
                         uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, curr->priority);
                         curr->vruntime += delta_vruntime;
                         curr->exec_start = cpu->sched_ticks;
                     }
                 }
 
-                if (curr->ticks_left > 0) {
+                if (likely(curr->ticks_left > 0)) {
                     curr->ticks_left--;
                 }
 
-                if (curr->ticks_left == 0) {
+                if (unlikely(curr->ticks_left == 0)) {
                     curr->ticks_left = curr->quantum;
                     lapic_eoi();
                     sched_yield();
