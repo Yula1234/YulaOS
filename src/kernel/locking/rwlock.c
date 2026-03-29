@@ -30,65 +30,78 @@ void rwlock_init(rwlock_t* rw) {
     dlist_init(&rw->write_waiters_);
 }
 
-/*
- * Wake up pending tasks.
- *
- * This function enforces Writer Preference. If there are pending writers,
- * we wake exactly one writer. Only if there are no pending writers do we
- * wake all pending readers simultaneously.
- */
+__attribute__((always_inline)) static inline void rwlock_do_wake_task(task_t* t) {
+    if (unlikely(!t)) {
+        return;
+    }
+
+    __sync_fetch_and_add(&t->in_transit, 1u);
+
+    t->sem_node.next = 0;
+    t->sem_node.prev = 0;
+    t->blocked_on_sem = 0;
+    t->blocked_kind = TASK_BLOCK_NONE;
+
+    if (likely(t->state != TASK_ZOMBIE 
+               && t->state != TASK_UNUSED)) {
+        
+        if (likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
+            sched_add(t);
+        }
+    }
+
+    __sync_fetch_and_sub(&t->in_transit, 1u);
+}
+
 static void rwlock_wake_waiters(rwlock_t* rw) {
-    const uint32_t flags = spinlock_acquire_safe(&rw->wait_lock_);
+    if (unlikely(!rw)) {
+        return;
+    }
 
-    if (likely(!dlist_empty(&rw->write_waiters_))) {
-        task_t* t = container_of(rw->write_waiters_.next, task_t, sem_node);
+    task_t* writer_to_wake = 0;
+    dlist_head_t local_read_waiters;
 
-        __sync_fetch_and_add(&t->in_transit, 1u);
+    dlist_init(&local_read_waiters);
+
+    {
+        const uint32_t flags = spinlock_acquire_safe(&rw->wait_lock_);
+
+        if (likely(!dlist_empty(&rw->write_waiters_))) {
+            writer_to_wake = container_of(rw->write_waiters_.next, task_t, sem_node);
+
+            dlist_del(&writer_to_wake->sem_node);
+
+            if (unlikely(dlist_empty(&rw->write_waiters_))) {
+                __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_WRITER, __ATOMIC_RELAXED);
+            }
+        } else if (unlikely(!dlist_empty(&rw->read_waiters_))) {
+
+            local_read_waiters.next = rw->read_waiters_.next;
+            local_read_waiters.prev = rw->read_waiters_.prev;
+
+            local_read_waiters.next->prev = &local_read_waiters;
+            local_read_waiters.prev->next = &local_read_waiters;
+
+            dlist_init(&rw->read_waiters_);
+
+            __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_READER, __ATOMIC_RELAXED);
+        }
+
+        spinlock_release_safe(&rw->wait_lock_, flags);
+    }
+
+    if (writer_to_wake) {
+        rwlock_do_wake_task(writer_to_wake);
+        return;
+    }
+
+    while (!dlist_empty(&local_read_waiters)) {
+        task_t* t = container_of(local_read_waiters.next, task_t, sem_node);
 
         dlist_del(&t->sem_node);
 
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        if (likely(t->state != TASK_ZOMBIE && t->state != TASK_UNUSED)) {
-            if (likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
-                sched_add(t);
-            }
-        }
-
-        __sync_fetch_and_sub(&t->in_transit, 1u);
-
-        if (unlikely(dlist_empty(&rw->write_waiters_))) {
-            __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_WRITER, __ATOMIC_RELAXED);
-        }
-    } else if (unlikely(!dlist_empty(&rw->read_waiters_))) {
-        while (!dlist_empty(&rw->read_waiters_)) {
-            task_t* t = container_of(rw->read_waiters_.next, task_t, sem_node);
-
-            __sync_fetch_and_add(&t->in_transit, 1u);
-
-            dlist_del(&t->sem_node);
-
-            t->sem_node.next = 0;
-            t->sem_node.prev = 0;
-            t->blocked_on_sem = 0;
-            t->blocked_kind = TASK_BLOCK_NONE;
-
-            if (likely(t->state != TASK_ZOMBIE && t->state != TASK_UNUSED)) {
-                if (likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
-                    sched_add(t);
-                }
-            }
-
-            __sync_fetch_and_sub(&t->in_transit, 1u);
-        }
-
-        __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_READER, __ATOMIC_RELAXED);
+        rwlock_do_wake_task(t);
     }
-
-    spinlock_release_safe(&rw->wait_lock_, flags);
 }
 
 /*
