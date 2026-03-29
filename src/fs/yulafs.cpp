@@ -2074,32 +2074,45 @@ int yfs::FileSystem::read(yfs_ino_t ino, void* buf, yfs_off_t offset, uint32_t s
         }
 
         if (phys_blk) {
-            if (!bcache_read(phys_blk, scratch)) {
-                if (scratch_heap) {
-                    kfree(scratch);
-                } else {
-                    yfs_scratch_release(scratch_slot);
+            if (blk_off == 0 && copy_len == YFS_BLOCK_SIZE) {
+                if (!bcache_read(phys_blk, (uint8_t*)buf + read_count)) {
+                    if (scratch_heap) {
+                        kfree(scratch);
+                    } else {
+                        yfs_scratch_release(scratch_slot);
+                    }
+
+                    rwlock_release_read(lock);
+                    return -1;
+                }
+            } else {
+                if (!bcache_read(phys_blk, scratch)) {
+                    if (scratch_heap) {
+                        kfree(scratch);
+                    } else {
+                        yfs_scratch_release(scratch_slot);
+                    }
+
+                    rwlock_release_read(lock);
+                    return -1;
                 }
 
-                rwlock_release_read(lock);
-                return -1;
-            }
+                if (
+                    read_count + copy_len > size ||
+                    blk_off + copy_len > YFS_BLOCK_SIZE
+                ) {
+                    if (scratch_heap) {
+                        kfree(scratch);
+                    } else {
+                        yfs_scratch_release(scratch_slot);
+                    }
 
-            if (
-                read_count + copy_len > size ||
-                blk_off + copy_len > YFS_BLOCK_SIZE
-            ) {
-                if (scratch_heap) {
-                    kfree(scratch);
-                } else {
-                    yfs_scratch_release(scratch_slot);
+                    rwlock_release_read(lock);
+                    return -1;
                 }
 
-                rwlock_release_read(lock);
-                return -1;
+                memcpy((uint8_t*)buf + read_count, scratch + blk_off, copy_len);
             }
-
-            memcpy((uint8_t*)buf + read_count, scratch + blk_off, copy_len);
 
             if (log_blk != last_prefetched_log_blk) {
                 uint32_t next_log_blk = log_blk + 1;
