@@ -23,6 +23,7 @@
 #include <hal/io.h>
 #include <hal/apic.h>
 #include <hal/irq.h>
+#include <hal/simd.h>
 
 #include "paging.h"
 #include "idt.h"
@@ -617,6 +618,26 @@ void isr_handler(registers_t* regs) {
     if (regs->int_no < 32) {
         if (regs->int_no == 8) {
             early_exception_halt("Double Fault", regs, 0);
+        }
+
+        if (regs->int_no == 7) {
+            fpu_clear_ts();
+
+            if (cpu && curr) {
+                task_t* prev_owner = cpu->fpu_owner;
+                if (prev_owner && prev_owner != curr) {
+                    if (prev_owner->fpu_state) {
+                        fpu_save(prev_owner->fpu_state);
+                    }
+                }
+
+                if (curr->fpu_state) {
+                    fpu_restore(curr->fpu_state);
+                    cpu->fpu_owner = curr;
+                }
+            }
+
+            goto out;
         }
 
         if (regs->int_no == 14) {

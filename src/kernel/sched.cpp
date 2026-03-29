@@ -318,7 +318,7 @@ void sched_set_current(task_t* t) {
 void sched_start(task_t* first) {
     sched_set_current(first);
     (void)proc_change_state(first, TASK_RUNNING);
-    fpu_restore(first->fpu_state);
+    fpu_set_ts();
     ctx_start(first->esp);
     for (;;) cpu_hlt();
 }
@@ -351,11 +351,10 @@ void sched_yield(void) {
         : "memory"
     );
     const bool irq_was_enabled = (irq_flags & 0x200u) != 0u;
-    
+
     if (prev && prev->state == TASK_RUNNING && prev != me->idle_task && prev->pid != 0) {
         (void)proc_change_state(prev, TASK_RUNNABLE);
-        fpu_save(prev->fpu_state);
-        
+
         if (prev->exec_start > 0) {
             uint64_t delta_exec = me->sched_ticks - prev->exec_start;
             if (delta_exec > 0) {
@@ -386,61 +385,59 @@ void sched_yield(void) {
             next = me->idle_task;
         }
 
-        if (next) {
-
-            if (next->state != TASK_ZOMBIE) {
-                (void)proc_change_state(next, TASK_RUNNING);
-            }
-
-            if (next == prev) {
-                if (next->pid == 0) {
-                    __asm__ volatile("sti; hlt" ::: "memory");
-                }
-
-                if (irq_was_enabled) {
-                    __asm__ volatile("sti" ::: "memory");
-                }
-                return;
-            }
-            
-            if (me->prev_task_during_switch != prev) {
-                sched_task_pin(prev);
-                me->prev_task_during_switch = prev;
-            }
-
-            next->exec_start = me->sched_ticks;
-            
-            sched_set_current(next);
-
-            fpu_restore(next->fpu_state);
-
-            if (prev) {
-                ctx_switch(&prev->esp, next->esp);
-
-                if (me->prev_task_during_switch) {
-                    task_t* switched_out = me->prev_task_during_switch;
-                    me->prev_task_during_switch = nullptr;
-                    sched_task_unpin(switched_out);
-                }
-
-                __asm__ volatile("sti" ::: "memory");
-                return;
-            }
-
-            me->prev_task_during_switch = nullptr;
-
-            __asm__ volatile("sti" ::: "memory");
-            
-            ctx_start(next->esp);
-            __builtin_unreachable();
+        if (!next) {
+            me->current_task = nullptr;
+            __asm__ volatile("sti; hlt" ::: "memory");
+            continue;
         }
 
-        me->current_task = nullptr;
+        if (next->state != TASK_ZOMBIE) {
+            (void)proc_change_state(next, TASK_RUNNING);
+        }
 
-        __asm__ volatile("sti; hlt" ::: "memory");
+        if (next == prev) {
+            if (next->pid == 0) {
+                __asm__ volatile("sti; hlt" ::: "memory");
+            }
+
+            if (irq_was_enabled) {
+                __asm__ volatile("sti" ::: "memory");
+            }
+            return;
+        }
+
+        if (me->prev_task_during_switch != prev) {
+            sched_task_pin(prev);
+            me->prev_task_during_switch = prev;
+        }
+
+        next->exec_start = me->sched_ticks;
+
+        sched_set_current(next);
+
+        fpu_set_ts();
+
+        if (prev) {
+            ctx_switch(&prev->esp, next->esp);
+
+            if (me->prev_task_during_switch) {
+                task_t* switched_out = me->prev_task_during_switch;
+                me->prev_task_during_switch = nullptr;
+                sched_task_unpin(switched_out);
+            }
+
+            __asm__ volatile("sti" ::: "memory");
+            return;
+        }
+
+        me->prev_task_during_switch = nullptr;
+
+        __asm__ volatile("sti" ::: "memory");
+
+        ctx_start(next->esp);
+        __builtin_unreachable();
     }
 }
-
 void sched_remove(task_t* t) {
     int cpu_idx = t->assigned_cpu;
     if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) return;

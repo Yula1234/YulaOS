@@ -1622,6 +1622,15 @@ void proc_free_resources(task_t* t) {
         t->kstack = 0;
     }
 
+    {
+        const int n = cpu_count > 0 ? cpu_count : 1;
+        for (int i = 0; i < n; i++) {
+            if (cpus[i].fpu_owner == t) {
+                cpus[i].fpu_owner = 0;
+            }
+        }
+    }
+
     if (t->fpu_state) {
         kfree(t->fpu_state);
         t->fpu_state = 0;

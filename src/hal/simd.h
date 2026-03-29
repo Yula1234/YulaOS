@@ -184,6 +184,17 @@ static inline void fpu_restore(uint8_t* buffer) {
     __asm__ volatile("fxrstor (%0)" : : "r"(buffer) : "memory");
 }
 
+static inline void fpu_set_ts(void) {
+    uint32_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1u << 3);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+}
+
+static inline void fpu_clear_ts(void) {
+    __asm__ volatile("clts" ::: "memory");
+}
+
 #define __vzeroupper() __asm__ volatile("vzeroupper")
 
 #endif

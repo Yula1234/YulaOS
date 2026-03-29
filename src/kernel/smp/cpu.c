@@ -15,6 +15,8 @@ void cpu_init_system(void) {
         cpus[i].index = i;
         cpus[i].started = 0;
 
+        cpus[i].fpu_owner = 0;
+
         cpus[i].stat_total_ticks = 0;
         cpus[i].stat_idle_ticks = 0;
 

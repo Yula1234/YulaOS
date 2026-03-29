@@ -21,6 +21,8 @@ typedef struct {
     int index; 
     struct task* current_task;
     struct task* prev_task_during_switch;
+
+    struct task* fpu_owner;
     volatile int started; 
     
     struct rb_root runq_root;
