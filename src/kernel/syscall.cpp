@@ -1722,13 +1722,11 @@ static void syscall_fb_present(registers_t* regs, task_t* curr) {
             }
 
             uint8_t* fpu_tmp = &fb_present_fpu_tmp[cpu->index][0];
-            uint32_t irq_flags = irq_save_disable();
             fpu_save(fpu_tmp);
 
             vga_present_rect(req.src, req.src_stride, x1, y1, x2 - x1, y2 - y1);
 
             fpu_restore(fpu_tmp);
-            irq_restore(irq_flags);
         }
     }
 
