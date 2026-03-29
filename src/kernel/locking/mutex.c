@@ -30,7 +30,9 @@ void mutex_init(mutex_t* m) {
  * Returns 0 if we should stop spinning and yield the CPU.
  */
 static int mutex_spin_on_owner(mutex_t* m) {
-    for (uint32_t i = 0; i < 1024u; i++) {
+    uint32_t backoff = 1;
+
+    for (uint32_t i = 0; i < 1024u; i += backoff) {
         const uintptr_t owner_val = __atomic_load_n(&m->owner, __ATOMIC_ACQUIRE);
 
         if (likely(owner_val == 0u)) {
@@ -52,7 +54,13 @@ static int mutex_spin_on_owner(mutex_t* m) {
             }
         }
 
-        cpu_relax();
+        for (uint32_t j = 0; j < backoff; j++) {
+            cpu_relax();
+        }
+
+        if (backoff < 64u) {
+            backoff <<= 1;
+        }
     }
 
     return 0;
