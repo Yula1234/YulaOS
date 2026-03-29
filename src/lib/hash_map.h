@@ -12,6 +12,7 @@
 #include <lib/cpp/hash_traits.h>
 #include <mm/heap.h>
 #include <lib/string.h>
+#include <kernel/smp/cpu.h>
 
 template<typename K, typename V, size_t Buckets = 32>
 class HashMap {
@@ -36,7 +37,7 @@ private:
     public:
         explicit Operation(HashMap& map)
             : map_(&map) {
-            ok_ = map_->begin_op(buckets_, mask_);
+            ok_ = map_->begin_op(buckets_, mask_, cpu_idx_);
         }
 
         Operation(const Operation&) = delete;
@@ -44,7 +45,7 @@ private:
 
         ~Operation() {
             if (ok_) {
-                map_->end_op();
+                map_->end_op(cpu_idx_);
             }
         }
 
@@ -64,6 +65,7 @@ private:
         HashMap* map_ = nullptr;
         Bucket* buckets_ = nullptr;
         size_t mask_ = 0u;
+        int cpu_idx_ = 0;
         bool ok_ = false;
     };
 
@@ -556,7 +558,17 @@ public:
 
         seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
         resizing.store(1u, kernel::memory_order::seq_cst);
-        kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
+
+        while (1) {
+            uint32_t total = 0u;
+            for (int i = 0; i < MAX_CPUS; i++) {
+                total += active_ops_per_cpu[i].count.load(kernel::memory_order::acquire);
+            }
+            if (total == 0u) {
+                break;
+            }
+            kernel::cpu_relax();
+        }
 
         if (buckets && bucket_count > 0u) {
             for (size_t i = 0; i < bucket_count; i++) {
@@ -882,7 +894,9 @@ private:
     }
 
     void init() {
-        active_ops.store(0u, kernel::memory_order::relaxed);
+        for (int i = 0; i < MAX_CPUS; i++) {
+            active_ops_per_cpu[i].count.store(0u, kernel::memory_order::relaxed);
+        }
         resizing.store(0u, kernel::memory_order::relaxed);
         size_.store(0u, kernel::memory_order::relaxed);
 
@@ -915,7 +929,16 @@ private:
         seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
         resizing.store(1u, kernel::memory_order::seq_cst);
 
-        kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
+        while (1) {
+            uint32_t total = 0u;
+            for (int i = 0; i < MAX_CPUS; i++) {
+                total += active_ops_per_cpu[i].count.load(kernel::memory_order::acquire);
+            }
+            if (total == 0u) {
+                break;
+            }
+            kernel::cpu_relax();
+        }
     }
 
     void steal_from_locked(HashMap& other) {
@@ -955,6 +978,11 @@ private:
     static constexpr uint32_t k_load_num = 3u;
     static constexpr uint32_t k_load_den = 4u;
 
+    struct alignas(64) PerCpuOp {
+        kernel::atomic<uint32_t> count{0u};
+        char padding[60];
+    };
+
     Bucket* buckets = nullptr;
 
     size_t bucket_count = 0u;
@@ -964,8 +992,8 @@ private:
 
     kernel::atomic<uint32_t> size_{0u};
     kernel::atomic<uint32_t> resizing{0u};
-    kernel::atomic<uint32_t> active_ops{0u};
     kernel::atomic<uint32_t> seqlock_{0u};
+    PerCpuOp active_ops_per_cpu[MAX_CPUS];
 
     uint32_t bucket_index(const K& key, size_t mask) const {
         return kernel::HashTraits<K>::hash(key) & (uint32_t)mask;
@@ -1041,7 +1069,7 @@ private:
 
     Bucket* try_resize_locked(uint32_t new_size, size_t& out_old_count) = delete;
 
-    bool begin_op(Bucket*& out_buckets, size_t& out_mask) {
+    bool begin_op(Bucket*& out_buckets, size_t& out_mask, int& out_cpu_idx) {
         while (1) {
             uint32_t seq1 = seqlock_.load(kernel::memory_order::acquire);
             if ((seq1 & 1u) != 0u) {
@@ -1059,7 +1087,8 @@ private:
             }
 
             if (b && bc > 0u) {
-                active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+                out_cpu_idx = cpu_current()->index;
+                active_ops_per_cpu[out_cpu_idx].count.fetch_add(1u, kernel::memory_order::seq_cst);
                 kernel::atomic_thread_fence(kernel::memory_order::acquire);
 
                 out_buckets = b;
@@ -1070,7 +1099,8 @@ private:
             kernel::SpinLockGuard lock(table_lock);
 
             if (buckets && bucket_count > 0u) {
-                active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+                out_cpu_idx = cpu_current()->index;
+                active_ops_per_cpu[out_cpu_idx].count.fetch_add(1u, kernel::memory_order::seq_cst);
                 out_buckets = buckets;
                 out_mask = bucket_mask;
                 return true;
@@ -1092,15 +1122,16 @@ private:
 
             seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
 
-            active_ops.fetch_add(1u, kernel::memory_order::seq_cst);
+            out_cpu_idx = cpu_current()->index;
+            active_ops_per_cpu[out_cpu_idx].count.fetch_add(1u, kernel::memory_order::seq_cst);
             out_buckets = buckets;
             out_mask = bucket_mask;
             return true;
         }
     }
 
-    void end_op() {
-        active_ops.fetch_sub(1u, kernel::memory_order::seq_cst);
+    void end_op(int cpu_idx) {
+        active_ops_per_cpu[cpu_idx].count.fetch_sub(1u, kernel::memory_order::seq_cst);
     }
 
     bool ensure_buckets_locked() = delete;
@@ -1128,7 +1159,16 @@ private:
             resizing.store(1u, kernel::memory_order::seq_cst);
         }
 
-        kernel::spin_wait_equals(active_ops, 0u, kernel::memory_order::acquire);
+        while (1) {
+            uint32_t total = 0u;
+            for (int i = 0; i < MAX_CPUS; i++) {
+                total += active_ops_per_cpu[i].count.load(kernel::memory_order::acquire);
+            }
+            if (total == 0u) {
+                break;
+            }
+            kernel::cpu_relax();
+        }
 
         target = grow_target_count();
 
