@@ -16,6 +16,8 @@ extern "C" {
 #include <arch/i386/paging.h>
 #include <mm/heap.h>
 
+#include <kernel/rcu.h>
+
 #include <lib/cpp/hash_traits.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/dlist.h>
@@ -281,6 +283,7 @@ struct vfs_fs_instance {
     vfs_node_t* root;
 
     uint32_t refs;
+    uint32_t umounting;
 };
 
 static void vfs_instance_retain(vfs_fs_instance* inst) noexcept {
@@ -297,6 +300,25 @@ static void vfs_instance_release(vfs_fs_instance* inst) noexcept {
     }
 
     __sync_sub_and_fetch(&inst->refs, 1);
+}
+
+static bool vfs_instance_try_retain(vfs_fs_instance* inst) noexcept {
+    if (!inst) {
+        return false;
+    }
+
+    if (__atomic_load_n(&inst->umounting, __ATOMIC_ACQUIRE) != 0u) {
+        return false;
+    }
+
+    vfs_instance_retain(inst);
+
+    if (__atomic_load_n(&inst->umounting, __ATOMIC_ACQUIRE) != 0u) {
+        vfs_instance_release(inst);
+        return false;
+    }
+
+    return true;
 }
 
 /*
@@ -375,6 +397,8 @@ static int vfs_yulafs_umount(vfs_fs_instance* inst) {
     if (!inst || inst->type != &g_yulafs_type) {
         return -1;
     }
+
+    __atomic_store_n(&inst->umounting, 0u, __ATOMIC_RELEASE);
 
     if (inst->root) {
         vfs_node_release(inst->root);
@@ -923,13 +947,28 @@ static vfs_ops_t yfs_vfs_ops = {
     0,
 };
 
-static percpu_rwspinlock_t g_mount_lock;
-static HashMap<kernel::string, vfs_mount_entry*, 32> g_mounts;
+struct vfs_mount_node {
+    vfs_mount_entry entry;
+    vfs_mount_node* next;
+};
+
+struct vfs_mount_table {
+    rcu_head_t rcu;
+
+    size_t bucket_count;
+    size_t size;
+
+    vfs_mount_node** buckets;
+};
+
+static kernel::SpinLock g_mount_table_write_lock;
+static kernel::RcuPtr<vfs_mount_table> g_mount_table;
 
 /*
  * Mount table locking:
- * - g_mount_lock protects g_mounts and every vfs_mount_entry stored in it.
- * - Avoid holding g_mount_lock across backend mount/umount callbacks.
+ * - Readers resolve mounts via an RCU-protected immutable hash table snapshot.
+ * - Writers update by publishing a copy-on-write snapshot under a single
+ *   writer lock, retiring old snapshots via call_rcu().
  */
 
 static const vfs_fs_type* vfs_fs_type_from_name(const char* fs_name);
@@ -963,6 +1002,190 @@ static int vfs_mountpoint_is_valid(const char* mountpoint) {
 
 static int vfs_path_is_abs(const char* path) {
     return path && path[0] == '/';
+}
+
+static uint32_t vfs_mount_hash(const char* s) noexcept {
+    if (!s) {
+        return 0u;
+    }
+
+    uint32_t h = 2166136261u;
+    for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+
+    return h;
+}
+
+static size_t vfs_mount_next_pow2(size_t v) noexcept {
+    size_t x = 1u;
+    while (x < v) {
+        x <<= 1u;
+    }
+    return x;
+}
+
+static vfs_mount_table* vfs_mount_table_alloc(size_t bucket_count) {
+    if (bucket_count < 8u) {
+        bucket_count = 8u;
+    }
+
+    bucket_count = vfs_mount_next_pow2(bucket_count);
+
+    auto* table = static_cast<vfs_mount_table*>(kmalloc(sizeof(vfs_mount_table)));
+    if (!table) {
+        return nullptr;
+    }
+
+    memset(table, 0, sizeof(*table));
+    table->bucket_count = bucket_count;
+
+    table->buckets = static_cast<vfs_mount_node**>(
+        kmalloc(sizeof(vfs_mount_node*) * bucket_count)
+    );
+    if (!table->buckets) {
+        kfree(table);
+        return nullptr;
+    }
+
+    memset(table->buckets, 0, sizeof(vfs_mount_node*) * bucket_count);
+    return table;
+}
+
+static void vfs_mount_table_rcu_free(rcu_head_t* head) {
+    if (!head) {
+        return;
+    }
+
+    auto* table = reinterpret_cast<vfs_mount_table*>(
+        reinterpret_cast<uint8_t*>(head) - offsetof(vfs_mount_table, rcu)
+    );
+
+    if (table->buckets) {
+        for (size_t i = 0; i < table->bucket_count; i++) {
+            vfs_mount_node* n = table->buckets[i];
+            while (n) {
+                vfs_mount_node* next = n->next;
+                kfree(n);
+                n = next;
+            }
+        }
+
+        kfree(table->buckets);
+        table->buckets = nullptr;
+    }
+
+    kfree(table);
+}
+
+static const vfs_mount_entry* vfs_mount_table_find(const vfs_mount_table* table, const char* mountpoint) {
+    if (!table
+        || !mountpoint
+        || mountpoint[0] == '\0'
+        || !table->buckets
+        || table->bucket_count == 0u) {
+        return nullptr;
+    }
+
+    const uint32_t h = vfs_mount_hash(mountpoint);
+    const size_t idx = (size_t)h & (table->bucket_count - 1u);
+
+    for (vfs_mount_node* n = table->buckets[idx]; n; n = n->next) {
+        if (strcmp(n->entry.mountpoint, mountpoint) == 0) {
+            return &n->entry;
+        }
+    }
+
+    return nullptr;
+}
+
+static int vfs_mount_table_insert_node(vfs_mount_table* table, const vfs_mount_entry& entry) {
+    if (!table
+        || !table->buckets
+        || table->bucket_count == 0u
+        || entry.mountpoint[0] == '\0') {
+        return -1;
+    }
+
+    if (vfs_mount_table_find(table, entry.mountpoint)) {
+        return -1;
+    }
+
+    auto* node = static_cast<vfs_mount_node*>(kmalloc(sizeof(vfs_mount_node)));
+    if (!node) {
+        return -1;
+    }
+
+    memset(node, 0, sizeof(*node));
+    node->entry = entry;
+
+    const uint32_t h = vfs_mount_hash(entry.mountpoint);
+    const size_t idx = (size_t)h & (table->bucket_count - 1u);
+
+    node->next = table->buckets[idx];
+    table->buckets[idx] = node;
+    table->size++;
+    return 0;
+}
+
+static vfs_mount_table* vfs_mount_table_copy_insert(const vfs_mount_table* old_table, const vfs_mount_entry& entry) {
+    const size_t old_size = old_table ? old_table->size : 0u;
+    const size_t new_size = old_size + 1u;
+
+    vfs_mount_table* table = vfs_mount_table_alloc(new_size * 2u);
+    if (!table) {
+        return nullptr;
+    }
+
+    if (old_table && old_table->buckets) {
+        for (size_t i = 0; i < old_table->bucket_count; i++) {
+            for (vfs_mount_node* n = old_table->buckets[i]; n; n = n->next) {
+                if (vfs_mount_table_insert_node(table, n->entry) != 0) {
+                    call_rcu(&table->rcu, vfs_mount_table_rcu_free);
+                    return nullptr;
+                }
+            }
+        }
+    }
+
+    if (vfs_mount_table_insert_node(table, entry) != 0) {
+        call_rcu(&table->rcu, vfs_mount_table_rcu_free);
+        return nullptr;
+    }
+
+    return table;
+}
+
+static vfs_mount_table* vfs_mount_table_copy_remove(const vfs_mount_table* old_table, const char* mountpoint) {
+    if (!old_table) {
+        return nullptr;
+    }
+
+    const size_t old_size = old_table->size;
+    const size_t new_size = old_size > 0u ? (old_size - 1u) : 0u;
+
+    vfs_mount_table* table = vfs_mount_table_alloc((new_size < 8u ? 8u : new_size * 2u));
+    if (!table) {
+        return nullptr;
+    }
+
+    if (old_table->buckets) {
+        for (size_t i = 0; i < old_table->bucket_count; i++) {
+            for (vfs_mount_node* n = old_table->buckets[i]; n; n = n->next) {
+                if (strcmp(n->entry.mountpoint, mountpoint) == 0) {
+                    continue;
+                }
+
+                if (vfs_mount_table_insert_node(table, n->entry) != 0) {
+                    call_rcu(&table->rcu, vfs_mount_table_rcu_free);
+                    return nullptr;
+                }
+            }
+        }
+    }
+
+    return table;
 }
 
 static constexpr size_t VFS_PATH_MAX = 256; /* bounded VFS path buffers */
@@ -1128,103 +1351,22 @@ static int vfs_build_abs_path(
     return n2 >= out_size ? -1 : 0;
 }
 
-static vfs_mount_entry* vfs_mount_table_find_locked(const char* mountpoint) {
-    /*
-     * Return a borrowed pointer.
-     *
-     * The returned entry is owned by the global table and is only stable while
-     * g_mount_lock is held. Do not cache it across unlock.
-     */
-    if (!mountpoint) {
-        return nullptr;
-    }
-
-    const kernel::string key(mountpoint);
-    auto locked = g_mounts.find_ptr(key);
-    if (!locked) {
-        return nullptr;
-    }
-
-    vfs_mount_entry** entry_ptr = locked.value_ptr();
-    return entry_ptr ? *entry_ptr : nullptr;
-}
-
-static int vfs_mount_table_insert_locked(const char* mountpoint, vfs_fs_instance* instance) {
-    /*
-     * Insert must be called with g_mount_lock held.
-     *
-     * Keep the table free of duplicates: the mountpoint string is the unique
-     * key and is expected to be canonical.
-     */
-    if (!mountpoint || !instance) {
-        return -1;
-    }
-
-    if (vfs_mount_table_find_locked(mountpoint)) {
-        return -1;
-    }
-
-    auto* entry = static_cast<vfs_mount_entry*>(kmalloc(sizeof(vfs_mount_entry)));
-    if (!entry) {
-        return -1;
-    }
-
-    memset(entry, 0, sizeof(*entry));
-
-    entry->used = 1u;
-    entry->instance = instance;
-
-    strlcpy(entry->mountpoint, mountpoint, sizeof(entry->mountpoint));
-
-    const kernel::string key(mountpoint);
-
-    g_mounts.insert_or_assign(key, entry);
-
-    return 0;
-}
-
-static int vfs_mount_table_remove_locked(const char* mountpoint, vfs_mount_entry** out_entry) {
-    /*
-     * Remove must be called with g_mount_lock held.
-     *
-     * Transfer ownership of the entry object to the caller. This keeps
-     * teardown outside the global lock.
-     */
-    if (!mountpoint
-        || !out_entry) {
-        return -1;
-    }
-
-    vfs_mount_entry* entry = vfs_mount_table_find_locked(mountpoint);
-    if (!entry) {
-        return -1;
-    }
-
-    const kernel::string key(mountpoint);
-    if (!g_mounts.remove(key)) {
-        return -1;
-    }
-
-    *out_entry = entry;
-
-    return 0;
-}
-
 static int vfs_resolve_mount(
     const char* path,
-    const vfs_mount_entry** out_mount,
+    vfs_fs_instance** out_instance,
+    char* out_mountpoint,
+    size_t out_mountpoint_size,
     const char** out_rel,
     int* out_is_abs
 ) {
     /*
-     * Resolve mountpoint under g_mount_lock.
-     *
-     * Return a pointer to a mount entry owned by the global table; the caller
-     * must not retain it past the lifetime of the table entry.
+     * Resolve mountpoint from an RCU-protected snapshot.
      */
     if (!path
         || path[0] == '\0'
-        || !out_mount
+        || !out_instance
+        || !out_mountpoint
+        || out_mountpoint_size == 0u
         || !out_rel
         || !out_is_abs) {
         return -1;
@@ -1234,104 +1376,98 @@ static int vfs_resolve_mount(
     *out_is_abs = is_abs;
 
     {
-        /*
-         * Hold g_mount_lock for the duration of prefix matching.
-         *
-         * This guarantees mount entries are not freed while computing best
-         * match, but the returned out_mount pointer is still borrowed and must
-         * not be stored long-term.
-         */
-        kernel::PerCpuRwSpinLockNativeReadGuard guard(g_mount_lock);
+        kernel::RcuReadGuard rcu_guard;
 
-        if (!is_abs) {
-            vfs_mount_entry* root = vfs_mount_table_find_locked("/");
-            if (!root
-                || !root->instance
-                || !root->instance->type
-                || !root->instance->type->ops) {
-                return -1;
-            }
-
-            *out_mount = root;
-            *out_rel = path;
-            return 0;
-        }
-
-        /*
-         * Best-prefix match.
-         *
-         * Scan '/' positions in the path and query the table for each prefix.
-         * This is small and predictable (mount table is tiny), and avoids
-         * allocating intermediate strings outside the fixed prefix buffer.
-         */
-        const size_t max_mount_len = sizeof(((vfs_mount_entry*)nullptr)->mountpoint) - 1u;
-        vfs_mount_entry* best = vfs_mount_table_find_locked("/");
-        size_t best_len = best ? 1u : 0u;
-
-        const size_t path_len = strlen(path);
-        char prefix[sizeof(((vfs_mount_entry*)nullptr)->mountpoint)];
-
-        for (size_t i = 1u; i < path_len; i++) {
-            if (path[i] != '/') {
-                continue;
-            }
-
-            const size_t len = i;
-            if (len > max_mount_len) {
-                break;
-            }
-
-            memcpy(prefix, path, len);
-            prefix[len] = '\0';
-
-            vfs_mount_entry* entry = vfs_mount_table_find_locked(prefix);
-            if (entry
-                && entry->instance
-                && entry->instance->type
-                && entry->instance->type->ops) {
-                best = entry;
-                best_len = len;
-            }
-        }
-
-        if (path_len <= max_mount_len) {
-            memcpy(prefix, path, path_len);
-            prefix[path_len] = '\0';
-
-            vfs_mount_entry* entry = vfs_mount_table_find_locked(prefix);
-            if (entry
-                && entry->instance
-                && entry->instance->type
-                && entry->instance->type->ops) {
-                best = entry;
-                best_len = path_len;
-            }
-        }
-
-        if (!best || best_len == 0u) {
+        const vfs_mount_table* table = g_mount_table.read();
+        if (!table) {
             return -1;
         }
 
-        /*
-         * out_rel must not start with '/'.
-         *
-         * Keep backend wrappers free from repeated slash-skipping logic.
-         */
-        const char* rel = path + best_len;
-        if (rel[0] == '/') {
+        const vfs_mount_entry* best = nullptr;
+        size_t best_len = 0u;
+
+        if (!is_abs) {
+            best = vfs_mount_table_find(table, "/");
+            best_len = best ? 1u : 0u;
+        } else {
+            const size_t max_mount_len = sizeof(((vfs_mount_entry*)nullptr)->mountpoint) - 1u;
+            best = vfs_mount_table_find(table, "/");
+            best_len = best ? 1u : 0u;
+
+            const size_t path_len = strlen(path);
+            char prefix[sizeof(((vfs_mount_entry*)nullptr)->mountpoint)];
+
+            for (size_t i = 1u; i < path_len; i++) {
+                if (path[i] != '/') {
+                    continue;
+                }
+
+                const size_t len = i;
+                if (len > max_mount_len) {
+                    break;
+                }
+
+                memcpy(prefix, path, len);
+                prefix[len] = '\0';
+
+                const vfs_mount_entry* entry = vfs_mount_table_find(table, prefix);
+                if (entry
+                    && entry->instance
+                    && entry->instance->type
+                    && entry->instance->type->ops) {
+                    best = entry;
+                    best_len = len;
+                }
+            }
+
+            if (path_len <= max_mount_len) {
+                memcpy(prefix, path, path_len);
+                prefix[path_len] = '\0';
+
+                const vfs_mount_entry* entry = vfs_mount_table_find(table, prefix);
+                if (entry
+                    && entry->instance
+                    && entry->instance->type
+                    && entry->instance->type->ops) {
+                    best = entry;
+                    best_len = path_len;
+                }
+            }
+        }
+
+        if (!best
+            || best_len == 0u
+            || !best->instance
+            || !best->instance->type
+            || !best->instance->type->ops) {
+            return -1;
+        }
+
+        if (!vfs_instance_try_retain(best->instance)) {
+            return -1;
+        }
+
+        if (strlcpy(out_mountpoint, best->mountpoint, out_mountpoint_size) >= out_mountpoint_size) {
+            vfs_instance_release(best->instance);
+            return -1;
+        }
+
+        const char* rel = is_abs ? (path + best_len) : path;
+        if (is_abs && rel[0] == '/') {
             rel++;
         }
 
-        *out_mount = best;
+        *out_instance = best->instance;
         *out_rel = rel;
         return 0;
     }
 }
 
 struct VfsResolvedPath {
-    const vfs_mount_entry* mount;
+    vfs_fs_instance* instance;
     const char* rel;
     int is_abs;
+    char mountpoint[sizeof(((vfs_mount_entry*)nullptr)->mountpoint)];
     char abs[VFS_PATH_MAX];
 };
 
@@ -1412,14 +1548,14 @@ static int vfs_resolve_path_base(task_t* curr, const char* base, const char* pat
         return -1;
     }
 
-    const vfs_mount_entry* mount = nullptr;
+    vfs_fs_instance* instance = nullptr;
     const char* rel = nullptr;
     int is_abs = 0;
-    if (vfs_resolve_mount(out->abs, &mount, &rel, &is_abs) != 0) {
+    if (vfs_resolve_mount(out->abs, &instance, out->mountpoint, sizeof(out->mountpoint), &rel, &is_abs) != 0) {
         return -1;
     }
 
-    out->mount = mount;
+    out->instance = instance;
     out->rel = rel;
     out->is_abs = is_abs;
     return 0;
@@ -1490,8 +1626,9 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
     /*
      * Keep mountpoint registration atomic with respect to lookups.
      *
-     * Perform backend mount outside g_mount_lock, then commit into the global
-     * table under lock. Roll back by calling umount() if the commit fails.
+     * Perform backend mount first, then publish a new immutable mount table
+     * snapshot under the writer lock. Roll back by calling umount() if the
+     * publish fails.
      */
     if (!mountpoint
         || !fs_name) {
@@ -1503,8 +1640,10 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
     }
 
     {
-        kernel::PerCpuRwSpinLockNativeWriteGuard guard(g_mount_lock);
-        if (vfs_mount_table_find_locked(mountpoint)) {
+        kernel::SpinLockGuard guard(g_mount_table_write_lock);
+
+        const vfs_mount_table* table = g_mount_table.read();
+        if (table && vfs_mount_table_find(table, mountpoint)) {
             return -1;
         }
     }
@@ -1530,11 +1669,26 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
     }
 
     {
-        kernel::PerCpuRwSpinLockNativeWriteGuard guard(g_mount_lock);
-        if (vfs_mount_table_insert_locked(mountpoint, instance) != 0) {
-            (void)type->umount(instance);
+        kernel::SpinLockGuard guard(g_mount_table_write_lock);
 
+        const vfs_mount_table* old_table = g_mount_table.read();
+
+        vfs_mount_entry entry;
+        memset(&entry, 0, sizeof(entry));
+
+        entry.used = 1u;
+        entry.instance = instance;
+        strlcpy(entry.mountpoint, mountpoint, sizeof(entry.mountpoint));
+
+        vfs_mount_table* new_table = vfs_mount_table_copy_insert(old_table, entry);
+        if (!new_table) {
+            (void)type->umount(instance);
             return -1;
+        }
+
+        g_mount_table.assign(new_table);
+        if (old_table) {
+            call_rcu(const_cast<rcu_head_t*>(&old_table->rcu), vfs_mount_table_rcu_free);
         }
     }
 
@@ -1543,10 +1697,12 @@ static int vfs_mount_impl(const char* mountpoint, const char* fs_name) {
 
 static int vfs_umount_impl(const char* mountpoint) {
     /*
-     * Remove from the global table under g_mount_lock first.
-     *
-     * This prevents new lookups from observing the instance while teardown
-     * runs. Refuse to umount while the instance is still shared.
+     * Unmount sequence:
+     * - Mark instance as umounting (blocks new try_retain).
+     * - Wait for all concurrent RCU readers to quiesce.
+     * - Publish a new snapshot without the mountpoint.
+     * - Wait again so all readers stop observing the removed entry.
+     * - Call backend umount.
      */
     if (!mountpoint) {
         return -1;
@@ -1556,38 +1712,76 @@ static int vfs_umount_impl(const char* mountpoint) {
         return -1;
     }
 
-    vfs_mount_entry* entry = nullptr;
+    vfs_fs_instance* inst = nullptr;
+
     {
-        kernel::PerCpuRwSpinLockNativeWriteGuard guard(g_mount_lock);
-        if (vfs_mount_table_remove_locked(mountpoint, &entry) != 0
-            || !entry) {
+        kernel::SpinLockGuard guard(g_mount_table_write_lock);
+
+        const vfs_mount_table* table = g_mount_table.read();
+        const vfs_mount_entry* entry = table ? vfs_mount_table_find(table, mountpoint) : nullptr;
+
+        if (!entry
+            || !entry->instance
+            || !entry->instance->type
+            || !entry->instance->type->umount) {
             return -1;
         }
+
+        inst = entry->instance;
+        __atomic_store_n(&inst->umounting, 1u, __ATOMIC_RELEASE);
     }
 
-    vfs_fs_instance* inst = entry->instance;
-    if (!inst || !inst->type || !inst->type->umount) {
-        kfree(entry);
-        return -1;
-    }
+    synchronize_rcu();
 
     if (inst->refs > 1u) {
-        kfree(entry);
+        __atomic_store_n(&inst->umounting, 0u, __ATOMIC_RELEASE);
         return -1;
     }
 
-    const int rc = inst->type->umount(inst);
+    const vfs_mount_table* retired = nullptr;
+    {
+        kernel::SpinLockGuard guard(g_mount_table_write_lock);
 
-    kfree(entry);
-    return rc;
+        const vfs_mount_table* old_table = g_mount_table.read();
+        if (!old_table || !vfs_mount_table_find(old_table, mountpoint)) {
+            __atomic_store_n(&inst->umounting, 0u, __ATOMIC_RELEASE);
+            return -1;
+        }
+
+        vfs_mount_table* new_table = vfs_mount_table_copy_remove(old_table, mountpoint);
+        if (!new_table) {
+            __atomic_store_n(&inst->umounting, 0u, __ATOMIC_RELEASE);
+            return -1;
+        }
+
+        g_mount_table.assign(new_table);
+        retired = old_table;
+    }
+
+    if (retired) {
+        call_rcu(const_cast<rcu_head_t*>(&retired->rcu), vfs_mount_table_rcu_free);
+    }
+
+    synchronize_rcu();
+
+    return inst->type->umount(inst);
 }
 
 static void vfs_init_impl(void) {
-    percpu_rwspinlock_init(&g_mount_lock);
-
     {
-        kernel::PerCpuRwSpinLockNativeWriteGuard guard(g_mount_lock);
-        g_mounts.clear();
+        kernel::SpinLockGuard guard(g_mount_table_write_lock);
+
+        vfs_mount_table* empty = vfs_mount_table_alloc(8u);
+        if (!empty) {
+            return;
+        }
+
+        const vfs_mount_table* old = g_mount_table.read();
+        g_mount_table.assign(empty);
+
+        if (old) {
+            call_rcu(const_cast<rcu_head_t*>(&old->rcu), vfs_mount_table_rcu_free);
+        }
     }
 
     (void)vfs_mount_impl("/", "yulafs");
@@ -2339,28 +2533,37 @@ static int vfs_open_resolved(task_t* curr, const VfsResolvedPath& resolved, int 
      * succeeds. Keep failure paths releasing the node exactly once.
      */
     if (!curr
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->open) {
+    if (!resolved.instance->type->ops->open) {
         return -1;
     }
 
-    vfs_node_t* node = resolved.mount->instance->type->ops->open(
-        resolved.mount->instance, curr,
-        resolved.mount->mountpoint, resolved.rel,
-        resolved.is_abs, flags
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    vfs_node_t* node = resolved.instance->type->ops->open(
+        resolved.instance,
+        curr,
+        resolved.mountpoint,
+        resolved.rel,
+        resolved.is_abs,
+        flags
     );
 
     if (!node) {
         return -1;
     }
 
-    vfs_node_bind_instance(node, resolved.mount->instance);
+    vfs_node_bind_instance(node, resolved.instance);
 
     node->refs = 1;
 
@@ -2414,10 +2617,9 @@ extern "C" int vfs_open(const char* path, int flags) {
 
     VfsResolvedPath resolved;
     if (vfs_resolve_path(curr, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
@@ -2456,10 +2658,9 @@ extern "C" int vfs_openat(int dirfd, const char* path, int flags) {
 
     VfsResolvedPath resolved;
     if (vfs_resolve_path_base(curr, base, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
@@ -2722,24 +2923,33 @@ extern "C" vfs_node_t* vfs_create_node_from_path(const char* path) {
     VfsResolvedPath resolved;
     if (!curr
         || vfs_resolve_path(curr, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return 0;
     }
 
-    if (!resolved.mount->instance->type->ops->create_node_from_path) {
+    if (!resolved.instance->type->ops->create_node_from_path) {
+        vfs_instance_release(resolved.instance);
         return 0;
     }
 
-    vfs_node_t* node = resolved.mount->instance->type->ops->create_node_from_path(
-        resolved.mount->instance, resolved.mount->mountpoint,
-        resolved.rel, resolved.is_abs
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    vfs_node_t* node = resolved.instance->type->ops->create_node_from_path(
+        resolved.instance,
+        resolved.mountpoint,
+        resolved.rel,
+        resolved.is_abs
     );
 
     if (node) {
-        vfs_node_bind_instance(node, resolved.mount->instance);
+        vfs_node_bind_instance(node, resolved.instance);
 
         if (node->ops && node->ops->open) {
             const int rc = node->ops->open(node);
@@ -2769,20 +2979,29 @@ extern "C" int vfs_mkdir(const char* path) {
     VfsResolvedPath resolved;
     if (!curr
         || vfs_resolve_path(curr, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->mkdir) {
+    if (!resolved.instance->type->ops->mkdir) {
+        vfs_instance_release(resolved.instance);
         return -1;
     }
 
-    return resolved.mount->instance->type->ops->mkdir(
-        resolved.mount->instance, resolved.mount->mountpoint,
-        resolved.rel, resolved.is_abs
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->mkdir(
+        resolved.instance,
+        resolved.mountpoint,
+        resolved.rel,
+        resolved.is_abs
     );
 }
 
@@ -2801,20 +3020,29 @@ extern "C" int vfs_mkdirat(int dirfd, const char* path) {
 
     VfsResolvedPath resolved;
     if (vfs_resolve_path_base(curr, base, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->mkdir) {
+    if (!resolved.instance->type->ops->mkdir) {
+        vfs_instance_release(resolved.instance);
         return -1;
     }
 
-    return resolved.mount->instance->type->ops->mkdir(
-        resolved.mount->instance, resolved.mount->mountpoint,
-        resolved.rel, resolved.is_abs
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->mkdir(
+        resolved.instance,
+        resolved.mountpoint,
+        resolved.rel,
+        resolved.is_abs
     );
 }
 
@@ -2833,20 +3061,29 @@ extern "C" int vfs_unlink(const char* path) {
     VfsResolvedPath resolved;
     if (!curr
         || vfs_resolve_path(curr, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->unlink) {
+    if (!resolved.instance->type->ops->unlink) {
+        vfs_instance_release(resolved.instance);
         return -1;
     }
 
-    return resolved.mount->instance->type->ops->unlink(
-        resolved.mount->instance, resolved.mount->mountpoint,
-        resolved.rel, resolved.is_abs
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->unlink(
+        resolved.instance,
+        resolved.mountpoint,
+        resolved.rel,
+        resolved.is_abs
     );
 }
 
@@ -2865,20 +3102,29 @@ extern "C" int vfs_unlinkat(int dirfd, const char* path) {
 
     VfsResolvedPath resolved;
     if (vfs_resolve_path_base(curr, base, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->unlink) {
+    if (!resolved.instance->type->ops->unlink) {
+        vfs_instance_release(resolved.instance);
         return -1;
     }
 
-    return resolved.mount->instance->type->ops->unlink(
-        resolved.mount->instance, resolved.mount->mountpoint,
-        resolved.rel, resolved.is_abs
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->unlink(
+        resolved.instance,
+        resolved.mountpoint,
+        resolved.rel,
+        resolved.is_abs
     );
 }
 
@@ -2899,21 +3145,30 @@ extern "C" int vfs_stat_path(const char* path, vfs_stat_t* out) {
     VfsResolvedPath resolved;
     if (!curr
         || vfs_resolve_path(curr, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->stat) {
+    if (!resolved.instance->type->ops->stat) {
+        vfs_instance_release(resolved.instance);
         return -1;
     }
 
-    return resolved.mount->instance->type->ops->stat(
-        resolved.mount->instance, resolved.mount->mountpoint,
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->stat(
+        resolved.instance,
+        resolved.mountpoint,
         resolved.rel,
-        resolved.is_abs, out
+        resolved.is_abs,
+        out
     );
 }
 
@@ -2939,21 +3194,30 @@ extern "C" int vfs_statat_path(int dirfd, const char* path, vfs_stat_t* out) {
 
     VfsResolvedPath resolved;
     if (vfs_resolve_path_base(curr, base, path, &resolved) != 0
-        || !resolved.mount
-        || !resolved.mount->instance
-        || !resolved.mount->instance->type
-        || !resolved.mount->instance->type->ops) {
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops) {
         return -1;
     }
 
-    if (!resolved.mount->instance->type->ops->stat) {
+    if (!resolved.instance->type->ops->stat) {
+        vfs_instance_release(resolved.instance);
         return -1;
     }
 
-    return resolved.mount->instance->type->ops->stat(
-        resolved.mount->instance, resolved.mount->mountpoint,
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->stat(
+        resolved.instance,
+        resolved.mountpoint,
         resolved.rel,
-        resolved.is_abs, out
+        resolved.is_abs,
+        out
     );
 }
 
@@ -2976,35 +3240,49 @@ extern "C" int vfs_rename(const char* old_path, const char* new_path) {
     VfsResolvedPath new_resolved;
     if (!curr
         || vfs_resolve_path(curr, old_path, &old_resolved) != 0
-        || !old_resolved.mount
-        || !old_resolved.mount->instance
-        || !old_resolved.mount->instance->type
-        || !old_resolved.mount->instance->type->ops) {
+        || !old_resolved.instance
+        || !old_resolved.instance->type
+        || !old_resolved.instance->type->ops) {
         return -1;
     }
 
     if (vfs_resolve_path(curr, new_path, &new_resolved) != 0
-        || !new_resolved.mount
-        || !new_resolved.mount->instance
-        || !new_resolved.mount->instance->type
-        || !new_resolved.mount->instance->type->ops) {
+        || !new_resolved.instance
+        || !new_resolved.instance->type
+        || !new_resolved.instance->type->ops) {
+        vfs_instance_release(old_resolved.instance);
         return -1;
     }
 
-    if (old_resolved.mount->instance->type != new_resolved.mount->instance->type
-        || old_resolved.mount->instance != new_resolved.mount->instance) {
+    if (old_resolved.instance != new_resolved.instance) {
+        vfs_instance_release(old_resolved.instance);
+        vfs_instance_release(new_resolved.instance);
         return -1;
     }
 
-    if (!old_resolved.mount->instance->type->ops->rename) {
+    if (!old_resolved.instance->type->ops->rename) {
+        vfs_instance_release(old_resolved.instance);
+        vfs_instance_release(new_resolved.instance);
         return -1;
     }
 
-    return old_resolved.mount->instance->type->ops->rename(
-        old_resolved.mount->instance,
-        old_resolved.mount->mountpoint, old_resolved.rel,
-        new_resolved.mount->mountpoint, new_resolved.rel,
-        old_resolved.is_abs, new_resolved.is_abs
+    vfs_instance_release(new_resolved.instance);
+
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{old_resolved.instance};
+
+    return old_resolved.instance->type->ops->rename(
+        old_resolved.instance,
+        old_resolved.mountpoint,
+        old_resolved.rel,
+        new_resolved.mountpoint,
+        new_resolved.rel,
+        old_resolved.is_abs,
+        new_resolved.is_abs
     );
 }
 
@@ -3036,35 +3314,49 @@ extern "C" int vfs_renameat(int old_dirfd, const char* old_path, int new_dirfd, 
     VfsResolvedPath old_resolved;
     VfsResolvedPath new_resolved;
     if (vfs_resolve_path_base(curr, old_base, old_path, &old_resolved) != 0
-        || !old_resolved.mount
-        || !old_resolved.mount->instance
-        || !old_resolved.mount->instance->type
-        || !old_resolved.mount->instance->type->ops) {
+        || !old_resolved.instance
+        || !old_resolved.instance->type
+        || !old_resolved.instance->type->ops) {
         return -1;
     }
 
     if (vfs_resolve_path_base(curr, new_base, new_path, &new_resolved) != 0
-        || !new_resolved.mount
-        || !new_resolved.mount->instance
-        || !new_resolved.mount->instance->type
-        || !new_resolved.mount->instance->type->ops) {
+        || !new_resolved.instance
+        || !new_resolved.instance->type
+        || !new_resolved.instance->type->ops) {
+        vfs_instance_release(old_resolved.instance);
         return -1;
     }
 
-    if (old_resolved.mount->instance->type != new_resolved.mount->instance->type
-        || old_resolved.mount->instance != new_resolved.mount->instance) {
+    if (old_resolved.instance != new_resolved.instance) {
+        vfs_instance_release(old_resolved.instance);
+        vfs_instance_release(new_resolved.instance);
         return -1;
     }
 
-    if (!old_resolved.mount->instance->type->ops->rename) {
+    if (!old_resolved.instance->type->ops->rename) {
+        vfs_instance_release(old_resolved.instance);
+        vfs_instance_release(new_resolved.instance);
         return -1;
     }
 
-    return old_resolved.mount->instance->type->ops->rename(
-        old_resolved.mount->instance,
-        old_resolved.mount->mountpoint, old_resolved.rel,
-        new_resolved.mount->mountpoint, new_resolved.rel,
-        old_resolved.is_abs, new_resolved.is_abs
+    vfs_instance_release(new_resolved.instance);
+
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{old_resolved.instance};
+
+    return old_resolved.instance->type->ops->rename(
+        old_resolved.instance,
+        old_resolved.mountpoint,
+        old_resolved.rel,
+        new_resolved.mountpoint,
+        new_resolved.rel,
+        old_resolved.is_abs,
+        new_resolved.is_abs
     );
 }
 
@@ -3072,8 +3364,8 @@ extern "C" int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, ui
     /*
      * Report filesystem-wide information for the root mount.
      *
-     * Take g_mount_lock only to fetch the current root entry, then call into
-     * the backend without holding the global lock.
+     * Resolve root via the RCU mount snapshot, then call into the backend
+     * without holding any global mount writer lock.
      */
     if (!total_blocks
         || !free_blocks
@@ -3081,22 +3373,24 @@ extern "C" int vfs_get_fs_info(uint32_t* total_blocks, uint32_t* free_blocks, ui
         return -1;
     }
 
-    const vfs_mount_entry* root = nullptr;
-    {
-        kernel::PerCpuRwSpinLockNativeReadGuard guard(g_mount_lock);
-        root = vfs_mount_table_find_locked("/");
-    }
-
-    if (!root
-        || !root->instance
-        || !root->instance->type
-        || !root->instance->type->ops
-        || !root->instance->type->ops->get_fs_info) {
+    VfsResolvedPath resolved;
+    if (vfs_resolve_path(proc_current(), "/", &resolved) != 0
+        || !resolved.instance
+        || !resolved.instance->type
+        || !resolved.instance->type->ops
+        || !resolved.instance->type->ops->get_fs_info) {
         return -1;
     }
 
-    return root->instance->type->ops->get_fs_info(
-        root->instance,
+    struct InstanceReleaseGuard {
+        vfs_fs_instance* inst;
+        ~InstanceReleaseGuard() {
+            vfs_instance_release(inst);
+        }
+    } inst_guard{resolved.instance};
+
+    return resolved.instance->type->ops->get_fs_info(
+        resolved.instance,
         total_blocks, free_blocks, block_size
     );
 }
