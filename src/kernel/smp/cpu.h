@@ -17,6 +17,7 @@ extern "C" {
 struct rcu_head;
 
 typedef struct {
+    void* self;             // Указатель на эту же структуру для gs:0
     int id;                 // LAPIC ID
     int index; 
     struct task* current_task;
@@ -64,7 +65,13 @@ extern int cpu_count;
 extern volatile int ap_running_count;
 
 void cpu_init_system(void);
-cpu_t* cpu_current(void);
+void cpu_setup_gs(int cpu_index);
+
+static inline cpu_t* cpu_current(void) {
+    cpu_t* p;
+    __asm__ volatile("movl %%gs:0, %0" : "=r"(p));
+    return p;
+}
 
 #ifdef __cplusplus
 }

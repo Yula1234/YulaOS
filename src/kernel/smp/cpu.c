@@ -2,7 +2,7 @@
 // Copyright (C) 2025 Yula1234
 
 #include <lib/string.h>
-#include <hal/apic.h>
+#include <arch/i386/gdt.h>
 #include "cpu.h"
 
 cpu_t cpus[MAX_CPUS];
@@ -45,29 +45,9 @@ void cpu_init_system(void) {
     }
 }
 
-static inline uint32_t lapic_read_local(uint32_t reg) {
-    return *(volatile uint32_t*)(LAPIC_BASE + reg);
-}
-
-cpu_t* cpu_current(void) {
-    uint16_t tr_sel = 0;
-    __asm__ volatile("str %0" : "=m"(tr_sel));
-
-    int gdt_index = (int)(tr_sel >> 3);
-    int cpu_idx = gdt_index - 5;
-    if (cpu_idx >= 0 && cpu_idx < MAX_CPUS) {
-        return &cpus[cpu_idx];
+void cpu_setup_gs(int cpu_index) {
+    if (cpu_index >= 0 && cpu_index < MAX_CPUS) {
+        uint16_t selector = ((GDT_CPU_DATA_BASE + cpu_index) << 3) | 3;
+        __asm__ volatile("mov %0, %%gs" : : "r"(selector));
     }
-
-    if (cpu_count == 0) return &cpus[0];
-
-    uint32_t apic_id_reg = lapic_read_local(LAPIC_ID);
-    int apic_id = (apic_id_reg >> 24) & 0xFF;
-
-    for (int i = 0; i < MAX_CPUS; i++) {
-        if (cpus[i].id == apic_id) {
-            return &cpus[i];
-        }
-    }
-    return &cpus[0];
 }

@@ -10,11 +10,13 @@
 /*
  * Global Descriptor Table layout.
  *
- * The GDT contains the flat kernel/user code+data segments and a per-CPU TSS.
- * GDT_ENTRIES accounts for the fixed descriptors plus one TSS descriptor per
- * CPU.
+ * The GDT contains the flat kernel/user code+data segments, per-CPU TSS,
+ * and per-CPU data segments for GS-based cpu_current() access.
  */
-#define GDT_ENTRIES (5 + MAX_CPUS) 
+#define GDT_ENTRIES (5 + MAX_CPUS + MAX_CPUS)
+
+/* Base index for per-CPU data segments (GS selectors). */
+#define GDT_CPU_DATA_BASE (5 + MAX_CPUS) 
 
 /*
  * i386 TSS.

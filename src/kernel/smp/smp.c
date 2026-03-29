@@ -104,6 +104,8 @@ void smp_ap_main(cpu_t* cpu_arg) {
     int tss_selector = (5 + cpu->index) * 8;
     __asm__ volatile("ltr %%ax" : : "a" (tss_selector));
     
+    cpu_setup_gs(cpu->index);
+
     paging_switch(kernel_page_directory);
     paging_init_pat();
 

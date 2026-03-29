@@ -116,7 +116,6 @@ isr_common:
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
 
     mov eax, esp
     push eax   

@@ -43,7 +43,6 @@ irq_return:
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
     
     iret
 

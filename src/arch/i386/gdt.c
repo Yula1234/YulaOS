@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
-  
+
+#include <stdint.h>
 #include <lib/string.h>
 #include <kernel/smp/cpu.h>
 #include "gdt.h"
@@ -54,6 +55,7 @@ void gdt_load(void) {
     /*
      * After lgdt, segment registers keep cached descriptor state.
      * Reload them and use a far jump to flush CS.
+     * Note: GS is reserved for per-CPU data, do not overwrite it.
      */
     __asm__ volatile("lgdt %0" : : "m" (gp));
     
@@ -62,7 +64,6 @@ void gdt_load(void) {
         "mov %%ax, %%ds \n"
         "mov %%ax, %%es \n"
         "mov %%ax, %%fs \n"
-        "mov %%ax, %%gs \n"
         "mov %%ax, %%ss \n"
         "ljmp $0x08, $1f \n"  
         "1: \n"             
@@ -100,9 +101,21 @@ void gdt_init() {
         
         tss_entries[i].ss0  = 0x10;
         tss_entries[i].iomap_base = sizeof(struct tss_entry_struct);
+
+        /* Per-CPU data segment for GS-based cpu_current(). */
+        uint32_t cpu_base = (uint32_t)&cpus[i];
+        uint32_t cpu_limit = sizeof(cpu_t) - 1;
+        /* Present, Ring 3, Data, Read/Write, 32-bit, Byte granularity. */
+        gdt_set_gate(GDT_CPU_DATA_BASE + i, cpu_base, cpu_limit, 0xF2, 0x40);
+        
+        /* Self-pointer for gs:0 access. */
+        cpus[i].self = &cpus[i];
     }
 
     gdt_load();
+    
+    /* Load GS selector for BSP. */
+    cpu_setup_gs(0);
     
     /*
      * Load TSS selector.
