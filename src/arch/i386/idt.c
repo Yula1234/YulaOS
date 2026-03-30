@@ -592,11 +592,12 @@ void isr_handler(registers_t* regs) {
                 }
             }
 
+            lapic_eoi();
+
             if (curr) {
                 maybe_deliver_pending_signal(curr, regs);
             }
 
-            lapic_eoi();
             goto out;
         }
 
@@ -604,10 +605,6 @@ void isr_handler(registers_t* regs) {
             irq_vector_handlers[regs->int_no].func(
                 regs, irq_vector_handlers[regs->int_no].ctx
             );
-        }
-
-        if (curr) {
-            maybe_deliver_pending_signal(curr, regs);
         }
 
         if (g_legacy_pic_enabled && regs->int_no >= 32 && regs->int_no <= 47) {
@@ -618,6 +615,11 @@ void isr_handler(registers_t* regs) {
         }
 
         lapic_eoi();
+
+        if (curr) {
+            maybe_deliver_pending_signal(curr, regs);
+        }
+
         goto out;
     }
 

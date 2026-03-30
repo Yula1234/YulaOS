@@ -286,6 +286,9 @@ extern "C" void sched_on_task_entry(void) {
         return;
     }
 
+    __atomic_store_n(&me->in_kernel, 0u, __ATOMIC_RELEASE);
+    rcu_qs_count_inc();
+
     task_t* switched_out = me->prev_task_during_switch;
     if (!switched_out) {
         return;
