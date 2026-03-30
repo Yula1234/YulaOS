@@ -30,7 +30,7 @@ typedef struct {
 /* Out-of-line slow path, implemented in spinlock.c */
 void spinlock_acquire_slowpath(spinlock_t* lock);
 
-__attribute__((always_inline)) static inline void spinlock_init(spinlock_t* lock) {
+___inline void spinlock_init(spinlock_t* lock) {
 #ifdef __cplusplus
     if (kernel::unlikely(!lock)) {
 #else
@@ -42,7 +42,7 @@ __attribute__((always_inline)) static inline void spinlock_init(spinlock_t* lock
     lock->val = 0u;
 }
 
-__attribute__((always_inline)) static inline void spinlock_acquire(spinlock_t* lock) {
+___inline void spinlock_acquire(spinlock_t* lock) {
     uint32_t expected = 0u;
 
     /*
@@ -69,7 +69,7 @@ __attribute__((always_inline)) static inline void spinlock_acquire(spinlock_t* l
     spinlock_acquire_slowpath(lock);
 }
 
-__attribute__((always_inline)) static inline int spinlock_try_acquire(spinlock_t* lock) {
+___inline int spinlock_try_acquire(spinlock_t* lock) {
     uint32_t expected = 0u;
 
     const int acquired = __atomic_compare_exchange_n(
@@ -80,7 +80,7 @@ __attribute__((always_inline)) static inline int spinlock_try_acquire(spinlock_t
     return acquired ? 1 : 0;
 }
 
-__attribute__((always_inline)) static inline void spinlock_release(spinlock_t* lock) {
+___inline void spinlock_release(spinlock_t* lock) {
     /*
      * Extremely fast release.
      * On x86, an aligned byte store has release semantics by default.
@@ -90,7 +90,7 @@ __attribute__((always_inline)) static inline void spinlock_release(spinlock_t* l
     __atomic_store_n(&lock->locked, 0u, __ATOMIC_RELEASE);
 }
 
-__attribute__((always_inline)) static inline uint32_t spinlock_acquire_safe(spinlock_t* lock) {
+___inline uint32_t spinlock_acquire_safe(spinlock_t* lock) {
     uint32_t flags = irq_save();
 
     spinlock_acquire(lock);
@@ -98,7 +98,7 @@ __attribute__((always_inline)) static inline uint32_t spinlock_acquire_safe(spin
     return flags;
 }
 
-__attribute__((always_inline)) static inline void spinlock_release_safe(spinlock_t* lock, uint32_t flags) {
+___inline void spinlock_release_safe(spinlock_t* lock, uint32_t flags) {
     spinlock_release(lock);
 
     if (flags & 0x200u) {
