@@ -4,7 +4,10 @@
 #include <kernel/smp/cpu_limits.h>
 #include <kernel/panic.h>
 
+#include <hal/align.h>
 #include <hal/cpu.h>
+
+#include <lib/compiler.h>
 
 #include <stddef.h>
 
@@ -23,10 +26,10 @@ typedef struct qnode {
     uint8_t padding[3];
 } qnode_t;
 
-static qnode_t g_qnodes[MAX_CPUS][QNODE_DEPTH];
-static uint32_t g_qnode_idx[MAX_CPUS];
+__cacheline_aligned static qnode_t g_qnodes[MAX_CPUS][QNODE_DEPTH];
+__cacheline_aligned static uint32_t g_qnode_idx[MAX_CPUS];
 
-__attribute__((always_inline)) static inline uint32_t encode_tail(int cpu, uint32_t idx) {
+___inline uint32_t encode_tail(int cpu, uint32_t idx) {
     /*
      * Bits 16-29: CPU index + 1 (so CPU 0 is not treated as an empty tail).
      * Bits 30-31: Node index (nesting level).
@@ -37,7 +40,7 @@ __attribute__((always_inline)) static inline uint32_t encode_tail(int cpu, uint3
     return tail_16 << 16u;
 }
 
-__attribute__((always_inline)) static inline qnode_t* decode_tail(uint32_t val) {
+___inline qnode_t* decode_tail(uint32_t val) {
     const uint32_t tail_16 = val >> 16u;
     
     const uint32_t cpu = (tail_16 & 0x3FFFu) - 1u;
