@@ -9,7 +9,6 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 
-#include <drivers/audio/pc_speaker.h>
 #include <drivers/video/vga.h>
 
 #include <fs/yulafs.h>
@@ -141,8 +140,6 @@ void init_task(void* arg) {
     tty_bridge_putc(tty, 0x0C);
 
     init_task_set_cwd(self);
-
-    pc_speaker_beep();
 
     init_task_spawn_shell_loop(self, tty);
 }
