@@ -98,20 +98,31 @@ extern "C" void rcu_qs_count_inc(void);
 extern "C" void synchronize_rcu(void) {
     const int n = cpu_count;
     uint32_t* snap = (uint32_t*)__builtin_alloca(sizeof(uint32_t) * n);
+    uint8_t* need_wait = (uint8_t*)__builtin_alloca(sizeof(uint8_t) * n);
 
     cpu_t* me = cpu_current();
 
     for (int i = 0; i < n; i++) {
-        if (cpus[i].id != -1 && &cpus[i] != me) {
-            snap[i] = __atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_RELAXED);
+        need_wait[i] = 0u;
 
-            lapic_write(LAPIC_ICRHI, (uint32_t)cpus[i].id << 24);
-            lapic_write(LAPIC_ICRLO, (uint32_t)IPI_RCU_VECTOR | 0x00004000u);
+        if (cpus[i].id == -1 || &cpus[i] == me) {
+            continue;
         }
+
+        snap[i] = __atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_RELAXED);
+
+        if (__atomic_load_n(&cpus[i].in_kernel, __ATOMIC_ACQUIRE) == 0u) {
+            continue;
+        }
+
+        need_wait[i] = 1u;
+
+        lapic_write(LAPIC_ICRHI, (uint32_t)cpus[i].id << 24);
+        lapic_write(LAPIC_ICRLO, (uint32_t)IPI_RCU_VECTOR | 0x00004000u);
     }
 
     for (int i = 0; i < n; i++) {
-        if (cpus[i].id == -1 || &cpus[i] == me) {
+        if (cpus[i].id == -1 || &cpus[i] == me || need_wait[i] == 0u) {
             continue;
         }
 

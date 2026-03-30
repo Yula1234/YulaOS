@@ -29,6 +29,8 @@ void cpu_init_system(void) {
         cpus[i].total_priority_weight = 0;
         cpus[i].total_task_count = 0;
 
+        cpus[i].in_kernel = 0;
+
         cpus[i].rcu_queue = 0;
         cpus[i].rcu_qlen = 0;
         

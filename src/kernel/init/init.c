@@ -147,6 +147,11 @@ void init_task(void* arg) {
 void idle_task_func(void* arg) {
     (void)arg;
     while (1) {
+        cpu_t* cpu = cpu_current();
+        if (cpu) {
+            __atomic_store_n(&cpu->in_kernel, 0u, __ATOMIC_RELEASE);
+        }
+
         rcu_qs_count_inc();
 
         __asm__ volatile("sti");

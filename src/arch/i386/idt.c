@@ -491,6 +491,13 @@ void isr_handler(registers_t* regs) {
     profiler_irq_enter();
 #endif
 
+    cpu = cpu_current();
+    curr = cpu ? cpu->current_task : 0;
+
+    if (cpu && regs->cs == 0x1B) {
+        __atomic_store_n(&cpu->in_kernel, 1u, __ATOMIC_RELEASE);
+    }
+
     if (regs->int_no == IPI_TLB_VECTOR) {
         smp_tlb_ipi_handler();
         lapic_eoi();
@@ -512,9 +519,6 @@ void isr_handler(registers_t* regs) {
         lapic_eoi();
         smp_panic_ipi_handler();
     }
-
-    cpu = cpu_current();
-    curr = cpu->current_task;
 
     if (regs->int_no == 0x80) {
         syscall_handler(regs);
@@ -787,6 +791,10 @@ void isr_handler(registers_t* regs) {
     }
 
 out:
+    if (cpu && regs->cs == 0x1B) {
+        __atomic_store_n(&cpu->in_kernel, 0u, __ATOMIC_RELEASE);
+        rcu_qs_count_inc();
+    }
 #ifdef KERNEL_PROFILE
     profiler_irq_exit();
 #endif

@@ -54,6 +54,7 @@ typedef struct {
     volatile int total_task_count;
 
     volatile uint32_t rcu_qs_count;
+    volatile uint32_t in_kernel;
 
     struct rcu_head* rcu_queue;
     volatile uint32_t rcu_qlen;
