@@ -919,11 +919,6 @@ void proc_init(void) {
     proc::detail::initial_fpu_state = fpu_state_guard.release();
 }
 
-task_t* proc_current() { 
-    cpu_t* cpu = cpu_current();
-    return cpu->current_task; 
-}
-
 void proc_fd_table_init(task_t* t) {
     if (!t) return;
 

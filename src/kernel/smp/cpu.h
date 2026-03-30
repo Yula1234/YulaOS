@@ -8,16 +8,16 @@
 #include <kernel/smp/cpu_limits.h>
 #include <hal/lock.h>
 #include <lib/rbtree.h>
-#include <kernel/proc.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct rcu_head;
+struct task;
 
 typedef struct {
-    void* self;             // Указатель на эту же структуру для gs:0
+    void* self;
     int id;                 // LAPIC ID
     int index; 
     struct task* current_task;

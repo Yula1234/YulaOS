@@ -7,6 +7,7 @@
 #include <hal/lock.h>
 #include <hal/io.h>
 #include <kernel/smp/cpu.h>
+#include <kernel/proc.h>
 #include "paging.h"
 
 extern void smp_tlb_shootdown(uint32_t virt);

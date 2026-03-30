@@ -10,6 +10,8 @@
 #include <lib/dlist.h>
 #include <lib/rbtree.h>
 #include <yos/proc.h>
+#include <lib/compiler.h>
+#include <kernel/smp/cpu.h>
 
 #include <kernel/rcu.h>
 #include <mm/vma.h>
@@ -210,7 +212,6 @@ void file_desc_retain(file_desc_t* d);
 void file_desc_release(file_desc_t* d);
 
 void proc_init(void);
-task_t* proc_current(void);
 
 uint32_t proc_list_snapshot(yos_proc_info_t* out, uint32_t cap);
 
@@ -247,6 +248,11 @@ void proc_usleep(uint32_t us);
 void proc_wake(task_t* t);
 
 int proc_change_state(task_t* t, task_state_t new_state);
+
+___inline task_t* proc_current() { 
+    cpu_t* cpu = cpu_current();
+    return cpu->current_task; 
+}
 
 #ifdef __cplusplus
 }
