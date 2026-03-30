@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <lib/compiler.h>
+
 #ifdef __cplusplus
 #include <lib/cpp/type_traits.h>
 #endif
@@ -42,16 +44,16 @@ typedef struct dlist_head {
 extern "C" {
 #endif
 
-static inline void dlist_init(dlist_head_t* list) {
+___inline void dlist_init(dlist_head_t* list) {
     list->next = list;
     list->prev = list;
 }
 
-static inline int dlist_node_linked(const dlist_head_t* node) {
+___inline int dlist_node_linked(const dlist_head_t* node) {
     return node && node->next && node->prev;
 }
 
-static inline int dlist_unlink_consistent(dlist_head_t* node) {
+___inline int dlist_unlink_consistent(dlist_head_t* node) {
     if (!node || !node->prev || !node->next) {
         return 0;
     }
@@ -76,7 +78,7 @@ static inline int dlist_unlink_consistent(dlist_head_t* node) {
     return 1;
 }
 
-static inline int dlist_unlink_consistent_checked(
+___inline int dlist_unlink_consistent_checked(
     dlist_head_t* node,
     int (*node_valid)(const dlist_head_t*)
 ) {
@@ -110,7 +112,7 @@ static inline int dlist_unlink_consistent_checked(
     return 1;
 }
 
-static inline int dlist_remove_node_if_present(dlist_head_t* head, dlist_head_t* node) {
+___inline int dlist_remove_node_if_present(dlist_head_t* head, dlist_head_t* node) {
     if (!head || !node) {
         return 0;
     }
@@ -143,7 +145,7 @@ static inline int dlist_remove_node_if_present(dlist_head_t* head, dlist_head_t*
     return 0;
 }
 
-static inline int dlist_remove_node_if_present_checked(
+___inline int dlist_remove_node_if_present_checked(
     dlist_head_t* head,
     dlist_head_t* node,
     int (*node_valid)(const dlist_head_t*),
@@ -209,12 +211,36 @@ static inline int dlist_remove_node_if_present_checked(
     return 0;
 }
 
-void dlist_add(dlist_head_t* new_node, dlist_head_t* head);
-void dlist_add_tail(dlist_head_t* new_node, dlist_head_t* head);
+___inline void __dlist_add(dlist_head_t *new_node,
+                               dlist_head_t *prev,
+                               dlist_head_t *next) {
+    next->prev = new_node;
+    new_node->next = next;
+    new_node->prev = prev;
+    prev->next = new_node;
+}
 
-void dlist_del(dlist_head_t* entry);
+___inline void dlist_add(dlist_head_t *new_node, dlist_head_t *head) {
+    __dlist_add(new_node, head, head->next);
+}
 
-static inline int dlist_empty(const dlist_head_t* head) {
+___inline void dlist_add_tail(dlist_head_t *new_node, dlist_head_t *head) {
+    __dlist_add(new_node, head->prev, head);
+}
+
+___inline void __dlist_del(dlist_head_t *prev, dlist_head_t *next) {
+    next->prev = prev;
+    prev->next = next;
+}
+
+___inline void dlist_del(dlist_head_t *entry) {
+    __dlist_del(entry->prev, entry->next);
+    
+    entry->next = 0;
+    entry->prev = 0;
+}
+
+___inline int dlist_empty(const dlist_head_t* head) {
     return head->next == head;
 }
 
