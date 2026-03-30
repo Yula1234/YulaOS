@@ -20,6 +20,11 @@ typedef struct __attribute__((packed)) {
 #define VRING_DESC_F_NEXT  1u
 #define VRING_DESC_F_WRITE 2u
 
+#define VRING_USED_F_NO_NOTIFY 1u
+#define VRING_USED_F_NO_INTERRUPT 2u
+
+#define VIRTIO_F_EVENT_IDX (1ull << 29u)
+
 typedef struct __attribute__((packed)) {
     uint16_t flags;
     uint16_t idx;
@@ -71,6 +76,9 @@ typedef struct virtqueue {
     uint16_t avail_idx;
     uint16_t last_used_idx;
 
+    uint8_t event_idx_enabled;
+    uint8_t _pad[3];
+
     void* aux_mem;
     virtqueue_token_t** pending;
 
@@ -107,5 +115,7 @@ uint32_t virtqueue_token_wait_timeout(virtqueue_token_t* token, uint32_t deadlin
 void virtqueue_token_destroy(virtqueue_token_t* token);
 
 void virtqueue_handle_irq(virtqueue_t* vq);
+
+void virtqueue_set_event_idx(virtqueue_t* vq, int enabled);
 
 #endif

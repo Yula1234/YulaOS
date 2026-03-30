@@ -16,6 +16,25 @@ static inline uint16_t vq_mod(uint16_t x, uint16_t size) {
     return (uint16_t)(x % size);
 }
 
+static inline int vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old_idx) {
+    return (uint16_t)(new_idx - event_idx - 1u) < (uint16_t)(new_idx - old_idx);
+}
+
+static uint16_t virtqueue_read_avail_event(virtqueue_t* vq) {
+    const uint16_t* avail_event_ptr = (const uint16_t*)(const void*)(&vq->used->ring[vq->size]);
+    smp_rmb();
+    return *avail_event_ptr;
+}
+
+static int virtqueue_should_notify(virtqueue_t* vq, uint16_t old_idx, uint16_t new_idx) {
+    if (vq->event_idx_enabled) {
+        uint16_t avail_event = virtqueue_read_avail_event(vq);
+        return vring_need_event(avail_event, new_idx, old_idx);
+    }
+
+    return (vq->used->flags & VRING_USED_F_NO_NOTIFY) == 0u;
+}
+
 static uint32_t virtqueue_ring_bytes(uint16_t qsz) {
     uint32_t desc_bytes = (uint32_t)qsz * (uint32_t)sizeof(vring_desc_t);
 
@@ -319,12 +338,15 @@ int virtqueue_submit(virtqueue_t* vq,
     vq->avail->ring[avail_slot] = head;
 
     smp_wmb();
+
+    uint16_t old_idx = vq->avail_idx;
     vq->avail_idx++;
-    vq->avail->idx = vq->avail_idx;
+    uint16_t new_idx = vq->avail_idx;
+    vq->avail->idx = new_idx;
 
-    smp_wmb();
+    smp_mb();
 
-    if (vq->notify_iomem) {
+    if (vq->notify_iomem && virtqueue_should_notify(vq, old_idx, new_idx)) {
         iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
     }
 
@@ -399,12 +421,15 @@ int virtqueue_submit_cb(virtqueue_t* vq,
     vq->avail->ring[avail_slot] = head;
 
     smp_wmb();
+
+    uint16_t old_idx = vq->avail_idx;
     vq->avail_idx++;
-    vq->avail->idx = vq->avail_idx;
+    uint16_t new_idx = vq->avail_idx;
+    vq->avail->idx = new_idx;
 
-    smp_wmb();
+    smp_mb();
 
-    if (vq->notify_iomem) {
+    if (vq->notify_iomem && virtqueue_should_notify(vq, old_idx, new_idx)) {
         iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
     }
 
@@ -460,6 +485,7 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
 
     uint32_t iflags = spinlock_acquire_safe(&vq->lock);
 
+again:
     uint16_t used_idx = vq->used->idx;
     smp_rmb();
 
@@ -492,6 +518,19 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
         vq->last_used_idx++;
     }
 
+    if (vq->event_idx_enabled) {
+        uint16_t* used_event_ptr = (uint16_t*)((uintptr_t)vq->avail + 
+                                   sizeof(vring_avail_t) + 
+                                   vq->size * sizeof(uint16_t));
+        *used_event_ptr = vq->last_used_idx;
+        
+        smp_mb();
+
+        if (vq->used->idx != vq->last_used_idx) {
+            goto again;
+        }
+    }
+
     spinlock_release_safe(&vq->lock, iflags);
 
     for (uint32_t i = 0; i < completion_count; i++) {
@@ -503,4 +542,14 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
             virtqueue_token_destroy(c->token);
         }
     }
+}
+
+void virtqueue_set_event_idx(virtqueue_t* vq, int enabled) {
+    if (!vq) return;
+
+    uint32_t iflags = spinlock_acquire_safe(&vq->lock);
+
+    vq->event_idx_enabled = enabled ? 1 : 0;
+
+    spinlock_release_safe(&vq->lock, iflags);
 }

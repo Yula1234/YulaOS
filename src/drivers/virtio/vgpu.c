@@ -892,12 +892,14 @@ static int virtio_gpu_probe(virtio_device_t* vdev) {
     ops->reset(vdev);
 
     uint64_t accepted = 0;
-    uint64_t wanted = VIRTIO_F_VERSION_1 | (1ull << VIRTIO_GPU_F_VIRGL);
+    uint64_t wanted = VIRTIO_F_VERSION_1 | VIRTIO_F_EVENT_IDX | (1ull << VIRTIO_GPU_F_VIRGL);
     if (!ops->negotiate_features(vdev, wanted, &accepted)) {
         vgpu_cleanup_state();
         return -1;
     }
     g_vgpu.virgl_supported = (accepted & (1ull << VIRTIO_GPU_F_VIRGL)) != 0ull;
+
+    int event_idx_enabled = (accepted & VIRTIO_F_EVENT_IDX) != 0ull;
 
     int msi_vec = irq_alloc_vector();
     int msi_ok = 0;
@@ -917,6 +919,8 @@ static int virtio_gpu_probe(virtio_device_t* vdev) {
         vgpu_cleanup_state();
         return -1;
     }
+
+    virtqueue_set_event_idx(&g_vgpu.ctrlq, event_idx_enabled);
 
     g_vgpu.ctrl_cmd = dma_alloc_coherent(PAGE_SIZE, &g_vgpu.ctrl_cmd_phys);
     g_vgpu.ctrl_resp = dma_alloc_coherent(PAGE_SIZE, &g_vgpu.ctrl_resp_phys);
