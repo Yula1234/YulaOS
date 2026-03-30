@@ -19,7 +19,6 @@ void sched_remove(task_t* t);
 void sched_set_current(task_t* t);
 void sched_on_task_entry(void);
 
-uint32_t calc_weight(task_prio_t prio);
 uint64_t calc_delta_vruntime(uint64_t delta_exec, task_prio_t prio);
 
 #ifdef __cplusplus

@@ -61,14 +61,14 @@ static const uint32_t prio_to_inv_weight[40] = {
 static constexpr uint64_t cpu_cache_invalid = 0xFFFFFFFF00000000ull;
 static __cacheline_aligned kernel::atomic<uint64_t> g_cpu_cache{cpu_cache_invalid};
 
-static inline int prio_to_index(task_prio_t prio) {
+___inline int prio_to_index(task_prio_t prio) {
     int nice = 10 - static_cast<int>(prio);
     if (nice < -20) nice = -20;
     if (nice > 19) nice = 19;
     return nice + 20;
 }
 
-uint32_t calc_weight(task_prio_t prio) {
+___inline uint32_t calc_weight(task_prio_t prio) {
     return sched_detail::prio_to_weight[prio_to_index(prio)];
 }
 
@@ -143,7 +143,7 @@ static int get_best_cpu(void) {
     return best_cpu;
 }
 
-static void enqueue_task(cpu_t* cpu, task_t* p) {
+___inline void enqueue_task(cpu_t* cpu, task_t* p) {
     struct rb_node **link = &cpu->runq_root.rb_node;
     struct rb_node *parent = nullptr;
     struct task *entry;
@@ -170,7 +170,7 @@ static void enqueue_task(cpu_t* cpu, task_t* p) {
     __sync_fetch_and_add(&cpu->runq_count, 1);
 }
 
-static void dequeue_task(cpu_t* cpu, task_t* p) {
+___inline void dequeue_task(cpu_t* cpu, task_t* p) {
     if (cpu->runq_leftmost == p) {
         struct rb_node *next = rb_next(&p->rb_node);
         cpu->runq_leftmost = next ? rb_entry(next, struct task, rb_node) : nullptr;
@@ -247,7 +247,7 @@ void sched_add(task_t* t) {
     g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
 }
 
-static task_t* pick_next_cfs(cpu_t* cpu) {
+___inline task_t* pick_next_cfs(cpu_t* cpu) {
     task_t* left = cpu->runq_leftmost;
 
     if (kernel::unlikely(!left)) {
@@ -260,11 +260,11 @@ static task_t* pick_next_cfs(cpu_t* cpu) {
     return left;
 }
 
-static inline bool sched_should_pin_task(const task_t* t) {
+___inline bool sched_should_pin_task(const task_t* t) {
     return t && t->pid != 0u;
 }
 
-static inline void sched_task_pin(task_t* t) {
+___inline void sched_task_pin(task_t* t) {
     if (!sched_should_pin_task(t)) {
         return;
     }
@@ -272,7 +272,7 @@ static inline void sched_task_pin(task_t* t) {
     (void)proc_task_retain(t);
 }
 
-static inline void sched_task_unpin(task_t* t) {
+___inline void sched_task_unpin(task_t* t) {
     if (!sched_should_pin_task(t)) {
         return;
     }
