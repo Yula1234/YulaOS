@@ -1412,17 +1412,13 @@ static int term_run(void) {
             if (pfds[0].revents & (POLLERR | POLLNVAL)) {
                 running = 0;
             } else if (pfds[0].revents & POLLIN) {
-                for (;;) {
-                    char buf[1024];
-                    int rn = read(master_fd, buf, (uint32_t)sizeof(buf));
-                    if (rn > 0) {
-                        term_process_buf(&term, buf, (uint32_t)rn);
-                        need_update = 1;
-                        if (rn < (int)sizeof(buf)) break;
-                        continue;
-                    }
+                char buf[1024];
+                int rn = read(master_fd, buf, (uint32_t)sizeof(buf));
+                if (rn > 0) {
+                    term_process_buf(&term, buf, (uint32_t)rn);
+                    need_update = 1;
+                } else {
                     running = 0;
-                    break;
                 }
             } else if (pfds[0].revents & POLLHUP) {
                 running = 0;
