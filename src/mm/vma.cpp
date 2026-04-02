@@ -389,7 +389,7 @@ static void unmap_range(uint32_t* page_dir, uint32_t start, uint32_t end) noexce
 
         uint32_t phys = pte & ~page_mask;
         if (phys != 0u && (pte & 0x200u) == 0u) {
-            pmm_free_block((void*)phys);
+            pmm_free_block_deferred((void*)phys);
         }
 
         auto* ctxp = static_cast<UnmapCtx*>(vctx);

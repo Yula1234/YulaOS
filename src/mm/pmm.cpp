@@ -11,6 +11,7 @@
 #include "pmm.h"
 
 #include <kernel/smp/cpu.h>
+#include <kernel/rcu.h>
 
 namespace kernel {
 
@@ -123,8 +124,8 @@ static inline void pcp_fix_shattered_page_metadata(page_t& page, pmm_zone_t zone
     page.freelist = nullptr;
     page.objects = 0;
 
-    page.prev = nullptr;
-    page.next = nullptr;
+    page.list.prev = nullptr;
+    page.list.next = nullptr;
 }
 
 static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
@@ -394,8 +395,8 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
     page->freelist = nullptr;
     page->objects = 0;
 
-    page->prev = nullptr;
-    page->next = nullptr;
+    page->list.prev = nullptr;
+    page->list.next = nullptr;
 
     /*
      * Split down by repeatedly carving out the upper buddy and returning it
@@ -628,8 +629,8 @@ void PmmState::init_used_pages(uint32_t total_pages, uint32_t kernel_end_addr) n
         page.freelist = nullptr;
         page.objects = 0;
 
-        page.prev = nullptr;
-        page.next = nullptr;
+        page.list.prev = nullptr;
+        page.list.next = nullptr;
     }
 }
 
@@ -793,29 +794,29 @@ pmm_zone_t PmmState::zone_for_flags(uint32_t flags) noexcept {
 }
 
 void PmmState::list_add(page_t** head, page_t* page) noexcept {
-    page->next = *head;
-    page->prev = nullptr;
+    page->list.next = *head;
+    page->list.prev = nullptr;
 
     if (*head) {
-        (*head)->prev = page;
+        (*head)->list.prev = page;
     }
 
     *head = page;
 }
 
 void PmmState::list_remove(page_t** head, page_t* page) noexcept {
-    if (page->prev) {
-        page->prev->next = page->next;
+    if (page->list.prev) {
+        page->list.prev->list.next = page->list.next;
     } else {
-        *head = page->next;
+        *head = page->list.next;
     }
 
-    if (page->next) {
-        page->next->prev = page->prev;
+    if (page->list.next) {
+        page->list.next->list.prev = page->list.prev;
     }
 
-    page->next = nullptr;
-    page->prev = nullptr;
+    page->list.next = nullptr;
+    page->list.prev = nullptr;
 }
 
 void PmmState::free_area_push(pmm_zone_t zone, uint32_t order, page_t* page) noexcept {
@@ -930,8 +931,8 @@ void PmmState::free_pages_unlocked(void* addr, uint32_t order) noexcept {
     page->slab_cache = nullptr;
     page->freelist = nullptr;
     page->objects = 0;
-    page->prev = nullptr;
-    page->next = nullptr;
+    page->list.prev = nullptr;
+    page->list.next = nullptr;
 
     page->flags = (page->flags | PMM_FLAG_FREE) & ~PMM_FLAG_USED;
     page->order = order;
@@ -1012,6 +1013,40 @@ void* pmm_alloc_block(void) {
 
 void pmm_free_block(void* addr) {
     pmm_free_pages(addr, 0u);
+}
+
+static void pmm_free_block_rcu_cb(rcu_head_t* head) {
+    if (!head) {
+        return;
+    }
+
+    page_t* page = container_of(head, page_t, rcu);
+
+    void* phys_addr = (void*)(uintptr_t)kernel::pmm_state()->page_to_phys(page);
+
+    kernel::pmm_state()->free_pages(phys_addr, 0u);
+}
+
+void pmm_free_block_deferred(void* addr) {
+    if (!addr) {
+        return;
+    }
+
+    page_t* page = kernel::pmm_state()->phys_to_page(
+        (uint32_t)(uintptr_t)addr
+    );
+
+    if (!page) {
+        pmm_free_block(addr);
+        return;
+    }
+
+    if ((page->flags & PMM_FLAG_KERNEL) != 0u) {
+        pmm_free_block(addr);
+        return;
+    }
+
+    call_rcu(&page->rcu, pmm_free_block_rcu_cb);
 }
 
 page_t* pmm_phys_to_page(uint32_t phys_addr) {

@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <kernel/rcu_types.h>
 
 #define PAGE_SIZE 4096
 #define PAGE_SHIFT 12
@@ -77,8 +78,13 @@ typedef struct page {
     void* freelist;
     uint16_t objects;
 
-    struct page* prev;
-    struct page* next;
+    union {
+        struct {
+            struct page* prev;
+            struct page* next;
+        } list;
+        rcu_head_t rcu;
+    };
 
     uint32_t _reserved;
 } page_t;
@@ -219,6 +225,7 @@ void pmm_init_regions(
 
 void* pmm_alloc_block(void);
 void pmm_free_block(void* addr);
+void pmm_free_block_deferred(void* addr);
 
 void* pmm_alloc_pages(uint32_t order);
 void* pmm_alloc_pages_zone(uint32_t order, pmm_zone_t zone);

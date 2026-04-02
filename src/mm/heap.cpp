@@ -563,8 +563,8 @@ public:
                     page->slab_cache = nullptr;
                     page->freelist = nullptr;
                     page->objects = 0;
-                    page->prev = nullptr;
-                    page->next = nullptr;
+                    page->list.prev = nullptr;
+                    page->list.next = nullptr;
                     page_set_owner_tag(*page, 0u);
                 }
             }
@@ -715,29 +715,29 @@ private:
      * cpu_slab is not part of these lists.
      */
     static void slab_list_add(page_t*& head, page_t& page) noexcept {
-        page.next = head;
-        page.prev = nullptr;
+        page.list.next = head;
+        page.list.prev = nullptr;
 
         if (head) {
-            head->prev = &page;
+            head->list.prev = &page;
         }
 
         head = &page;
     }
 
     static void slab_list_remove(page_t*& head, page_t& page) noexcept {
-        if (page.prev) {
-            page.prev->next = page.next;
+        if (page.list.prev) {
+            page.list.prev->list.next = page.list.next;
         } else {
-            head = page.next;
+            head = page.list.next;
         }
 
-        if (page.next) {
-            page.next->prev = page.prev;
+        if (page.list.next) {
+            page.list.next->list.prev = page.list.prev;
         }
 
-        page.next = nullptr;
-        page.prev = nullptr;
+        page.list.next = nullptr;
+        page.list.prev = nullptr;
     }
 
     void slub_init_page(KmemCache& cache, page_t& page, void* virt_addr) noexcept {
@@ -751,8 +751,8 @@ private:
 
         page.slab_cache = &cache;
         page.objects = 0;
-        page.next = nullptr;
-        page.prev = nullptr;
+        page.list.next = nullptr;
+        page.list.prev = nullptr;
         page_set_owner_tag(page, 0u);
 
         const uint32_t obj_count = PAGE_SIZE / cache.object_size;
@@ -1061,8 +1061,8 @@ private:
                 page.slab_cache = nullptr;
                 page.freelist = nullptr;
                 page.objects = 0;
-                page.prev = nullptr;
-                page.next = nullptr;
+                page.list.prev = nullptr;
+                page.list.next = nullptr;
                 page_set_owner_tag(page, 0u);
 
                 need_free_page = true;

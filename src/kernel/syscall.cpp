@@ -295,7 +295,7 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
             }
 
             if (phys != 0u && (pte & 0x200u) == 0u) {
-                pmm_free_block((void*)phys);
+                pmm_free_block_deferred((void*)phys);
             }
 
             return 1;
