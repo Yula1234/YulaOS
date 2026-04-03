@@ -13,6 +13,7 @@
 #include <kernel/proc.h>
 #include <kernel/smp/cpu.h>
 #include <kernel/panic.h>
+#include <kernel/rcu.h>
 
 #include <kernel/output/kprintf.h>
 
@@ -593,6 +594,8 @@ void isr_handler(registers_t* regs) {
             }
 
             lapic_eoi();
+
+            rcu_process_local();
 
             if (curr) {
                 maybe_deliver_pending_signal(curr, regs);

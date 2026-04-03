@@ -5,6 +5,7 @@
 #define KERNEL_CPU_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <kernel/smp/cpu_limits.h>
 #include <hal/lock.h>
 #include <lib/rbtree.h>
@@ -57,6 +58,9 @@ typedef struct {
     volatile uint32_t in_kernel;
 
     struct rcu_head* rcu_queue;
+    struct rcu_head* rcu_pending;
+    uint32_t rcu_qs_snapshot[MAX_CPUS];
+    bool rcu_gp_active;
     volatile uint32_t rcu_qlen;
 
 } __cacheline_aligned cpu_t;

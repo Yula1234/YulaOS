@@ -3,9 +3,9 @@
 
 #pragma once
 
-#include <kernel/rcu_types.h>
 
 #include <kernel/smp/cpu_limits.h>
+#include <kernel/rcu_types.h>
 #include <kernel/smp/mb.h>
 
 #include <lib/compiler.h>
@@ -21,7 +21,7 @@ void synchronize_rcu(void);
 
 void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*));
 
-void rcu_gc_task(void* arg);
+void rcu_process_local(void);
 
 void rcu_qs_count_inc(void);
 

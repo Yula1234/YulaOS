@@ -8,6 +8,7 @@
 #include <kernel/smp/cpu.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
+#include <kernel/rcu.h>
 
 #include <drivers/video/vga.h>
 
@@ -148,11 +149,13 @@ void idle_task_func(void* arg) {
     (void)arg;
     while (1) {
         cpu_t* cpu = cpu_current();
+
+        rcu_qs_count_inc();
+        rcu_process_local();
+
         if (cpu) {
             __atomic_store_n(&cpu->in_kernel, 0u, __ATOMIC_RELEASE);
         }
-
-        rcu_qs_count_inc();
 
         __asm__ volatile("sti");
         cpu_hlt();

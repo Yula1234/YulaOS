@@ -2,20 +2,13 @@
 /* Copyright (C) 2026 Yula1234 */
 
 #include <lib/cpp/lock_guard.h>
-#include <lib/cpp/semaphore.h>
 #include <lib/cpp/atomic.h>
 #include <lib/compiler.h>
 
 #include <kernel/smp/cpu.h>
-#include <kernel/sched.h>
 #include <kernel/rcu.h>
 
 #include <hal/apic.h>
-
-static kernel::Semaphore g_rcu_sem{};
-static kernel::atomic<uint32_t> g_rcu_sem_ready{0u};
-
-extern "C" volatile uint32_t timer_ticks;
 
 extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
     if (!head || !func) {
@@ -25,76 +18,88 @@ extern "C" void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*)) {
     head->func = func;
 
     cpu_t* cpu = cpu_current();
-    if (kernel::unlikely(!cpu)) {
-        return;
-    }
 
     kernel::ScopedIrqDisable irq_guard;
 
-    rcu_head_t* old_head = __atomic_load_n(&cpu->rcu_queue, __ATOMIC_RELAXED);
-    do {
-        head->next = old_head;
-    } while (!__atomic_compare_exchange_n(
-        &cpu->rcu_queue, &old_head, head,
-        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED
-    ));
+    head->next = cpu->rcu_queue;
+    cpu->rcu_queue = head;
 
-    uint32_t len = __atomic_fetch_add(&cpu->rcu_qlen, 1u, __ATOMIC_RELAXED);
-    if (len == 256u && g_rcu_sem_ready.load(kernel::memory_order::relaxed) != 0u) {
-        g_rcu_sem.signal();
+    __atomic_fetch_add(&cpu->rcu_qlen, 1u, __ATOMIC_RELAXED);
+}
+
+static void rcu_invoke_callbacks(rcu_head_t* list) {
+    while (list) {
+        rcu_head_t* next = list->next;
+        void (*f)(rcu_head_t*) = list->func;
+
+        list->next = nullptr;
+        list->func = nullptr;
+
+        f(list);
+        list = next;
     }
 }
 
-extern "C" void rcu_gc_task(void* arg) {
-    (void)arg;
+void rcu_process_local(void) {
+    cpu_t* cpu = cpu_current();
 
-    g_rcu_sem_ready.store(1u, kernel::memory_order::release);
-
-    for (;;) {
-        g_rcu_sem.wait_timeout(timer_ticks + 10u);
-
-        rcu_head_t* list = nullptr;
+    if (cpu->rcu_gp_active) {
+        bool all_passed = true;
 
         for (int i = 0; i < cpu_count; i++) {
-            if (cpus[i].id == -1) {
+            if (cpus[i].id == -1 || &cpus[i] == cpu) {
                 continue;
             }
 
-            rcu_head_t* local = __atomic_exchange_n(&cpus[i].rcu_queue, nullptr, __ATOMIC_ACQUIRE);
-            if (!local) {
+            if (__atomic_load_n(&cpus[i].in_kernel, __ATOMIC_ACQUIRE) == 0u) {
                 continue;
             }
 
-            __atomic_store_n(&cpus[i].rcu_qlen, 0u, __ATOMIC_RELAXED);
+            uint32_t current_qs = __atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_ACQUIRE);
+            if (current_qs != cpu->rcu_qs_snapshot[i]) {
+                continue;
+            }
 
-            while (local) {
-                rcu_head_t* next = local->next;
-                local->next = list;
-                list = local;
-                local = next;
+            all_passed = false;
+            break;
+        }
+
+        if (all_passed) {
+            rcu_head_t* ready_list = nullptr;
+
+            {
+                kernel::ScopedIrqDisable irq_guard;
+
+                if (cpu->rcu_gp_active) {
+                    ready_list = cpu->rcu_pending;
+                    cpu->rcu_pending = nullptr;
+                    cpu->rcu_gp_active = false;
+                }
+            }
+
+            if (ready_list) {
+                rcu_invoke_callbacks(ready_list);
             }
         }
+    }
 
-        if (!list) {
-            continue;
-        }
+    if (!cpu->rcu_gp_active) {
+        kernel::ScopedIrqDisable irq_guard;
 
-        synchronize_rcu();
+        if (cpu->rcu_queue) {
+            cpu->rcu_pending = cpu->rcu_queue;
+            cpu->rcu_queue = nullptr;
+            cpu->rcu_qlen = 0u;
 
-        while (list) {
-            rcu_head_t* next = list->next;
-            void (*f)(rcu_head_t*) = list->func;
+            cpu->rcu_gp_active = true;
 
-            list->next = nullptr;
-            list->func = nullptr;
-
-            f(list);
-            list = next;
+            for (int i = 0; i < cpu_count; i++) {
+                cpu->rcu_qs_snapshot[i] = __atomic_load_n(&cpus[i].rcu_qs_count, __ATOMIC_RELAXED);
+            }
         }
     }
 }
 
-extern "C" void rcu_qs_count_inc(void);
 extern "C" void synchronize_rcu(void) {
     const int n = cpu_count;
     uint32_t* snap = (uint32_t*)__builtin_alloca(sizeof(uint32_t) * n);
