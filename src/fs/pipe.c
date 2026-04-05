@@ -151,7 +151,7 @@ static void sem_signal_n(semaphore_t* sem, uint32_t n) {
            && !dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
 
-        __sync_fetch_and_add(&t->in_transit, 1);
+        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
         dlist_del(&t->sem_node);
 
@@ -161,7 +161,7 @@ static void sem_signal_n(semaphore_t* sem, uint32_t n) {
         t->blocked_kind = TASK_BLOCK_NONE;
 
         if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
-            __sync_fetch_and_sub(&t->in_transit, 1);
+            __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
             continue;
         }
 
@@ -169,7 +169,7 @@ static void sem_signal_n(semaphore_t* sem, uint32_t n) {
             sched_add(t);
         }
 
-        __sync_fetch_and_sub(&t->in_transit, 1);
+        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
     }
 
     spinlock_release_safe(&sem->lock, flags);
@@ -196,7 +196,7 @@ static void sem_wake_all(semaphore_t* sem) {
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
 
-        __sync_fetch_and_add(&t->in_transit, 1);
+        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
         dlist_del(&t->sem_node);
 
@@ -208,7 +208,7 @@ static void sem_wake_all(semaphore_t* sem) {
         sem->count++;
 
         if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
-            __sync_fetch_and_sub(&t->in_transit, 1);
+            __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
             continue;
         }
 
@@ -216,7 +216,7 @@ static void sem_wake_all(semaphore_t* sem) {
             sched_add(t);
         }
 
-        __sync_fetch_and_sub(&t->in_transit, 1);
+       __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
     }
 
     spinlock_release_safe(&sem->lock, flags);

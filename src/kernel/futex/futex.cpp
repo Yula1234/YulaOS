@@ -259,7 +259,7 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
         while (woken < max_wake && !waiters.empty()) {
             task_t& t = waiters.front();
 
-            __sync_fetch_and_add(&t.in_transit, 1);
+            __atomic_fetch_add(&t.in_transit, 1u, __ATOMIC_ACQUIRE);
 
             if (!dlist_unlink_consistent(&t.sem_node)) {
                 panic("FUTEX: waiter unlink failed");
@@ -272,7 +272,7 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
                 sched_add(&t);
             }
 
-            __sync_fetch_and_sub(&t.in_transit, 1);
+            __atomic_fetch_sub(&t.in_transit, 1u, __ATOMIC_RELEASE);
 
             woken++;
         }

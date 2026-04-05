@@ -1,45 +1,45 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
-#include <drivers/video/fbdev.h>
+#include <kernel/waitq/poll_waitq.h>
+#include <kernel/tty/tty_internal.h>
+#include <kernel/tty/tty_service.h>
+#include <kernel/output/kprintf.h>
+#include <kernel/futex/futex.h>
+#include <kernel/term/term.h>
+#include <kernel/smp/cpu.h>
+#include <kernel/smp/mb.h>
 
+#include <lib/cpp/unique_ptr.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/dlist.h>
+
+#include <lib/hash_map.h>
 #include <lib/string.h>
 #include <lib/dlist.h>
-#include <fs/yulafs.h>
+
+#include <hal/apic.h>
+#include <hal/simd.h>
+#include <hal/io.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+#include <mm/vma.h>
 
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
 
-#include <mm/heap.h>
-#include <mm/pmm.h>
-#include <mm/heap.h>
-#include <mm/vma.h>
+#include <drivers/video/fbdev.h>
 
-#include <hal/io.h>
-#include <hal/simd.h>
-#include <hal/apic.h>
-#include <kernel/input_focus.h>
+#include <fs/yulafs.h>
 
-#include <lib/hash_map.h>
-#include <lib/cpp/dlist.h>
-#include <lib/cpp/atomic.h>
-#include <lib/cpp/lock_guard.h>
-#include <lib/cpp/unique_ptr.h>
-
+#include "input_focus.h"
+#include "syscall.h"
+#include "panic.h"
 #include "sched.h"
 #include "proc.h"
 #include "elf.h"
-#include "syscall.h"
-#include "panic.h"
-
-#include <kernel/smp/mb.h>
-#include <kernel/output/kprintf.h>
-#include <kernel/term/term.h>
-#include <kernel/tty/tty_service.h>
-#include <kernel/tty/tty_internal.h>
-#include <kernel/waitq/poll_waitq.h>
-#include <kernel/futex/futex.h>
-#include <kernel/smp/cpu.h>
 
 #define PID_L2_BITS 10
 #define PID_L1_BITS 12
@@ -2642,14 +2642,16 @@ void proc_check_sleepers(uint32_t current_tick) {
             continue;
         }
 
-        __sync_fetch_and_add(&t->in_transit, 1);
+        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
         proc::detail::cpu_sleep_remove_locked(cpu, t);
 
         if (proc_change_state(t, TASK_RUNNABLE) != 0) {
             __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
             __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
-            __sync_fetch_and_sub(&t->in_transit, 1);
+
+            __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
+            
             proc_task_put(t);
             continue;
         }
@@ -2661,7 +2663,8 @@ void proc_check_sleepers(uint32_t current_tick) {
 
         sched_add(t);
 
-        __sync_fetch_and_sub(&t->in_transit, 1);
+        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
+        
         proc_task_put(t);
     }
 
@@ -2706,12 +2709,12 @@ void proc_wake(task_t* t) {
         return;
     }
 
-    __sync_fetch_and_add(&t->in_transit, 1);
+    __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
     proc_sleep_remove(t);
 
     if (t->blocked_on_sem) {
-        __sync_fetch_and_sub(&t->in_transit, 1);
+        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
         return;
     }
 
@@ -2719,7 +2722,7 @@ void proc_wake(task_t* t) {
         sched_add(t);
     }
 
-    __sync_fetch_and_sub(&t->in_transit, 1);
+    __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
 }
 
 int proc_change_state(task_t* t, task_state_t new_state) {

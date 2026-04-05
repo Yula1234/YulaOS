@@ -185,7 +185,7 @@ static void mutex_unlock_slowpath(mutex_t* m, task_t* curr) {
     if (likely(!dlist_empty(&m->wait_list))) {
         task_t* t = container_of(m->wait_list.next, task_t, sem_node);
 
-        __sync_fetch_and_add(&t->in_transit, 1u);
+        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
         dlist_del(&t->sem_node);
 
@@ -200,7 +200,7 @@ static void mutex_unlock_slowpath(mutex_t* m, task_t* curr) {
             }
         }
 
-        __sync_fetch_and_sub(&t->in_transit, 1u);
+        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
     }
 
     spinlock_release_safe(&m->wait_lock, flags);

@@ -35,7 +35,7 @@ __attribute__((always_inline)) static inline void rwlock_do_wake_task(task_t* t)
         return;
     }
 
-    __sync_fetch_and_add(&t->in_transit, 1u);
+    __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
     t->sem_node.next = 0;
     t->sem_node.prev = 0;
@@ -50,7 +50,7 @@ __attribute__((always_inline)) static inline void rwlock_do_wake_task(task_t* t)
         }
     }
 
-    __sync_fetch_and_sub(&t->in_transit, 1u);
+    __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
 }
 
 static void rwlock_wake_waiters(rwlock_t* rw) {
