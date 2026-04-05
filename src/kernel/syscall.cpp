@@ -1818,7 +1818,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             proc_sleep_remove(t);
         }
 
-        (void)proc_change_state(t, TASK_RUNNABLE);
+        (void)proc_change_state(t, TASK_RUNNING);
     };
 
     int result = 0;
