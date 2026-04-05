@@ -167,7 +167,7 @@ ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
     if (leftmost)
         cpu->runq_leftmost = p;
         
-    __sync_fetch_and_add(&cpu->runq_count, 1);
+    __atomic_fetch_add(&cpu->runq_count, 1, __ATOMIC_RELAXED);
 }
 
 ___inline void dequeue_task(cpu_t* cpu, task_t* p) {
@@ -177,7 +177,8 @@ ___inline void dequeue_task(cpu_t* cpu, task_t* p) {
     }
 
     rb_erase(&p->rb_node, &cpu->runq_root);
-    __sync_fetch_and_sub(&cpu->runq_count, 1);
+
+    __atomic_fetch_sub(&cpu->runq_count, 1, __ATOMIC_RELAXED);
 }
 
 void sched_add(task_t* t) {
@@ -240,7 +241,8 @@ void sched_add(task_t* t) {
     t->exec_start = 0;
     
     target->total_priority_weight += t->priority;
-    __sync_fetch_and_add(&target->total_task_count, 1);
+    
+    __atomic_fetch_add(&target->total_task_count, 1, __ATOMIC_RELAXED);
 
     enqueue_task(target, t);
 
@@ -460,7 +462,7 @@ void sched_remove(task_t* t) {
         target->total_priority_weight = 0;
 
     if (target->total_task_count > 0) {
-        __sync_fetch_and_sub(&target->total_task_count, 1);
+        __atomic_fetch_sub(&target->total_task_count, 1, __ATOMIC_RELAXED);
     }
 
     g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);

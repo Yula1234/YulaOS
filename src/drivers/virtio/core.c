@@ -10,8 +10,13 @@ static spinlock_t g_virtio_drivers_lock;
 static volatile int g_virtio_drivers_subsystem_inited;
 
 static void virtio_drivers_subsystem_init(void) {
-    if (__sync_bool_compare_and_swap(&g_virtio_drivers_subsystem_inited, 0, 1)) {
+    int expected = 0;
+
+    if (__atomic_compare_exchange_n(&g_virtio_drivers_subsystem_inited, &expected,
+        1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    {
         spinlock_init(&g_virtio_drivers_lock);
+
         dlist_init(&g_virtio_drivers);
     }
 }

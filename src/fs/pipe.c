@@ -70,7 +70,7 @@ static void pipe_private_retain(void* private_data) {
         return;
     }
 
-    __sync_fetch_and_add(&p->refs, 1u);
+    __atomic_fetch_add(&p->refs, 1u, __ATOMIC_RELAXED);
 }
 
 static void pipe_private_release(void* private_data) {
@@ -79,7 +79,7 @@ static void pipe_private_release(void* private_data) {
         return;
     }
 
-    if (__sync_sub_and_fetch(&p->refs, 1u) != 0u) {
+    if (__atomic_sub_fetch(&p->refs, 1u, __ATOMIC_ACQ_REL) != 0u) {
         return;
     }
 
@@ -104,6 +104,7 @@ static uint32_t sem_take_up_to(semaphore_t* sem, uint32_t max) {
     sem_wait(sem);
 
     uint32_t taken = 1;
+
     while (taken < max
            && sem_try_acquire(sem)) {
         taken++;
@@ -123,7 +124,9 @@ static uint32_t sem_try_take_up_to(semaphore_t* sem, uint32_t max) {
      * This is intentionally implemented with the internal semaphore lock.
      */
     uint32_t flags = spinlock_acquire_safe(&sem->lock);
+
     int c = sem->count;
+    
     if (c <= 0) {
         spinlock_release_safe(&sem->lock, flags);
         return 0;
@@ -133,6 +136,7 @@ static uint32_t sem_try_take_up_to(semaphore_t* sem, uint32_t max) {
     uint32_t take = (avail < max) ? avail : max;
 
     sem->count -= (int)take;
+    
     spinlock_release_safe(&sem->lock, flags);
 
     return take;
@@ -181,12 +185,17 @@ static int sem_try_take_n(semaphore_t* sem, uint32_t n) {
     }
 
     uint32_t flags = spinlock_acquire_safe(&sem->lock);
+
     if (sem->count >= (int)n) {
         sem->count -= (int)n;
+        
         spinlock_release_safe(&sem->lock, flags);
+        
         return 1;
     }
+
     spinlock_release_safe(&sem->lock, flags);
+    
     return 0;
 }
 

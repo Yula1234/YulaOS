@@ -27,7 +27,9 @@ volatile int ap_running_count = 0;
 typedef struct {
     uint32_t start;
     uint32_t end;
+
     volatile uint32_t pending_mask;
+    
     volatile int in_use;
 } tlb_shootdown_req_t;
 
@@ -121,7 +123,7 @@ void smp_ap_main(cpu_t* cpu_arg) {
 
     __asm__ volatile("sti");
     
-    __sync_fetch_and_add(&ap_running_count, 1);
+    __atomic_fetch_add(&ap_running_count, 1, __ATOMIC_RELEASE);
     
     sched_yield();
 }
@@ -188,7 +190,7 @@ void smp_tlb_ipi_handler(void) {
 
         tlb_flush_range_local(req->start, req->end);
 
-        __sync_fetch_and_and(&req->pending_mask, ~my_bit);
+        __atomic_fetch_and(&req->pending_mask, ~my_bit, __ATOMIC_ACQ_REL);
     }
 }
 

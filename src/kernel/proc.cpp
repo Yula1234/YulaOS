@@ -522,14 +522,18 @@ int proc_signal_pgrp(uint32_t pgid, uint32_t sig) {
     kernel::RwSpinLockNativeReadSafeGuard group_guard(g->lock);
 
     int signaled = 0;
+
     for (dlist_head_t* it = g->members.next; it && it != &g->members; it = it->next) {
         task_t* m = container_of(it, task_t, pgrp_node);
+        
         if (!m || m->state == TASK_UNUSED || m->state == TASK_ZOMBIE) {
             continue;
         }
 
-        __sync_fetch_and_or(&m->pending_signals, 1u << sig);
+        __atomic_fetch_or(&m->pending_signals, 1u << sig, __ATOMIC_ACQ_REL);
+
         proc_wake(m);
+        
         signaled++;
     }
 
@@ -1350,11 +1354,13 @@ void proc_task_put(task_t* t) {
         return;
     }
 
-    const uint32_t old = __sync_fetch_and_sub(&t->refs, 1u);
+    const uint32_t old = __atomic_fetch_sub(&t->refs, 1u, __ATOMIC_ACQ_REL);
+
     if (old == 0u) {
-        __sync_fetch_and_add(&t->refs, 1u);
+        __atomic_fetch_add(&t->refs, 1u, __ATOMIC_RELAXED);
         return;
     }
+
     if (old != 1u) {
         return;
     }
@@ -1390,19 +1396,28 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
 }
 
 static void proc_mem_retain(proc_mem_t* mem) {
-    if (!mem) return;
-    __sync_fetch_and_add(&mem->refcount, 1);
+    if (!mem) {
+        return;
+    }
+
+    __atomic_fetch_add(&mem->refcount, 1, __ATOMIC_RELAXED);
 }
 
 static void proc_mem_release(proc_mem_t* mem) {
-    if (!mem) return;
-
-    uint32_t old = __sync_fetch_and_sub(&mem->refcount, 1);
-    if (old == 0) {
-        mem->refcount = 0;
+    if (!mem) {
         return;
     }
-    if (old > 1) return;
+
+    const uint32_t old = __atomic_fetch_sub(&mem->refcount, 1, __ATOMIC_ACQ_REL);
+
+    if (old == 0) {
+        mem->refcount = 0;
+
+        return;
+    }
+    if (old > 1) {
+        return;
+    }
 
     if (mem->leader_pid) {
         fb_release_by_pid(mem->leader_pid);
@@ -1672,16 +1687,20 @@ void proc_kill(task_t* t) {
     }
     
     uint32_t waited_pid = t->wait_for_pid;
+
     if (waited_pid) {
         task_t* waited = proc_find_by_pid(waited_pid);
+
         if (waited) {
-            uint32_t old = __sync_fetch_and_sub(&waited->exit_waiters, 1);
+            const uint32_t old = __atomic_fetch_sub(&waited->exit_waiters, 1, __ATOMIC_ACQ_REL);
+
             if (old == 0) {
-                __sync_fetch_and_add(&waited->exit_waiters, 1);
+                __atomic_fetch_add(&waited->exit_waiters, 1, __ATOMIC_RELAXED);
             }
 
             proc_task_put(waited);
         }
+
         t->wait_for_pid = 0;
     }
 
@@ -2334,21 +2353,26 @@ task_t* proc_spawn_elf(const char* filename, int argc, char** argv) {
 
 void proc_wait(uint32_t pid) {
     task_t* target = proc_find_by_pid(pid);
-    if (!target) return;
+    
+    if (!target) {
+        return;
+    }
 
     task_t* waiter = proc_current();
+
     if (waiter) {
         waiter->wait_for_pid = pid;
     }
 
-    __sync_fetch_and_add(&target->exit_waiters, 1);
+    __atomic_fetch_add(&target->exit_waiters, 1, __ATOMIC_RELAXED);
     
     sem_wait(&target->exit_sem);
 
     if (waiter) {
         waiter->wait_for_pid = 0;
     }
-    __sync_fetch_and_sub(&target->exit_waiters, 1);
+
+    __atomic_fetch_sub(&target->exit_waiters, 1, __ATOMIC_ACQ_REL);
 
     proc_task_put(target);
 }
@@ -2362,7 +2386,7 @@ int proc_waitpid(uint32_t pid, int* out_status) {
         waiter->wait_for_pid = pid;
     }
 
-    __sync_fetch_and_add(&target->exit_waiters, 1);
+    __atomic_fetch_add(&target->exit_waiters, 1, __ATOMIC_RELAXED);
 
     sem_wait(&target->exit_sem);
 
@@ -2374,7 +2398,7 @@ int proc_waitpid(uint32_t pid, int* out_status) {
         *out_status = target->exit_status;
     }
 
-    __sync_fetch_and_sub(&target->exit_waiters, 1);
+    __atomic_fetch_sub(&target->exit_waiters, 1, __ATOMIC_ACQ_REL);
 
     proc_task_put(target);
     return 0;

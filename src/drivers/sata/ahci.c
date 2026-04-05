@@ -909,7 +909,7 @@ static int ahci_send_command(
         return 0;
     }
 
-    __sync_fetch_and_or(&ex->hba->port_active_slots[port_no], (1u << slot));
+    __atomic_fetch_or(&ex->hba->port_active_slots[port_no], (1u << slot), __ATOMIC_ACQ_REL);
 
     HBA_CMD_HEADER* cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
     cmdheader += slot;
@@ -965,7 +965,7 @@ static int ahci_send_command(
     }
 
     if (timeout_us == 0u) {
-        __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
+        __atomic_fetch_and(&ex->hba->port_active_slots[port_no], ~(1u << slot), __ATOMIC_ACQ_REL);
 
         const int reset_ok = ahci_port_comreset(ex);
 
@@ -986,7 +986,7 @@ static int ahci_send_command(
             return 0;
         }
 
-        __sync_fetch_and_or(&ex->hba->port_active_slots[port_no], (1u << new_slot));
+        __atomic_fetch_or(&ex->hba->port_active_slots[port_no], (1u << new_slot), __ATOMIC_ACQ_REL);
 
         HBA_CMD_HEADER* new_cmdheader = (HBA_CMD_HEADER*)(state->clb_virt);
         new_cmdheader += new_slot;
@@ -1026,7 +1026,7 @@ static int ahci_send_command(
             }
         }
 
-        __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << new_slot));
+        __atomic_fetch_and(&ex->hba->port_active_slots[port_no], ~(1u << new_slot), __ATOMIC_ACQ_REL);
 
         if ((ioread32(hba->iomem, AHCI_PORT_IS(port_no)) & (1u << 30)) == 0u
             && (ioread32(hba->iomem, AHCI_PORT_TFD(port_no)) & AHCI_DEV_ERR) == 0u) {
@@ -1048,7 +1048,7 @@ static int ahci_send_command(
         }
     }
 
-    __sync_fetch_and_and(&ex->hba->port_active_slots[port_no], ~(1u << slot));
+    __atomic_fetch_and(&ex->hba->port_active_slots[port_no], ~(1u << slot), __ATOMIC_ACQ_REL);
 
     result = 1;
 

@@ -44,7 +44,7 @@ static void panic_print_hex(int x, int y, uint32_t val) {
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs) {
     __asm__ volatile("cli");
 
-    if (__sync_lock_test_and_set(&g_kernel_panic_in_progress, 1) == 0) {
+    if (__atomic_exchange_n(&g_kernel_panic_in_progress, 1, __ATOMIC_ACQ_REL) == 0) {
         smp_panic_stop_other_cpus();
     }
 

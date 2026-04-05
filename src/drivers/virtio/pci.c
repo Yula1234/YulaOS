@@ -125,14 +125,23 @@ static void virtio_pci_irq_bh(work_struct_t* work) {
 }
 
 static spinlock_t g_virtio_devs_lock;
+
 static virtio_pci_dev_t* g_virtio_devs[8];
+
 static uint32_t g_virtio_devs_count;
+
 static volatile int g_virtio_global_inited;
 
 static void virtio_pci_global_init_once(void) {
-    if (__sync_bool_compare_and_swap(&g_virtio_global_inited, 0, 1)) {
+    int expected = 0;
+
+    if (__atomic_compare_exchange_n(&g_virtio_global_inited, &expected,
+        1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    {
         spinlock_init(&g_virtio_devs_lock);
+
         memset(g_virtio_devs, 0, sizeof(g_virtio_devs));
+        
         g_virtio_devs_count = 0;
     }
 }

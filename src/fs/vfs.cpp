@@ -293,7 +293,7 @@ static void vfs_instance_retain(vfs_fs_instance* inst) noexcept {
         return;
     }
 
-    __sync_fetch_and_add(&inst->refs, 1);
+    __atomic_fetch_add(&inst->refs, 1u, __ATOMIC_RELAXED);
 }
 
 static void vfs_instance_release(vfs_fs_instance* inst) noexcept {
@@ -301,7 +301,7 @@ static void vfs_instance_release(vfs_fs_instance* inst) noexcept {
         return;
     }
 
-    __sync_sub_and_fetch(&inst->refs, 1);
+    __atomic_sub_fetch(&inst->refs, 1u, __ATOMIC_ACQ_REL);
 }
 
 static bool vfs_instance_try_retain(vfs_fs_instance* inst) noexcept {

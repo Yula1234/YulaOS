@@ -320,7 +320,9 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
 
 static void syscall_kill(registers_t* regs, task_t* curr) {
     uint32_t target_pid = regs->ebx;
+
     task_t* t = proc_find_by_pid(target_pid);
+    
     if (!t) {
         regs->eax = (uint32_t)-1;
         return;
@@ -328,15 +330,20 @@ static void syscall_kill(registers_t* regs, task_t* curr) {
 
     if (t == curr) {
         proc_kill(t);
+
         proc_task_put(t);
+        
         sched_yield();
+        
         regs->eax = 0;
         return;
     }
 
     if (t->mem && t->mem->page_dir) {
-        __sync_fetch_and_or(&t->pending_signals, 1u << SIGTERM);
+        __atomic_fetch_or(&t->pending_signals, 1u << SIGTERM, __ATOMIC_ACQ_REL);
+
         proc_wake(t);
+        
         regs->eax = 0;
     } else {
         regs->eax = (uint32_t)-1;
