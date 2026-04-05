@@ -19,8 +19,10 @@ struct task;
 
 typedef struct {
     void* self;
+    
     int id;                 // LAPIC ID
     int index; 
+
     struct task* current_task;
     struct task* prev_task_during_switch;
 
@@ -58,9 +60,15 @@ typedef struct {
     volatile uint32_t in_kernel;
 
     struct rcu_head* rcu_queue;
+    struct rcu_head* rcu_queue_tail;
+
     struct rcu_head* rcu_pending;
+    struct rcu_head* rcu_pending_tail;
+    
     uint32_t rcu_qs_snapshot[MAX_CPUS];
+    
     bool rcu_gp_active;
+
     volatile uint32_t rcu_qlen;
 
 } __cacheline_aligned cpu_t;

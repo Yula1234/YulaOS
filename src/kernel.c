@@ -339,6 +339,8 @@ static void kmain_handle_kthread_failure(void) {
 }
 
 static void kmain_spawn_core_tasks(void) {
+    rcu_init_workers();
+    
     task_t* tty_t = proc_spawn_kthread("tty", PRIO_GUI, tty_task, 0);
     task_t* init_t = proc_spawn_kthread("init", PRIO_USER, init_task, 0);
     if (!tty_t || !init_t) {

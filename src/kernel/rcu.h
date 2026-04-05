@@ -19,6 +19,8 @@ extern "C" {
 
 void synchronize_rcu(void);
 
+void rcu_init_workers(void);
+
 void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*));
 
 void rcu_process_local(void);
