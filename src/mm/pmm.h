@@ -12,9 +12,10 @@
 #ifndef MM_PMM_H
 #define MM_PMM_H
 
+#include <kernel/rcu.h>
+
 #include <stdint.h>
 #include <stddef.h>
-#include <kernel/rcu_types.h>
 
 #define PAGE_SIZE 4096
 #define PAGE_SHIFT 12

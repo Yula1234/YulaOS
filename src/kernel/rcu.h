@@ -5,7 +5,6 @@
 
 
 #include <kernel/smp/cpu_limits.h>
-#include <kernel/rcu_types.h>
 #include <kernel/smp/mb.h>
 
 #include <lib/compiler.h>
@@ -16,6 +15,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct rcu_ptr {
+    void* ptr;
+} rcu_ptr_t;
+
+typedef struct rcu_head {
+    struct rcu_head* next;
+    void (*func)(struct rcu_head*);
+} rcu_head_t;
 
 void synchronize_rcu(void);
 

@@ -1,30 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2026 Yula1234
 
-#include <mm/shm.h>
-
-#include <fs/vfs.h>
+#include <lib/cpp/intrusive_ref.h>
+#include <lib/cpp/unique_ptr.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/string.h>
+#include <lib/cpp/new.h>
 
 #include <lib/hash_map.h>
-
-#include <lib/cpp/atomic.h>
-#include <lib/cpp/intrusive_ref.h>
-#include <lib/cpp/new.h>
-#include <lib/cpp/string.h>
-#include <lib/cpp/unique_ptr.h>
-
 #include <lib/string.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <mm/pmm.h>
+#include <mm/shm.h>
+
 #include <arch/i386/paging.h>
 
-#ifdef __cplusplus
-}
-#endif
+#include <fs/vfs.h>
 
 namespace kernel {
 namespace shm {
