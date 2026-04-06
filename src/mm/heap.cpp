@@ -49,6 +49,13 @@ static constexpr uint32_t compute_reciprocal(uint32_t divisor) noexcept {
  *    stores the page count
  */
 
+struct RemoteFreeBatch {
+    void* head = nullptr;
+    void* tail = nullptr;
+
+    uint32_t count = 0;
+};
+
 struct KmemCache {
     char name[16];
     size_t object_size;
@@ -64,6 +71,8 @@ struct KmemCache {
 
         kernel::atomic<void*> remote_free;
         kernel::atomic<uint32_t> remote_free_count;
+
+        RemoteFreeBatch remote_batches[MAX_CPUS];
     };
 
     PerCpuSlab cpu_slabs[MAX_CPUS];
@@ -112,8 +121,16 @@ public:
 
             for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
                 c->cpu_slabs[cpu].page = nullptr;
+                
                 c->cpu_slabs[cpu].remote_free.store(nullptr);
                 c->cpu_slabs[cpu].remote_free_count.store(0u);
+
+                for (int tgt = 0; tgt < MAX_CPUS; tgt++) {
+                    c->cpu_slabs[cpu].remote_batches[tgt].head = nullptr;
+                    c->cpu_slabs[cpu].remote_batches[tgt].tail = nullptr;
+
+                    c->cpu_slabs[cpu].remote_batches[tgt].count = 0;
+                }
             }
 
             c->partial = nullptr;
@@ -283,7 +300,10 @@ public:
 
                 if (locked_owner_tag != 0u && locked_owner_cpu == owner_cpu) {
                     if (kernel::likely(cache.cpu_slabs[owner_cpu].page == page)) {
-                        remote_free_object(cache.cpu_slabs[owner_cpu], *page, obj);
+                        remote_free_object_batched(
+                            cache.cpu_slabs[cpu_index], cache.cpu_slabs[owner_cpu],
+                            owner_cpu, *page, obj
+                        );
                         return;
                     }
                 }
@@ -829,21 +849,52 @@ private:
         page.freelist = obj;
     }
 
-    static void remote_free_object(KmemCache::PerCpuSlab& target, page_t& page, void* obj) noexcept {
-        if (kernel::unlikely(!obj)) {
-            panic("SLUB: remote free null object");
+    static void flush_remote_batch(KmemCache::PerCpuSlab& target, RemoteFreeBatch& batch) noexcept {
+        if (batch.count == 0) {
+            return;
         }
 
+        void* current_head = target.remote_free.load(kernel::memory_order::relaxed);
+
+        while (true) {
+            *reinterpret_cast<uintptr_t*>(batch.tail) = reinterpret_cast<uintptr_t>(current_head) | 1u;
+
+            if (target.remote_free.compare_exchange_weak(
+                    current_head, batch.head,
+                    kernel::memory_order::release,
+                    kernel::memory_order::relaxed)) {
+                target.remote_free_count.fetch_add(batch.count, kernel::memory_order::relaxed);
+                break;
+            }
+        }
+
+        batch.head = nullptr;
+        batch.tail = nullptr;
+        
+        batch.count = 0;
+    }
+
+    static void remote_free_object_batched(
+        KmemCache::PerCpuSlab& local_slab, KmemCache::PerCpuSlab& target_slab,
+        int target_cpu, page_t& page, void* obj) noexcept
+    {
+        
         page_remote_pending_inc(page);
 
-        void* head = target.remote_free.load();
-        while (true) {
-            *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(head) | 1u;
+        RemoteFreeBatch& batch = local_slab.remote_batches[target_cpu];
 
-            if (target.remote_free.compare_exchange_weak(head, obj)) {
-                target.remote_free_count.fetch_add(1u);
-                return;
-            }
+        *reinterpret_cast<uintptr_t*>(obj) = reinterpret_cast<uintptr_t>(batch.head) | 1u;
+        
+        batch.head = obj;
+        
+        if (batch.count == 0) {
+            batch.tail = obj;
+        }
+        
+        batch.count++;
+
+        if (batch.count >= 16) {
+            flush_remote_batch(target_slab, batch);
         }
     }
 
@@ -1037,9 +1088,15 @@ private:
             const uint32_t owner_tag = page_owner_tag(page);
             if (kernel::unlikely(owner_tag != 0u)) {
                 const int owner_cpu = static_cast<int>(owner_tag) - 1;
+
                 if (owner_cpu >= 0 && owner_cpu < MAX_CPUS) {
                     if (kernel::likely(cache.cpu_slabs[owner_cpu].page == &page)) {
-                        remote_free_object(cache.cpu_slabs[owner_cpu], page, obj);
+                        const int local_cpu = cpu_current()->index;
+                        
+                        remote_free_object_batched(
+                            cache.cpu_slabs[local_cpu], cache.cpu_slabs[owner_cpu],
+                            owner_cpu, page, obj
+                        );
                         return;
                     }
                 }
