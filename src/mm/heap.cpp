@@ -24,6 +24,18 @@ extern "C" {
 
 namespace {
 
+static constexpr uint32_t compute_reciprocal(uint32_t divisor) noexcept {
+    if (divisor == 0u) {
+        return 0u;
+    }
+
+    if (divisor == 1u) {
+        return 0xFFFFFFFFu;
+    }
+
+    return static_cast<uint32_t>(((static_cast<uint64_t>(1) << 32) + divisor - 1) / divisor);
+}
+
 /*
  * Kernel heap implementation.
  *
@@ -41,6 +53,7 @@ struct KmemCache {
     char name[16];
     size_t object_size;
 
+    uint32_t reciprocal_size;
     uint32_t align;
     uint32_t flags;
 
@@ -93,6 +106,7 @@ public:
             c->name[1] = '\0';
 
             c->object_size = size;
+            c->reciprocal_size = compute_reciprocal(static_cast<uint32_t>(size));
             c->align = k_align_default;
             c->flags = 0;
 
@@ -230,11 +244,17 @@ public:
         const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
         const uintptr_t off = virt - page_virt;
 
-        if (kernel::unlikely(
-                off >= PAGE_SIZE
-                || cache.object_size == 0
-                || (off % cache.object_size) != 0u
-            )) {
+        if (kernel::unlikely(off >= PAGE_SIZE || cache.object_size == 0)) {
+            panic("SLUB: invalid object address");
+        }
+
+        const uint32_t index = static_cast<uint32_t>(
+            (static_cast<uint64_t>(off) * cache.reciprocal_size) >> 32
+        );
+
+        const uintptr_t expected_off = static_cast<uintptr_t>(index) * cache.object_size;
+
+        if (kernel::unlikely(off != expected_off)) {
             panic("SLUB: invalid object address");
         }
 
@@ -1197,6 +1217,7 @@ private:
         copy_cache_name(*cache, name);
 
         cache->object_size = size;
+        cache->reciprocal_size = compute_reciprocal(static_cast<uint32_t>(size));
         cache->align = align;
         cache->flags = flags;
 
