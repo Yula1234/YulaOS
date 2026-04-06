@@ -1,20 +1,22 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <lib/compiler.h>
-#include <lib/string.h>
-
-#include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/atomic.h>
 #include <lib/cpp/new.h>
 
 #include <kernel/smp/cpu.h>
 #include <kernel/panic.h>
 
-#include <arch/i386/paging.h>
+#include <lib/compiler.h>
+#include <lib/string.h>
 
 #include <mm/pmm.h>
 #include <mm/vmm.h>
+
+#include <arch/i386/paging.h>
+
+#include <hal/align.h>
 
 extern "C" {
 
@@ -66,13 +68,13 @@ struct KmemCache {
 
     kernel::SpinLock lock;
 
-    struct PerCpuSlab {
+    struct __cacheline_aligned PerCpuSlab {
         page_t* page;
 
         kernel::atomic<void*> remote_free;
         kernel::atomic<uint32_t> remote_free_count;
 
-        RemoteFreeBatch remote_batches[MAX_CPUS];
+        __cacheline_aligned RemoteFreeBatch remote_batches[MAX_CPUS];
     };
 
     PerCpuSlab cpu_slabs[MAX_CPUS];
@@ -202,8 +204,12 @@ public:
         KmemCache::PerCpuSlab& local = cache.cpu_slabs[cpu_index];
 
         page_t* page = local.page;
+
         if (kernel::likely(page != nullptr)) {
-            drain_remote_frees(cache, local);
+            
+            if (kernel::unlikely(page->freelist == nullptr)) {
+                drain_remote_frees(cache, local);
+            }
 
             if (kernel::likely(page->freelist != nullptr)) {
                 if (kernel::unlikely(page->slab_cache != &cache)) {
@@ -221,6 +227,7 @@ public:
         }
 
         irq_guard.restore();
+
         return cache_alloc_slowpath(cache, cpu_index);
     }
 
@@ -791,8 +798,10 @@ private:
 
         page.slab_cache = &cache;
         page.objects = 0;
+
         page.list.next = nullptr;
         page.list.prev = nullptr;
+        
         page_set_owner_tag(page, 0u);
 
         const uint32_t obj_count = PAGE_SIZE / cache.object_size;
@@ -821,17 +830,23 @@ private:
          * aligned at least to sizeof(uintptr_t).
          */
         void* obj = page.freelist;
+
         if (!obj) {
             return nullptr;
         }
 
         const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(obj);
 
-        if ((next_tagged & 1u) == 0u) {
+        if (kernel::unlikely((next_tagged & 1u) == 0u)) {
             panic("SLUB: freelist tag corrupt");
         }
 
         void* next = reinterpret_cast<void*>(next_tagged & ~static_cast<uintptr_t>(1u));
+
+        if (kernel::likely(next != nullptr)) {
+            __builtin_prefetch(next, 1 /* write */, 0 /* temporal locality */);
+        }
+
         page.freelist = next;
         page.objects++;
 
@@ -850,7 +865,7 @@ private:
     }
 
     static void flush_remote_batch(KmemCache::PerCpuSlab& target, RemoteFreeBatch& batch) noexcept {
-        if (batch.count == 0) {
+        if (kernel::unlikely(batch.count == 0)) {
             return;
         }
 
@@ -899,17 +914,19 @@ private:
     }
 
     void drain_remote_frees(KmemCache& cache, KmemCache::PerCpuSlab& local) noexcept {
-        if (kernel::likely(local.remote_free.load() == nullptr)) {
+        if (kernel::likely(local.remote_free.load(kernel::memory_order::relaxed) == nullptr)) {
             return;
         }
 
-        void* list = local.remote_free.exchange(nullptr);
-        const uint32_t count = local.remote_free_count.exchange(0u);
+        void* list = local.remote_free.exchange(nullptr, kernel::memory_order::acq_rel);
+        const uint32_t count = local.remote_free_count.exchange(0u, kernel::memory_order::relaxed);
 
         if (kernel::unlikely(list == nullptr)) {
+
             if (kernel::unlikely(count != 0u)) {
-                local.remote_free_count.fetch_add(count);
+                local.remote_free_count.fetch_add(count, kernel::memory_order::relaxed);
             }
+
             return;
         }
 
@@ -917,6 +934,7 @@ private:
         void* it = list;
         while (it) {
             const uintptr_t next_tagged = *reinterpret_cast<uintptr_t*>(it);
+
             if (kernel::unlikely((next_tagged & 1u) == 0u)) {
                 panic("SLUB: remote free tag corrupt");
             }
