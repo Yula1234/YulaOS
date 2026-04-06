@@ -58,7 +58,7 @@ struct dma_pool {
     DmaPoolSlotHdr* global_free_;
     dlist_head_t pages_;
 
-    volatile uint32_t growing_;
+    spinlock_t grow_lock_;
 };
 
 static inline int is_pow2(size_t v) {
@@ -201,10 +201,11 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
     }
 
     spinlock_init(&pool->lock_);
+    spinlock_init(&pool->grow_lock_);
 
     pool->global_free_ = 0;
+    
     dlist_init(&pool->pages_);
-    pool->growing_ = 0u;
 
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_ = 0;
@@ -274,18 +275,8 @@ retry_global:
 
     /*
      * Global pool is empty. We must ask the system for a new DMA page.
-     * Use a CAS on a growing flag to prevent the thundering herd problem
-     * where multiple CPUs simultaneously allocate backing pages.
      */
-    uint32_t expected_growing = 0u;
-    if (__atomic_compare_exchange_n(
-            &pool->growing_,
-            &expected_growing,
-            1u,
-            0,
-            __ATOMIC_ACQUIRE,
-            __ATOMIC_RELAXED
-        )) {
+    if (spinlock_try_acquire(&pool->grow_lock_)) {
 
         spinlock_release(&pool->lock_);
 
@@ -304,10 +295,11 @@ retry_global:
             dlist_add_tail(&rec->node_, &pool->pages_);
         }
 
-        __atomic_store_n(&pool->growing_, 0u, __ATOMIC_RELEASE);
+        spinlock_release(&pool->grow_lock_);
 
         if (unlikely(!ok)) {
             spinlock_release(&pool->lock_);
+
             irq_restore(irq_flags);
             return 0;
         }
@@ -321,9 +313,8 @@ retry_global:
      */
     spinlock_release(&pool->lock_);
 
-    while (__atomic_load_n(&pool->growing_, __ATOMIC_ACQUIRE) != 0u) {
-        cpu_relax();
-    }
+    spinlock_acquire(&pool->grow_lock_);
+    spinlock_release(&pool->grow_lock_);
 
     spinlock_acquire(&pool->lock_);
     goto retry_global;
