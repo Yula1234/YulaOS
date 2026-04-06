@@ -630,11 +630,8 @@ static inline uint32_t* read_cr3(void) {
 }
 
 void paging_map_ex(
-    uint32_t* dir,
-    uint32_t virt,
-    uint32_t phys,
-    uint32_t flags,
-    uint32_t map_flags
+    uint32_t* dir, uint32_t virt, uint32_t phys,
+    uint32_t flags, uint32_t map_flags
 ) {
     /*
      * Map a single 4KiB page.
