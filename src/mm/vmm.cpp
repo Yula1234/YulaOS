@@ -15,6 +15,7 @@
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 
+#include <hal/align.h>
 #include <hal/cpu.h>
 
 extern "C" {

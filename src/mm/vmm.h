@@ -123,7 +123,7 @@ public:
 private:
     static constexpr uint32_t k_max_nodes = 4096u;
 
-    struct PerCpuVmmCache {
+    struct __cacheline_aligned PerCpuVmmCache {
         static constexpr size_t k_capacity = 64u;
 
         uintptr_t free_pages[k_capacity]{};
