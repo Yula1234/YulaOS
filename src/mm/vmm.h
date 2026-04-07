@@ -23,9 +23,10 @@
 
 #ifdef __cplusplus
 
+#include <lib/rbtree.h>
+
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
-#include <lib/cpp/rbtree.h>
 
 #include <kernel/smp/cpu_limits.h>
 
@@ -36,57 +37,18 @@ class PmmState;
 /*
  * A free region inside the managed virtual range.
  *
- * The same node is indexed in two intrusive rb-trees:
- *  - by address, used for adjacency checks and merge
- *  - by (size,start), used for best-fit selection
+ * Augmented Red-Black Tree: sorted by address for adjacency checks,
+ * with subtree_max_size enabling O(log N) best-fit search.
  */
 struct VmFreeBlock {
-    rb_node node_addr;
-    rb_node node_size;
+    struct rb_node node;
 
     uintptr_t start;
     size_t size;
+    size_t subtree_max_size;
 
     VmFreeBlock* next_free;
 };
-
-/* Key extractor for address-ordered tree. */
-struct VmFreeBlockAddrKeyOfValue {
-    const uintptr_t& operator()(const VmFreeBlock& block) const noexcept;
-};
-
-struct VmFreeBlockSizeKey {
-    size_t size;
-    uintptr_t start;
-};
-
-/* Key extractor for size-ordered tree. */
-struct VmFreeBlockSizeKeyOfValue {
-    VmFreeBlockSizeKey operator()(const VmFreeBlock& block) const noexcept;
-};
-
-/*
- * Strict weak ordering for size-tree.
- * Ties are resolved by address to keep keys unique.
- */
-struct VmFreeBlockSizeKeyCompare {
-    bool operator()(const VmFreeBlockSizeKey& a, const VmFreeBlockSizeKey& b) const noexcept;
-};
-
-using VmmAddrTree = IntrusiveRbTree<
-    VmFreeBlock,
-    detail::RbMemberHook<VmFreeBlock, offsetof(VmFreeBlock, node_addr)>,
-    uintptr_t,
-    VmFreeBlockAddrKeyOfValue
->;
-
-using VmmSizeTree = IntrusiveRbTree<
-    VmFreeBlock,
-    detail::RbMemberHook<VmFreeBlock, offsetof(VmFreeBlock, node_size)>,
-    VmFreeBlockSizeKey,
-    VmFreeBlockSizeKeyOfValue,
-    VmFreeBlockSizeKeyCompare
->;
 
 class VmmState {
 public:
@@ -137,8 +99,7 @@ private:
     VmFreeBlock node_pool_[k_max_nodes]{};
     VmFreeBlock* free_nodes_head_ = nullptr;
 
-    VmmAddrTree addr_tree_{};
-    VmmSizeTree size_tree_{};
+    struct rb_root free_tree_ = RB_ROOT;
 
     atomic<size_t> used_pages_count_{0u};
 

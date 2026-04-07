@@ -8,8 +8,6 @@
 #include <lib/cpp/new.h>
 
 #include <kernel/panic.h>
-
-#include <lib/cpp/rbtree.h>
 #include <lib/string.h>
 
 #include <mm/pmm.h>
@@ -37,39 +35,63 @@ static inline int vmm_cpu_index() noexcept {
 
 namespace kernel {
 
-const uintptr_t& VmFreeBlockAddrKeyOfValue::operator()(const VmFreeBlock& block) const noexcept {
-    return block.start;
-}
-
-VmFreeBlockSizeKey VmFreeBlockSizeKeyOfValue::operator()(const VmFreeBlock& block) const noexcept {
-    return VmFreeBlockSizeKey{block.size, block.start};
-}
-
-bool VmFreeBlockSizeKeyCompare::operator()(const VmFreeBlockSizeKey& a, const VmFreeBlockSizeKey& b) const noexcept {
-    if (a.size != b.size) {
-        return a.size < b.size;
-    }
-
-    return a.start < b.start;
-}
-
 namespace {
 
-/*
- * VmFreeBlock objects are stored in an intrusive rb-tree, so the rb_node hooks
- * must be explicitly reset before reuse.
- */
-static void init_block(VmFreeBlock& block) noexcept {
-    block.node_addr.__parent_color = 0;
-    block.node_addr.rb_left = nullptr;
-    block.node_addr.rb_right = nullptr;
+static inline size_t get_subtree_max_size(struct rb_node* node) {
+    if (!node) return 0;
+    return rb_entry(node, VmFreeBlock, node)->subtree_max_size;
+}
 
-    block.node_size.__parent_color = 0;
-    block.node_size.rb_left = nullptr;
-    block.node_size.rb_right = nullptr;
+static bool vmm_recalc_subtree(VmFreeBlock* block) {
+    size_t old_max = block->subtree_max_size;
+    size_t new_max = block->size;
+
+    size_t l_max = get_subtree_max_size(block->node.rb_left);
+    size_t r_max = get_subtree_max_size(block->node.rb_right);
+
+    if (l_max > new_max) new_max = l_max;
+    if (r_max > new_max) new_max = r_max;
+
+    block->subtree_max_size = new_max;
+    return old_max != new_max;
+}
+
+static void vmm_augment_propagate(struct rb_node* node, struct rb_node* stop) {
+    while (node != stop) {
+        VmFreeBlock* block = rb_entry(node, VmFreeBlock, node);
+        vmm_recalc_subtree(block);
+        node = rb_parent(node);
+    }
+}
+
+static void vmm_augment_copy(struct rb_node* old_n, struct rb_node* new_n) {
+    VmFreeBlock* old_b = rb_entry(old_n, VmFreeBlock, node);
+    VmFreeBlock* new_b = rb_entry(new_n, VmFreeBlock, node);
+    new_b->subtree_max_size = old_b->subtree_max_size;
+}
+
+static void vmm_augment_rotate(struct rb_node* old_n, struct rb_node* new_n) {
+    VmFreeBlock* old_b = rb_entry(old_n, VmFreeBlock, node);
+    VmFreeBlock* new_b = rb_entry(new_n, VmFreeBlock, node);
+
+    vmm_recalc_subtree(old_b);
+    vmm_recalc_subtree(new_b);
+}
+
+static const struct rb_augment_callbacks vmm_rb_callbacks = {
+    .propagate = vmm_augment_propagate,
+    .copy      = vmm_augment_copy,
+    .rotate    = vmm_augment_rotate,
+};
+
+static void init_block(VmFreeBlock& block) noexcept {
+    block.node.__parent_color = 0;
+    block.node.rb_left = nullptr;
+    block.node.rb_right = nullptr;
 
     block.start = 0;
     block.size = 0;
+    block.subtree_max_size = 0;
     block.next_free = nullptr;
 }
 
@@ -108,56 +130,60 @@ static void free_node(VmFreeBlock& node, VmFreeBlock*& head) noexcept {
     head = &node;
 }
 
-static void tree_insert(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTree& size_tree) noexcept {
-    /*
-     * Every free range must exist in both trees.
-     * If insertion fails, we treat it as an invariant violation.
-     */
-    const bool inserted_addr = addr_tree.insert_unique(block);
-    const bool inserted_size = size_tree.insert_unique(block);
+static void tree_insert(VmFreeBlock& block, struct rb_root* root) noexcept {
+    struct rb_node** link = &root->rb_node;
+    struct rb_node* parent = nullptr;
 
-    if (kernel::unlikely(!inserted_addr || !inserted_size)) {
-        if (inserted_addr) {
-            addr_tree.erase(block);
+    while (*link) {
+        parent = *link;
+        VmFreeBlock* curr = rb_entry(parent, VmFreeBlock, node);
+
+        if (block.start < curr->start) {
+            link = &(*link)->rb_left;
+        } else {
+            link = &(*link)->rb_right;
         }
-
-        if (inserted_size) {
-            size_tree.erase(block);
-        }
-
-        panic("VMM: rb-tree invariant violated (insert)");
     }
-}
 
-static void tree_erase(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTree& size_tree) noexcept {
-    addr_tree.erase(block);
-    size_tree.erase(block);
-}
+    rb_link_node(&block.node, parent, link);
+    block.subtree_max_size = block.size;
 
-static void size_tree_reinsert_after_size_change(VmFreeBlock& block, VmmSizeTree& size_tree) noexcept {
-    size_tree.erase(block);
-
-    const bool inserted = size_tree.insert_unique(block);
-
-    if (kernel::unlikely(!inserted)) {
-        panic("VMM: rb-tree invariant violated (size reinsert)");
+    if (parent) {
+        vmm_augment_propagate(parent, nullptr);
     }
+
+    rb_insert_color_augmented(&block.node, root, &vmm_rb_callbacks);
 }
 
-static VmFreeBlock* find_best_fit(size_t size, VmmSizeTree& size_tree) noexcept {
-    /*
-     * Best-fit policy: smallest block that can satisfy `size`.
-     * Ordered by (size,start), so lower_bound gives the candidate directly.
-     */
-    const VmFreeBlockSizeKey key{size, 0u};
+static void tree_erase(VmFreeBlock& block, struct rb_root* root) noexcept {
+    rb_erase_augmented(&block.node, root, &vmm_rb_callbacks);
+    block.node.__parent_color = 0;
+    block.node.rb_left = nullptr;
+    block.node.rb_right = nullptr;
+}
 
-    auto it = size_tree.lower_bound_key(key);
+static VmFreeBlock* find_fit(struct rb_root* root, size_t size) noexcept {
+    if (!root->rb_node) return nullptr;
 
-    if (it == size_tree.end()) {
+    if (get_subtree_max_size(root->rb_node) < size) {
         return nullptr;
     }
 
-    return &(*it);
+    struct rb_node* node = root->rb_node;
+
+    while (node) {
+        if (get_subtree_max_size(node->rb_left) >= size) {
+            node = node->rb_left;
+        } else {
+            VmFreeBlock* curr = rb_entry(node, VmFreeBlock, node);
+            if (curr->size >= size) {
+                return curr;
+            }
+            node = node->rb_right;
+        }
+    }
+
+    return nullptr;
 }
 
 static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noexcept {
@@ -260,69 +286,33 @@ static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noex
     return true;
 }
 
-static void merge_adjacent(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTree& size_tree, VmFreeBlock*& free_head) noexcept {
-    /*
-     * Coalesce adjacent free ranges.
-     * We only ever merge exact neighbors found through the address-ordered tree.
-     */
+static void merge_adjacent(VmFreeBlock& block, struct rb_root* root, VmFreeBlock*& free_head) noexcept {
     VmFreeBlock* curr = &block;
 
-    bool merged = true;
-    while (merged) {
-        merged = false;
+    struct rb_node* next_n = rb_next(&curr->node);
+    if (next_n) {
+        VmFreeBlock* next_b = rb_entry(next_n, VmFreeBlock, node);
+        if (curr->start + curr->size == next_b->start) {
+            tree_erase(*next_b, root);
 
-        auto it = addr_tree.find_key(curr->start);
-        if (kernel::unlikely(it == addr_tree.end())) {
-            panic("VMM: rb-tree invariant violated (merge/find)");
-            return;
+            curr->size += next_b->size;
+            vmm_augment_propagate(&curr->node, nullptr);
+
+            free_node(*next_b, free_head);
         }
+    }
 
-        {
-            auto next_it = it;
-            ++next_it;
+    struct rb_node* prev_n = rb_prev(&curr->node);
+    if (prev_n) {
+        VmFreeBlock* prev_b = rb_entry(prev_n, VmFreeBlock, node);
+        if (prev_b->start + prev_b->size == curr->start) {
+            tree_erase(*curr, root);
 
-            if (next_it != addr_tree.end()) {
-                VmFreeBlock* next = &(*next_it);
+            prev_b->size += curr->size;
+            vmm_augment_propagate(&prev_b->node, nullptr);
 
-                if (curr->start + curr->size == next->start) {
-                    tree_erase(*next, addr_tree, size_tree);
-
-                    curr->size += next->size;
-                    size_tree_reinsert_after_size_change(*curr, size_tree);
-
-                    free_node(*next, free_head);
-                    merged = true;
-                }
-            }
-        }
-
-        if (merged) {
-            continue;
-        }
-
-        it = addr_tree.find_key(curr->start);
-        if (kernel::unlikely(it == addr_tree.end())) {
-            panic("VMM: rb-tree invariant violated (merge/refind)");
-            return;
-        }
-
-        if (it != addr_tree.begin()) {
-            auto prev_it = it;
-            --prev_it;
-
-            VmFreeBlock* prev = &(*prev_it);
-
-            if (prev->start + prev->size == curr->start) {
-                tree_erase(*curr, addr_tree, size_tree);
-
-                prev->size += curr->size;
-                size_tree_reinsert_after_size_change(*prev, size_tree);
-
-                free_node(*curr, free_head);
-
-                curr = prev;
-                merged = true;
-            }
+            free_node(*curr, free_head);
+            curr = prev_b;
         }
     }
 }
@@ -330,16 +320,11 @@ static void merge_adjacent(VmFreeBlock& block, VmmAddrTree& addr_tree, VmmSizeTr
 } /* namespace */
 
 void VmmState::init() noexcept {
-    /*
-     * At init time the heap is a single free block.
-     * Actual mapping happens lazily in alloc_pages().
-     */
     pmm_ = kernel::pmm_state();
 
     init_node_pool(node_pool_, k_max_nodes, free_nodes_head_);
 
-    addr_tree_.clear();
-    size_tree_.clear();
+    free_tree_ = RB_ROOT;
 
     used_pages_count_.store(0u, kernel::memory_order::relaxed);
 
@@ -356,7 +341,7 @@ void VmmState::init() noexcept {
     initial->start = static_cast<uintptr_t>(KERNEL_HEAP_START);
     initial->size = static_cast<size_t>(KERNEL_HEAP_SIZE);
 
-    tree_insert(*initial, addr_tree_, size_tree_);
+    tree_insert(*initial, &free_tree_);
 }
 
 void* VmmState::alloc_pages(size_t count) noexcept {
@@ -399,10 +384,10 @@ void* VmmState::alloc_pages(size_t count) noexcept {
         {
             kernel::SpinLockSafeGuard guard(lock_);
 
-            VmFreeBlock* block = find_best_fit(carve_pages * PAGE_SIZE, size_tree_);
+            VmFreeBlock* block = find_fit(&free_tree_, carve_pages * PAGE_SIZE);
             if (kernel::unlikely(!block)) {
                 carve_pages = 1u;
-                block = find_best_fit(PAGE_SIZE, size_tree_);
+                block = find_fit(&free_tree_, PAGE_SIZE);
             }
 
             if (kernel::unlikely(!block)) {
@@ -411,7 +396,7 @@ void* VmmState::alloc_pages(size_t count) noexcept {
 
             carve_base = block->start;
 
-            tree_erase(*block, addr_tree_, size_tree_);
+            tree_erase(*block, &free_tree_);
 
             const size_t carved_bytes = carve_pages * PAGE_SIZE;
             if (block->size == carved_bytes) {
@@ -420,7 +405,7 @@ void* VmmState::alloc_pages(size_t count) noexcept {
                 block->start += carved_bytes;
                 block->size -= carved_bytes;
 
-                tree_insert(*block, addr_tree_, size_tree_);
+                tree_insert(*block, &free_tree_);
             }
         }
 
@@ -456,8 +441,8 @@ void* VmmState::alloc_pages(size_t count) noexcept {
                 rem_block->start = rem_start;
                 rem_block->size = rem_size;
 
-                tree_insert(*rem_block, addr_tree_, size_tree_);
-                merge_adjacent(*rem_block, addr_tree_, size_tree_, free_nodes_head_);
+                tree_insert(*rem_block, &free_tree_);
+                merge_adjacent(*rem_block, &free_tree_, free_nodes_head_);
             }
         }
 
@@ -475,8 +460,8 @@ void* VmmState::alloc_pages(size_t count) noexcept {
             rollback->start = out;
             rollback->size = rollback_size;
 
-            tree_insert(*rollback, addr_tree_, size_tree_);
-            merge_adjacent(*rollback, addr_tree_, size_tree_, free_nodes_head_);
+            tree_insert(*rollback, &free_tree_);
+            merge_adjacent(*rollback, &free_tree_, free_nodes_head_);
 
             return nullptr;
         }
@@ -492,14 +477,14 @@ void* VmmState::alloc_pages(size_t count) noexcept {
     {
         kernel::SpinLockSafeGuard guard(lock_);
 
-        VmFreeBlock* block = find_best_fit(size_bytes, size_tree_);
+        VmFreeBlock* block = find_fit(&free_tree_, size_bytes);
         if (kernel::unlikely(!block)) {
             return nullptr;
         }
 
         virt_base = block->start;
 
-        tree_erase(*block, addr_tree_, size_tree_);
+        tree_erase(*block, &free_tree_);
 
         if (block->size == size_bytes) {
             free_node(*block, free_nodes_head_);
@@ -507,7 +492,7 @@ void* VmmState::alloc_pages(size_t count) noexcept {
             block->start += size_bytes;
             block->size -= size_bytes;
 
-            tree_insert(*block, addr_tree_, size_tree_);
+            tree_insert(*block, &free_tree_);
         }
 
         used_pages_count_.fetch_add(count, kernel::memory_order::relaxed);
@@ -534,9 +519,9 @@ void* VmmState::alloc_pages(size_t count) noexcept {
         rollback->start = virt_base;
         rollback->size = rollback_size;
 
-        tree_insert(*rollback, addr_tree_, size_tree_);
+        tree_insert(*rollback, &free_tree_);
 
-        merge_adjacent(*rollback, addr_tree_, size_tree_, free_nodes_head_);
+        merge_adjacent(*rollback, &free_tree_, free_nodes_head_);
 
         return nullptr;
     }
@@ -643,8 +628,8 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
                 block->start = run_start;
                 block->size = run_end - run_start;
 
-                tree_insert(*block, addr_tree_, size_tree_);
-                merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+                tree_insert(*block, &free_tree_);
+                merge_adjacent(*block, &free_tree_, free_nodes_head_);
 
                 run_start = a;
                 run_end = a + PAGE_SIZE;
@@ -659,8 +644,8 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
             block->start = run_start;
             block->size = run_end - run_start;
 
-            tree_insert(*block, addr_tree_, size_tree_);
-            merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+            tree_insert(*block, &free_tree_);
+            merge_adjacent(*block, &free_tree_, free_nodes_head_);
         }
 
         used_pages_count_.fetch_sub(1u, kernel::memory_order::relaxed);
@@ -750,9 +735,9 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
         block->start = virt_base;
         block->size = size_bytes;
 
-        tree_insert(*block, addr_tree_, size_tree_);
+        tree_insert(*block, &free_tree_);
 
-        merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+        merge_adjacent(*block, &free_tree_, free_nodes_head_);
 
         used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
     }
@@ -786,13 +771,13 @@ void* VmmState::reserve_pages(size_t count) noexcept {
 
     kernel::SpinLockSafeGuard guard(lock_);
 
-    VmFreeBlock* block = find_best_fit(size_bytes, size_tree_);
+    VmFreeBlock* block = find_fit(&free_tree_, size_bytes);
     if (kernel::unlikely(!block)) {
         return nullptr;
     }
 
     virt_base = block->start;
-    tree_erase(*block, addr_tree_, size_tree_);
+    tree_erase(*block, &free_tree_);
 
     if (block->size == size_bytes) {
         free_node(*block, free_nodes_head_);
@@ -800,7 +785,7 @@ void* VmmState::reserve_pages(size_t count) noexcept {
         block->start += size_bytes;
         block->size -= size_bytes;
 
-        tree_insert(*block, addr_tree_, size_tree_);
+        tree_insert(*block, &free_tree_);
     }
     
     return reinterpret_cast<void*>(virt_base);
@@ -825,8 +810,8 @@ void VmmState::unreserve_pages(void* ptr, size_t count) noexcept {
     block->start = virt_base;
     block->size = size_bytes;
 
-    tree_insert(*block, addr_tree_, size_tree_);
-    merge_adjacent(*block, addr_tree_, size_tree_, free_nodes_head_);
+    tree_insert(*block, &free_tree_);
+    merge_adjacent(*block, &free_tree_, free_nodes_head_);
 }
 
 size_t VmmState::get_used_pages() const noexcept {
