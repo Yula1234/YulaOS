@@ -90,6 +90,8 @@ void paging_map_ex(
     uint32_t map_flags
 );
 
+void paging_map_4m(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags);
+
 typedef int (*paging_unmap_visitor_t)(uint32_t virt, uint32_t pte, void* ctx);
 
 void paging_unmap_range_ex(

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #ifndef HAL_SIMD_H
 #define HAL_SIMD_H
@@ -96,6 +96,7 @@ static inline void kernel_enable_sse(void) {
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1u << 9);
     cr4 |= (1u << 10);
+    cr4 |= (1u << 4); /* PSE (Page Size Extension) */
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 }
 

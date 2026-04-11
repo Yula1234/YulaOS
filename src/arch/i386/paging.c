@@ -279,6 +279,18 @@ void paging_unmap_range_ex(
         }
 
         if ((pde & (1u << 7)) != 0u) {
+            if (visitor) {
+                if (!visitor(virt & ~0x3FFFFFu, pde, visitor_ctx)) {
+                    virt = (virt & ~0x3FFFFFu) + 0x400000u - 0x1000u;
+                    continue;
+                }
+            }
+            
+            any_unmapped = 1;
+
+            dir[pd_idx] = 0;
+            virt = (virt & ~0x3FFFFFu) + 0x400000u - 0x1000u;
+            
             continue;
         }
 
@@ -345,7 +357,20 @@ void paging_unmap_range_no_tlb(
 
         const uint32_t pde = dir[pd_idx];
         if ((pde & 1u) == 0u) continue;
-        if ((pde & (1u << 7)) != 0u) continue;
+
+        if ((pde & (1u << 7)) != 0u) {
+            if (visitor) {
+                if (!visitor(virt & ~0x3FFFFFu, pde, visitor_ctx)) {
+                    virt = (virt & ~0x3FFFFFu) + 0x400000u - 0x1000u;
+                    continue;
+                }
+            }
+
+            dir[pd_idx] = 0;
+            virt = (virt & ~0x3FFFFFu) + 0x400000u - 0x1000u;
+            continue;
+        }
+        
         if (!paging_pde_pt_phys_valid(pde)) continue;
 
         uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
@@ -795,6 +820,23 @@ void paging_map_batch(
         }
 
         pages_done += chunk_size;
+    }
+}
+
+void paging_map_4m(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
+    if (!dir) return;
+
+    uint32_t pd_idx = virt >> 22;
+    uint32_t int_flags = paging_lock_dir_safe(dir);
+
+    dir[pd_idx] = (phys & ~0x3FFFFFu) | flags | (1u << 7);
+
+    paging_unlock_dir_safe(dir, int_flags);
+
+    if (dir == kernel_page_directory) {
+        smp_tlb_shootdown_range(virt, virt + 0x400000u);
+    } else {
+        __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
     }
 }
 
