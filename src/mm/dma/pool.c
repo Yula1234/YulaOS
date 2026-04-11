@@ -107,35 +107,34 @@ ___inline int tagged_ptr_cas(
     TaggedPtr           desired
 ) {
     uint8_t success;
-
+    
     __asm__ volatile(
-        "lock cmpxchg8b %[mem] \n\t"
-        "sete %[ok]            \n\t"
-        : [mem] "+m"  (*dst),
-          "+A"        (*(uint64_t*)&expected),
-          [ok]  "=q"  (success)
-        : "b" (desired.ptr_),
-          "c" (desired.version_)
+        "lock cmpxchg8b (%[ptr]) \n\t"
+        "sete %[ok]              \n\t"
+        : "+A"  (*(uint64_t*)&expected),
+          [ok]  "=qm" (success)
+        : [ptr] "S"   (dst),
+          "b"   (desired.ptr_),
+          "c"   (desired.version_)
         : "memory", "cc"
     );
-
+    
     return success;
 }
 
 ___inline TaggedPtr tagged_ptr_load(volatile TaggedPtr* src) {
     TaggedPtr result;
-
+    uint32_t zero = 0;
+    
     __asm__ volatile(
-        "xor %%eax, %%eax      \n\t"
-        "xor %%edx, %%edx      \n\t"
-        "xor %%ebx, %%ebx      \n\t"
-        "xor %%ecx, %%ecx      \n\t"
-        "lock cmpxchg8b %[mem] \n\t"
+        "lock cmpxchg8b (%[ptr]) \n\t"
         : "=A" (*(uint64_t*)&result)
-        : [mem] "m" (*src)
-        : "ebx", "ecx", "memory", "cc"
+        : [ptr] "S" (src),
+          "a" (zero), "d" (zero),
+          "b" (zero), "c" (zero)
+        : "memory", "cc"
     );
-
+    
     return result;
 }
 
