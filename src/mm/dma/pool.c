@@ -34,31 +34,47 @@ typedef struct DmaPoolPage {
 
 typedef struct DmaPoolSlotHdr {
     struct DmaPoolSlotHdr* next_;
+
     uint32_t phys_;
 } DmaPoolSlotHdr;
 
 typedef struct PerCpuDmaCache {
     DmaPoolSlotHdr* free_list_;
+
     uint32_t count_;
 } __cacheline_aligned PerCpuDmaCache;
 
 struct dma_pool {
-    char* name_;
+    /* hot data for per-cpu local allocation */
 
-    size_t obj_size_;
-    size_t align_;
+    uint32_t obj_off_;
+    uint32_t slot_size_;
 
-    size_t obj_off_;
-    size_t slot_size_;
-
-    PerCpuDmaCache cpu_cache_[MAX_CPUS];
+    /* slow path data */
 
     spinlock_t lock_;
     DmaPoolSlotHdr* global_free_;
-    dlist_head_t pages_;
+
+    uint8_t         _pad0[48];
+    /* end of one cacheline for more or less hot data */
+
+    /* cacheline 2 for cold data */
 
     spinlock_t grow_lock_;
-};
+
+    dlist_head_t pages_;
+    
+    uint32_t obj_size_;
+    uint32_t align_;
+    
+    char* name_;
+    
+    uint8_t _pad1[36];
+
+    /* cacheline 3 */
+
+    PerCpuDmaCache  cpu_cache_[MAX_CPUS];
+} __cacheline_aligned;
 
 static inline int is_pow2(size_t v) {
     return v && ((v & (v - 1u)) == 0u);
@@ -87,10 +103,8 @@ static char* dup_name(const char* s) {
  * This runs entirely lockless with respect to the pool's internal locks.
  */
 static int dma_pool_prepare_page(
-    dma_pool_t* pool,
-    DmaPoolPage** out_page,
-    DmaPoolSlotHdr** out_head,
-    DmaPoolSlotHdr** out_tail
+    dma_pool_t* pool, DmaPoolPage** out_page,
+    DmaPoolSlotHdr** out_head, DmaPoolSlotHdr** out_tail
 ) {
     if (unlikely(
         !pool
