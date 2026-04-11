@@ -95,8 +95,6 @@ constexpr size_t k_cache_count = k_malloc_shift_high - k_malloc_shift_low + 1;
 
 static_assert(k_malloc_shift_low >= 1, "k_malloc_shift_low must be at least 1");
 
-constexpr size_t k_dynamic_cache_capacity = 32;
-
 static constexpr uint32_t k_align_default = 0u;
 
 class HeapState {
@@ -140,8 +138,6 @@ public:
 
             size <<= 1;
         }
-
-        init_dynamic_caches();
     }
 
 private:
@@ -617,9 +613,6 @@ public:
             }
 
             remove_dynamic_cache_locked(cache);
-
-            cache.next_dyn = dynamic_free_head_;
-            dynamic_free_head_ = &cache;
         }
 
         for (uint32_t i = 0; i < free_pages_count; i++) {
@@ -627,6 +620,8 @@ public:
                 vmm_->free_pages(reinterpret_cast<void*>(free_pages_virt[i]), 1);
             }
         }
+
+        free(&cache);
 
         return 1;
     }
@@ -1218,19 +1213,6 @@ private:
         cache.name[i] = '\0';
     }
 
-    void init_dynamic_caches() noexcept {
-        /*
-         * Dynamic caches are taken from a fixed pool.
-         * This limits metadata usage and avoids recursion into the heap.
-         */
-        for (size_t i = 0; i < k_dynamic_cache_capacity; i++) {
-            dynamic_caches_[i].next_dyn = dynamic_free_head_;
-            dynamic_free_head_ = &dynamic_caches_[i];
-        }
-
-        dynamic_used_head_ = nullptr;
-    }
-
     static size_t round_up_size(size_t size, size_t align) noexcept {
         if (size < sizeof(uintptr_t)) {
             size = sizeof(uintptr_t);
@@ -1280,14 +1262,11 @@ private:
 
     KmemCache* cache_create_locked(const char* name, size_t size, uint32_t align, uint32_t flags) noexcept {
         /* Caller is expected to hold dynamic_caches_lock_. */
-        if (kernel::unlikely(!dynamic_free_head_)) {
+
+        KmemCache* cache = static_cast<KmemCache*>(zalloc(sizeof(KmemCache)));
+        if (kernel::unlikely(!cache)) {
             return nullptr;
         }
-
-        KmemCache* cache = dynamic_free_head_;
-        dynamic_free_head_ = dynamic_free_head_->next_dyn;
-
-        memset(cache, 0, sizeof(*cache));
 
         copy_cache_name(*cache, name);
 
@@ -1296,25 +1275,17 @@ private:
         cache->align = align;
         cache->flags = flags;
 
-        for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
-            cache->cpu_slabs[cpu].page = nullptr;
-            cache->cpu_slabs[cpu].remote_free.store(nullptr);
-            cache->cpu_slabs[cpu].remote_free_count.store(0u);
-        }
-
-        cache->partial = nullptr;
-        cache->full = nullptr;
         cache->next_dyn = nullptr;
 
         return cache;
     }
 
     bool is_dynamic_cache(const KmemCache* cache) const noexcept {
-        const uintptr_t begin = reinterpret_cast<uintptr_t>(&dynamic_caches_[0]);
-        const uintptr_t end = reinterpret_cast<uintptr_t>(&dynamic_caches_[k_dynamic_cache_capacity]);
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(&caches_[0]);
+        const uintptr_t end = reinterpret_cast<uintptr_t>(&caches_[k_cache_count]);
         const uintptr_t p = reinterpret_cast<uintptr_t>(cache);
 
-        return p >= begin && p < end;
+        return (p < begin || p >= end);
     }
 
     void remove_dynamic_cache_locked(KmemCache& cache) noexcept {
@@ -1373,8 +1344,6 @@ private:
     KmemCache caches_[k_cache_count]{};
 
     kernel::SpinLock dynamic_caches_lock_;
-    KmemCache dynamic_caches_[k_dynamic_cache_capacity]{};
-    KmemCache* dynamic_free_head_ = nullptr;
     KmemCache* dynamic_used_head_ = nullptr;
 
     kernel::VmmState* vmm_ = nullptr;
