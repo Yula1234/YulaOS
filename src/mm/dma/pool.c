@@ -107,7 +107,7 @@ ___inline char* dup_name(const char* s) {
  * Allocate a new backing DMA page from the system and carve it into slots.
  * This runs entirely lockless with respect to the pool's internal locks.
  */
-___inline int dma_pool_prepare_page(
+___noinline static int dma_pool_prepare_page(
     dma_pool_t* pool, DmaPoolPage** out_page,
     DmaPoolSlotHdr** out_head, DmaPoolSlotHdr** out_tail
 ) {
@@ -150,29 +150,43 @@ ___inline int dma_pool_prepare_page(
     rec->vaddr_ = page;
     rec->phys_ = page_phys;
 
-    const size_t count = PAGE_SIZE / pool->slot_size_;
-
-    DmaPoolSlotHdr* head = 0;
-    DmaPoolSlotHdr* tail = 0;
-
     /*
      * Link the freshly carved slots sequentially. The hot path will graft
      * this local list onto the global free list in O(1).
+     *
+     * Extract frequently used fields into local variables
+     * so that the compiler can pull them into registers.
      */
-    for (size_t i = 0; i < count; i++) {
-        uint8_t* slot_ptr = (uint8_t*)page + (i * pool->slot_size_);
+    const uint32_t slot_size = pool->slot_size_;
+    const uint32_t obj_off   = pool->obj_off_;
+    const size_t   count     = PAGE_SIZE / slot_size;
+
+    uint8_t*  slot_ptr = (uint8_t*)page;
+    uint32_t  phys_cur = page_phys + obj_off; /* cursor */
+
+    /*
+     * The first slot is processed separately
+     * to completely remove the branching from the loop body.
+     */
+    DmaPoolSlotHdr* head = (DmaPoolSlotHdr*)slot_ptr;
+    head->phys_ = phys_cur;
+    head->next_ = 0;
+
+    DmaPoolSlotHdr* tail = head;
+
+    slot_ptr += slot_size;
+    phys_cur += slot_size;
+
+    for (size_t i = 1; i < count; i++) {
         DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)slot_ptr;
 
-        hdr->phys_ = page_phys + (uint32_t)(i * pool->slot_size_) + (uint32_t)pool->obj_off_;
-        hdr->next_ = 0;
+        hdr->phys_  = phys_cur;
+        hdr->next_  = 0;        
+        tail->next_ = hdr;
+        tail        = hdr;
 
-        if (!head) {
-            head = hdr;
-        } else {
-            tail->next_ = hdr;
-        }
-
-        tail = hdr;
+        slot_ptr += slot_size;
+        phys_cur += slot_size;
     }
 
     *out_page = rec;
@@ -237,8 +251,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
     if (unlikely(!pool || !out_phys)) {
         return 0;
     }
-
-    /* Do not disable interrupts in the fast path, because the kernel is not preemptible
+    /*
+     * Do not disable interrupts in the fast path, because the kernel is not preemptible
      * Cpu index cannot be invalidated at the time of allocation.
      */
 
@@ -353,7 +367,8 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
     uint8_t* obj = (uint8_t*)vaddr;
     DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)(obj - pool->obj_off_);
 
-    /* Do not disable interrupts while using the CPU index
+    /*
+     * Do not disable interrupts while using the CPU index
      * see the note in dma_pool_alloc.
      */
     const int cpu = hal_cpu_index();
