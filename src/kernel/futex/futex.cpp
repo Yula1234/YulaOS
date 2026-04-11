@@ -220,6 +220,18 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
 
         v = 0u;
         if (uaccess_copy_from_user(&v, (const void*)uaddr, sizeof(v)) != 0) {
+            kernel::SpinLockSafeGuard guard(entry->lock);
+            if (curr && curr->blocked_on_sem == entry) {
+                if (dlist_unlink_consistent(&curr->sem_node)) {
+                    curr->blocked_on_sem = 0;
+                    curr->blocked_kind = TASK_BLOCK_NONE;
+                }
+            }
+
+            if (curr) {
+                (void)proc_change_state(curr, TASK_RUNNING);
+            }
+            
             return -1;
         }
 
@@ -230,8 +242,11 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
                 if (dlist_unlink_consistent(&curr->sem_node)) {
                     curr->blocked_on_sem = 0;
                     curr->blocked_kind = TASK_BLOCK_NONE;
-                    (void)proc_change_state(curr, TASK_RUNNING);
                 }
+            }
+            
+            if (curr) {
+                (void)proc_change_state(curr, TASK_RUNNING);
             }
 
             return 0;
