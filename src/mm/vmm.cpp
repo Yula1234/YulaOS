@@ -258,16 +258,18 @@ static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noex
 
         uint32_t allocated = pmm->alloc_pages_order0_batch(PMM_ZONE_NORMAL, phys_batch, chunk);
 
-        for (size_t j = 0; j < allocated; j++) {
-            const uintptr_t virt = virt_base + ((mapped_total + j) * PAGE_SIZE);
-            const uint32_t phys = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys_batch[j]));
+        if (allocated > 0) {
+            uint32_t phys_u32[k_batch];
 
-            paging_map_ex(
-                kernel_page_directory,
-                static_cast<uint32_t>(virt),
-                phys,
-                PTE_PRESENT | PTE_RW,
-                PAGING_MAP_NO_TLB_FLUSH
+            for (size_t j = 0; j < allocated; j++) {
+                phys_u32[j] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys_batch[j]));
+            }
+
+            const uintptr_t virt_chunk_start = virt_base + (mapped_total * PAGE_SIZE);
+
+            paging_map_batch(
+                kernel_page_directory, static_cast<uint32_t>(virt_chunk_start),
+                phys_u32, allocated, PTE_PRESENT | PTE_RW, PAGING_MAP_NO_TLB_FLUSH
             );
         }
 
