@@ -187,6 +187,17 @@ static void rwlock_acquire_read_slowpath(rwlock_t* rw) {
         spinlock_release_safe(&rw->wait_lock_, flags);
 
         sched_yield();
+
+        flags = spinlock_acquire_safe(&rw->wait_lock_);
+        
+        if (curr->sem_node.next && curr->sem_node.prev) {
+            dlist_del(&curr->sem_node);
+        
+            curr->sem_node.next = 0;
+            curr->sem_node.prev = 0;
+        }
+        
+        spinlock_release_safe(&rw->wait_lock_, flags);
     }
 }
 
@@ -281,6 +292,17 @@ static void rwlock_acquire_write_slowpath(rwlock_t* rw, task_t* curr) {
         spinlock_release_safe(&rw->wait_lock_, flags);
 
         sched_yield();
+
+        flags = spinlock_acquire_safe(&rw->wait_lock_);
+        
+        if (curr->sem_node.next && curr->sem_node.prev) {
+            dlist_del(&curr->sem_node);
+        
+            curr->sem_node.next = 0;
+            curr->sem_node.prev = 0;
+        }
+
+        spinlock_release_safe(&rw->wait_lock_, flags);
     }
 }
 

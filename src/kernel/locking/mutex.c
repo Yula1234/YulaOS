@@ -138,6 +138,13 @@ static void mutex_lock_slowpath(mutex_t* m, task_t* curr) {
         sched_yield();
 
         flags = spinlock_acquire_safe(&m->wait_lock);
+
+        if (curr->sem_node.next && curr->sem_node.prev) {
+            dlist_del(&curr->sem_node);
+            
+            curr->sem_node.next = 0;
+            curr->sem_node.prev = 0;
+        }
     }
 
     spinlock_release_safe(&m->wait_lock, flags);

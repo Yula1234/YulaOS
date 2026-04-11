@@ -151,6 +151,8 @@ extern "C" void sem_wait(semaphore_t* sem) {
          * fast path to allow "barging", which increases overall throughput.
          */
         if (kernel::likely(sem_try_acquire_fast(sem))) {
+            sem_remove_task(curr);
+
             curr->blocked_on_sem = nullptr;
             curr->blocked_kind = TASK_BLOCK_NONE;
             return;
@@ -226,6 +228,8 @@ extern "C" int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
         }
 
         if (kernel::likely(sem_try_acquire_fast(sem))) {
+            sem_remove_task(curr);
+            
             curr->blocked_on_sem = nullptr;
             curr->blocked_kind = TASK_BLOCK_NONE;
             return 1;
