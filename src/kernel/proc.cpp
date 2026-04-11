@@ -2683,8 +2683,6 @@ void proc_check_sleepers(uint32_t current_tick) {
         __atomic_store_n(&t->wake_tick, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&t->sleep_cpu, -1, __ATOMIC_RELEASE);
 
-        sem_remove_task(t);
-
         sched_add(t);
 
         __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
