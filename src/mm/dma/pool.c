@@ -49,6 +49,11 @@ typedef struct PerCpuDmaCache {
     uint32_t count_;
 } __cacheline_aligned PerCpuDmaCache;
 
+typedef struct {
+    DmaPoolSlotHdr* ptr_;
+    uint32_t        version_;
+} __attribute__((aligned(8))) TaggedPtr;
+
 struct dma_pool {
     /* hot data for per-cpu local allocation */
 
@@ -57,10 +62,10 @@ struct dma_pool {
 
     /* slow path data */
 
-    spinlock_t lock_;
-    DmaPoolSlotHdr* global_free_;
+    spinlock_t   lock_;
+    volatile TaggedPtr global_free_;
 
-    uint8_t         _pad0[48];
+    uint8_t         _pad0[44];
     /* end of one cacheline for more or less hot data */
 
     /* cacheline 2 for cold data */
@@ -80,6 +85,113 @@ struct dma_pool {
 
     PerCpuDmaCache  cpu_cache_[MAX_CPUS];
 } __cacheline_aligned;
+
+___inline int tagged_ptr_cas(
+    volatile TaggedPtr* dst,
+    TaggedPtr           expected,
+    TaggedPtr           desired
+) {
+    uint8_t success;
+
+    __asm__ volatile(
+        "lock cmpxchg8b %[mem] \n\t"
+        "sete %[ok]            \n\t"
+        : [mem] "+m"  (*dst),
+          "+A"        (*(uint64_t*)&expected),
+          [ok]  "=q"  (success)
+        : "b" (desired.ptr_),
+          "c" (desired.version_)
+        : "memory", "cc"
+    );
+
+    return success;
+}
+
+___inline TaggedPtr tagged_ptr_load(volatile TaggedPtr* src) {
+    TaggedPtr result;
+
+    __asm__ volatile(
+        "xor %%eax, %%eax      \n\t"
+        "xor %%edx, %%edx      \n\t"
+        "xor %%ebx, %%ebx      \n\t"
+        "xor %%ecx, %%ecx      \n\t"
+        "lock cmpxchg8b %[mem] \n\t"
+        : "=A" (*(uint64_t*)&result)
+        : [mem] "m" (*src)
+        : "ebx", "ecx", "memory", "cc"
+    );
+
+    return result;
+}
+
+___inline void global_free_push(volatile TaggedPtr* head, DmaPoolSlotHdr* hdr) {
+    TaggedPtr old, desired;
+
+    do {
+        old = tagged_ptr_load(head);
+
+        hdr->next_ = old.ptr_;
+
+        desired.ptr_     = hdr;
+        desired.version_ = old.version_ + 1u;
+
+    } while (!tagged_ptr_cas(head, old, desired));
+}
+
+___inline DmaPoolSlotHdr* global_free_pop(volatile TaggedPtr* head) {
+    TaggedPtr old, desired;
+
+    do {
+        old = tagged_ptr_load(head);
+
+        if (unlikely(!old.ptr_)) {
+            return 0;
+        }
+
+        desired.ptr_     = old.ptr_->next_;
+        desired.version_ = old.version_ + 1u;
+
+    } while (!tagged_ptr_cas(head, old, desired));
+
+    return old.ptr_;
+}
+
+___inline DmaPoolSlotHdr* global_free_pop_batch(
+    volatile TaggedPtr* head,
+    uint32_t            batch,
+    uint32_t*           out_count
+) {
+    TaggedPtr old, desired;
+
+    *out_count = 0u;
+
+    do {
+        old = tagged_ptr_load(head);
+
+        if (unlikely(!old.ptr_)) {
+            return 0;
+        }
+
+        DmaPoolSlotHdr* cut = old.ptr_;
+        uint32_t        cnt = 1u;
+
+        while (cnt < batch && cut->next_) {
+            cut = cut->next_;
+            cnt++;
+        }
+
+        desired.ptr_     = cut->next_;
+        desired.version_ = old.version_ + 1u;
+
+        if (tagged_ptr_cas(head, old, desired)) {
+            cut->next_  = 0;
+            *out_count  = cnt;
+
+            return old.ptr_;
+        }
+
+    } while (1);
+}
 
 ___inline int is_pow2(size_t v) {
     return v && ((v & (v - 1u)) == 0u);
@@ -235,7 +347,8 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
     spinlock_init(&pool->lock_);
     spinlock_init(&pool->grow_lock_);
 
-    pool->global_free_ = 0;
+    pool->global_free_.ptr_     = 0;
+    pool->global_free_.version_ = 0u;
     
     dlist_init(&pool->pages_);
 
@@ -281,82 +394,99 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
     /*
      * Slow path: replenish the per-CPU magazine from the global pool.
      */
-    uint32_t irq_flags = irq_save();
+    uint32_t transferred = 0u;
+    DmaPoolSlotHdr* batch = global_free_pop_batch(
+        &pool->global_free_, DMA_POOL_PCP_BATCH,
+        &transferred
+    );
 
-    spinlock_acquire(&pool->lock_);
-
-retry_global:
-    if (pool->global_free_) {
-        uint32_t transferred = 0u;
-
+    if (likely(batch)) {
         /* Move a batch of slots to amortize lock acquisition cost. */
-        while (pool->global_free_ && transferred < DMA_POOL_PCP_BATCH) {
-            DmaPoolSlotHdr* hdr = pool->global_free_;
-            pool->global_free_ = hdr->next_;
+        DmaPoolSlotHdr* cur = batch;
+        while (cur) {
+            DmaPoolSlotHdr* next = cur->next_;
 
-            hdr->next_ = pcp->free_list_;
-            pcp->free_list_ = hdr;
-            
+            cur->next_ = pcp->free_list_;
+            pcp->free_list_ = cur;
+
             pcp->count_++;
-            transferred++;
+            cur = next;
         }
 
         DmaPoolSlotHdr* mine = pcp->free_list_;
+
         pcp->free_list_ = mine->next_;
         pcp->count_--;
 
-        spinlock_release(&pool->lock_);
-        irq_restore(irq_flags);
-
         *out_phys = mine->phys_;
+
         return (uint8_t*)mine + pool->obj_off_;
     }
 
     /*
      * Global pool is empty. We must ask the system for a new DMA page.
      */
+    uint32_t irq_flags = irq_save();
+
     if (spinlock_try_acquire(&pool->grow_lock_)) {
-
-        spinlock_release(&pool->lock_);
-
-        DmaPoolPage* rec = 0;
+        DmaPoolPage*    rec        = 0;
         DmaPoolSlotHdr* local_head = 0;
         DmaPoolSlotHdr* local_tail = 0;
 
         const int ok = dma_pool_prepare_page(pool, &rec, &local_head, &local_tail);
 
-        spinlock_acquire(&pool->lock_);
-
         if (likely(ok)) {
-            local_tail->next_ = pool->global_free_;
-            pool->global_free_ = local_head;
+            DmaPoolSlotHdr* cur = local_head;
+            while (cur) {
+                DmaPoolSlotHdr* next = cur->next_;
+                
+                global_free_push(&pool->global_free_, cur);
+
+                cur = next;
+            }
+
+            spinlock_acquire(&pool->lock_);
 
             dlist_add_tail(&rec->node_, &pool->pages_);
+            
+            spinlock_release(&pool->lock_);
         }
 
         spinlock_release(&pool->grow_lock_);
 
-        if (unlikely(!ok)) {
-            spinlock_release(&pool->lock_);
+        irq_restore(irq_flags);
 
-            irq_restore(irq_flags);
+        if (unlikely(!ok)) {
             return 0;
         }
 
-        goto retry_global;
+        DmaPoolSlotHdr* hdr = global_free_pop(&pool->global_free_);
+        if (unlikely(!hdr)) {
+            return 0;
+        }
+
+        *out_phys = hdr->phys_;
+        return (uint8_t*)hdr + pool->obj_off_;
     }
 
     /*
      * Another CPU is currently growing the pool.
      * Drop the lock and spin gently until the new page is integrated.
      */
-    spinlock_release(&pool->lock_);
-
     spinlock_acquire(&pool->grow_lock_);
-    spinlock_release(&pool->grow_lock_);
 
-    spinlock_acquire(&pool->lock_);
-    goto retry_global;
+    spinlock_release(&pool->grow_lock_);
+    
+    irq_restore(irq_flags);
+
+    DmaPoolSlotHdr* hdr = global_free_pop(&pool->global_free_);
+    if (unlikely(!hdr)) {
+        return 0;
+    }
+
+    *out_phys = hdr->phys_;
+    
+    return (uint8_t*)hdr + pool->obj_off_;
 }
 
 void dma_pool_free(dma_pool_t* pool, void* vaddr) {
@@ -395,15 +525,16 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
             drain_tail = drain_tail->next_;
         }
 
-        pcp->free_list_ = drain_tail->next_;
-        pcp->count_ -= DMA_POOL_PCP_BATCH;
+        pcp->free_list_   = drain_tail->next_;
+        pcp->count_      -= DMA_POOL_PCP_BATCH;
+        drain_tail->next_ = 0;
 
-        spinlock_acquire(&pool->lock_);
-
-        drain_tail->next_ = pool->global_free_;
-        pool->global_free_ = drain_head;
-
-        spinlock_release(&pool->lock_);
+        DmaPoolSlotHdr* cur = drain_head;
+        while (cur) {
+            DmaPoolSlotHdr* next = cur->next_;
+            global_free_push(&pool->global_free_, cur);
+            cur = next;
+        }
     }
 }
 
@@ -431,7 +562,8 @@ void dma_pool_destroy(dma_pool_t* pool) {
         dlist_init(&pool->pages_);
     }
 
-    pool->global_free_ = 0;
+    pool->global_free_.ptr_     = 0;
+    pool->global_free_.version_ = 0u;
 
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_ = 0;
