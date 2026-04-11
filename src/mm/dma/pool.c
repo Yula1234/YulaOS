@@ -22,8 +22,12 @@
 
 #endif
 
-#define DMA_POOL_PCP_MAX   32u
+#define DMA_POOL_PCP_MAX 32u
 #define DMA_POOL_PCP_BATCH 16u
+
+#define DMA_POOL_PCP_BATCH_MIN 4u
+#define DMA_POOL_PCP_BATCH_MAX (DMA_POOL_PCP_MAX / 2u)
+#define DMA_POOL_ADAPT_PERIOD 256u
 
 /* Important clarification: any hard irq handlers cannot call dma_pool_*
  * because these internal functions do not save the eflags state
@@ -47,6 +51,11 @@ typedef struct PerCpuDmaCache {
     DmaPoolSlotHdr* free_list_;
 
     uint32_t count_;
+
+    uint32_t batch_size_;
+
+    uint32_t hits_;
+    uint32_t total_;
 } __cacheline_aligned PerCpuDmaCache;
 
 typedef struct {
@@ -355,6 +364,11 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_ = 0;
         pool->cpu_cache_[i].count_ = 0u;
+
+        pool->cpu_cache_[i].batch_size_ = DMA_POOL_PCP_BATCH;
+        
+        pool->cpu_cache_[i].hits_ = 0u;
+        pool->cpu_cache_[i].total_ = 0u;
     }
 
     return pool;
@@ -387,9 +401,36 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         pcp->free_list_ = hdr->next_;
         pcp->count_--;
 
+        pcp->hits_++;
+        pcp->total_++;
+
+        if (unlikely(pcp->total_ >= DMA_POOL_ADAPT_PERIOD)) {
+            const uint32_t hits  = pcp->hits_;
+            const uint32_t total = pcp->total_;
+
+            pcp->hits_  = 0u;
+            pcp->total_ = 0u;
+
+            const uint32_t hit_rate = (hits * 100u) / total;
+
+            if (hit_rate < 70u) {
+                const uint32_t nb   = pcp->batch_size_ << 1u;
+                pcp->batch_size_    = nb > DMA_POOL_PCP_BATCH_MAX
+                                    ? DMA_POOL_PCP_BATCH_MAX
+                                    : nb;
+            } else if (hit_rate > 95u) {
+                const uint32_t nb   = pcp->batch_size_ >> 1u;
+                pcp->batch_size_    = nb < DMA_POOL_PCP_BATCH_MIN
+                                    ? DMA_POOL_PCP_BATCH_MIN
+                                    : nb;
+            }
+        }
+
         *out_phys = hdr->phys_;
         return (uint8_t*)hdr + pool->obj_off_;
     }
+
+    pcp->total_++;
 
     /*
      * Slow path: replenish the per-CPU magazine from the global pool.
@@ -485,7 +526,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
     }
 
     *out_phys = hdr->phys_;
-    
+
     return (uint8_t*)hdr + pool->obj_off_;
 }
 
