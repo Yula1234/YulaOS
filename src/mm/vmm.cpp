@@ -11,10 +11,12 @@
 #include <hal/align.h>
 #include <hal/cpu.h>
 
+#include <mm/heap.h>
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 
 #include <kernel/panic.h>
+#include <kernel/rcu.h>
 
 extern "C" {
 
@@ -31,6 +33,50 @@ ___inline int vmm_cpu_index() noexcept {
     }
 
     return cpu;
+}
+
+struct VmmFreeBatch {
+    rcu_head_t rcu;
+    uintptr_t virt_base;
+    size_t count;
+    size_t phys_count;
+    uint32_t phys_pages[0];
+};
+
+static void vmm_rcu_free_batch_cb(rcu_head_t* head) {
+    VmmFreeBatch* batch = reinterpret_cast<VmmFreeBatch*>(
+        reinterpret_cast<uintptr_t>(head) - offsetof(VmmFreeBatch, rcu)
+    );
+
+    kernel::PmmState* pmm = kernel::pmm_state();
+    if (kernel::likely(pmm && batch->phys_count > 0)) {
+        pmm->free_pages_order0_batch(
+            reinterpret_cast<void* const*>(batch->phys_pages), 
+            batch->phys_count
+        );
+    }
+
+    kernel::VmmState* vmm = kernel::vmm_state();
+    if (kernel::likely(vmm)) {
+        vmm->unreserve_pages(reinterpret_cast<void*>(batch->virt_base), batch->count);
+    }
+
+    kfree(batch);
+}
+
+static void vmm_rcu_free_single_cb(rcu_head_t* head) {
+    page_t* p = container_of(head, page_t, rcu);
+    kernel::PmmState* pmm = kernel::pmm_state();
+    
+    uint32_t phys = pmm->page_to_phys(p);
+    uintptr_t virt = reinterpret_cast<uintptr_t>(p->freelist);
+    
+    pmm->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys)), 0u);
+
+    kernel::VmmState* vmm = kernel::vmm_state();
+    if (kernel::likely(vmm)) {
+        vmm->rcu_free_single_complete(virt);
+    }
 }
 
 namespace kernel {
@@ -514,126 +560,159 @@ void* VmmState::alloc_pages(size_t count) noexcept {
     return reinterpret_cast<void*>(virt_base);
 }
 
+void VmmState::flush_va_cache_overflow(uintptr_t* flush, size_t flush_count) noexcept {
+    for (size_t i = 1; i < flush_count; i++) {
+        uintptr_t key = flush[i];
+        size_t j = i;
+
+        while (j > 0u && flush[j - 1u] > key) {
+            flush[j] = flush[j - 1u];
+            j--;
+        }
+
+        flush[j] = key;
+    }
+
+    kernel::SpinLockSafeGuard guard(lock_);
+
+    uintptr_t run_start = flush[0];
+    uintptr_t run_end = run_start + PAGE_SIZE;
+
+    for (size_t i = 1; i < flush_count; i++) {
+        const uintptr_t a = flush[i];
+
+        if (a == run_end) {
+            run_end += PAGE_SIZE;
+            continue;
+        }
+
+        VmFreeBlock* block = alloc_node(free_nodes_head_);
+        
+        if (kernel::unlikely(!block)) {
+            panic("VMM: Out of metadata nodes during free!");
+            return;
+        }
+
+        block->start = run_start;
+        block->size = run_end - run_start;
+        
+        tree_insert(*block, &free_tree_);
+        merge_adjacent(*block, &free_tree_, free_nodes_head_);
+
+        run_start = a;
+        run_end = a + PAGE_SIZE;
+    }
+
+    VmFreeBlock* block = alloc_node(free_nodes_head_);
+    if (kernel::unlikely(!block)) {
+        panic("VMM: Out of metadata nodes during free!");
+        return;
+    }
+
+    block->start = run_start;
+    block->size = run_end - run_start;
+    
+    tree_insert(*block, &free_tree_);
+    merge_adjacent(*block, &free_tree_, free_nodes_head_);
+}
+
+void VmmState::rcu_free_single_complete(uintptr_t virt) noexcept {
+    static constexpr size_t k_flush_pages = PerCpuVmmCache::k_capacity / 2u;
+
+    uintptr_t flush[k_flush_pages] = {};
+    size_t flush_count = 0u;
+
+    {
+        kernel::ScopedIrqDisable irq_guard;
+        
+        const int cpu = vmm_cpu_index();
+        PerCpuVmmCache& cache = pcp_caches_[cpu];
+
+        if (cache.count < PerCpuVmmCache::k_capacity) {
+            cache.free_pages[cache.count++] = virt;
+        } else {
+            for (size_t i = 0; i < k_flush_pages; i++) {
+                flush[i] = cache.free_pages[--cache.count];
+            }
+
+            flush_count = k_flush_pages;
+            cache.free_pages[cache.count++] = virt;
+        }
+    }
+
+    if (flush_count != 0u) {
+        flush_va_cache_overflow(flush, flush_count);
+    }
+}
+
 void VmmState::free_pages(void* ptr, size_t count) noexcept {
     if (kernel::unlikely(!ptr || count == 0u)) {
         return;
     }
 
     const uintptr_t virt_base = reinterpret_cast<uintptr_t>(ptr);
-
     if (kernel::unlikely(count > SIZE_MAX / PAGE_SIZE)) {
         return;
     }
 
-    const size_t size_bytes = count * PAGE_SIZE;
+    used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
 
     if (count == 1u) {
-        const uintptr_t virt = virt_base;
+        const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt_base));
 
-        const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
         if (kernel::likely(phys && pmm_)) {
             page_t* page = pmm_->phys_to_page(phys);
+
             if (kernel::unlikely(page && page->slab_cache)) {
                 panic("VMM: freeing slab page");
             }
         }
 
-        paging_map_ex(
-            kernel_page_directory,
-            static_cast<uint32_t>(virt),
-            0u,
-            0u,
-            PAGING_MAP_NO_TLB_FLUSH
-        );
-
-        smp_tlb_shootdown_range(
-            static_cast<uint32_t>(virt),
-            static_cast<uint32_t>(virt + PAGE_SIZE)
-        );
+        paging_map_ex(kernel_page_directory, static_cast<uint32_t>(virt_base), 0u, 0u, PAGING_MAP_NO_TLB_FLUSH);
 
         if (phys != 0u && pmm_) {
-            pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys)), 0u);
-        }
+            page_t* page = pmm_->phys_to_page(phys);
+            if (page) {
+                page->freelist = reinterpret_cast<void*>(virt_base);
 
-        static constexpr size_t k_flush_pages = PerCpuVmmCache::k_capacity / 2u;
-
-        uintptr_t flush[k_flush_pages] = {};
-        size_t flush_count = 0u;
-
-        {
-            kernel::ScopedIrqDisable irq_guard;
-
-            const int cpu = vmm_cpu_index();
-            PerCpuVmmCache& cache = pcp_caches_[cpu];
-
-            if (cache.count < PerCpuVmmCache::k_capacity) {
-                cache.free_pages[cache.count++] = virt;
-            } else {
-                for (size_t i = 0; i < k_flush_pages; i++) {
-                    flush[i] = cache.free_pages[--cache.count];
-                }
-
-                flush_count = k_flush_pages;
-                cache.free_pages[cache.count++] = virt;
-            }
-        }
-
-        if (flush_count != 0u) {
-            for (size_t i = 1; i < flush_count; i++) {
-                uintptr_t key = flush[i];
-                size_t j = i;
-
-                while (j > 0u && flush[j - 1u] > key) {
-                    flush[j] = flush[j - 1u];
-                    j--;
-                }
-
-                flush[j] = key;
-            }
-
-            kernel::SpinLockSafeGuard guard(lock_);
-
-            uintptr_t run_start = flush[0];
-            uintptr_t run_end = run_start + PAGE_SIZE;
-
-            for (size_t i = 1; i < flush_count; i++) {
-                const uintptr_t a = flush[i];
-
-                if (a == run_end) {
-                    run_end += PAGE_SIZE;
-                    continue;
-                }
-
-                VmFreeBlock* block = alloc_node(free_nodes_head_);
-                if (kernel::unlikely(!block)) {
-                    panic("VMM: Out of metadata nodes during free!");
-                    return;
-                }
-
-                block->start = run_start;
-                block->size = run_end - run_start;
-
-                tree_insert(*block, &free_tree_);
-                merge_adjacent(*block, &free_tree_, free_nodes_head_);
-
-                run_start = a;
-                run_end = a + PAGE_SIZE;
-            }
-
-            VmFreeBlock* block = alloc_node(free_nodes_head_);
-            if (kernel::unlikely(!block)) {
-                panic("VMM: Out of metadata nodes during free!");
+                call_rcu(&page->rcu, vmm_rcu_free_single_cb);
                 return;
             }
+        }
+        
+        smp_tlb_shootdown_range(static_cast<uint32_t>(virt_base), static_cast<uint32_t>(virt_base + PAGE_SIZE));
 
-            block->start = run_start;
-            block->size = run_end - run_start;
+        rcu_free_single_complete(virt_base);
 
-            tree_insert(*block, &free_tree_);
-            merge_adjacent(*block, &free_tree_, free_nodes_head_);
+        return;
+    }
+
+    size_t batch_size = sizeof(VmmFreeBatch) + count * sizeof(uint32_t);
+    VmmFreeBatch* batch = (VmmFreeBatch*)kmalloc(batch_size);
+
+    if (kernel::likely(batch != nullptr)) {
+        batch->virt_base = virt_base;
+        batch->count = count;
+        batch->phys_count = 0;
+
+        for (size_t i = 0; i < count; i++) {
+            const uintptr_t virt = virt_base + (i * PAGE_SIZE);
+            const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
+
+            if (kernel::likely(phys && pmm_)) {
+                page_t* page = pmm_->phys_to_page(phys);
+
+                if (kernel::unlikely(page && page->slab_cache)) {
+                    panic("VMM: freeing slab page");
+                }
+
+                batch->phys_pages[batch->phys_count++] = phys;
+            }
+
+            paging_map_ex(kernel_page_directory, static_cast<uint32_t>(virt), 0u, 0u, PAGING_MAP_NO_TLB_FLUSH);
         }
 
-        used_pages_count_.fetch_sub(1u, kernel::memory_order::relaxed);
+        call_rcu(&batch->rcu, vmm_rcu_free_batch_cb);
         return;
     }
 
@@ -644,45 +723,22 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
 
     for (size_t i = 0; i < count; i++) {
         const uintptr_t virt = virt_base + (i * PAGE_SIZE);
-
         const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
-        if (kernel::likely(phys && pmm_)) {
-            page_t* page = pmm_->phys_to_page(phys);
-            if (kernel::unlikely(page && page->slab_cache)) {
-                panic("VMM: freeing slab page");
-            }
-        }
-
+        
         phys_batch[phys_count++] = phys;
-
-        paging_map_ex(
-            kernel_page_directory,
-            static_cast<uint32_t>(virt),
-            0u,
-            0u,
-            PAGING_MAP_NO_TLB_FLUSH
-        );
+        paging_map_ex(kernel_page_directory, static_cast<uint32_t>(virt), 0u, 0u, PAGING_MAP_NO_TLB_FLUSH);
 
         if (phys_count == k_batch) {
             const uintptr_t batch_end = virt + PAGE_SIZE;
             const uintptr_t batch_start = batch_end - (phys_count * PAGE_SIZE);
 
-            smp_tlb_shootdown_range(
-                static_cast<uint32_t>(batch_start),
-                static_cast<uint32_t>(batch_end)
-            );
+            smp_tlb_shootdown_range(static_cast<uint32_t>(batch_start), static_cast<uint32_t>(batch_end));
 
             for (size_t k = 0u; k < phys_count; k++) {
-                if (phys_batch[k] == 0u || !pmm_) {
-                    continue;
+                if (phys_batch[k] != 0u && pmm_) {
+                    pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])), 0u);
                 }
-
-                pmm_->free_pages(
-                    reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])),
-                    0u
-                );
             }
-
             phys_count = 0u;
         }
     }
@@ -690,42 +746,17 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
     if (phys_count != 0u) {
         const uintptr_t batch_end = virt_base + (count * PAGE_SIZE);
         const uintptr_t batch_start = batch_end - (phys_count * PAGE_SIZE);
-
-        smp_tlb_shootdown_range(
-            static_cast<uint32_t>(batch_start),
-            static_cast<uint32_t>(batch_end)
-        );
+        
+        smp_tlb_shootdown_range(static_cast<uint32_t>(batch_start), static_cast<uint32_t>(batch_end));
 
         for (size_t k = 0u; k < phys_count; k++) {
-            if (phys_batch[k] == 0u || !pmm_) {
-                continue;
+            if (phys_batch[k] != 0u && pmm_) {
+                pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])), 0u);
             }
-
-            pmm_->free_pages(
-                reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])),
-                0u
-            );
         }
     }
 
-    {
-        kernel::SpinLockSafeGuard guard(lock_);
-
-        VmFreeBlock* block = alloc_node(free_nodes_head_);
-        if (kernel::unlikely(!block)) {
-            panic("VMM: Out of metadata nodes during free!");
-            return;
-        }
-
-        block->start = virt_base;
-        block->size = size_bytes;
-
-        tree_insert(*block, &free_tree_);
-
-        merge_adjacent(*block, &free_tree_, free_nodes_head_);
-
-        used_pages_count_.fetch_sub(count, kernel::memory_order::relaxed);
-    }
+    unreserve_pages(reinterpret_cast<void*>(virt_base), count);
 }
 
 int VmmState::map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept {

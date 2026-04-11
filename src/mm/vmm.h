@@ -79,10 +79,15 @@ public:
      */
     [[nodiscard]] int map_page(uint32_t virt, uint32_t phys, uint32_t flags) noexcept;
 
+    void rcu_free_single_complete(uintptr_t virt) noexcept;
+
     /* Number of pages currently allocated from the kernel heap range. */
     [[nodiscard]] size_t get_used_pages() const noexcept;
 
 private:
+
+    void flush_va_cache_overflow(uintptr_t* flush, size_t flush_count) noexcept;
+
     static constexpr uint32_t k_max_nodes = 4096u;
 
     struct __cacheline_aligned PerCpuVmmCache {
