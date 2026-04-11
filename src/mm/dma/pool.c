@@ -415,8 +415,6 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
     /*
      * Fast path: serve directly from the per-CPU magazine.
-     * IRQ disablement ensures we do not migrate to another CPU
-     * and prevents reentrancy races with IRQ handlers.
      */
     if (likely(pcp->count_ > 0u)) {
         DmaPoolSlotHdr* hdr = pcp->free_list_;
