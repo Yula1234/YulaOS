@@ -1,6 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <kernel/workqueue.h>
+#include <kernel/smp/mb.h>
+#include <kernel/sched.h>
+#include <kernel/proc.h>
+
 #include <drivers/usb/core.h>
 #include <drivers/usb/hcd.h>
 #include <drivers/usb/urb.h>
@@ -8,17 +13,12 @@
 #include <drivers/driver.h>
 #include <drivers/pci/pci.h>
 
-#include <kernel/workqueue.h>
-#include <kernel/proc.h>
-#include <kernel/sched.h>
-
-#include <hal/delay.h>
-#include <hal/pmio.h>
-
-#include <kernel/smp/mb.h>
 #include <mm/dma/api.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
+
+#include <hal/delay.h>
+#include <hal/pmio.h>
 
 #include <lib/string.h>
 #include <lib/dlist.h>
@@ -1690,9 +1690,9 @@ static int uhci_probe(pci_device_t* pdev) {
     spinlock_init(&u->sched_lock);
     u->sched_head = 0;
 
-    u->td_pool = dma_pool_create("uhci_td", sizeof(uhci_td_t), 16u);
-    u->qh_pool = dma_pool_create("uhci_qh", sizeof(uhci_qh_t), 16u);
-    u->setup_pool = dma_pool_create("usb_setup", sizeof(usb_setup_packet_t), 8u);
+    u->td_pool = dma_pool_create("uhci_td", sizeof(uhci_td_t), 16u, 0u);
+    u->qh_pool = dma_pool_create("uhci_qh", sizeof(uhci_qh_t), 16u, 0u);
+    u->setup_pool = dma_pool_create("usb_setup", sizeof(usb_setup_packet_t), 8u, 0u);
 
     if (!u->td_pool || !u->qh_pool || !u->setup_pool) {
         uhci_destroy(u);

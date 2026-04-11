@@ -67,34 +67,34 @@ typedef struct {
 
 struct dma_pool {
     /* hot data for per-cpu local allocation */
+    /* cacheline 1 */
 
     uint32_t obj_off_;
     uint32_t slot_size_;
 
     /* slow path data */
 
-    spinlock_t   lock_;
+    spinlock_t         lock_;
     volatile TaggedPtr global_free_;
 
-    uint8_t         _pad0[44];
-    /* end of one cacheline for more or less hot data */
+    uint8_t _pad0[44];
 
     /* cacheline 2 for cold data */
 
-    spinlock_t grow_lock_;
-
+    spinlock_t   grow_lock_;
     dlist_head_t pages_;
-    
+
     uint32_t obj_size_;
     uint32_t align_;
-    
+    uint32_t boundary_;
+
     char* name_;
-    
-    uint8_t _pad1[36];
+
+    uint8_t _pad1[32];
 
     /* cacheline 3 */
 
-    PerCpuDmaCache  cpu_cache_[MAX_CPUS];
+    PerCpuDmaCache cpu_cache_[MAX_CPUS];
 } __cacheline_aligned;
 
 ___inline int tagged_ptr_cas(
@@ -234,12 +234,7 @@ ___noinline static int dma_pool_prepare_page(
     dma_pool_t* pool, DmaPoolPage** out_page,
     DmaPoolSlotHdr** out_head, DmaPoolSlotHdr** out_tail
 ) {
-    if (unlikely(
-        !pool
-        || !out_page
-        || !out_head
-        || !out_tail
-    )) {
+    if (unlikely(!pool || !out_page || !out_head || !out_tail)) {
         return 0;
     }
 
@@ -254,10 +249,6 @@ ___noinline static int dma_pool_prepare_page(
         return 0;
     }
 
-    /* 
-     * Hardware expects strict alignment. If the underlying allocator
-     * gives us a misaligned page, we cannot satisfy the pool contract.
-     */
     if (unlikely((page_phys & (uint32_t)(pool->align_ - 1u)) != 0u)) {
         dma_free_coherent(page, PAGE_SIZE, page_phys);
         return 0;
@@ -271,55 +262,66 @@ ___noinline static int dma_pool_prepare_page(
 
     dlist_init(&rec->node_);
     rec->vaddr_ = page;
-    rec->phys_ = page_phys;
+    rec->phys_  = page_phys;
 
-    /*
-     * Link the freshly carved slots sequentially. The hot path will graft
-     * this local list onto the global free list in O(1).
-     *
-     * Extract frequently used fields into local variables
-     * so that the compiler can pull them into registers.
-     */
     const uint32_t slot_size = pool->slot_size_;
     const uint32_t obj_off   = pool->obj_off_;
-    const size_t   count     = PAGE_SIZE / slot_size;
+    const uint32_t boundary  = pool->boundary_;
+
+    uint32_t offset       = 0u;
+    uint32_t next_boundary = boundary;
 
     uint8_t*  slot_ptr = (uint8_t*)page;
-    uint32_t  phys_cur = page_phys + obj_off; /* cursor */
+    uint32_t  phys_cur = page_phys + obj_off;
 
-    /*
-     * The first slot is processed separately
-     * to completely remove the branching from the loop body.
-     */
-    DmaPoolSlotHdr* head = (DmaPoolSlotHdr*)slot_ptr;
-    head->phys_ = phys_cur;
-    head->next_ = 0;
+    DmaPoolSlotHdr* head = 0;
+    DmaPoolSlotHdr* tail = 0;
 
-    DmaPoolSlotHdr* tail = head;
+    while (offset + slot_size <= PAGE_SIZE) {
+        if (unlikely(offset + slot_size > next_boundary)) {
+            const uint32_t skip = next_boundary - offset;
 
-    slot_ptr += slot_size;
-    phys_cur += slot_size;
+            offset = next_boundary;
+            next_boundary += boundary;
 
-    for (size_t i = 1; i < count; i++) {
+            slot_ptr += skip;
+            phys_cur += skip;
+
+            continue;
+        }
+
         DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)slot_ptr;
 
-        hdr->phys_  = phys_cur;
-        hdr->next_  = 0;        
-        tail->next_ = hdr;
-        tail        = hdr;
+        hdr->phys_ = phys_cur;
+        hdr->next_ = 0;
 
+        if (!head) {
+            head = hdr;
+        } else {
+            tail->next_ = hdr;
+        }
+
+        tail = hdr;
+
+        offset   += slot_size;
         slot_ptr += slot_size;
         phys_cur += slot_size;
+    }
+
+    if (unlikely(!head)) {
+        dma_free_coherent(page, PAGE_SIZE, page_phys);
+        kfree(rec);
+        return 0;
     }
 
     *out_page = rec;
     *out_head = head;
     *out_tail = tail;
 
-    return head != 0;
+    return 1;
 }
 
-dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
+dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, size_t boundary) {
     if (unlikely(!name || obj_size == 0u)) {
         return 0;
     }
@@ -330,6 +332,23 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
 
     if (unlikely(!is_pow2(align) || align > PAGE_SIZE)) {
         return 0;
+    }
+
+    /*
+     * This means there are no restrictions
+     * simplify the cutting logic by assigning a page size.
+     */
+    if (boundary == 0u) {
+        boundary = PAGE_SIZE;
+    }
+
+    if (unlikely(!is_pow2(boundary) || boundary < obj_size)) {
+        return 0;
+    }
+
+    /* boundary cannot be larger than the page size. */
+    if (boundary > PAGE_SIZE) {
+        boundary = PAGE_SIZE;
     }
 
     dma_pool_t* pool = (dma_pool_t*)kzalloc(sizeof(*pool));
@@ -344,9 +363,10 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
     }
 
     pool->obj_size_ = obj_size;
-    pool->align_ = align;
+    pool->align_    = align;
+    pool->boundary_ = boundary;
 
-    pool->obj_off_ = align_up(sizeof(DmaPoolSlotHdr), align);
+    pool->obj_off_   = align_up(sizeof(DmaPoolSlotHdr), align);
     pool->slot_size_ = align_up(pool->obj_off_ + obj_size, align);
 
     if (unlikely(pool->slot_size_ == 0u || pool->slot_size_ > PAGE_SIZE)) {
@@ -360,17 +380,15 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align) {
 
     pool->global_free_.ptr_     = 0;
     pool->global_free_.version_ = 0u;
-    
+
     dlist_init(&pool->pages_);
 
     for (int i = 0; i < MAX_CPUS; i++) {
-        pool->cpu_cache_[i].free_list_ = 0;
-        pool->cpu_cache_[i].count_ = 0u;
-
+        pool->cpu_cache_[i].free_list_  = 0;
+        pool->cpu_cache_[i].count_      = 0u;
         pool->cpu_cache_[i].batch_size_ = DMA_POOL_PCP_BATCH;
-        
-        pool->cpu_cache_[i].hits_ = 0u;
-        pool->cpu_cache_[i].total_ = 0u;
+        pool->cpu_cache_[i].hits_       = 0u;
+        pool->cpu_cache_[i].total_      = 0u;
     }
 
     return pool;

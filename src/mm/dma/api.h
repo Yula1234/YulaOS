@@ -38,7 +38,7 @@ void dma_free_coherent(void* vaddr, size_t size, uint32_t phys);
 dma_sg_list_t* dma_map_buffer(void* vaddr, size_t size, uint32_t direction);
 void dma_unmap_buffer(dma_sg_list_t* sg);
 
-dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align);
+dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, size_t boundary);
 void dma_pool_destroy(dma_pool_t* pool);
 
 void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys);
