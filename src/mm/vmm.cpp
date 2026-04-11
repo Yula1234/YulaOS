@@ -192,98 +192,80 @@ static VmFreeBlock* find_fit(struct rb_root* root, size_t size) noexcept {
 static bool map_new_pages(uintptr_t virt_base, size_t count, PmmState* pmm) noexcept {
     /*
      * Map and populate the kernel heap pages.
-     * On failure this attempts to undo whatever was mapped so far.
+     * Uses batch allocation to drastically reduce lock contention on the PMM.
      */
-    if (kernel::unlikely(!pmm)) {
+    if (kernel::unlikely(!pmm || count == 0u)) {
         return false;
     }
 
-    /*
-     * Allocate one physical page per virtual page and map it into the kernel
-     * page directory.
-     */
-    for (size_t i = 0; i < count; i++) {
-        const uintptr_t virt = virt_base + (i * PAGE_SIZE);
+    static constexpr size_t k_batch = 128u;
+    void* phys_batch[k_batch];
 
-        void* phys_ptr = pmm->alloc_pages(0);
-        const uint32_t phys = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys_ptr));
+    size_t mapped_total = 0;
 
-        if (kernel::unlikely(!phys)) {
-            static constexpr size_t k_batch = 128u;
+    while (mapped_total < count) {
+        size_t chunk = count - mapped_total;
+        
+        if (chunk > k_batch) {
+            chunk = k_batch;
+        }
 
-            uint32_t phys_batch[k_batch] = {};
-            size_t phys_count = 0u;
+        uint32_t allocated = pmm->alloc_pages_order0_batch(PMM_ZONE_NORMAL, phys_batch, chunk);
 
-            for (size_t j = 0; j < i; j++) {
-                const uintptr_t mapped_virt = virt_base + (j * PAGE_SIZE);
-                const uint32_t mapped_phys = paging_get_phys(
-                    kernel_page_directory,
-                    static_cast<uint32_t>(mapped_virt)
-                );
+        for (size_t j = 0; j < allocated; j++) {
+            const uintptr_t virt = virt_base + ((mapped_total + j) * PAGE_SIZE);
+            const uint32_t phys = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys_batch[j]));
 
-                phys_batch[phys_count++] = mapped_phys;
+            paging_map_ex(
+                kernel_page_directory,
+                static_cast<uint32_t>(virt),
+                phys,
+                PTE_PRESENT | PTE_RW,
+                PAGING_MAP_NO_TLB_FLUSH
+            );
+        }
 
-                paging_map_ex(
-                    kernel_page_directory,
-                    static_cast<uint32_t>(mapped_virt),
-                    0u, 0u, PAGING_MAP_NO_TLB_FLUSH
-                );
+        mapped_total += allocated;
 
-                if (phys_count == k_batch) {
-                    const uintptr_t batch_end = mapped_virt + PAGE_SIZE;
-                    const uintptr_t batch_start = batch_end - (k_batch * PAGE_SIZE);
+        if (kernel::unlikely(allocated < chunk)) {
+            size_t rb_done = 0;
+            
+            while (rb_done < mapped_total) {
+                size_t rb_chunk = mapped_total - rb_done;
 
-                    smp_tlb_shootdown_range(
-                        static_cast<uint32_t>(batch_start),
-                        static_cast<uint32_t>(batch_end)
-                    );
-
-                    for (size_t k = 0u; k < phys_count; k++) {
-                        if (phys_batch[k] == 0u) {
-                            continue;
-                        }
-
-                        pmm->free_pages(
-                            reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])),
-                            0u
-                        );
-                    }
-
-                    phys_count = 0u;
+                if (rb_chunk > k_batch) {
+                    rb_chunk = k_batch;
                 }
-            }
 
-            if (phys_count != 0u) {
-                const uintptr_t batch_end = virt_base + (i * PAGE_SIZE);
-                const uintptr_t batch_start = batch_end - (phys_count * PAGE_SIZE);
+                for (size_t k = 0; k < rb_chunk; k++) {
+                    const uintptr_t mapped_virt = virt_base + ((rb_done + k) * PAGE_SIZE);
+                    
+                    phys_batch[k] = reinterpret_cast<void*>(static_cast<uintptr_t>(
+                        paging_get_phys(kernel_page_directory, static_cast<uint32_t>(mapped_virt))
+                    ));
+
+                    paging_map_ex(
+                        kernel_page_directory,
+                        static_cast<uint32_t>(mapped_virt),
+                        0u, 0u, PAGING_MAP_NO_TLB_FLUSH
+                    );
+                }
+
+                const uintptr_t batch_start = virt_base + (rb_done * PAGE_SIZE);
+                const uintptr_t batch_end = batch_start + (rb_chunk * PAGE_SIZE);
 
                 smp_tlb_shootdown_range(
                     static_cast<uint32_t>(batch_start),
                     static_cast<uint32_t>(batch_end)
                 );
 
-                for (size_t k = 0u; k < phys_count; k++) {
-                    if (phys_batch[k] == 0u) {
-                        continue;
-                    }
+                pmm->free_pages_order0_batch(phys_batch, rb_chunk);
 
-                    pmm->free_pages(
-                        reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])),
-                        0u
-                    );
-                }
+                rb_done += rb_chunk;
             }
-
+            
             return false;
         }
-
-        paging_map_ex(
-            kernel_page_directory,
-            static_cast<uint32_t>(virt),
-            phys,
-            PTE_PRESENT | PTE_RW,
-            PAGING_MAP_NO_TLB_FLUSH
-        );
     }
 
     return true;
