@@ -78,6 +78,12 @@ uint32_t* paging_clone_directory(void);
  */
 void paging_map(uint32_t* dir, uint32_t virt, uint32_t phys, uint32_t flags);
 
+void paging_map_batch(
+    uint32_t* dir, uint32_t virt_start,
+    const uint32_t* phys_array, uint32_t count,
+    uint32_t flags, uint32_t map_flags
+);
+
 void paging_map_ex(
     uint32_t* dir, uint32_t virt,
     uint32_t phys, uint32_t flags,
