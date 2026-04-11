@@ -1,20 +1,20 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <lib/compiler.h>
 
-#include <lib/cpp/atomic.h>
 #include <lib/cpp/lock_guard.h>
+#include <lib/cpp/atomic.h>
+#include <lib/compiler.h>
 #include <lib/cpp/new.h>
-
-#include <kernel/panic.h>
 #include <lib/string.h>
+
+#include <hal/align.h>
+#include <hal/cpu.h>
 
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 
-#include <hal/align.h>
-#include <hal/cpu.h>
+#include <kernel/panic.h>
 
 extern "C" {
 
@@ -24,7 +24,7 @@ void smp_tlb_shootdown_range(uint32_t start, uint32_t end);
 
 }
 
-static inline int vmm_cpu_index() noexcept {
+___inline int vmm_cpu_index() noexcept {
     const int cpu = hal_cpu_index();
     if (cpu < 0 || cpu >= MAX_CPUS) {
         return 0;
@@ -37,12 +37,15 @@ namespace kernel {
 
 namespace {
 
-static inline size_t get_subtree_max_size(struct rb_node* node) {
-    if (!node) return 0;
+___inline size_t get_subtree_max_size(struct rb_node* node) {
+    if (unlikely(!node)) {
+        return 0;
+    }
+
     return rb_entry(node, VmFreeBlock, node)->subtree_max_size;
 }
 
-static bool vmm_recalc_subtree(VmFreeBlock* block) {
+___inline bool vmm_recalc_subtree(VmFreeBlock* block) {
     size_t old_max = block->subtree_max_size;
     size_t new_max = block->size;
 
@@ -64,7 +67,7 @@ static void vmm_augment_propagate(struct rb_node* node, struct rb_node* stop) {
     }
 }
 
-static void vmm_augment_copy(struct rb_node* old_n, struct rb_node* new_n) {
+___inline void vmm_augment_copy(struct rb_node* old_n, struct rb_node* new_n) {
     VmFreeBlock* old_b = rb_entry(old_n, VmFreeBlock, node);
     VmFreeBlock* new_b = rb_entry(new_n, VmFreeBlock, node);
     new_b->subtree_max_size = old_b->subtree_max_size;
@@ -84,7 +87,7 @@ static const struct rb_augment_callbacks vmm_rb_callbacks = {
     .rotate    = vmm_augment_rotate,
 };
 
-static void init_block(VmFreeBlock& block) noexcept {
+___inline void init_block(VmFreeBlock& block) noexcept {
     block.node.__parent_color = 0;
     block.node.rb_left = nullptr;
     block.node.rb_right = nullptr;
@@ -125,7 +128,7 @@ static VmFreeBlock* alloc_node(VmFreeBlock*& head) noexcept {
     return node;
 }
 
-static void free_node(VmFreeBlock& node, VmFreeBlock*& head) noexcept {
+___inline void free_node(VmFreeBlock& node, VmFreeBlock*& head) noexcept {
     node.next_free = head;
     head = &node;
 }
@@ -155,7 +158,7 @@ static void tree_insert(VmFreeBlock& block, struct rb_root* root) noexcept {
     rb_insert_color_augmented(&block.node, root, &vmm_rb_callbacks);
 }
 
-static void tree_erase(VmFreeBlock& block, struct rb_root* root) noexcept {
+___inline void tree_erase(VmFreeBlock& block, struct rb_root* root) noexcept {
     rb_erase_augmented(&block.node, root, &vmm_rb_callbacks);
     block.node.__parent_color = 0;
     block.node.rb_left = nullptr;
