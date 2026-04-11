@@ -76,11 +76,11 @@ struct dma_pool {
     PerCpuDmaCache  cpu_cache_[MAX_CPUS];
 } __cacheline_aligned;
 
-static inline int is_pow2(size_t v) {
+___inline int is_pow2(size_t v) {
     return v && ((v & (v - 1u)) == 0u);
 }
 
-static char* dup_name(const char* s) {
+___inline char* dup_name(const char* s) {
     if (unlikely(!s)) {
         return 0;
     }
@@ -102,7 +102,7 @@ static char* dup_name(const char* s) {
  * Allocate a new backing DMA page from the system and carve it into slots.
  * This runs entirely lockless with respect to the pool's internal locks.
  */
-static int dma_pool_prepare_page(
+___inline int dma_pool_prepare_page(
     dma_pool_t* pool, DmaPoolPage** out_page,
     DmaPoolSlotHdr** out_head, DmaPoolSlotHdr** out_tail
 ) {
