@@ -20,19 +20,12 @@
 
 static uint32_t size_to_order(size_t size) {
     uint32_t pages = (size + PAGE_SIZE - 1u) / PAGE_SIZE;
-    if (pages == 0u) {
+    
+    if (pages <= 1u) {
         return 0u;
     }
 
-    uint32_t order = 0u;
-    uint32_t pow2 = 1u;
-    
-    while (pow2 < pages) {
-        pow2 <<= 1u;
-        order++;
-    }
-    
-    return order;
+    return 32u - __builtin_clz(pages - 1u);
 }
 
 ___inline void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags) {
