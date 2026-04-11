@@ -6,7 +6,6 @@
 #include <hal/align.h>
 #include <hal/lock.h>
 #include <hal/cpu.h>
-#include <hal/cpu.h>
 #include <hal/irq.h>
 
 #include <lib/compiler.h>
