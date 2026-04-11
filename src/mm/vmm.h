@@ -95,6 +95,9 @@ private:
 
         uintptr_t free_pages[k_capacity]{};
         size_t count = 0u;
+
+        uintptr_t arena_base = 0u;
+        size_t arena_pages = 0u;
     };
 
     SpinLock lock_;

@@ -355,6 +355,9 @@ void VmmState::init() noexcept {
 
     for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
         pcp_caches_[cpu].count = 0u;
+
+        pcp_caches_[cpu].arena_base = 0u;
+        pcp_caches_[cpu].arena_pages = 0u;
     }
 
     VmFreeBlock* initial = alloc_node(free_nodes_head_);
@@ -370,60 +373,62 @@ void VmmState::init() noexcept {
 }
 
 void* VmmState::alloc_pages(size_t count) noexcept {
-    if (kernel::unlikely(count == 0u)) {
+    if (kernel::unlikely(count == 0u || count > SIZE_MAX / PAGE_SIZE)) {
         return nullptr;
     }
 
-    if (kernel::unlikely(count > SIZE_MAX / PAGE_SIZE)) {
-        return nullptr;
+    uintptr_t virt_base = 0u;
+
+    {
+        kernel::ScopedIrqDisable irq_guard;
+
+        const int cpu = vmm_cpu_index();
+        
+        PerCpuVmmCache& cache = pcp_caches_[cpu];
+
+        if (count == 1u && cache.count > 0u) {
+            virt_base = cache.free_pages[--cache.count];
+        } else if (cache.arena_pages >= count) {
+            virt_base = cache.arena_base;
+
+            cache.arena_base += count * PAGE_SIZE;
+            cache.arena_pages -= count;
+        }
     }
 
-    static constexpr size_t k_pcp_refill_pages = 32u;
+    if (kernel::unlikely(virt_base == 0u)) {
+        static constexpr size_t k_arena_refill_pages = 512u; 
+        size_t carve_pages = (count < k_arena_refill_pages) ? k_arena_refill_pages : count;
 
-    if (count == 1u) {
-        uintptr_t virt = 0u;
+        uintptr_t old_arena_base = 0u;
+        size_t old_arena_pages = 0u;
 
         {
             kernel::ScopedIrqDisable irq_guard;
 
             const int cpu = vmm_cpu_index();
+
             PerCpuVmmCache& cache = pcp_caches_[cpu];
 
-            if (cache.count > 0u) {
-                virt = cache.free_pages[--cache.count];
-            }
-        }
-
-        if (virt != 0u) {
-            if (kernel::unlikely(!map_new_pages(virt, 1u, pmm_))) {
-                return nullptr;
-            }
-
-            used_pages_count_.fetch_add(1u, kernel::memory_order::relaxed);
-            return reinterpret_cast<void*>(virt);
-        }
-
-        uintptr_t carve_base = 0u;
-        size_t carve_pages = k_pcp_refill_pages;
-
-        {
             kernel::SpinLockSafeGuard guard(lock_);
 
             VmFreeBlock* block = find_fit(&free_tree_, carve_pages * PAGE_SIZE);
+
             if (kernel::unlikely(!block)) {
-                carve_pages = 1u;
-                block = find_fit(&free_tree_, PAGE_SIZE);
+                carve_pages = count;
+
+                block = find_fit(&free_tree_, carve_pages * PAGE_SIZE);
             }
 
             if (kernel::unlikely(!block)) {
                 return nullptr;
             }
 
-            carve_base = block->start;
+            virt_base = block->start;
+            const size_t carved_bytes = carve_pages * PAGE_SIZE;
 
             tree_erase(*block, &free_tree_);
 
-            const size_t carved_bytes = carve_pages * PAGE_SIZE;
             if (block->size == carved_bytes) {
                 free_node(*block, free_nodes_head_);
             } else {
@@ -432,124 +437,43 @@ void* VmmState::alloc_pages(size_t count) noexcept {
 
                 tree_insert(*block, &free_tree_);
             }
-        }
 
-        const uintptr_t out = carve_base;
+            if (carve_pages > count) {
+                old_arena_base = cache.arena_base;
+                old_arena_pages = cache.arena_pages;
 
-        if (carve_pages > 1u) {
-            kernel::ScopedIrqDisable irq_guard;
-
-            const int cpu = vmm_cpu_index();
-            PerCpuVmmCache& cache = pcp_caches_[cpu];
-
-            const size_t cache_free = PerCpuVmmCache::k_capacity - cache.count;
-            const size_t available = carve_pages - 1u;
-            const size_t to_cache = (cache_free < available) ? cache_free : available;
-
-            for (size_t i = 0; i < to_cache; i++) {
-                cache.free_pages[cache.count++] = carve_base + ((i + 1u) * PAGE_SIZE);
+                cache.arena_base = virt_base + (count * PAGE_SIZE);
+                cache.arena_pages = carve_pages - count;
             }
 
-            const size_t remaining = available - to_cache;
-            if (remaining != 0u) {
-                const uintptr_t rem_start = carve_base + ((to_cache + 1u) * PAGE_SIZE);
-                const size_t rem_size = remaining * PAGE_SIZE;
+            if (old_arena_pages > 0u) {
+                VmFreeBlock* old_rem = alloc_node(free_nodes_head_);
+                if (kernel::likely(old_rem)) {
+                    old_rem->start = old_arena_base;
+                    old_rem->size = old_arena_pages * PAGE_SIZE;
 
-                kernel::SpinLockSafeGuard guard(lock_);
-
-                VmFreeBlock* rem_block = alloc_node(free_nodes_head_);
-                if (kernel::unlikely(!rem_block)) {
-                    panic("VMM: Out of metadata nodes during alloc refill!");
-                    return nullptr;
+                    tree_insert(*old_rem, &free_tree_);
+                    merge_adjacent(*old_rem, &free_tree_, free_nodes_head_);
                 }
-
-                rem_block->start = rem_start;
-                rem_block->size = rem_size;
-
-                tree_insert(*rem_block, &free_tree_);
-                merge_adjacent(*rem_block, &free_tree_, free_nodes_head_);
             }
         }
+    }
 
-        if (kernel::unlikely(!map_new_pages(out, 1u, pmm_))) {
-            const size_t rollback_size = PAGE_SIZE;
-
-            kernel::SpinLockSafeGuard guard(lock_);
-
-            VmFreeBlock* rollback = alloc_node(free_nodes_head_);
-            if (kernel::unlikely(!rollback)) {
-                panic("VMM: Out of metadata nodes during rollback!");
-                return nullptr;
-            }
-
-            rollback->start = out;
-            rollback->size = rollback_size;
+    if (kernel::unlikely(!map_new_pages(virt_base, count, pmm_))) {
+        kernel::SpinLockSafeGuard guard(lock_);
+        
+        VmFreeBlock* rollback = alloc_node(free_nodes_head_);
+        if (kernel::likely(rollback)) {
+            rollback->start = virt_base;
+            rollback->size = count * PAGE_SIZE;
 
             tree_insert(*rollback, &free_tree_);
             merge_adjacent(*rollback, &free_tree_, free_nodes_head_);
-
-            return nullptr;
         }
-
-        used_pages_count_.fetch_add(1u, kernel::memory_order::relaxed);
-        return reinterpret_cast<void*>(out);
-    }
-
-    const size_t size_bytes = count * PAGE_SIZE;
-
-    uintptr_t virt_base = 0u;
-
-    {
-        kernel::SpinLockSafeGuard guard(lock_);
-
-        VmFreeBlock* block = find_fit(&free_tree_, size_bytes);
-        if (kernel::unlikely(!block)) {
-            return nullptr;
-        }
-
-        virt_base = block->start;
-
-        tree_erase(*block, &free_tree_);
-
-        if (block->size == size_bytes) {
-            free_node(*block, free_nodes_head_);
-        } else {
-            block->start += size_bytes;
-            block->size -= size_bytes;
-
-            tree_insert(*block, &free_tree_);
-        }
-
-        used_pages_count_.fetch_add(count, kernel::memory_order::relaxed);
-    }
-
-    /*
-     * Mapping is performed outside the allocator lock.
-     * If it fails, we roll the virtual range back into the free trees.
-     */
-    if (kernel::unlikely(!map_new_pages(virt_base, count, pmm_))) {
-        const size_t rollback_count = count;
-        const size_t rollback_size = rollback_count * PAGE_SIZE;
-
-        kernel::SpinLockSafeGuard guard(lock_);
-
-        used_pages_count_.fetch_sub(rollback_count, kernel::memory_order::relaxed);
-
-        VmFreeBlock* rollback = alloc_node(free_nodes_head_);
-        if (kernel::unlikely(!rollback)) {
-            panic("VMM: Out of metadata nodes during rollback!");
-            return nullptr;
-        }
-
-        rollback->start = virt_base;
-        rollback->size = rollback_size;
-
-        tree_insert(*rollback, &free_tree_);
-
-        merge_adjacent(*rollback, &free_tree_, free_nodes_head_);
-
         return nullptr;
     }
+
+    used_pages_count_.fetch_add(count, kernel::memory_order::relaxed);
 
     return reinterpret_cast<void*>(virt_base);
 }
