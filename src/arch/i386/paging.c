@@ -326,6 +326,46 @@ void paging_unmap_range(uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr)
     paging_unmap_range_ex(dir, start_vaddr, end_vaddr, 0, 0);
 }
 
+void paging_unmap_range_no_tlb(
+    uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr,
+    paging_unmap_visitor_t visitor, void* visitor_ctx
+) {
+    if (!dir) return;
+    if (end_vaddr <= start_vaddr) return;
+
+    const uint32_t start = start_vaddr & ~0xFFFu;
+    const uint32_t end = (end_vaddr + 0xFFFu) & ~0xFFFu;
+    
+    if (end <= start) return;
+
+    uint32_t int_flags = paging_lock_dir_safe(dir);
+
+    for (uint32_t virt = start; virt < end; virt += 0x1000u) {
+        const uint32_t pd_idx = virt >> 22;
+
+        const uint32_t pde = dir[pd_idx];
+        if ((pde & 1u) == 0u) continue;
+        if ((pde & (1u << 7)) != 0u) continue;
+        if (!paging_pde_pt_phys_valid(pde)) continue;
+
+        uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+        const uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+
+        const uint32_t pte = pt[pt_idx];
+        if ((pte & 1u) == 0u) continue;
+
+        if (visitor) {
+            if (!visitor(virt, pte, visitor_ctx)) {
+                continue;
+            }
+        }
+
+        pt[pt_idx] = 0u;
+    }
+
+    paging_unlock_dir_safe(dir, int_flags);
+}
+
 static inline int paging_pde_pt_phys_valid(uint32_t pde) {
     /*
      * Defensive validation for pointers coming from page tables.

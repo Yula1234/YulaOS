@@ -694,67 +694,91 @@ void VmmState::free_pages(void* ptr, size_t count) noexcept {
 
     if (kernel::likely(batch != nullptr)) {
         batch->virt_base = virt_base;
+        
         batch->count = count;
         batch->phys_count = 0;
 
-        for (size_t i = 0; i < count; i++) {
-            const uintptr_t virt = virt_base + (i * PAGE_SIZE);
-            const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
+        struct VmmUnmapCtx {
+            VmmFreeBatch* b;
 
-            if (kernel::likely(phys && pmm_)) {
-                page_t* page = pmm_->phys_to_page(phys);
+            kernel::PmmState* p;
+        } ctx = { batch, pmm_ };
 
+        auto visitor = [](uint32_t virt, uint32_t pte, void* vctx) -> int {
+            (void)virt;
+            
+            auto* c = static_cast<VmmUnmapCtx*>(vctx);
+            
+            uint32_t phys = pte & ~0xFFFu;
+            
+            if (kernel::likely(phys && c->p)) {
+                page_t* page = c->p->phys_to_page(phys);
+            
                 if (kernel::unlikely(page && page->slab_cache)) {
                     panic("VMM: freeing slab page");
                 }
-
-                batch->phys_pages[batch->phys_count++] = phys;
+            
+                c->b->phys_pages[c->b->phys_count++] = phys;
             }
 
-            paging_map_ex(kernel_page_directory, static_cast<uint32_t>(virt), 0u, 0u, PAGING_MAP_NO_TLB_FLUSH);
-        }
+            return 1;
+        };
+
+        paging_unmap_range_no_tlb(
+            kernel_page_directory, static_cast<uint32_t>(virt_base),
+            static_cast<uint32_t>(virt_base + count * PAGE_SIZE),
+            visitor, &ctx
+        );
 
         call_rcu(&batch->rcu, vmm_rcu_free_batch_cb);
         return;
     }
 
     static constexpr size_t k_batch = 128u;
-
-    uint32_t phys_batch[k_batch] = {};
-    size_t phys_count = 0u;
-
-    for (size_t i = 0; i < count; i++) {
-        const uintptr_t virt = virt_base + (i * PAGE_SIZE);
-        const uint32_t phys = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(virt));
-        
-        phys_batch[phys_count++] = phys;
-        paging_map_ex(kernel_page_directory, static_cast<uint32_t>(virt), 0u, 0u, PAGING_MAP_NO_TLB_FLUSH);
-
-        if (phys_count == k_batch) {
-            const uintptr_t batch_end = virt + PAGE_SIZE;
-            const uintptr_t batch_start = batch_end - (phys_count * PAGE_SIZE);
-
-            smp_tlb_shootdown_range(static_cast<uint32_t>(batch_start), static_cast<uint32_t>(batch_end));
-
-            for (size_t k = 0u; k < phys_count; k++) {
-                if (phys_batch[k] != 0u && pmm_) {
-                    pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])), 0u);
-                }
-            }
-            phys_count = 0u;
+    
+    for (size_t offset = 0; offset < count; offset += k_batch) {
+        size_t chunk = count - offset;
+        if (chunk > k_batch) {
+            chunk = k_batch;
         }
-    }
 
-    if (phys_count != 0u) {
-        const uintptr_t batch_end = virt_base + (count * PAGE_SIZE);
-        const uintptr_t batch_start = batch_end - (phys_count * PAGE_SIZE);
-        
-        smp_tlb_shootdown_range(static_cast<uint32_t>(batch_start), static_cast<uint32_t>(batch_end));
+        struct VmmSyncCtx {
+            uint32_t phys_batch[k_batch];
+            size_t phys_count;
 
-        for (size_t k = 0u; k < phys_count; k++) {
-            if (phys_batch[k] != 0u && pmm_) {
-                pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(phys_batch[k])), 0u);
+            kernel::PmmState* p;
+        } ctx = { {}, 0, pmm_ };
+
+        auto visitor = [](uint32_t virt, uint32_t pte, void* vctx) -> int {
+            (void)virt;
+            
+            auto* c = static_cast<VmmSyncCtx*>(vctx);
+
+            uint32_t phys = pte & ~0xFFFu;
+            
+            if (kernel::likely(phys && c->p)) {
+                page_t* page = c->p->phys_to_page(phys);
+            
+                if (kernel::unlikely(page && page->slab_cache)) {
+                    panic("VMM: freeing slab page");
+                }
+            
+                c->phys_batch[c->phys_count++] = phys;
             }
+
+            return 1;
+        };
+
+        const uintptr_t chunk_virt = virt_base + (offset * PAGE_SIZE);
+
+        paging_unmap_range_ex(
+            kernel_page_directory, static_cast<uint32_t>(chunk_virt),
+            static_cast<uint32_t>(chunk_virt + chunk * PAGE_SIZE),
+            visitor, &ctx
+        );
+
+        for (size_t k = 0u; k < ctx.phys_count; k++) {
+            pmm_->free_pages(reinterpret_cast<void*>(static_cast<uintptr_t>(ctx.phys_batch[k])), 0u);
         }
     }
 

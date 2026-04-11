@@ -99,6 +99,11 @@ void paging_unmap_range_ex(
 
 void paging_unmap_range(uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr);
 
+void paging_unmap_range_no_tlb(
+    uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr,
+    paging_unmap_visitor_t visitor, void* visitor_ctx
+);
+
 /* Zero a physical page, using a temporary fixmap mapping once paging is on. */
 void paging_zero_phys_page(uint32_t phys);
 
