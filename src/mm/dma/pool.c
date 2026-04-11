@@ -1,16 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <kernel/output/kprintf.h>
 #include <kernel/smp/cpu_limits.h>
+
+#include <lib/compiler.h>
+#include <lib/string.h>
+#include <lib/dlist.h>
 
 #include <hal/align.h>
 #include <hal/lock.h>
 #include <hal/cpu.h>
 #include <hal/irq.h>
-
-#include <lib/compiler.h>
-#include <lib/string.h>
-#include <lib/dlist.h>
 
 #include <mm/heap.h>
 
@@ -86,11 +87,14 @@ struct dma_pool {
 
     uint32_t obj_size_;
     uint32_t align_;
+
     uint32_t boundary_;
+
+    uint32_t nr_active_;
 
     char* name_;
 
-    uint8_t _pad1[32];
+    uint8_t _pad1[28];
 
     /* cacheline 3 */
 
@@ -364,7 +368,9 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
 
     pool->obj_size_ = obj_size;
     pool->align_    = align;
+    
     pool->boundary_ = boundary;
+    pool->nr_active_ = 0u;
 
     pool->obj_off_   = align_up(sizeof(DmaPoolSlotHdr), align);
     pool->slot_size_ = align_up(pool->obj_off_ + obj_size, align);
@@ -446,6 +452,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
             }
         }
 
+        __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+
         *out_phys = hdr->phys_;
         return (uint8_t*)hdr + pool->obj_off_;
     }
@@ -480,6 +488,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         pcp->count_--;
 
         *out_phys = mine->phys_;
+
+        __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
 
         return (uint8_t*)mine + pool->obj_off_;
     }
@@ -526,6 +536,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
             return 0;
         }
 
+        __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+
         *out_phys = hdr->phys_;
         return (uint8_t*)hdr + pool->obj_off_;
     }
@@ -545,6 +557,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         return 0;
     }
 
+    __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+
     *out_phys = hdr->phys_;
 
     return (uint8_t*)hdr + pool->obj_off_;
@@ -554,6 +568,8 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
     if (unlikely(!pool || !vaddr)) {
         return;
     }
+
+    __atomic_fetch_sub(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
 
     uint8_t* obj = (uint8_t*)vaddr;
     DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)(obj - pool->obj_off_);
@@ -601,7 +617,15 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
 
 void dma_pool_destroy(dma_pool_t* pool) {
     if (unlikely(!pool)) {
+        kprintf("dma_pool_destroy: called on null pool pointer\n");
         return;
+    }
+
+    if (pool->nr_active_) {
+        kprintf(
+            "dma_pool_destroy: pool '%s' destroyed with %u active allocations\n",
+            pool->name_ ? pool->name_ : "?", pool->nr_active_
+        );
     }
 
     uint32_t flags = spinlock_acquire_safe(&pool->lock_);
