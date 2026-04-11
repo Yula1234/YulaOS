@@ -7,6 +7,7 @@
 
 #include <arch/i386/paging.h>
 
+#include <lib/compiler.h>
 #include <lib/string.h>
 
 #include "api.h"
@@ -34,7 +35,7 @@ static uint32_t size_to_order(size_t size) {
     return order;
 }
 
-__attribute__((always_inline)) static inline void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags) {
+___inline void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags) {
     if (size == 0u || !out_phys) {
         return 0;
     }
