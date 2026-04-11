@@ -56,6 +56,8 @@ typedef struct PerCpuDmaCache {
 
     uint32_t hits_;
     uint32_t total_;
+
+    uint8_t  _pad[64 - 5 * sizeof(uint32_t)];
 } __cacheline_aligned PerCpuDmaCache;
 
 typedef struct {
@@ -437,7 +439,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
      */
     uint32_t transferred = 0u;
     DmaPoolSlotHdr* batch = global_free_pop_batch(
-        &pool->global_free_, DMA_POOL_PCP_BATCH,
+        &pool->global_free_, pcp->batch_size_,
         &transferred
     );
 
@@ -558,16 +560,16 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
      * Flush a batch to the global list if the per-CPU magazine overflows.
      * This prevents a single CPU from hoarding all free slots.
      */
-    if (unlikely(pcp->count_ >= DMA_POOL_PCP_MAX)) {
+    if (unlikely(pcp->count_ >= pcp->batch_size_)) {
         DmaPoolSlotHdr* drain_head = pcp->free_list_;
         DmaPoolSlotHdr* drain_tail = drain_head;
 
-        for (uint32_t i = 1u; i < DMA_POOL_PCP_BATCH; i++) {
+        for (uint32_t i = 1u; i < pcp->batch_size_; i++) {
             drain_tail = drain_tail->next_;
         }
 
-        pcp->free_list_   = drain_tail->next_;
-        pcp->count_      -= DMA_POOL_PCP_BATCH;
+        pcp->free_list_ = drain_tail->next_;
+        pcp->count_ -= pcp->batch_size_;
         drain_tail->next_ = 0;
 
         DmaPoolSlotHdr* cur = drain_head;
@@ -609,6 +611,9 @@ void dma_pool_destroy(dma_pool_t* pool) {
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_ = 0;
         pool->cpu_cache_[i].count_ = 0u;
+        pool->cpu_cache_[i].batch_size_ = 0u;
+        pool->cpu_cache_[i].hits_ = 0u;
+        pool->cpu_cache_[i].total_ = 0u;
     }
 
     spinlock_release_safe(&pool->lock_, flags);
