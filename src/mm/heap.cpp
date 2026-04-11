@@ -687,6 +687,12 @@ private:
             return false;
         }
 
+        if (kernel::unlikely((addr & static_cast<uintptr_t>(PAGE_SIZE - 1u)) < sizeof(AlignedAllocHeader))) {
+            if (kernel::unlikely(paging_get_phys(kernel_page_directory, static_cast<uint32_t>(header_addr)) == 0u)) {
+                return false;
+            }
+        }
+
         auto* header = reinterpret_cast<AlignedAllocHeader*>(header_addr);
         if (kernel::unlikely(header->magic != k_aligned_alloc_magic)) {
             return false;
