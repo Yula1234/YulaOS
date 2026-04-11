@@ -25,6 +25,11 @@
 #define DMA_POOL_PCP_MAX   32u
 #define DMA_POOL_PCP_BATCH 16u
 
+/* Important clarification: any hard irq handlers cannot call dma_pool_*
+ * because these internal functions do not save the eflags state
+ * which is done to keep the fast allocation path fast.
+ */
+
 typedef struct DmaPoolPage {
     dlist_head_t node_;
 
@@ -233,7 +238,9 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         return 0;
     }
 
-    uint32_t irq_flags = irq_save();
+    /* Do not disable interrupts in the fast path, because the kernel is not preemptible
+     * Cpu index cannot be invalidated at the time of allocation.
+     */
 
     const int cpu = hal_cpu_index();
     PerCpuDmaCache* pcp = &pool->cpu_cache_[cpu];
@@ -245,10 +252,13 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
      */
     if (likely(pcp->count_ > 0u)) {
         DmaPoolSlotHdr* hdr = pcp->free_list_;
+
+        if (likely(hdr->next_)) {
+            __builtin_prefetch(hdr->next_, 0, 3); /* to avoid cache misses later */
+        }
+
         pcp->free_list_ = hdr->next_;
         pcp->count_--;
-
-        irq_restore(irq_flags);
 
         *out_phys = hdr->phys_;
         return (uint8_t*)hdr + pool->obj_off_;
@@ -257,6 +267,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
     /*
      * Slow path: replenish the per-CPU magazine from the global pool.
      */
+    uint32_t irq_flags = irq_save();
+
     spinlock_acquire(&pool->lock_);
 
 retry_global:
@@ -341,12 +353,18 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
     uint8_t* obj = (uint8_t*)vaddr;
     DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)(obj - pool->obj_off_);
 
-    uint32_t irq_flags = irq_save();
-
+    /* Do not disable interrupts while using the CPU index
+     * see the note in dma_pool_alloc.
+     */
     const int cpu = hal_cpu_index();
     PerCpuDmaCache* pcp = &pool->cpu_cache_[cpu];
 
+    if (likely(pcp->free_list_)) {
+        __builtin_prefetch(pcp->free_list_, 0, 3); /* to avoid cache misses later */
+    }
+
     hdr->next_ = pcp->free_list_;
+
     pcp->free_list_ = hdr;
     pcp->count_++;
 
@@ -372,8 +390,6 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
 
         spinlock_release(&pool->lock_);
     }
-
-    irq_restore(irq_flags);
 }
 
 void dma_pool_destroy(dma_pool_t* pool) {
