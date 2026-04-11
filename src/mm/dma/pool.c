@@ -327,6 +327,7 @@ ___noinline static int dma_pool_prepare_page(
 
 dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, size_t boundary) {
     if (unlikely(!name || obj_size == 0u)) {
+        kprintf("dma_pool_create: called on null name pointer or null obj size");
         return 0;
     }
 
@@ -402,6 +403,7 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
 
 void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
     if (unlikely(!pool || !out_phys)) {
+        kprintf("dma_pool_alloc: called on null pool pointer or null out_phys");
         return 0;
     }
     /*
@@ -566,6 +568,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
 void dma_pool_free(dma_pool_t* pool, void* vaddr) {
     if (unlikely(!pool || !vaddr)) {
+        kprintf("dma_pool_free: called on null pool pointer or null vaddr");
         return;
     }
 
