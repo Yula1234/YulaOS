@@ -108,7 +108,26 @@ static int comp_surface_shadow_snapshot_try(comp_surface_t* s, uint32_t* dst) {
 
 static int comp_send_reply(int fd, uint16_t type, uint32_t seq, const void* payload, uint32_t payload_len) {
     if (fd < 0) return -1;
-    return comp_ipc_send(fd, type, seq, payload, payload_len);
+    if (payload_len > COMP_IPC_MAX_PAYLOAD) return -1;
+
+    comp_ipc_hdr_t h;
+    h.magic = COMP_IPC_MAGIC;
+    h.version = (uint16_t)COMP_IPC_VERSION;
+    h.type = type;
+    h.len = payload_len;
+    h.seq = seq;
+
+    uint8_t frame[sizeof(h) + COMP_IPC_MAX_PAYLOAD];
+    memcpy(frame, &h, sizeof(h));
+    if (payload_len) {
+        memcpy(frame + sizeof(h), payload, payload_len);
+    }
+
+    const uint32_t frame_size = (uint32_t)(sizeof(h) + payload_len);
+    
+    int r = pipe_try_write(fd, frame, frame_size);
+    
+    return (r == (int)frame_size) ? 0 : -1;
 }
 
 static void comp_send_ack(int fd, uint32_t seq, uint16_t req_type, uint32_t surface_id, uint32_t flags) {
