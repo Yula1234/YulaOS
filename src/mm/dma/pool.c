@@ -4,6 +4,7 @@
 #include <kernel/output/kprintf.h>
 #include <kernel/smp/cpu_limits.h>
 
+#include <lib/tagged_ptr.h>
 #include <lib/compiler.h>
 #include <lib/string.h>
 #include <lib/dlist.h>
@@ -61,11 +62,6 @@ typedef struct PerCpuDmaCache {
     uint8_t  _pad[64 - 5 * sizeof(uint32_t)];
 } __cacheline_aligned PerCpuDmaCache;
 
-typedef struct {
-    DmaPoolSlotHdr* ptr_;
-    uint32_t        version_;
-} __attribute__((aligned(8))) TaggedPtr;
-
 struct dma_pool {
     /* hot data for per-cpu local allocation */
     /* cacheline 1 */
@@ -75,7 +71,7 @@ struct dma_pool {
 
     /* slow path data */
 
-    volatile TaggedPtr global_free_;
+    volatile tagged_ptr_t global_free_;
 
     uint8_t _pad0[52];
 
@@ -100,50 +96,13 @@ struct dma_pool {
     PerCpuDmaCache cpu_cache_[MAX_CPUS];
 } __cacheline_aligned;
 
-___inline int tagged_ptr_cas(
-    volatile TaggedPtr* dst,
-    TaggedPtr           expected,
-    TaggedPtr           desired
-) {
-    uint8_t success;
-    
-    __asm__ volatile(
-        "lock cmpxchg8b (%[ptr]) \n\t"
-        "sete %[ok]              \n\t"
-        : "+A"  (*(uint64_t*)&expected),
-          [ok]  "=qm" (success)
-        : [ptr] "S"   (dst),
-          "b"   (desired.ptr_),
-          "c"   (desired.version_)
-        : "memory", "cc"
-    );
-    
-    return success;
-}
-
-___inline TaggedPtr tagged_ptr_load(volatile TaggedPtr* src) {
-    TaggedPtr result;
-    uint32_t zero = 0;
-    
-    __asm__ volatile(
-        "lock cmpxchg8b (%[ptr]) \n\t"
-        : "=A" (*(uint64_t*)&result)
-        : [ptr] "S" (src),
-          "a" (zero), "d" (zero),
-          "b" (zero), "c" (zero)
-        : "memory", "cc"
-    );
-    
-    return result;
-}
-
-___inline void global_free_push(volatile TaggedPtr* head, DmaPoolSlotHdr* hdr) {
-    TaggedPtr old, desired;
+___inline void global_free_push(volatile tagged_ptr_t* head, DmaPoolSlotHdr* hdr) {
+    tagged_ptr_t old, desired;
 
     do {
         old = tagged_ptr_load(head);
 
-        hdr->next_ = old.ptr_;
+        hdr->next_ = (DmaPoolSlotHdr*)old.ptr_;
 
         desired.ptr_     = hdr;
         desired.version_ = old.version_ + 1u;
@@ -151,8 +110,8 @@ ___inline void global_free_push(volatile TaggedPtr* head, DmaPoolSlotHdr* hdr) {
     } while (!tagged_ptr_cas(head, old, desired));
 }
 
-___inline DmaPoolSlotHdr* global_free_pop(volatile TaggedPtr* head) {
-    TaggedPtr old, desired;
+___inline DmaPoolSlotHdr* global_free_pop(volatile tagged_ptr_t* head) {
+    tagged_ptr_t old, desired;
 
     do {
         old = tagged_ptr_load(head);
@@ -161,16 +120,16 @@ ___inline DmaPoolSlotHdr* global_free_pop(volatile TaggedPtr* head) {
             return 0;
         }
 
-        desired.ptr_     = old.ptr_->next_;
+        desired.ptr_     = ((DmaPoolSlotHdr*)old.ptr_)->next_;
         desired.version_ = old.version_ + 1u;
 
     } while (!tagged_ptr_cas(head, old, desired));
 
-    return old.ptr_;
+    return (DmaPoolSlotHdr*)old.ptr_;
 }
 
 ___inline DmaPoolSlotHdr* global_free_pop_batch(
-    volatile TaggedPtr* head,
+    volatile tagged_ptr_t* head,
     uint32_t            batch,
     uint32_t*           out_count
 ) {
@@ -204,16 +163,16 @@ ___inline DmaPoolSlotHdr* global_free_pop_batch(
 }
 
 ___inline void global_free_push_batch(
-    volatile TaggedPtr* head, 
+    volatile tagged_ptr_t* head, 
     DmaPoolSlotHdr* local_head, 
     DmaPoolSlotHdr* local_tail
 ) {
-    TaggedPtr old, desired;
+    tagged_ptr_t old, desired;
 
     do {
         old = tagged_ptr_load(head);
 
-        local_tail->next_ = old.ptr_;
+        local_tail->next_ = (DmaPoolSlotHdr*)old.ptr_;
 
         desired.ptr_     = local_head;
         desired.version_ = old.version_ + 1u;
