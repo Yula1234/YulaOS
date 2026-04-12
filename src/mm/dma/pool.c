@@ -6,9 +6,9 @@
 
 #include <lib/tagged_ptr.h>
 #include <lib/compiler.h>
-#include <lib/string.h>
 #include <lib/lfslist.h>
 #include <lib/lflist.h>
+#include <lib/string.h>
 #include <lib/dlist.h>
 
 #include <hal/align.h>
