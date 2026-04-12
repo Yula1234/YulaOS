@@ -1766,11 +1766,9 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
 
     pollfd_t stack_fds[POLL_STACK_FAST_PATH];
     poll_waiter_t stack_waiters[POLL_STACK_FAST_PATH];
-    file_desc_t* stack_descs[POLL_STACK_FAST_PATH];
 
-    pollfd_t* k_fds = 0;
-    poll_waiter_t* waiters = 0;
-    file_desc_t** active_descs = 0;
+    pollfd_t* k_fds = nullptr;
+    poll_waiter_t* waiters = nullptr;
 
     bool use_heap = (nfds > POLL_STACK_FAST_PATH);
 
@@ -1778,21 +1776,16 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         if (use_heap) {
             k_fds = (pollfd_t*)kmalloc(bytes);
             waiters = (poll_waiter_t*)kmalloc((uint32_t)sizeof(poll_waiter_t) * nfds);
-            active_descs = (file_desc_t**)kmalloc((uint32_t)sizeof(file_desc_t*) * nfds);
-            if (!k_fds || !waiters || !active_descs) {
+            if (!k_fds || !waiters) {
                 if (k_fds) kfree(k_fds);
                 if (waiters) kfree(waiters);
-                if (active_descs) kfree(active_descs);
                 regs->eax = (uint32_t)-1;
                 return;
             }
-            memset(active_descs, 0, (uint32_t)sizeof(file_desc_t*) * nfds);
             memset(waiters, 0, (uint32_t)sizeof(poll_waiter_t) * nfds);
         } else {
             k_fds = stack_fds;
             waiters = stack_waiters;
-            active_descs = stack_descs;
-            memset(active_descs, 0, nfds * sizeof(file_desc_t*));
             memset(waiters, 0, nfds * sizeof(poll_waiter_t));
         }
 
@@ -1800,7 +1793,6 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             if (use_heap) {
                 kfree(k_fds);
                 kfree(waiters);
-                kfree(active_descs);
             }
             regs->eax = (uint32_t)-1;
             return;
@@ -1809,22 +1801,23 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
 
     uint32_t end_tick = 0;
     int have_deadline = 0;
+    
     if (timeout_ms > 0) {
         uint64_t t = (uint64_t)timer_ticks + (uint64_t)((uint32_t)timeout_ms) * KERNEL_TIMER_HZ / 1000ull;
-        if (t > 0xFFFFFFFFull) t = 0xFFFFFFFFull;
+
+        if (t > 0xFFFFFFFFull) {
+            t = 0xFFFFFFFFull;
+        }
+        
         end_tick = (uint32_t)t;
         have_deadline = 1;
     }
 
     const auto unblock_curr = [have_deadline](task_t* t) {
-        if (!t) {
-            return;
-        }
-
+        if (!t) return;
         if (have_deadline) {
             proc_sleep_remove(t);
         }
-
         (void)proc_change_state(t, TASK_RUNNING);
     };
 
@@ -1834,12 +1827,6 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         if (waiters) {
             for (uint32_t i = 0; i < nfds; i++) {
                 poll_waitq_unregister(&waiters[i]);
-
-                if (active_descs && active_descs[i]) {
-                    file_desc_release(active_descs[i]);
-                    active_descs[i] = 0;
-                }
-
                 memset(&waiters[i], 0, sizeof(poll_waiter_t));
             }
         }
@@ -1884,26 +1871,22 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             if (fd < 0) continue;
             if ((ev & (VFS_POLLIN | VFS_POLLOUT)) == 0) continue;
 
-            file_desc_t* d = proc_fd_get(curr, fd);
+            kernel::RcuReadGuard rcu_guard;
+
+            fd_table_t* ft = curr->fd_table;
+            file_desc_t* d = nullptr;
+
+            if (ft && fd >= 0 && (uint32_t)fd < ft->max_fds) {
+                d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
+            }
+
             if (!d || !d->node) {
-                if (d) {
-                    file_desc_release(d);
-                }
                 continue;
             }
 
-            if (active_descs) {
-                active_descs[i] = d;
-            }
-
             vfs_node_t* node = d->node;
-
             if (node->ops && node->ops->poll_register) {
                 (void)node->ops->poll_register(node, &waiters[i], curr);
-            }
-
-            if (!active_descs) {
-                file_desc_release(d);
             }
         }
 
@@ -1914,6 +1897,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
         smp_mb();
 
+        /* RCU protected */
         int ready = 0;
         for (uint32_t i = 0; i < nfds; i++) {
             pollfd_t* p = &k_fds[i];
@@ -1925,7 +1909,15 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             if (fd < 0) {
                 rev = VFS_POLLNVAL;
             } else {
-                file_desc_t* d = proc_fd_get(curr, fd);
+                kernel::RcuReadGuard rcu_guard;
+
+                fd_table_t* ft = curr->fd_table;
+                file_desc_t* d = nullptr;
+
+                if (ft && fd >= 0 && (uint32_t)fd < ft->max_fds) {
+                    d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
+                }
+
                 if (!d || !d->node) {
                     rev = VFS_POLLNVAL;
                 } else {
@@ -1935,8 +1927,6 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
                         rev = (int16_t)node->ops->poll_status(node, ev);
                     }
                 }
-
-                file_desc_release(d);
             }
 
             p->revents = rev;
@@ -1974,10 +1964,6 @@ out:
     if (waiters) {
         for (uint32_t i = 0; i < nfds; i++) {
             poll_waitq_unregister(&waiters[i]);
-
-            if (active_descs && active_descs[i]) {
-                file_desc_release(active_descs[i]);
-            }
         }
     }
 
@@ -1996,7 +1982,6 @@ out:
     if (use_heap) {
         if (k_fds) kfree(k_fds);
         if (waiters) kfree(waiters);
-        if (active_descs) kfree(active_descs);
     }
 
     regs->eax = (uint32_t)result;
