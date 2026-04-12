@@ -175,36 +175,51 @@ ___inline DmaPoolSlotHdr* global_free_pop_batch(
     uint32_t            batch,
     uint32_t*           out_count
 ) {
-    TaggedPtr old, desired;
+    DmaPoolSlotHdr* first = 0;
+    DmaPoolSlotHdr* last  = 0;
+    uint32_t cnt = 0u;
 
-    *out_count = 0u;
+    while (cnt < batch) {
+        DmaPoolSlotHdr* node = global_free_pop(head);
+        if (unlikely(!node)) {
+            break;
+        }
+
+        if (!first) {
+            first = node;
+            last = node;
+        } else {
+            last->next_ = node;
+            last = node;
+        }
+        
+        cnt++;
+    }
+
+    if (last) {
+        last->next_ = 0;
+    }
+
+    *out_count = cnt;
+    return first;
+}
+
+___inline void global_free_push_batch(
+    volatile TaggedPtr* head, 
+    DmaPoolSlotHdr* local_head, 
+    DmaPoolSlotHdr* local_tail
+) {
+    TaggedPtr old, desired;
 
     do {
         old = tagged_ptr_load(head);
 
-        if (unlikely(!old.ptr_)) {
-            return 0;
-        }
+        local_tail->next_ = old.ptr_;
 
-        DmaPoolSlotHdr* cut = old.ptr_;
-        uint32_t        cnt = 1u;
-
-        while (cnt < batch && cut->next_) {
-            cut = cut->next_;
-            cnt++;
-        }
-
-        desired.ptr_     = cut->next_;
+        desired.ptr_     = local_head;
         desired.version_ = old.version_ + 1u;
 
-        if (tagged_ptr_cas(head, old, desired)) {
-            cut->next_  = 0;
-            *out_count  = cnt;
-
-            return old.ptr_;
-        }
-
-    } while (1);
+    } while (!tagged_ptr_cas(head, old, desired));
 }
 
 ___inline int is_pow2(size_t v) {
@@ -506,14 +521,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         const int ok = dma_pool_prepare_page(pool, &rec, &local_head, &local_tail);
 
         if (likely(ok)) {
-            DmaPoolSlotHdr* cur = local_head;
-            while (cur) {
-                DmaPoolSlotHdr* next = cur->next_;
-                
-                global_free_push(&pool->global_free_, cur);
-
-                cur = next;
-            }
+            global_free_push_batch(&pool->global_free_, local_head, local_tail);
 
             spinlock_acquire(&pool->lock_);
 
@@ -604,14 +612,8 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
 
         pcp->free_list_ = drain_tail->next_;
         pcp->count_ -= pcp->batch_size_;
-        drain_tail->next_ = 0;
-
-        DmaPoolSlotHdr* cur = drain_head;
-        while (cur) {
-            DmaPoolSlotHdr* next = cur->next_;
-            global_free_push(&pool->global_free_, cur);
-            cur = next;
-        }
+        
+        global_free_push_batch(&pool->global_free_, drain_head, drain_tail);
     }
 }
 
