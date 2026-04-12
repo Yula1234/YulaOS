@@ -1,14 +1,19 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #ifndef KERNEL_CPU_H
 #define KERNEL_CPU_H
 
+#include <kernel/smp/cpu_limits.h>
+
+#include <lib/compiler>
+#include <lib/rbtree.h>
+
+#include <hal/lock.h>
+#include <hal/align.h>
+
 #include <stdint.h>
 #include <stdbool.h>
-#include <kernel/smp/cpu_limits.h>
-#include <hal/lock.h>
-#include <lib/rbtree.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,69 +23,106 @@ struct rcu_head;
 struct task;
 
 typedef struct {
-    void* self;
-    
-    int id;                 // LAPIC ID
-    int index; 
+    union {
+        struct {
+            void* self;
+            
+            int id; /* LAPIC ID */
+            int index; /* logical index */
+            
+            volatile int started;
 
-    struct task* current_task;
-    struct task* prev_task_during_switch;
+            struct task* idle_task;
+        };
 
-    struct task* fpu_owner;
-    volatile int started; 
-    
-    struct rb_root runq_root;
-    struct task* runq_leftmost;
+        uint8_t _pad0[HAL_CACHELINE_SIZE];
+    };
 
-    struct rb_root sleep_root;
-    struct task* sleep_leftmost;
+    union {
+        struct {
+            volatile uint32_t in_kernel;
+            
+            volatile uint32_t rcu_qs_count;
 
-    spinlock_t sleep_lock;
-    volatile uint32_t sleep_next_wake_tick;
-    
-    spinlock_t lock;
-    struct task* idle_task;
-    
-    volatile uint32_t runq_count; 
+            struct task* current_task;
+            struct task* prev_task_during_switch;
+            
+            struct task* fpu_owner;
+            
+            volatile uint64_t sched_ticks;
+        };
+        
+        uint8_t _pad1[HAL_CACHELINE_SIZE];
+    };
 
-    volatile uint64_t stat_total_ticks;
-    volatile uint64_t stat_idle_ticks;
+    union {
+        struct {
+            struct rcu_head* rcu_queue;
+            struct rcu_head* rcu_queue_tail;
+            
+            struct rcu_head* rcu_pending;
+            struct rcu_head* rcu_pending_tail;
+            
+            volatile uint32_t rcu_qlen;
+            
+            bool rcu_gp_active;
+            
+            volatile uint64_t stat_total_ticks;
+            volatile uint64_t stat_idle_ticks;
+        };
 
-    volatile uint64_t sched_ticks;
+        uint8_t _pad2[HAL_CACHELINE_SIZE];
+    };
+
+    union {
+        struct {
+            spinlock_t lock;
+
+            volatile uint32_t runq_count;
+            volatile uint32_t load_percent;
+            
+            volatile int total_priority_weight;
+            volatile int total_task_count;
+            
+            struct rb_root runq_root;
+            
+            struct task* runq_leftmost;
+        };
+
+        uint8_t _pad3[HAL_CACHELINE_SIZE];
+    };
+
+    union {
+        struct {
+            spinlock_t sleep_lock;
+
+            volatile uint32_t sleep_next_wake_tick;
+            
+            struct rb_root sleep_root;
+            struct task* sleep_leftmost;
+        };
+
+        uint8_t _pad4[HAL_CACHELINE_SIZE];
+    };
 
     volatile uint64_t snap_total_ticks;
     volatile uint64_t snap_idle_ticks;
     
-    volatile uint32_t load_percent;
-
-    volatile int total_priority_weight; 
-    volatile int total_task_count;
-
-    volatile uint32_t rcu_qs_count;
-    volatile uint32_t in_kernel;
-
-    struct rcu_head* rcu_queue;
-    struct rcu_head* rcu_queue_tail;
-
-    struct rcu_head* rcu_pending;
-    struct rcu_head* rcu_pending_tail;
-    
     uint32_t rcu_qs_snapshot[MAX_CPUS];
-    
-    bool rcu_gp_active;
-
-    volatile uint32_t rcu_qlen;
 
 } __cacheline_aligned cpu_t;
 
 extern cpu_t cpus[MAX_CPUS];
+
 extern int cpu_count;
+
 extern volatile int ap_running_count;
 
 void cpu_init_system(void);
+
 void cpu_setup_gs(int cpu_index);
 
-static inline cpu_t* cpu_current(void) {
+___inline cpu_t* cpu_current(void) {
     cpu_t* p;
     __asm__ volatile("movl %%gs:0, %0" : "=r"(p));
     return p;
