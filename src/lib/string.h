@@ -30,6 +30,8 @@ int memcmp(const void* a, const void* b, size_t n);
 size_t strlcpy(char* restrict dst, const char* restrict src, size_t dstsz);
 size_t strlcat(char* restrict dst, const char* restrict src, size_t dstsz);
 
+void memzero_nt_page(void* dst);
+
 #ifdef __cplusplus
 }
 #endif

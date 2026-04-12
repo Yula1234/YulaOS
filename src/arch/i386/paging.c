@@ -468,7 +468,7 @@ void paging_zero_phys_page(uint32_t phys) {
     }
 
     if (!paging_is_enabled()) {
-        memset((void*)phys, 0, 4096);
+        memzero_nt_page((void*)phys);
         return;
     }
 
@@ -479,7 +479,7 @@ void paging_zero_phys_page(uint32_t phys) {
     uint32_t virt = paging_fixmap_virt();
 
     paging_fixmap_set(virt, phys);
-    memset((void*)virt, 0, 4096);
+    memzero_nt_page((void*)virt);
     paging_fixmap_clear(virt);
 }
 

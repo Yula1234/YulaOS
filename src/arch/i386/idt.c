@@ -426,7 +426,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         return -1;
     }
 
-    memset(new_page, 0, 4096);
+    memzero_nt_page(new_page);
 
     if ((info.map_flags & MAP_STACK) == 0 &&
         info.file &&
