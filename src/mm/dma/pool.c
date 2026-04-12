@@ -103,24 +103,6 @@ ___inline int is_pow2(size_t v) {
     return v && ((v & (v - 1u)) == 0u);
 }
 
-___inline char* dup_name(const char* s) {
-    if (unlikely(!s)) {
-        return 0;
-    }
-
-    const size_t len = strlen(s);
-
-    char* out = (char*)kmalloc(len + 1u);
-    if (unlikely(!out)) {
-        return 0;
-    }
-
-    memcpy(out, s, len);
-    out[len] = '\0';
-
-    return out;
-}
-
 /*
  * Allocate a new backing DMA page from the system and carve it into slots.
  * This runs entirely lockless with respect to the pool's internal locks.
@@ -252,7 +234,7 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
         return 0;
     }
 
-    pool->name_ = dup_name(name);
+    pool->name_ = strdup(name);
     if (unlikely(!pool->name_)) {
         kfree(pool);
         return 0;
