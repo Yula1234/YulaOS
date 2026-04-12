@@ -7,6 +7,7 @@
 #include <lib/tagged_ptr.h>
 #include <lib/compiler.h>
 #include <lib/string.h>
+#include <lib/lfslist.h>
 #include <lib/lflist.h>
 #include <lib/dlist.h>
 
@@ -38,7 +39,7 @@
  */
 
 typedef struct DmaPoolPage {
-    struct DmaPoolPage* next_;
+    lfsnode_t node_;
 
     void* vaddr_;
     uint32_t phys_;
@@ -79,7 +80,8 @@ struct dma_pool {
     /* cacheline 2 for cold data */
 
     spinlock_t   grow_lock_;
-    DmaPoolPage* pages_;
+
+    lfslist_head_t pages_;
 
     uint32_t obj_size_;
     uint32_t align_;
@@ -153,7 +155,7 @@ ___noinline static int dma_pool_prepare_page(
         return 0;
     }
 
-    rec->next_  = 0;
+    rec->node_.next_ = 0;
     rec->vaddr_ = page;
     rec->phys_  = page_phys;
 
@@ -275,7 +277,7 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
 
     lflist_init(&pool->global_free_);
 
-    pool->pages_ = 0;
+    lfslist_init(&pool->pages_);
 
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_  = 0;
@@ -401,8 +403,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         if (likely(ok)) {
             lflist_push_batch(&pool->global_free_, local_head, local_tail);
 
-            rec->next_ = pool->pages_;
-            __atomic_store_n(&pool->pages_, rec, __ATOMIC_RELEASE);
+            lfslist_push(&pool->pages_, &rec->node_);
         }
 
         spinlock_release(&pool->grow_lock_);
@@ -514,9 +515,9 @@ void dma_pool_destroy(dma_pool_t* pool) {
      * Extract the page list. Since destroy() implies exclusive access 
      * to the pool context, we don't need to acquire grow_lock_ here.
      */
-    DmaPoolPage* page = pool->pages_;
+    lfsnode_t* it = lfslist_pop_all(&pool->pages_);
 
-    pool->pages_ = 0;
+    lfslist_init(&pool->pages_);
 
     lflist_init(&pool->global_free_);
 
@@ -528,15 +529,18 @@ void dma_pool_destroy(dma_pool_t* pool) {
         pool->cpu_cache_[i].total_      = 0u;
     }
 
-    while (page) {
-        DmaPoolPage* next = page->next_;
+    while (it) {
+        lfsnode_t* next = it->next_;
+        
+        DmaPoolPage* page = container_of(it, DmaPoolPage, node_);
 
         if (likely(page->vaddr_)) {
             dma_free_coherent(page->vaddr_, PAGE_SIZE, page->phys_);
         }
 
         kfree(page);
-        page = next;
+        
+        it = next;
     }
 
     if (likely(pool->name_)) {
