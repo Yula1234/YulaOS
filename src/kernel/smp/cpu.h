@@ -23,91 +23,70 @@ struct rcu_head;
 struct task;
 
 typedef struct {
-    union {
-        struct {
-            void* self;
-            
-            int id; /* LAPIC ID */
-            int index; /* logical index */
-            
-            volatile int started;
-
-            struct task* idle_task;
-        };
-
-        uint8_t _pad0[HAL_CACHELINE_SIZE];
-    };
-
-    union {
-        struct {
-            volatile uint32_t in_kernel;
-            
-            volatile uint32_t rcu_qs_count;
-
-            struct task* current_task;
-            struct task* prev_task_during_switch;
-            
-            struct task* fpu_owner;
-            
-            volatile uint64_t sched_ticks;
-        };
-        
-        uint8_t _pad1[HAL_CACHELINE_SIZE];
-    };
-
-    union {
-        struct {
-            struct rcu_head* rcu_queue;
-            struct rcu_head* rcu_queue_tail;
-            
-            struct rcu_head* rcu_pending;
-            struct rcu_head* rcu_pending_tail;
-            
-            volatile uint32_t rcu_qlen;
-            
-            bool rcu_gp_active;
-            
-            volatile uint64_t stat_total_ticks;
-            volatile uint64_t stat_idle_ticks;
-        };
-
-        uint8_t _pad2[HAL_CACHELINE_SIZE];
-    };
-
-    union {
-        struct {
-            spinlock_t lock;
-
-            volatile uint32_t runq_count;
-            volatile uint32_t load_percent;
-            
-            volatile int total_priority_weight;
-            volatile int total_task_count;
-            
-            struct rb_root runq_root;
-            
-            struct task* runq_leftmost;
-        };
-
-        uint8_t _pad3[HAL_CACHELINE_SIZE];
-    };
-
-    union {
-        struct {
-            spinlock_t sleep_lock;
-
-            volatile uint32_t sleep_next_wake_tick;
-            
-            struct rb_root sleep_root;
-            struct task* sleep_leftmost;
-        };
-
-        uint8_t _pad4[HAL_CACHELINE_SIZE];
-    };
-
-    volatile uint64_t snap_total_ticks;
-    volatile uint64_t snap_idle_ticks;
+    /* cacheline 1 */
     
+    void* self __cacheline_aligned;
+    
+    int id; /* LAPIC ID */
+    int index; /* Logical index */
+    
+    volatile int started;
+
+    struct task* idle_task; 
+
+    /* cacheline 2 */
+
+    volatile uint32_t in_kernel __cacheline_aligned;
+    volatile uint32_t rcu_qs_count;
+    
+    struct task* current_task;
+    struct task* prev_task_during_switch;
+    struct task* fpu_owner;
+
+    volatile uint64_t sched_ticks;
+
+    /* cacheline 3 */
+
+    struct rcu_head* rcu_queue __cacheline_aligned;
+    struct rcu_head* rcu_queue_tail;
+    
+    struct rcu_head* rcu_pending;
+    struct rcu_head* rcu_pending_tail;
+    
+    volatile uint32_t rcu_qlen;
+    
+    bool rcu_gp_active;
+
+    volatile uint64_t stat_total_ticks;
+    volatile uint64_t stat_idle_ticks;
+
+    /* cacheline 4 */
+
+    spinlock_t lock __cacheline_aligned;
+
+    volatile uint32_t runq_count;
+    volatile uint32_t load_percent;
+    
+    volatile int total_priority_weight;
+    volatile int total_task_count;
+    
+    struct rb_root runq_root;
+    struct task* runq_leftmost;
+
+    /* cacheline 5 */
+
+    spinlock_t sleep_lock __cacheline_aligned;
+
+    volatile uint32_t sleep_next_wake_tick;
+    
+    struct rb_root sleep_root;
+    struct task* sleep_leftmost;
+
+    /* cacheline 6 */
+
+    volatile uint64_t snap_total_ticks __cacheline_aligned;
+    volatile uint64_t snap_idle_ticks;
+
     uint32_t rcu_qs_snapshot[MAX_CPUS];
 
 } __cacheline_aligned cpu_t;
