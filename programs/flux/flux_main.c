@@ -801,7 +801,8 @@ int main(int argc, char** argv) {
         const uint32_t present_mode = gpu_present_ok ? flux_gpu_present_mode(&gpu_present) : (uint32_t)FLUX_GPU_PRESENT_MODE_NONE;
         int virgl_mode = gpu_present_ok && present_mode == (uint32_t)FLUX_GPU_PRESENT_MODE_VIRGL_COMPOSE;
 
-        uint32_t* front = (gpu_present_ok && !virgl_mode) ? gpu_pixels : fb;
+        uint32_t* out = frame_pixels ? frame_pixels : (gpu_present_ok && !virgl_mode ? gpu_pixels : fb);
+        uint32_t* front = out;
 
         const int cursor_moved = ((int32_t)ms.x != draw_mx || (int32_t)ms.y != draw_my);
         if (!virgl_mode) {
@@ -902,7 +903,7 @@ int main(int argc, char** argv) {
 
                     if (!rect_empty(&new_preview_rect)) {
                         const int t = 2;
-                        draw_frame_rect_clipped(fb, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
+                        draw_frame_rect_clipped(front, stride, w, h, new_preview_rect.x1, new_preview_rect.y1, new_preview_rect.x2 - new_preview_rect.x1, new_preview_rect.y2 - new_preview_rect.y1, t, preview_col, clip);
                     }
                 }
             }
@@ -1115,7 +1116,7 @@ int main(int argc, char** argv) {
                             draw_my = (int32_t)ms.y;
 
                             fb_rect_t full = fb_rect_make(0, 0, w, h);
-                            (void)fb_present(fb, info.pitch, &full, 1);
+                            (void)fb_present(out, info.pitch, &full, 1);
                         } else {
                             draw_mx = (int32_t)ms.x;
                             draw_my = (int32_t)ms.y;
