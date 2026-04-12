@@ -7,6 +7,7 @@
 #include <lib/tagged_ptr.h>
 #include <lib/compiler.h>
 #include <lib/string.h>
+#include <lib/lflist.h>
 #include <lib/dlist.h>
 
 #include <hal/align.h>
@@ -44,13 +45,13 @@ typedef struct DmaPoolPage {
 } DmaPoolPage;
 
 typedef struct DmaPoolSlotHdr {
-    struct DmaPoolSlotHdr* next_;
+    lfnode_t node_;
 
     uint32_t phys_;
 } DmaPoolSlotHdr;
 
 typedef struct PerCpuDmaCache {
-    DmaPoolSlotHdr* free_list_;
+    lfnode_t* free_list_;
 
     uint32_t count_;
 
@@ -71,7 +72,7 @@ struct dma_pool {
 
     /* slow path data */
 
-    volatile tagged_ptr_t global_free_;
+    lflist_head_t global_free_;
 
     uint8_t _pad0[52];
 
@@ -95,90 +96,6 @@ struct dma_pool {
 
     PerCpuDmaCache cpu_cache_[MAX_CPUS];
 } __cacheline_aligned;
-
-___inline void global_free_push(volatile tagged_ptr_t* head, DmaPoolSlotHdr* hdr) {
-    tagged_ptr_t old, desired;
-
-    do {
-        old = tagged_ptr_load(head);
-
-        hdr->next_ = (DmaPoolSlotHdr*)old.ptr_;
-
-        desired.ptr_     = hdr;
-        desired.version_ = old.version_ + 1u;
-
-    } while (!tagged_ptr_cas(head, old, desired));
-}
-
-___inline DmaPoolSlotHdr* global_free_pop(volatile tagged_ptr_t* head) {
-    tagged_ptr_t old, desired;
-
-    do {
-        old = tagged_ptr_load(head);
-
-        if (unlikely(!old.ptr_)) {
-            return 0;
-        }
-
-        desired.ptr_     = ((DmaPoolSlotHdr*)old.ptr_)->next_;
-        desired.version_ = old.version_ + 1u;
-
-    } while (!tagged_ptr_cas(head, old, desired));
-
-    return (DmaPoolSlotHdr*)old.ptr_;
-}
-
-___inline DmaPoolSlotHdr* global_free_pop_batch(
-    volatile tagged_ptr_t* head,
-    uint32_t            batch,
-    uint32_t*           out_count
-) {
-    DmaPoolSlotHdr* first = 0;
-    DmaPoolSlotHdr* last  = 0;
-    uint32_t cnt = 0u;
-
-    while (cnt < batch) {
-        DmaPoolSlotHdr* node = global_free_pop(head);
-        if (unlikely(!node)) {
-            break;
-        }
-
-        if (!first) {
-            first = node;
-            last = node;
-        } else {
-            last->next_ = node;
-            last = node;
-        }
-        
-        cnt++;
-    }
-
-    if (last) {
-        last->next_ = 0;
-    }
-
-    *out_count = cnt;
-    return first;
-}
-
-___inline void global_free_push_batch(
-    volatile tagged_ptr_t* head, 
-    DmaPoolSlotHdr* local_head, 
-    DmaPoolSlotHdr* local_tail
-) {
-    tagged_ptr_t old, desired;
-
-    do {
-        old = tagged_ptr_load(head);
-
-        local_tail->next_ = (DmaPoolSlotHdr*)old.ptr_;
-
-        desired.ptr_     = local_head;
-        desired.version_ = old.version_ + 1u;
-
-    } while (!tagged_ptr_cas(head, old, desired));
-}
 
 ___inline int is_pow2(size_t v) {
     return v && ((v & (v - 1u)) == 0u);
@@ -208,7 +125,7 @@ ___inline char* dup_name(const char* s) {
  */
 ___noinline static int dma_pool_prepare_page(
     dma_pool_t* pool, DmaPoolPage** out_page,
-    DmaPoolSlotHdr** out_head, DmaPoolSlotHdr** out_tail
+    lfnode_t** out_head, lfnode_t** out_tail 
 ) {
     if (unlikely(!pool || !out_page || !out_head || !out_tail)) {
         return 0;
@@ -250,8 +167,8 @@ ___noinline static int dma_pool_prepare_page(
     uint8_t*  slot_ptr = (uint8_t*)page;
     uint32_t  phys_cur = page_phys + obj_off;
 
-    DmaPoolSlotHdr* head = 0;
-    DmaPoolSlotHdr* tail = 0;
+    lfnode_t* head = 0;
+    lfnode_t* tail = 0;
 
     while (offset + slot_size <= PAGE_SIZE) {
         if (unlikely(offset + slot_size > next_boundary)) {
@@ -269,15 +186,15 @@ ___noinline static int dma_pool_prepare_page(
         DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)slot_ptr;
 
         hdr->phys_ = phys_cur;
-        hdr->next_ = 0;
+        hdr->node_.next_ = 0;
 
         if (!head) {
-            head = hdr;
+            head = &hdr->node_;
         } else {
-            tail->next_ = hdr;
+            tail->next_ = &hdr->node_;
         }
 
-        tail = hdr;
+        tail = &hdr->node_;
 
         offset   += slot_size;
         slot_ptr += slot_size;
@@ -356,8 +273,7 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
 
     spinlock_init(&pool->grow_lock_);
 
-    pool->global_free_.ptr_     = 0;
-    pool->global_free_.version_ = 0u;
+    lflist_init(&pool->global_free_);
 
     pool->pages_ = 0;
 
@@ -389,13 +305,13 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
      * Fast path: serve directly from the per-CPU magazine.
      */
     if (likely(pcp->count_ > 0u)) {
-        DmaPoolSlotHdr* hdr = pcp->free_list_;
+        lfnode_t* node = pcp->free_list_;
 
-        if (likely(hdr->next_)) {
-            __builtin_prefetch(hdr->next_, 0, 3); /* to avoid cache misses later */
+        if (likely(node->next_)) {
+            __builtin_prefetch(node->next_, 0, 3);
         }
 
-        pcp->free_list_ = hdr->next_;
+        pcp->free_list_ = node->next_;
         pcp->count_--;
 
         pcp->hits_++;
@@ -425,6 +341,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
         __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
 
+        DmaPoolSlotHdr* hdr = container_of(node, DmaPoolSlotHdr, node_);
+
         *out_phys = hdr->phys_;
         return (uint8_t*)hdr + pool->obj_off_;
     }
@@ -435,16 +353,16 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
      * Slow path: replenish the per-CPU magazine from the global pool.
      */
     uint32_t transferred = 0u;
-    DmaPoolSlotHdr* batch = global_free_pop_batch(
+    lfnode_t* batch = lflist_pop_batch(
         &pool->global_free_, pcp->batch_size_,
         &transferred
     );
 
     if (likely(batch)) {
         /* Move a batch of slots to amortize lock acquisition cost. */
-        DmaPoolSlotHdr* cur = batch;
+        lfnode_t* cur = batch;
         while (cur) {
-            DmaPoolSlotHdr* next = cur->next_;
+            lfnode_t* next = cur->next_;
 
             cur->next_ = pcp->free_list_;
             pcp->free_list_ = cur;
@@ -453,14 +371,16 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
             cur = next;
         }
 
-        DmaPoolSlotHdr* mine = pcp->free_list_;
+        lfnode_t* mine_node = pcp->free_list_;
 
-        pcp->free_list_ = mine->next_;
+        pcp->free_list_ = mine_node->next_;
         pcp->count_--;
 
-        *out_phys = mine->phys_;
+        DmaPoolSlotHdr* mine = container_of(mine_node, DmaPoolSlotHdr, node_);
 
         __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+        
+        *out_phys = mine->phys_;
 
         return (uint8_t*)mine + pool->obj_off_;
     }
@@ -472,13 +392,14 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
     if (spinlock_try_acquire(&pool->grow_lock_)) {
         DmaPoolPage*    rec        = 0;
-        DmaPoolSlotHdr* local_head = 0;
-        DmaPoolSlotHdr* local_tail = 0;
+
+        lfnode_t*    local_head = 0;
+        lfnode_t*    local_tail = 0;
 
         const int ok = dma_pool_prepare_page(pool, &rec, &local_head, &local_tail);
 
         if (likely(ok)) {
-            global_free_push_batch(&pool->global_free_, local_head, local_tail);
+            lflist_push_batch(&pool->global_free_, local_head, local_tail);
 
             rec->next_ = pool->pages_;
             __atomic_store_n(&pool->pages_, rec, __ATOMIC_RELEASE);
@@ -492,14 +413,17 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
             return 0;
         }
 
-        DmaPoolSlotHdr* hdr = global_free_pop(&pool->global_free_);
-        if (unlikely(!hdr)) {
+        lfnode_t* node = lflist_pop(&pool->global_free_);
+        if (unlikely(!node)) {
             return 0;
         }
+
+        DmaPoolSlotHdr* hdr = container_of(node, DmaPoolSlotHdr, node_);
 
         __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
 
         *out_phys = hdr->phys_;
+
         return (uint8_t*)hdr + pool->obj_off_;
     }
 
@@ -513,10 +437,12 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
     
     irq_restore(irq_flags);
 
-    DmaPoolSlotHdr* hdr = global_free_pop(&pool->global_free_);
-    if (unlikely(!hdr)) {
+    lfnode_t* node = lflist_pop(&pool->global_free_);
+    if (unlikely(!node)) {
         return 0;
     }
+
+    DmaPoolSlotHdr* hdr = container_of(node, DmaPoolSlotHdr, node_);
 
     __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
 
@@ -547,9 +473,9 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
         __builtin_prefetch(pcp->free_list_, 0, 3); /* to avoid cache misses later */
     }
 
-    hdr->next_ = pcp->free_list_;
+    hdr->node_.next_ = pcp->free_list_;
 
-    pcp->free_list_ = hdr;
+    pcp->free_list_ = &hdr->node_;
     pcp->count_++;
 
     /*
@@ -557,8 +483,8 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
      * This prevents a single CPU from hoarding all free slots.
      */
     if (unlikely(pcp->count_ >= pcp->batch_size_)) {
-        DmaPoolSlotHdr* drain_head = pcp->free_list_;
-        DmaPoolSlotHdr* drain_tail = drain_head;
+        lfnode_t* drain_head = pcp->free_list_;
+        lfnode_t* drain_tail = drain_head;
 
         for (uint32_t i = 1u; i < pcp->batch_size_; i++) {
             drain_tail = drain_tail->next_;
@@ -567,7 +493,7 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
         pcp->free_list_ = drain_tail->next_;
         pcp->count_ -= pcp->batch_size_;
         
-        global_free_push_batch(&pool->global_free_, drain_head, drain_tail);
+        lflist_push_batch(&pool->global_free_, drain_head, drain_tail);
     }
 }
 
@@ -591,8 +517,8 @@ void dma_pool_destroy(dma_pool_t* pool) {
     DmaPoolPage* page = pool->pages_;
 
     pool->pages_ = 0;
-    pool->global_free_.ptr_     = 0;
-    pool->global_free_.version_ = 0u;
+
+    lflist_init(&pool->global_free_);
 
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_  = 0;
