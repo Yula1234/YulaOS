@@ -52,7 +52,7 @@ void bdev_retain(block_device_t* dev) {
         dev->private_retain(dev->private_data);
     }
 
-    __atomic_fetch_add(&dev->refs_, 1u, __ATOMIC_RELAXED);
+    atomic_uint_fetch_add_explicit(&dev->refs_, 1u, ATOMIC_RELAXED);
 }
 
 void bdev_release(block_device_t* dev) {
@@ -64,7 +64,7 @@ void bdev_release(block_device_t* dev) {
         dev->private_release(dev->private_data);
     }
 
-    const uint32_t old_refs = __atomic_fetch_sub(&dev->refs_, 1u, __ATOMIC_ACQ_REL);
+    const uint32_t old_refs = atomic_uint_fetch_sub_explicit(&dev->refs_, 1u, ATOMIC_ACQ_REL);
 
     if (old_refs == 1u) {
         if (dev->destroy) {
@@ -132,7 +132,7 @@ int bdev_register(block_device_t* dev) {
         return -1;
     }
 
-    dev->refs_ = 1;
+    atomic_uint_store_explicit(&dev->refs_, 1u, ATOMIC_RELAXED);
 
     if (dev->private_retain && dev->private_data) {
         dev->private_retain(dev->private_data);

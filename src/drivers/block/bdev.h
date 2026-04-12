@@ -5,6 +5,7 @@
 
 #include <fs/vfs.h>
 
+#include <lib/atomic.h>
 #include <lib/dlist.h>
 
 #ifdef __cplusplus
@@ -49,7 +50,7 @@ typedef struct block_device {
 
     vfs_node_t node_template;
 
-    uint32_t refs_;
+    atomic_uint_t refs_;
 
     dlist_head_t list_node;
 } block_device_t;
