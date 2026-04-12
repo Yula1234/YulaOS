@@ -36,7 +36,7 @@
  */
 
 typedef struct DmaPoolPage {
-    dlist_head_t node_;
+    struct DmaPoolPage* next_;
 
     void* vaddr_;
     uint32_t phys_;
@@ -75,15 +75,14 @@ struct dma_pool {
 
     /* slow path data */
 
-    spinlock_t         lock_;
     volatile TaggedPtr global_free_;
 
-    uint8_t _pad0[44];
+    uint8_t _pad0[52];
 
     /* cacheline 2 for cold data */
 
     spinlock_t   grow_lock_;
-    dlist_head_t pages_;
+    DmaPoolPage* pages_;
 
     uint32_t obj_size_;
     uint32_t align_;
@@ -94,7 +93,7 @@ struct dma_pool {
 
     char* name_;
 
-    uint8_t _pad1[28];
+    uint8_t _pad1[36];
 
     /* cacheline 3 */
 
@@ -278,7 +277,7 @@ ___noinline static int dma_pool_prepare_page(
         return 0;
     }
 
-    dlist_init(&rec->node_);
+    rec->next_  = 0;
     rec->vaddr_ = page;
     rec->phys_  = page_phys;
 
@@ -396,13 +395,12 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
         return 0;
     }
 
-    spinlock_init(&pool->lock_);
     spinlock_init(&pool->grow_lock_);
 
     pool->global_free_.ptr_     = 0;
     pool->global_free_.version_ = 0u;
 
-    dlist_init(&pool->pages_);
+    pool->pages_ = 0;
 
     for (int i = 0; i < MAX_CPUS; i++) {
         pool->cpu_cache_[i].free_list_  = 0;
@@ -523,11 +521,8 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
         if (likely(ok)) {
             global_free_push_batch(&pool->global_free_, local_head, local_tail);
 
-            spinlock_acquire(&pool->lock_);
-
-            dlist_add_tail(&rec->node_, &pool->pages_);
-            
-            spinlock_release(&pool->lock_);
+            rec->next_ = pool->pages_;
+            __atomic_store_n(&pool->pages_, rec, __ATOMIC_RELEASE);
         }
 
         spinlock_release(&pool->grow_lock_);
@@ -623,61 +618,44 @@ void dma_pool_destroy(dma_pool_t* pool) {
         return;
     }
 
-    if (pool->nr_active_) {
+    if (unlikely(pool->nr_active_ != 0u)) {
         kprintf(
             "dma_pool_destroy: pool '%s' destroyed with %u active allocations\n",
             pool->name_ ? pool->name_ : "?", pool->nr_active_
         );
     }
 
-    uint32_t flags = spinlock_acquire_safe(&pool->lock_);
-
     /*
-     * Extract the entire page list into a local variable so we can safely
-     * unmap and free them without holding the global spinlock.
+     * Extract the page list. Since destroy() implies exclusive access 
+     * to the pool context, we don't need to acquire grow_lock_ here.
      */
-    dlist_head_t pages_to_free;
-    dlist_init(&pages_to_free);
+    DmaPoolPage* page = pool->pages_;
 
-    if (!dlist_empty(&pool->pages_)) {
-        pages_to_free.next = pool->pages_.next;
-        pages_to_free.prev = pool->pages_.prev;
-
-        pages_to_free.next->prev = &pages_to_free;
-        pages_to_free.prev->next = &pages_to_free;
-
-        dlist_init(&pool->pages_);
-    }
-
+    pool->pages_ = 0;
     pool->global_free_.ptr_     = 0;
     pool->global_free_.version_ = 0u;
 
     for (int i = 0; i < MAX_CPUS; i++) {
-        pool->cpu_cache_[i].free_list_ = 0;
-        pool->cpu_cache_[i].count_ = 0u;
+        pool->cpu_cache_[i].free_list_  = 0;
+        pool->cpu_cache_[i].count_      = 0u;
         pool->cpu_cache_[i].batch_size_ = 0u;
-        pool->cpu_cache_[i].hits_ = 0u;
-        pool->cpu_cache_[i].total_ = 0u;
+        pool->cpu_cache_[i].hits_       = 0u;
+        pool->cpu_cache_[i].total_      = 0u;
     }
 
-    spinlock_release_safe(&pool->lock_, flags);
+    while (page) {
+        DmaPoolPage* next = page->next_;
 
-    /* Now perform the heavy unmapping unhindered. */
-    dlist_head_t* it = pages_to_free.next;
-    while (it && it != &pages_to_free) {
-        DmaPoolPage* p = container_of(it, DmaPoolPage, node_);
-        it = it->next;
-
-        if (p->vaddr_) {
-            dma_free_coherent(p->vaddr_, PAGE_SIZE, p->phys_);
+        if (likely(page->vaddr_)) {
+            dma_free_coherent(page->vaddr_, PAGE_SIZE, page->phys_);
         }
 
-        kfree(p);
+        kfree(page);
+        page = next;
     }
 
-    if (pool->name_) {
+    if (likely(pool->name_)) {
         kfree(pool->name_);
-        pool->name_ = 0;
     }
 
     kfree(pool);
