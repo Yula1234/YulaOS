@@ -6,7 +6,7 @@
 
 #include <kernel/smp/cpu_limits.h>
 
-#include <lib/compiler>
+#include <lib/compiler.h>
 #include <lib/rbtree.h>
 
 #include <hal/lock.h>

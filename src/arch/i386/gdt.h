@@ -4,8 +4,11 @@
 #ifndef ARCH_I386_GDT_H
 #define ARCH_I386_GDT_H
 
-#include <stdint.h>
 #include <kernel/smp/cpu.h>
+
+#include <hal/align.h>
+
+#include <stdint.h>
 
 /*
  * Global Descriptor Table layout.
@@ -27,7 +30,7 @@
  *
  * The layout is ABI with the CPU; keep packed.
  */
-struct tss_entry_struct {
+struct __cacheline_aligned tss_entry_struct {
     uint32_t prev_tss;
     uint32_t esp0; 
     uint32_t ss0;
@@ -42,7 +45,7 @@ struct tss_entry_struct {
     uint32_t ldt; uint16_t trap; uint16_t iomap_base;
 } __attribute__((packed));
 
-extern struct tss_entry_struct tss_entries[MAX_CPUS];
+extern __cacheline_aligned struct tss_entry_struct tss_entries[MAX_CPUS];
 
 #ifdef __cplusplus
 extern "C" {

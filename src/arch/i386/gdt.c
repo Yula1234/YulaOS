@@ -33,7 +33,7 @@ struct gdt_ptr {
 struct gdt_entry gdt[GDT_ENTRIES];
 struct gdt_ptr gp;
 
-struct tss_entry_struct tss_entries[MAX_CPUS];
+__cacheline_aligned struct tss_entry_struct tss_entries[MAX_CPUS];
 
 static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     /*
