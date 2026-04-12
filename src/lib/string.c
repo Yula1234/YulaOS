@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include <stdint.h>
 #include <lib/compiler.h>
+
+#include <mm/heap.h>
+
+#include <stdint.h>
 
 #include "string.h"
 
@@ -74,6 +77,24 @@ int strncmp(const char* a, const char* b, size_t n)
     }
 
     return 0;
+}
+
+char* strdup(const char* s) {
+    if (unlikely(!s)) {
+        return 0;
+    }
+
+    const size_t len = strlen(s);
+
+    char* out = (char*)kmalloc(len + 1u);
+    if (unlikely(!out)) {
+        return 0;
+    }
+
+    memcpy(out, s, len);
+    out[len] = '\0';
+
+    return out;
 }
 
 static size_t strnlen_impl(const char* s, size_t max)

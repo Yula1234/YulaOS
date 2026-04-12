@@ -20,6 +20,7 @@ extern "C" {
 size_t strlen(const char* s);
 int strcmp(const char* a, const char* b);
 int strncmp(const char* a, const char* b, size_t n);
+char* strdup(const char* s);
 
 void* memset(void* dst, int v, size_t n);
 void* memcpy(void* restrict dst, const void* restrict src, size_t n);
