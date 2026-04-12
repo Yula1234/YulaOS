@@ -931,7 +931,7 @@ void paging_init(uint32_t ram_size_bytes) {
     }
 
     /* Local APIC MMIO is accessed via a fixed physical address on x86. */
-    paging_map(page_dir, 0xFEE00000, 0xFEE00000, 3);
+    paging_map(page_dir, 0xFEE00000, 0xFEE00000, PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT);
 
     for (uint32_t i = 0; i < PAGING_FIXMAP_SLOTS; i++) {
         uint32_t virt = PAGING_FIXMAP_BASE - i * 4096u;
