@@ -10,7 +10,7 @@
 #define COMP_RX_CAP 2048u
 #define COMP_RX_MASK (COMP_RX_CAP - 1u)
 
-#define COMP_PENDING_MAX 8u
+#define COMP_PENDING_MAX 128u
 
 typedef struct {
     uint8_t buf[COMP_RX_CAP];
