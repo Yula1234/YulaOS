@@ -61,7 +61,9 @@ typedef struct PerCpuDmaCache {
     uint32_t hits_;
     uint32_t total_;
 
-    uint8_t  _pad[64 - 5 * sizeof(uint32_t)];
+    int32_t  active_;
+
+    uint8_t  _pad[64 - 6 * sizeof(uint32_t)];
 } __cacheline_aligned PerCpuDmaCache;
 
 struct dma_pool {
@@ -88,11 +90,9 @@ struct dma_pool {
 
     uint32_t boundary_;
 
-    uint32_t nr_active_;
-
     char* name_;
 
-    uint8_t _pad1[36];
+    uint8_t _pad1[32];
 
     /* cacheline 3 */
 
@@ -244,7 +244,6 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
     pool->align_    = align;
     
     pool->boundary_ = boundary;
-    pool->nr_active_ = 0u;
 
     pool->obj_off_   = align_up(sizeof(DmaPoolSlotHdr), align);
     pool->slot_size_ = align_up(pool->obj_off_ + obj_size, align);
@@ -267,6 +266,7 @@ dma_pool_t* dma_pool_create(const char* name, size_t obj_size, size_t align, siz
         pool->cpu_cache_[i].batch_size_ = DMA_POOL_PCP_BATCH;
         pool->cpu_cache_[i].hits_       = 0u;
         pool->cpu_cache_[i].total_      = 0u;
+        pool->cpu_cache_[i].active_      = 0u;
     }
 
     return pool;
@@ -323,7 +323,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
             }
         }
 
-        __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+        pcp->active_++;
 
         DmaPoolSlotHdr* hdr = container_of(node, DmaPoolSlotHdr, node_);
 
@@ -362,7 +362,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
         DmaPoolSlotHdr* mine = container_of(mine_node, DmaPoolSlotHdr, node_);
 
-        __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+        pcp->active_++;
         
         *out_phys = mine->phys_;
 
@@ -403,7 +403,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
         DmaPoolSlotHdr* hdr = container_of(node, DmaPoolSlotHdr, node_);
 
-        __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+        pcp->active_++;
 
         *out_phys = hdr->phys_;
 
@@ -427,7 +427,7 @@ void* dma_pool_alloc(dma_pool_t* pool, uint32_t* out_phys) {
 
     DmaPoolSlotHdr* hdr = container_of(node, DmaPoolSlotHdr, node_);
 
-    __atomic_fetch_add(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
+    pcp->active_++;
 
     *out_phys = hdr->phys_;
 
@@ -440,7 +440,6 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
         return;
     }
 
-    __atomic_fetch_sub(&pool->nr_active_, 1u, __ATOMIC_RELAXED);
 
     uint8_t* obj = (uint8_t*)vaddr;
     DmaPoolSlotHdr* hdr = (DmaPoolSlotHdr*)(obj - pool->obj_off_);
@@ -451,6 +450,8 @@ void dma_pool_free(dma_pool_t* pool, void* vaddr) {
      */
     const int cpu = hal_cpu_index();
     PerCpuDmaCache* pcp = &pool->cpu_cache_[cpu];
+    
+    pcp->active_--;
 
     if (likely(pcp->free_list_)) {
         __builtin_prefetch(pcp->free_list_, 0, 3); /* to avoid cache misses later */
@@ -486,10 +487,15 @@ void dma_pool_destroy(dma_pool_t* pool) {
         return;
     }
 
-    if (unlikely(pool->nr_active_ != 0u)) {
+    int32_t total_active = 0;
+    for (int i = 0; i < MAX_CPUS; i++) {
+        total_active += pool->cpu_cache_[i].active_;
+    }
+
+    if (unlikely(total_active != 0u)) {
         kprintf(
             "dma_pool_destroy: pool '%s' destroyed with %u active allocations\n",
-            pool->name_ ? pool->name_ : "?", pool->nr_active_
+            pool->name_ ? pool->name_ : "?", total_active
         );
     }
 
@@ -509,6 +515,7 @@ void dma_pool_destroy(dma_pool_t* pool) {
         pool->cpu_cache_[i].batch_size_ = 0u;
         pool->cpu_cache_[i].hits_       = 0u;
         pool->cpu_cache_[i].total_      = 0u;
+        pool->cpu_cache_[i].active_     = 0u;
     }
 
     while (it) {
