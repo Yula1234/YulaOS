@@ -131,6 +131,10 @@ extern "C" void sem_wait(semaphore_t* sem) {
         curr->blocked_on_sem = static_cast<void*>(sem);
         curr->blocked_kind = TASK_BLOCK_SEM;
 
+        if (kernel::unlikely(curr->sem_node.next != nullptr || curr->sem_node.prev != nullptr)) {
+            panic("SEM: Task is trying to wait, but its sem_node is already linked!");
+        }
+
         dlist_add_tail(&curr->sem_node, &sem->wait_list);
 
         if (kernel::unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
@@ -146,12 +150,13 @@ extern "C" void sem_wait(semaphore_t* sem) {
 
         sched_yield();
 
+        sem_remove_task(curr);
+
         /*
          * Upon waking, attempt to aggressively acquire the token via the
          * fast path to allow "barging", which increases overall throughput.
          */
         if (kernel::likely(sem_try_acquire_fast(sem))) {
-            sem_remove_task(curr);
 
             curr->blocked_on_sem = nullptr;
             curr->blocked_kind = TASK_BLOCK_NONE;
@@ -227,17 +232,15 @@ extern "C" int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
             proc_sleep_add(curr, deadline_tick);
         }
 
+        sem_remove_task(curr);
+
         if (kernel::likely(sem_try_acquire_fast(sem))) {
-            sem_remove_task(curr);
-            
             curr->blocked_on_sem = nullptr;
             curr->blocked_kind = TASK_BLOCK_NONE;
             return 1;
         }
 
         if (kernel::unlikely((uint32_t)(timer_ticks - deadline_tick) < 0x80000000u)) {
-            sem_remove_task(curr);
-
             curr->blocked_on_sem = nullptr;
             curr->blocked_kind = TASK_BLOCK_NONE;
             return 0;
@@ -256,6 +259,10 @@ extern "C" void sem_signal(semaphore_t* sem) {
 
     while (!dlist_empty(&sem->wait_list)) {
         task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
+
+        if (kernel::unlikely(t->blocked_on_sem != sem)) {
+            panic("SEM: Corrupted wait_list! Task points to a different semaphore.");
+        }
 
         __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
 
@@ -327,7 +334,12 @@ extern "C" void sem_signal_all(semaphore_t* sem) {
 }
 
 extern "C" void sem_remove_task(task_t* t) {
-    if (kernel::unlikely(!t || !t->blocked_on_sem)) {
+    if (kernel::unlikely(!t)) {
+        return;
+    }
+
+    void* raw_sem = __atomic_load_n(&t->blocked_on_sem, __ATOMIC_ACQUIRE);
+    if (!raw_sem) {
         return;
     }
 
@@ -335,13 +347,14 @@ extern "C" void sem_remove_task(task_t* t) {
         return;
     }
 
-    semaphore_t* sem = static_cast<semaphore_t*>(t->blocked_on_sem);
+    semaphore_t* sem = static_cast<semaphore_t*>(raw_sem);
 
     const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
     if (kernel::likely(t->blocked_on_sem == sem && t->blocked_kind == TASK_BLOCK_SEM)) {
         if (t->sem_node.next && t->sem_node.prev) {
             dlist_del(&t->sem_node);
+
             t->sem_node.next = nullptr;
             t->sem_node.prev = nullptr;
         }
