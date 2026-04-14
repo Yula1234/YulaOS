@@ -225,9 +225,16 @@ static inline int comp_ipc_send(int fd, uint16_t type, uint32_t seq, const void*
     h.len = payload_len;
     h.seq = seq;
 
-    if (comp_ipc_write_full(fd, &h, (uint32_t)sizeof(h)) < 0) return -1;
-    if (payload_len == 0) return 0;
-    return comp_ipc_write_full(fd, payload, payload_len) < 0 ? -1 : 0;
+    uint8_t frame[sizeof(h) + COMP_IPC_MAX_PAYLOAD];
+    memcpy(frame, &h, sizeof(h));
+    if (payload_len) {
+        memcpy(frame + sizeof(h), payload, payload_len);
+    }
+    
+    int r = pipe_try_write(fd, frame, sizeof(h) + payload_len);
+    if (r < 0) return -1;
+
+    return 0;
 }
 
 #endif
