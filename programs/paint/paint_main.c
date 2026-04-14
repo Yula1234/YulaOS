@@ -413,7 +413,22 @@ int main(int argc, char** argv) {
 
         if (need_update && canvas) {
             render_all();
-            (void)comp_send_commit(&conn, surface_id, 32, 32, 0u);
+            
+            int commit_success = 0;
+            for (int retries = 0; retries < 100; retries++) {
+                if (comp_send_commit(&conn, surface_id, 32, 32, 0u) == 0) {
+                    commit_success = 1;
+                    break;
+                }
+
+                usleep(1000); 
+            }
+            
+            if (!commit_success) {
+                dbg_write("paint: FATAL - failed to commit frame after 100 retries\n");
+                running = 0;
+                break;
+            }
         }
 
         if (event_count < 64) {
