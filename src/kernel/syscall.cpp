@@ -1892,8 +1892,7 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
 
         if (proc_change_state(curr, TASK_WAITING) != 0) {
             unblock_curr(curr);
-            result = -2;
-            goto out;
+            continue;
         }
         smp_mb();
 
