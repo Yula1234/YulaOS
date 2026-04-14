@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #include <arch/i386/context.h>
 #include <arch/i386/paging.h>
@@ -12,12 +12,14 @@
 #include <kernel/panic.h>
 
 #include <lib/cpp/lock_guard.h>
- #include <lib/cpp/atomic.h>
+#include <lib/cpp/atomic.h>
 
 #include "sched.h"
 #include <kernel/smp/cpu.h>
 
 extern volatile uint32_t timer_ticks;
+
+#define SCHED_DEBUG 0
 
 namespace {
 
@@ -144,6 +146,27 @@ static int get_best_cpu(void) {
 }
 
 ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
+#if SCHED_DEBUG
+    if (p->rb_node.__parent_color != 0 || p->rb_node.rb_left != nullptr || p->rb_node.rb_right != nullptr) {
+        if (cpu->runq_root.rb_node != &p->rb_node) {
+            panic("SCHED: enqueue_task - task already has RB-tree links!");
+        }
+    }
+    if (p->state == TASK_WAITING || p->state == TASK_STOPPED) {
+        panic("SCHED: enqueue_task - trying to enqueue sleeping task!");
+    }
+
+    if (p->state != TASK_RUNNABLE && p->state != TASK_RUNNING) {
+        panic("SCHED: enqueue_task() on non-runnable task!");
+    }
+    if (cpu->runq_count > 1000000) { 
+        panic("SCHED: runq_count corrupted (underflow?)");
+    }
+#endif
+
+    proc_task_retain(p);
+    p->is_queued = 1;
+
     struct rb_node **link = &cpu->runq_root.rb_node;
     struct rb_node *parent = nullptr;
     struct task *entry;
@@ -171,6 +194,17 @@ ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
 }
 
 ___inline void dequeue_task(cpu_t* cpu, task_t* p) {
+#if SCHED_DEBUG
+    if (cpu->runq_count == 0) {
+        panic("SCHED: dequeue_task - runq_count is already 0!");
+    }
+    if (p->rb_node.__parent_color == 0 && p->rb_node.rb_left == nullptr && p->rb_node.rb_right == nullptr) {
+        if (cpu->runq_root.rb_node != &p->rb_node) {
+            panic("SCHED: dequeue_task - task is NOT in the tree!");
+        }
+    }
+#endif
+
     if (cpu->runq_leftmost == p) {
         struct rb_node *next = rb_next(&p->rb_node);
         cpu->runq_leftmost = next ? rb_entry(next, struct task, rb_node) : nullptr;
@@ -179,6 +213,13 @@ ___inline void dequeue_task(cpu_t* cpu, task_t* p) {
     rb_erase(&p->rb_node, &cpu->runq_root);
 
     __atomic_fetch_sub(&cpu->runq_count, 1, __ATOMIC_RELAXED);
+
+    p->is_queued = 0;
+    p->rb_node.__parent_color = 0;
+    p->rb_node.rb_left = nullptr;
+    p->rb_node.rb_right = nullptr;
+
+    proc_task_put(p);
 }
 
 void sched_add(task_t* t) {
@@ -203,10 +244,12 @@ void sched_add(task_t* t) {
     }
 
     if (t->is_queued) {
-        return; 
+        return;
     }
 
-    t->is_queued = 1;
+    if (target->current_task == t) {
+        return;
+    }
 
     uint32_t base_quantum;
     if (t->priority >= PRIO_GUI) {
@@ -241,7 +284,6 @@ void sched_add(task_t* t) {
     t->exec_start = 0;
     
     target->total_priority_weight += t->priority;
-    
     __atomic_fetch_add(&target->total_task_count, 1, __ATOMIC_RELAXED);
 
     enqueue_task(target, t);
@@ -250,6 +292,15 @@ void sched_add(task_t* t) {
 }
 
 ___inline task_t* pick_next_cfs(cpu_t* cpu) {
+#if SCHED_DEBUG
+    if (cpu->runq_count > 0 && cpu->runq_leftmost == nullptr) {
+        panic("SCHED: runq_count > 0 but leftmost is NULL!");
+    }
+    if (cpu->runq_count == 0 && cpu->runq_leftmost != nullptr) {
+        panic("SCHED: runq_count == 0 but leftmost is NOT NULL!");
+    }
+#endif
+
     task_t* left = cpu->runq_leftmost;
 
     if (kernel::unlikely(!left)) {
@@ -257,7 +308,12 @@ ___inline task_t* pick_next_cfs(cpu_t* cpu) {
     }
     
     dequeue_task(cpu, left);
-    left->is_queued = 0;
+    
+#if SCHED_DEBUG
+    if (left->state == TASK_WAITING || left->state == TASK_STOPPED) {
+        panic("SCHED: pick_next_cfs - picked a sleeping task!");
+    }
+#endif
     
     return left;
 }
@@ -305,13 +361,6 @@ void sched_set_current(task_t* t) {
 
     rcu_qs_count_inc();
 
-    task_t* old = cpu->current_task;
-    if (old != t) {
-        sched_task_pin(t);
-        cpu->current_task = t;
-        sched_task_unpin(old);
-    }
-    
     uint32_t kstack_top = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t->kstack)) + t->kstack_size;
     kstack_top &= ~0xF; 
     
@@ -360,41 +409,66 @@ void sched_yield(void) {
     );
     const bool irq_was_enabled = (irq_flags & 0x200u) != 0u;
 
-    if (kernel::likely(prev && prev->state == TASK_RUNNING && prev != me->idle_task && prev->pid != 0)) {
-        (void)proc_change_state(prev, TASK_RUNNABLE);
+    if (kernel::likely(prev && prev != me->idle_task && prev->pid != 0)) {
+        if (prev->state == TASK_RUNNING || prev->state == TASK_RUNNABLE) {
+            prev->state = TASK_RUNNABLE;
 
-        if (prev->exec_start > 0) {
-            uint64_t delta_exec = me->sched_ticks - prev->exec_start;
-            if (delta_exec > 0) {
-                uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, prev->priority);
-                prev->vruntime += delta_vruntime;
+            if (prev->exec_start > 0) {
+                uint64_t delta_exec = me->sched_ticks - prev->exec_start;
+                if (delta_exec > 0) {
+                    uint64_t delta_vruntime = calc_delta_vruntime(delta_exec, prev->priority);
+                    prev->vruntime += delta_vruntime;
+                }
             }
-        }
-        prev->exec_start = 0;
+            prev->exec_start = 0;
 
-        {
             kernel::SpinLockNativeSafeGuard guard(me->lock);
+            if (!prev->is_queued) {
+                enqueue_task(me, prev);
+            }
+        } 
+        else if (prev->state == TASK_WAITING || prev->state == TASK_STOPPED || prev->state == TASK_ZOMBIE) {
+            kernel::SpinLockNativeSafeGuard guard(me->lock);
+            
+            if (prev->is_queued) {
+                dequeue_task(me, prev);
+            }
 
-            prev->is_queued = 1;
-            enqueue_task(me, prev);
+            if (me->total_priority_weight >= static_cast<int>(prev->priority)) {
+                me->total_priority_weight -= prev->priority;
+            } else {
+                me->total_priority_weight = 0;
+            }
+
+            if (me->total_task_count > 0) {
+                __atomic_fetch_sub(&me->total_task_count, 1, __ATOMIC_RELAXED);
+            }
         }
     }
 
     while (1) {
         task_t* next = nullptr;
+        task_t* old_task_to_unpin = nullptr;
 
         {
             kernel::SpinLockNativeSafeGuard guard(me->lock);
-
             next = pick_next_cfs(me);
+            if (kernel::unlikely(!next)) {
+                next = me->idle_task;
+            }
+
+            if (kernel::likely(next && next != prev)) {
+                old_task_to_unpin = me->current_task;
+                sched_task_pin(next);
+                me->current_task = next;
+            }
+        }
+
+        if (old_task_to_unpin) {
+            sched_task_unpin(old_task_to_unpin);
         }
 
         if (kernel::unlikely(!next)) {
-            next = me->idle_task;
-        }
-
-        if (kernel::unlikely(!next)) {
-            me->current_task = nullptr;
             __asm__ volatile("sti; hlt" ::: "memory");
             continue;
         }
@@ -407,7 +481,6 @@ void sched_yield(void) {
             if (next->pid == 0) {
                 __asm__ volatile("sti; hlt" ::: "memory");
             }
-
             if (irq_was_enabled) {
                 __asm__ volatile("sti" ::: "memory");
             }
@@ -420,9 +493,8 @@ void sched_yield(void) {
         }
 
         next->exec_start = me->sched_ticks;
-
+        
         sched_set_current(next);
-
         fpu_set_ts();
 
         if (kernel::likely(prev)) {
@@ -441,13 +513,12 @@ void sched_yield(void) {
         }
 
         me->prev_task_during_switch = nullptr;
-
         __asm__ volatile("sti" ::: "memory");
-
         ctx_start(next->esp);
         __builtin_unreachable();
     }
 }
+
 void sched_remove(task_t* t) {
     int cpu_idx = t->assigned_cpu;
     if (cpu_idx < 0 || cpu_idx >= MAX_CPUS) return;
@@ -456,19 +527,19 @@ void sched_remove(task_t* t) {
     
     kernel::SpinLockNativeSafeGuard guard(target->lock);
     
-    if (target->total_priority_weight >= static_cast<int>(t->priority))
-        target->total_priority_weight -= t->priority;
-    else 
-        target->total_priority_weight = 0;
-
-    if (target->total_task_count > 0) {
-        __atomic_fetch_sub(&target->total_task_count, 1, __ATOMIC_RELAXED);
-    }
-
-    g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
-
     if (t->is_queued) {
+        if (target->total_priority_weight >= static_cast<int>(t->priority)) {
+            target->total_priority_weight -= t->priority;
+        } else {
+            target->total_priority_weight = 0;
+        }
+
+        if (target->total_task_count > 0) {
+            __atomic_fetch_sub(&target->total_task_count, 1, __ATOMIC_RELAXED);
+        }
+
         dequeue_task(target, t);
-        t->is_queued = 0;
+
+        g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
     }
 }
