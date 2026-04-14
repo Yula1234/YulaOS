@@ -129,6 +129,7 @@ int main(int argc, char** argv) {
 
     while (running) {
         int need_update = 0;
+        int event_count = 0;
 
         for (;;) {
             int rr = comp_try_recv(&conn, &hdr, payload, (uint32_t)sizeof(payload));
@@ -139,6 +140,8 @@ int main(int argc, char** argv) {
             if (rr == 0) {
                 break;
             }
+
+            event_count++;
 
             if (hdr.type != (uint16_t)COMP_IPC_MSG_INPUT || hdr.len != (uint32_t)sizeof(comp_ipc_input_t)) {
                 continue;
@@ -402,19 +405,20 @@ int main(int argc, char** argv) {
                 last_my = my;
                 last_buttons = buttons;
             }
-        }
 
-        if (need_update && canvas) {
-            g_dbg_stage = 400;
-            render_all();
-            g_dbg_stage = 401;
-            if (comp_send_commit(&conn, surface_id, 32, 32, 0u) != 0) {
-                dbg_write("paint: commit failed\n");
-                running = 0;
+            if (event_count >= 64) {
                 break;
             }
         }
-        comp_wait_events(&conn, 16000u);
+
+        if (need_update && canvas) {
+            render_all();
+            (void)comp_send_commit(&conn, surface_id, 32, 32, 0u);
+        }
+
+        if (event_count < 64) {
+            comp_wait_events(&conn, 16000u);
+        }
     }
 
     for (int i = 0; i < undo_count; i++) {
