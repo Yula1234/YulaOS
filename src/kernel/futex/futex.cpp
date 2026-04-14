@@ -253,6 +253,8 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
         }
 
         sched_yield();
+
+        futex_remove_task(curr);
     }
 }
 
@@ -326,21 +328,23 @@ extern "C" int futex_wake(uint32_t key, uint32_t max_wake) {
 }
 
 extern "C" void futex_remove_task(struct task* t) {
-    if (!t || t->blocked_kind != TASK_BLOCK_FUTEX || !t->blocked_on_sem) {
+    if (!t) {
         return;
     }
 
-    auto* entry = static_cast<futex_entry_t*>(t->blocked_on_sem);
+    void* raw_sem = __atomic_load_n(&t->blocked_on_sem, __ATOMIC_ACQUIRE);
+    if (!raw_sem || t->blocked_kind != TASK_BLOCK_FUTEX) {
+        return;
+    }
 
-    {
-        kernel::SpinLockSafeGuard guard(entry->lock);
+    auto* entry = static_cast<futex_entry_t*>(raw_sem);
 
-        if (t->blocked_on_sem != entry || t->blocked_kind != TASK_BLOCK_FUTEX) {
-            return;
-        }
+    kernel::SpinLockSafeGuard guard(entry->lock);
 
+    if (t->blocked_on_sem == entry && t->blocked_kind == TASK_BLOCK_FUTEX) {
         if (t->sem_node.next && t->sem_node.prev) {
             dlist_del(&t->sem_node);
+            
             t->sem_node.next = nullptr;
             t->sem_node.prev = nullptr;
         }
