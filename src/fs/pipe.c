@@ -13,6 +13,8 @@
 #include <lib/compiler.h>
 #include <lib/string.h>
 
+#include <hal/align.h>
+
 #include <mm/heap.h>
 
 #include "pipe.h"
@@ -20,51 +22,45 @@
 #define PIPE_SIZE 32768u
 
 /*
- * Pipe core.
+ * Pipe Core.
  *
- * This is a byte-stream pipe implemented as a fixed-size
- * ring buffer.
+ * This implementation uses a Single-Producer / Single-Consumer (SPSC) 
+ * lock-free ring buffer under the hood, protected by independent mutexes 
+ * to serialize multiple readers and multiple writers.
  *
- * Concurrency model:
- *  - `lock` is a sleeping mutex that protects the ring indices, reader/writer 
- *    counters, and allows safe `uaccess` copy operations while held.
- *  - I/O coordination acts like a Condition Variable pattern using semaphores:
- *      sem_read  == Signaled when new data becomes available.
- *      sem_write == Signaled when new free space becomes available.
- *
- * Invariants:
- *  - write_ptr and read_ptr are monotonic counters; the ring index is derived
- *    via modulo.
- *  - write_ptr - read_ptr is the current occupancy and is bounded by `size`.
- *  - Operations re-check conditions after blocking because state can change
- *    (e.g., endpoints closed) during the sleep phase.
+ * Concurrency & Cache Model:
+ *  - Readers and writers operate on separate cache lines.
+ *  - `read_lock` serializes readers. `write_lock` serializes writers.
+ *  - Because only 1 reader and 1 writer can actively touch the ring at a time,
+ *    they synchronize purely via atomic loads/stores of `read_ptr` and `write_ptr`,
+ *    allowing completely lock-free concurrent data copying.
+ *  - Standard VFS paths (`pipe_read`/`pipe_write`) use fast `memcpy` because 
+ *    the VFS layer already safely buffered the data into kernel space.
+ *  - Non-blocking syscall paths use `uaccess` directly.
  */
 
 typedef struct {
-    /* cacheline 1 core hot data protected by `lock`*/
-    mutex_t lock __cacheline_aligned;
+    mutex_t read_lock __cacheline_aligned;
 
-    char* buffer;
-    uint32_t size;
+    volatile uint32_t read_ptr;
+    volatile int readers;
+
+    mutex_t write_lock __cacheline_aligned;
     
-    uint32_t read_ptr;
-    uint32_t write_ptr;
+    volatile uint32_t write_ptr;
+    volatile int writers;
 
-    /* cacheline 2 poll subsystem */
-    poll_waitq_t poll_waitq __cacheline_aligned;
-
-    /* cacheline 3-4 reader synchronization */
     semaphore_t sem_read __cacheline_aligned;
 
-    /* cacheline 5-6 writer synchronization */
     semaphore_t sem_write __cacheline_aligned;
 
-    /* cacheline 7 cold data & lifecycle */
-    volatile uint32_t refs __cacheline_aligned;
-    
-    int readers;
-    int writers;
+    poll_waitq_t poll_waitq __cacheline_aligned;
 
+    char* buffer __cacheline_aligned;
+
+    uint32_t size;
+    
+    volatile uint32_t refs;
 } pipe_t;
 
 static void pipe_poll_waitq_finalize(void* ctx) {
@@ -123,44 +119,42 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
     uint32_t read_count = 0u;
     char* buf = (char*)buffer;
 
-    mutex_lock(&p->lock);
+    mutex_lock(&p->read_lock);
 
     while (read_count < size) {
-        /*
-         * Wait for data to become available.
-         * Drop the lock, sleep on the condition, and drain spurious wakeups.
-         */
-        while (p->write_ptr == p->read_ptr 
-               && p->writers > 0) {
+        while (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) == p->read_ptr 
+               && __atomic_load_n(&p->writers, __ATOMIC_ACQUIRE) > 0) {
                
             if (read_count > 0u) {
                 goto out;
             }
 
-            mutex_unlock(&p->lock);
-
+            mutex_unlock(&p->read_lock);
             sem_wait(&p->sem_read);
+            mutex_lock(&p->read_lock);
 
-            mutex_lock(&p->lock);
-
+            /* Drain spurious wakeups */
             while (sem_try_acquire(&p->sem_read)) {}
         }
 
-        if (p->write_ptr == p->read_ptr 
-            && p->writers == 0) {
-            break;
+        if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) == p->read_ptr 
+            && __atomic_load_n(&p->writers, __ATOMIC_ACQUIRE) == 0) {
+            break; /* EOF */
         }
 
-        const uint32_t available = p->write_ptr - p->read_ptr;
+        const uint32_t wp = __atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE);
+        const uint32_t rp = p->read_ptr; /* Protected by read_lock */
+        const uint32_t available = wp - rp;
+
         const uint32_t want = size - read_count;
         const uint32_t take = (want < available) ? want : available;
 
-        const uint32_t rp = p->read_ptr % p->size;
-        const uint32_t contig = p->size - rp;
-
+        const uint32_t rp_mod = rp % p->size;
+        const uint32_t contig = p->size - rp_mod;
         const uint32_t n1 = (take < contig) ? take : contig;
 
-        memcpy(&buf[read_count], &p->buffer[rp], n1);
+        /* VFS layer gives us a kernel buffer, plain memcpy is safe */
+        memcpy(&buf[read_count], &p->buffer[rp_mod], n1);
 
         const uint32_t n2 = take - n1;
 
@@ -168,12 +162,13 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
             memcpy(&buf[read_count + n1], &p->buffer[0], n2);
         }
 
-        p->read_ptr += take;
+        __atomic_store_n(&p->read_ptr, rp + take, __ATOMIC_RELEASE);
         read_count += take;
 
         sem_signal_all(&p->sem_write);
         poll_waitq_wake_all(&p->poll_waitq);
 
+        /* return early if we got any data in a blocking call */
         if (read_count > 0u) {
             break;
         }
@@ -181,11 +176,11 @@ static int pipe_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buf
 
 out:
     /* Leave the door open for other readers if there is still data. */
-    if (p->write_ptr > p->read_ptr) {
+    if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > p->read_ptr) {
         sem_signal_all(&p->sem_read);
     }
 
-    mutex_unlock(&p->lock);
+    mutex_unlock(&p->read_lock);
 
     return (int)read_count;
 }
@@ -207,27 +202,28 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
 
     char* buf = (char*)buffer;
 
-    mutex_lock(&p->lock);
+    mutex_lock(&p->read_lock);
 
-    if (p->write_ptr == p->read_ptr) {
-        int res = (p->writers > 0) ? 0 : -1;
+    const uint32_t wp = __atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE);
+    const uint32_t rp = p->read_ptr;
+    const uint32_t available = wp - rp;
+
+    if (available == 0u) {
+        const int writers_alive = __atomic_load_n(&p->writers, __ATOMIC_ACQUIRE);
+        mutex_unlock(&p->read_lock);
         
-        mutex_unlock(&p->lock);
-        
-        return res;
+        return (writers_alive > 0) ? 0 : -1;
     }
 
-    const uint32_t available = p->write_ptr - p->read_ptr;
     const uint32_t take = (size < available) ? size : available;
 
-    const uint32_t rp = p->read_ptr % p->size;
-    const uint32_t contig = p->size - rp;
-    
+    const uint32_t rp_mod = rp % p->size;
+    const uint32_t contig = p->size - rp_mod;
     const uint32_t n1 = (take < contig) ? take : contig;
 
-    if (uaccess_copy_to_user(&buf[0], &p->buffer[rp], n1) != 0) {
-        mutex_unlock(&p->lock);
-        
+    /* Non-blocking syscall bypasses VFS and passes user pointer */
+    if (uaccess_copy_to_user(&buf[0], &p->buffer[rp_mod], n1) != 0) {
+        mutex_unlock(&p->read_lock);
         return -1;
     }
 
@@ -235,22 +231,28 @@ int pipe_read_nonblock(vfs_node_t* node, uint32_t size, void* buffer) {
 
     if (n2 > 0u) {
         if (uaccess_copy_to_user(&buf[n1], &p->buffer[0], n2) != 0) {
-            mutex_unlock(&p->lock);
+            __atomic_store_n(&p->read_ptr, rp + n1, __ATOMIC_RELEASE);
             
-            return -1;
+            sem_signal_all(&p->sem_write);
+
+            poll_waitq_wake_all(&p->poll_waitq);
+            
+            mutex_unlock(&p->read_lock);
+            
+            return (int)n1;
         }
     }
 
-    p->read_ptr += take;
+    __atomic_store_n(&p->read_ptr, rp + take, __ATOMIC_RELEASE);
 
     sem_signal_all(&p->sem_write);
     poll_waitq_wake_all(&p->poll_waitq);
 
-    if (p->write_ptr > p->read_ptr) {
+    if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > p->read_ptr) {
         sem_signal_all(&p->sem_read);
     }
 
-    mutex_unlock(&p->lock);
+    mutex_unlock(&p->read_lock);
 
     return (int)take;
 }
@@ -271,28 +273,24 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
     uint32_t written_count = 0u;
     const char* buf = (const char*)buffer;
 
-    /*
-     * Guarantee atomic writes if the requested size fits within the total
-     * pipe capacity, preventing interleaving.
-     */
     const uint32_t require_space = (size <= p->size) ? size : 1u;
 
-    mutex_lock(&p->lock);
+    mutex_lock(&p->write_lock);
 
     while (written_count < size) {
-        while (p->size - (p->write_ptr - p->read_ptr) < require_space 
-               && p->readers > 0) {
+        while (p->size - (p->write_ptr - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) < require_space 
+               && __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE) > 0) {
                
-            mutex_unlock(&p->lock);
+            mutex_unlock(&p->write_lock);
 
             sem_wait(&p->sem_write);
-
-            mutex_lock(&p->lock);
+        
+            mutex_lock(&p->write_lock);
 
             while (sem_try_acquire(&p->sem_write)) {}
         }
 
-        if (p->readers == 0) {
+        if (__atomic_load_n(&p->readers, __ATOMIC_ACQUIRE) == 0) {
             if (written_count == 0u) {
                 written_count = (uint32_t)-1;
             }
@@ -300,16 +298,19 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
             break;
         }
 
-        const uint32_t space = p->size - (p->write_ptr - p->read_ptr);
+        const uint32_t rp = __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE);
+        const uint32_t wp = p->write_ptr; /* Protected by write_lock */
+        const uint32_t space = p->size - (wp - rp);
+
         const uint32_t want = size - written_count;
         const uint32_t take = (want < space) ? want : space;
 
-        const uint32_t wp = p->write_ptr % p->size;
-        const uint32_t contig = p->size - wp;
-
+        const uint32_t wp_mod = wp % p->size;
+        const uint32_t contig = p->size - wp_mod;
         const uint32_t n1 = (take < contig) ? take : contig;
 
-        memcpy(&p->buffer[wp], &buf[written_count], n1);
+        /* VFS layer gives us a kernel buffer, plain memcpy is safe */
+        memcpy(&p->buffer[wp_mod], &buf[written_count], n1);
 
         const uint32_t n2 = take - n1;
 
@@ -317,19 +318,20 @@ static int pipe_write(vfs_node_t* node, uint32_t offset, uint32_t size, const vo
             memcpy(&p->buffer[0], &buf[written_count + n1], n2);
         }
 
-        p->write_ptr += take;
+        __atomic_store_n(&p->write_ptr, wp + take, __ATOMIC_RELEASE);
         written_count += take;
 
+        /* Wake up the reader immediately so it can start consuming */
         sem_signal_all(&p->sem_read);
         poll_waitq_wake_all(&p->poll_waitq);
     }
 
     /* Chain-wake other writers if space remains. */
-    if (p->size - (p->write_ptr - p->read_ptr) > 0u) {
+    if (p->size - (p->write_ptr - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
         sem_signal_all(&p->sem_write);
     }
 
-    mutex_unlock(&p->lock);
+    mutex_unlock(&p->write_lock);
 
     return (int)written_count;
 }
@@ -355,31 +357,32 @@ int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
 
     const char* buf = (const char*)buffer;
 
-    mutex_lock(&p->lock);
+    mutex_lock(&p->write_lock);
 
-    if (p->readers == 0) {
-        mutex_unlock(&p->lock);
-        
+    const int readers_alive = __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE);
+    if (readers_alive == 0) {
+        mutex_unlock(&p->write_lock);
         return -1;
     }
 
-    const uint32_t space = p->size - (p->write_ptr - p->read_ptr);
+    const uint32_t rp = __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE);
+
+    const uint32_t wp = p->write_ptr;
+    const uint32_t space = p->size - (wp - rp);
     
     if (space < size) {
-        mutex_unlock(&p->lock);
-        
+        mutex_unlock(&p->write_lock);
         return 0;
     }
 
     const uint32_t take = size;
-    const uint32_t wp = p->write_ptr % p->size;
-    const uint32_t contig = p->size - wp;
-    
+    const uint32_t wp_mod = wp % p->size;
+    const uint32_t contig = p->size - wp_mod;
     const uint32_t n1 = (take < contig) ? take : contig;
 
-    if (uaccess_copy_from_user(&p->buffer[wp], &buf[0], n1) != 0) {
-        mutex_unlock(&p->lock);
-        
+    /* Non-blocking syscall bypasses VFS and passes user pointer */
+    if (uaccess_copy_from_user(&p->buffer[wp_mod], &buf[0], n1) != 0) {
+        mutex_unlock(&p->write_lock);
         return -1;
     }
 
@@ -387,22 +390,28 @@ int pipe_write_nonblock(vfs_node_t* node, uint32_t size, const void* buffer) {
 
     if (n2 > 0u) {
         if (uaccess_copy_from_user(&p->buffer[0], &buf[n1], n2) != 0) {
-            mutex_unlock(&p->lock);
+            __atomic_store_n(&p->write_ptr, wp + n1, __ATOMIC_RELEASE);
+            
+            sem_signal_all(&p->sem_read);
+            
+            poll_waitq_wake_all(&p->poll_waitq);
+
+            mutex_unlock(&p->write_lock);
             
             return -1;
         }
     }
 
-    p->write_ptr += take;
+    __atomic_store_n(&p->write_ptr, wp + take, __ATOMIC_RELEASE);
 
     sem_signal_all(&p->sem_read);
     poll_waitq_wake_all(&p->poll_waitq);
 
-    if (p->size - (p->write_ptr - p->read_ptr) > 0u) {
+    if (p->size - (p->write_ptr - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
         sem_signal_all(&p->sem_write);
     }
 
-    mutex_unlock(&p->lock);
+    mutex_unlock(&p->write_lock);
 
     return (int)take;
 }
@@ -437,16 +446,15 @@ int pipe_poll_info(
         return -1;
     }
 
-    mutex_lock(&p->lock);
+    /* 
+     * The atomic guarantees ensure we get a consistent enough snapshot 
+     * for event loop triggers.
+     */
+    const uint32_t wp = __atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE);
+    const uint32_t rp = __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE);
 
-    const uint32_t available = p->write_ptr - p->read_ptr;
-
+    const uint32_t available = wp - rp;
     const uint32_t space = p->size - available;
-
-    const int readers = p->readers;
-    const int writers = p->writers;
-
-    mutex_unlock(&p->lock);
 
     if (out_available)
         *out_available = available;
@@ -455,10 +463,10 @@ int pipe_poll_info(
         *out_space = space;
     
     if (out_readers)
-        *out_readers = readers;
+        *out_readers = __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE);
     
     if (out_writers)
-        *out_writers = writers;
+        *out_writers = __atomic_load_n(&p->writers, __ATOMIC_ACQUIRE);
 
     return 0;
 }
@@ -498,6 +506,7 @@ static int pipe_vfs_poll_status(vfs_node_t* node, int events) {
 
     uint32_t avail = 0;
     uint32_t space = 0;
+
     int readers = 0;
     int writers = 0;
 
@@ -541,26 +550,24 @@ static int pipe_close(vfs_node_t* node) {
         return 0;
     }
 
-    mutex_lock(&p->lock);
+    int readers_left = 1;
+    int writers_left = 1;
 
     if (node->flags & VFS_FLAG_PIPE_READ) {
-        p->readers--;
+        readers_left = __atomic_sub_fetch(&p->readers, 1, __ATOMIC_ACQ_REL);
+        
+        /* Wake writers so they hit EPIPE immediately */
+        sem_signal_all(&p->sem_write);
     } else if (node->flags & VFS_FLAG_PIPE_WRITE) {
-        p->writers--;
+        writers_left = __atomic_sub_fetch(&p->writers, 1, __ATOMIC_ACQ_REL);
+        
+        /* Wake readers so they hit EOF */
+        sem_signal_all(&p->sem_read);
     }
-
-    const int readers = p->readers;
-    const int writers = p->writers;
-
-    /* Wake all blocked users so they can observe the state change. */
-    sem_signal_all(&p->sem_read);
-    sem_signal_all(&p->sem_write);
 
     poll_waitq_wake_all(&p->poll_waitq);
 
-    mutex_unlock(&p->lock);
-
-    if (readers == 0 && writers == 0) {
+    if (readers_left == 0 && writers_left == 0) {
         poll_waitq_detach_all(&p->poll_waitq);
     }
 
@@ -610,7 +617,8 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
         return -1;
     }
 
-    mutex_init(&p->lock);
+    mutex_init(&p->read_lock);
+    mutex_init(&p->write_lock);
 
     sem_init(&p->sem_read, 0);
     sem_init(&p->sem_write, 0);
@@ -622,13 +630,8 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     *write_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
 
     if (!*read_node || !*write_node) {
-        if (*read_node) {
-            kfree(*read_node);
-        }
-
-        if (*write_node) {
-            kfree(*write_node);
-        }
+        if (*read_node) kfree(*read_node);
+        if (*write_node) kfree(*write_node);
 
         *read_node = 0;
         *write_node = 0;
