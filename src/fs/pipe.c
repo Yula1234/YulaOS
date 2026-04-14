@@ -650,8 +650,6 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     (*read_node)->private_data = p;
     (*read_node)->private_retain = pipe_private_retain;
     (*read_node)->private_release = pipe_private_release;
-    (*read_node)->inode_idx = 0;
-    (*read_node)->size = 0;
     (*read_node)->flags = VFS_FLAG_PIPE_READ;
     (*read_node)->refs = 1u;
 
@@ -660,8 +658,6 @@ int vfs_create_pipe(vfs_node_t** read_node, vfs_node_t** write_node) {
     (*write_node)->private_data = p;
     (*write_node)->private_retain = pipe_private_retain;
     (*write_node)->private_release = pipe_private_release;
-    (*write_node)->inode_idx = 0;
-    (*write_node)->size = 0;
     (*write_node)->flags = VFS_FLAG_PIPE_WRITE;
     (*write_node)->refs = 1u;
 
