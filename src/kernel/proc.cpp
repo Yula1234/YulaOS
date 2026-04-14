@@ -2732,7 +2732,6 @@ void proc_wake(task_t* t) {
     }
 
     __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
     proc_sleep_remove(t);
 
     if (t->blocked_on_sem) {
@@ -2740,7 +2739,17 @@ void proc_wake(task_t* t) {
         return;
     }
 
-    if (proc_change_state(t, TASK_RUNNABLE) == 0) {
+    uint32_t flags = spinlock_acquire_safe(&t->state_lock);
+    task_state_t old_state = t->state;
+    int needs_wake = 0;
+    
+    if (old_state == TASK_WAITING || old_state == TASK_STOPPED) {
+        t->state = TASK_RUNNABLE;
+        needs_wake = 1;
+    }
+    spinlock_release_safe(&t->state_lock, flags);
+
+    if (needs_wake) {
         sched_add(t);
     }
 
@@ -2769,29 +2778,20 @@ int proc_change_state(task_t* t, task_state_t new_state) {
         case TASK_UNUSED:
             ok = false;
             break;
-
         case TASK_ZOMBIE:
             ok = true;
             break;
-
         case TASK_WAITING:
-            ok = old_state == TASK_RUNNING
-                || old_state == TASK_RUNNABLE
-                || old_state == TASK_WAITING;
+            ok = old_state == TASK_RUNNING || old_state == TASK_WAITING;
             break;
-
         case TASK_RUNNABLE:
-            ok = old_state == TASK_WAITING
-                || old_state == TASK_RUNNING
-                || old_state == TASK_RUNNABLE;
+            ok = old_state == TASK_WAITING || old_state == TASK_RUNNING || 
+                 old_state == TASK_RUNNABLE || old_state == TASK_STOPPED;
             break;
-
         case TASK_RUNNING:
-            ok = old_state == TASK_RUNNABLE
-                || old_state == TASK_RUNNING
-                || old_state == TASK_WAITING;
+            ok = old_state == TASK_RUNNABLE || old_state == TASK_RUNNING || 
+                 old_state == TASK_WAITING;
             break;
-
         case TASK_STOPPED:
             ok = true;
             break;
