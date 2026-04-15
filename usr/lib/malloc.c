@@ -58,6 +58,8 @@ typedef struct malloc_state {
     int initialized_;
 } malloc_state_t;
 
+#define ___inline __attribute__((always_inline)) static inline
+
 static pthread_mutex_t g_malloc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static malloc_state_t g_state;
@@ -66,43 +68,43 @@ static tcache_t g_tcaches[TCACHE_SLOTS];
 
 static int g_zero_fd = -1;
 
-static inline void lock_heap(void) {
+___inline void lock_heap(void) {
     (void)pthread_mutex_lock(&g_malloc_lock);
 }
 
-static inline void unlock_heap(void) {
+___inline void unlock_heap(void) {
     (void)pthread_mutex_unlock(&g_malloc_lock);
 }
 
-static inline uint32_t chunk_size(const malloc_chunk_t* c) {
+___inline uint32_t chunk_size(const malloc_chunk_t* c) {
     return c->size_ & ~CHUNK_FLAG_MASK;
 }
 
-static inline int chunk_prev_in_use(const malloc_chunk_t* c) {
+___inline int chunk_prev_in_use(const malloc_chunk_t* c) {
     return (c->size_ & CHUNK_IN_USE_PREV) != 0u;
 }
 
-static inline int chunk_is_free(const malloc_chunk_t* c) {
+___inline int chunk_is_free(const malloc_chunk_t* c) {
     return (c->size_ & CHUNK_IS_FREE) != 0u;
 }
 
-static inline malloc_chunk_t* chunk_next(const malloc_chunk_t* c) {
+___inline malloc_chunk_t* chunk_next(const malloc_chunk_t* c) {
     return (malloc_chunk_t*)((char*)c + chunk_size(c));
 }
 
-static inline void chunk_set_size_and_flags(malloc_chunk_t* c, uint32_t size, uint32_t flags) {
+___inline void chunk_set_size_and_flags(malloc_chunk_t* c, uint32_t size, uint32_t flags) {
     c->size_ = size | flags;
 }
 
-static inline void* chunk_to_mem(malloc_chunk_t* c) {
+___inline void* chunk_to_mem(malloc_chunk_t* c) {
     return (void*)((char*)c + 8u);
 }
 
-static inline malloc_chunk_t* mem_to_chunk(void* mem) {
+___inline malloc_chunk_t* mem_to_chunk(void* mem) {
     return (malloc_chunk_t*)((char*)mem - 8u);
 }
 
-static inline uint32_t compute_bin_index(uint32_t size) {
+___inline uint32_t compute_bin_index(uint32_t size) {
     if (size <= 256u) {
         return (size >> 3u) - 2u;
     }
@@ -118,7 +120,7 @@ static inline uint32_t compute_bin_index(uint32_t size) {
     return idx;
 }
 
-static void bin_insert(malloc_chunk_t* chunk, uint32_t size) {
+___inline void bin_insert(malloc_chunk_t* chunk, uint32_t size) {
     const uint32_t idx = compute_bin_index(size);
     malloc_chunk_t* head = &g_state.bins_[idx];
 
@@ -131,7 +133,7 @@ static void bin_insert(malloc_chunk_t* chunk, uint32_t size) {
     head->fd_ = chunk;
 }
 
-static void bin_remove(malloc_chunk_t* chunk) {
+___inline void bin_remove(malloc_chunk_t* chunk) {
     malloc_chunk_t* fwd = chunk->fd_;
     malloc_chunk_t* bck = chunk->bk_;
 
@@ -145,7 +147,7 @@ static void bin_remove(malloc_chunk_t* chunk) {
     fwd->bk_ = bck;
 }
 
-static void ensure_inited(void) {
+___inline void ensure_inited(void) {
     if (likely(g_state.initialized_)) {
         return;
     }
@@ -162,7 +164,7 @@ static void ensure_inited(void) {
     g_state.initialized_ = 1;
 }
 
-static inline tcache_t* get_tcache(void) {
+___inline tcache_t* get_tcache(void) {
     const uint32_t pid = (uint32_t)getpid();
     const uint32_t slot = pid & (TCACHE_SLOTS - 1u);
 
