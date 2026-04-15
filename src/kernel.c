@@ -19,6 +19,7 @@
 
 #include <kernel/symbols/symbols.h>
 #include <kernel/output/console.h>
+#include <kernel/tty/pty/pty.h>
 #include <kernel/init/init.h>
 #include <kernel/init/boot.h>
 #include <kernel/profiler.h>
@@ -38,7 +39,6 @@
 #include <hal/pic.h>
 #include <hal/io.h>
 
-#include <fs/pty/pty.h>
 #include <fs/yulafs.h>
 #include <fs/bcache.h>
 #include <fs/vfs.h>
