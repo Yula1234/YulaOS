@@ -17,32 +17,54 @@
 #define MALLOC_MIN_SIZE        16u
 #define MALLOC_SYS_ALLOC_MIN   65536u
 #define MALLOC_TRIM_THRESHOLD  (256u * 1024u)
+#define MALLOC_MMAP_THRESHOLD  (128u * 1024u)
 
 #define CHUNK_IN_USE_PREV      1u
 #define CHUNK_IS_FREE          2u
-#define CHUNK_FLAG_MASK        3u
+#define CHUNK_IS_MMAPPED       4u
+#define CHUNK_FLAG_MASK        7u
 
 #define NUM_BINS               64u
 
-typedef struct MallocChunk {
+#define TCACHE_SLOTS           16u
+#define TCACHE_MAX_BINS        32u
+#define TCACHE_MAX_ENTRIES     64u
+#define TCACHE_MAX_SIZE        256u
+
+typedef struct malloc_chunk {
     uint32_t prev_size_;
     uint32_t size_;
 
-    struct MallocChunk* fd_;
-    struct MallocChunk* bk_;
-} MallocChunk;
+    struct malloc_chunk* fd_;
+    struct malloc_chunk* bk_;
+} malloc_chunk_t;
 
-typedef struct MallocState {
-    MallocChunk bins_[NUM_BINS];
+typedef struct tcache_bin {
+    malloc_chunk_t* head_;
+    uint32_t count_;
+} tcache_bin_t;
 
-    MallocChunk* top_chunk_;
+typedef struct tcache {
+    tcache_bin_t bins_[TCACHE_MAX_BINS];
+    uint32_t pid_;
+} tcache_t;
+
+typedef struct malloc_state {
+    malloc_chunk_t bins_[NUM_BINS];
+
+    malloc_chunk_t* top_chunk_;
     uint32_t top_size_;
 
     int initialized_;
-} MallocState;
+} malloc_state_t;
 
 static pthread_mutex_t g_malloc_lock = PTHREAD_MUTEX_INITIALIZER;
-static MallocState g_state;
+
+static malloc_state_t g_state;
+
+static tcache_t g_tcaches[TCACHE_SLOTS];
+
+static int g_zero_fd = -1;
 
 static inline void lock_heap(void) {
     (void)pthread_mutex_lock(&g_malloc_lock);
@@ -52,32 +74,32 @@ static inline void unlock_heap(void) {
     (void)pthread_mutex_unlock(&g_malloc_lock);
 }
 
-static inline uint32_t chunk_size(const MallocChunk* c) {
+static inline uint32_t chunk_size(const malloc_chunk_t* c) {
     return c->size_ & ~CHUNK_FLAG_MASK;
 }
 
-static inline int chunk_prev_in_use(const MallocChunk* c) {
+static inline int chunk_prev_in_use(const malloc_chunk_t* c) {
     return (c->size_ & CHUNK_IN_USE_PREV) != 0u;
 }
 
-static inline int chunk_is_free(const MallocChunk* c) {
+static inline int chunk_is_free(const malloc_chunk_t* c) {
     return (c->size_ & CHUNK_IS_FREE) != 0u;
 }
 
-static inline MallocChunk* chunk_next(const MallocChunk* c) {
-    return (MallocChunk*)((char*)c + chunk_size(c));
+static inline malloc_chunk_t* chunk_next(const malloc_chunk_t* c) {
+    return (malloc_chunk_t*)((char*)c + chunk_size(c));
 }
 
-static inline void chunk_set_size_and_flags(MallocChunk* c, uint32_t size, uint32_t flags) {
+static inline void chunk_set_size_and_flags(malloc_chunk_t* c, uint32_t size, uint32_t flags) {
     c->size_ = size | flags;
 }
 
-static inline void* chunk_to_mem(MallocChunk* c) {
+static inline void* chunk_to_mem(malloc_chunk_t* c) {
     return (void*)((char*)c + 8u);
 }
 
-static inline MallocChunk* mem_to_chunk(void* mem) {
-    return (MallocChunk*)((char*)mem - 8u);
+static inline malloc_chunk_t* mem_to_chunk(void* mem) {
+    return (malloc_chunk_t*)((char*)mem - 8u);
 }
 
 static inline uint32_t compute_bin_index(uint32_t size) {
@@ -96,11 +118,11 @@ static inline uint32_t compute_bin_index(uint32_t size) {
     return idx;
 }
 
-static void bin_insert(MallocChunk* chunk, uint32_t size) {
+static void bin_insert(malloc_chunk_t* chunk, uint32_t size) {
     const uint32_t idx = compute_bin_index(size);
-    MallocChunk* head = &g_state.bins_[idx];
+    malloc_chunk_t* head = &g_state.bins_[idx];
 
-    MallocChunk* fwd = head->fd_;
+    malloc_chunk_t* fwd = head->fd_;
 
     chunk->fd_ = fwd;
     chunk->bk_ = head;
@@ -109,9 +131,15 @@ static void bin_insert(MallocChunk* chunk, uint32_t size) {
     head->fd_ = chunk;
 }
 
-static void bin_remove(MallocChunk* chunk) {
-    MallocChunk* fwd = chunk->fd_;
-    MallocChunk* bck = chunk->bk_;
+static void bin_remove(malloc_chunk_t* chunk) {
+    malloc_chunk_t* fwd = chunk->fd_;
+    malloc_chunk_t* bck = chunk->bk_;
+
+    if (unlikely(fwd->bk_ != chunk 
+        || bck->fd_ != chunk)) {
+        
+        abort(); /* Safe Unlinking, Heap corruption detected. */
+    }
 
     bck->fd_ = fwd;
     fwd->bk_ = bck;
@@ -134,7 +162,78 @@ static void ensure_inited(void) {
     g_state.initialized_ = 1;
 }
 
-static void free_internal(void* mem);
+static inline tcache_t* get_tcache(void) {
+    const uint32_t pid = (uint32_t)getpid();
+    const uint32_t slot = pid & (TCACHE_SLOTS - 1u);
+
+    tcache_t* t = &g_tcaches[slot];
+    const uint32_t cached_pid = __atomic_load_n(&t->pid_, __ATOMIC_RELAXED);
+
+    if (likely(cached_pid == pid)) {
+        return t;
+    }
+
+    if (cached_pid == 0u) {
+        uint32_t expected = 0u;
+        const bool claimed = __atomic_compare_exchange_n(
+            &t->pid_, &expected, pid, false,
+            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
+        );
+
+        if (claimed) {
+            return t;
+        }
+    }
+
+    return NULL;
+}
+
+static void* mmap_alloc(uint32_t size) {
+    int fd = __atomic_load_n(&g_zero_fd, __ATOMIC_ACQUIRE);
+
+    if (unlikely(fd < 0)) {
+        const int new_fd = open("/dev/zero", 0);
+
+        if (unlikely(new_fd < 0)) {
+            return NULL;
+        }
+
+        int expected = -1;
+        const bool claimed = __atomic_compare_exchange_n(
+            &g_zero_fd, &expected, new_fd, false,
+            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE
+        );
+
+        if (!claimed) {
+            (void)close(new_fd);
+        }
+
+        fd = __atomic_load_n(&g_zero_fd, __ATOMIC_ACQUIRE);
+    }
+
+    const uint32_t alloc_size = size + 8u;
+
+    void* ptr = mmap(fd, alloc_size, MAP_PRIVATE);
+
+    if (unlikely(!ptr || ptr == (void*)-1)) {
+        return NULL;
+    }
+
+    malloc_chunk_t* chunk = (malloc_chunk_t*)ptr;
+
+    chunk->size_ = size | CHUNK_IN_USE_PREV | CHUNK_IS_MMAPPED;
+
+    return (void*)((char*)chunk + 8u);
+}
+
+static void mmap_free(malloc_chunk_t* chunk) {
+    const uint32_t size = chunk_size(chunk);
+    const uint32_t alloc_size = size + 8u;
+
+    (void)munmap((void*)chunk, alloc_size);
+}
+
+static void free_internal(malloc_chunk_t* c, uint32_t size);
 
 static int extend_heap(uint32_t min_size) {
     uint32_t request = min_size;
@@ -160,36 +259,36 @@ static int extend_heap(uint32_t min_size) {
             const uint32_t old_size = g_state.top_size_;
 
             if (old_size >= MALLOC_MIN_SIZE + 8u) {
-                MallocChunk* dummy = (MallocChunk*)((char*)g_state.top_chunk_ + old_size - 8u);
+                malloc_chunk_t* dummy = (malloc_chunk_t*)((char*)g_state.top_chunk_ + old_size - 8u);
                 chunk_set_size_and_flags(dummy, 8u, CHUNK_IN_USE_PREV);
 
-                MallocChunk* old_top = g_state.top_chunk_;
+                malloc_chunk_t* old_top = g_state.top_chunk_;
                 chunk_set_size_and_flags(old_top, old_size - 8u, CHUNK_IN_USE_PREV);
 
-                free_internal(chunk_to_mem(old_top));
+                free_internal(old_top, old_size - 8u);
             } else {
-                MallocChunk* dummy = g_state.top_chunk_;
+                malloc_chunk_t* dummy = g_state.top_chunk_;
                 chunk_set_size_and_flags(dummy, old_size, CHUNK_IN_USE_PREV);
             }
         }
 
-        g_state.top_chunk_ = (MallocChunk*)p;
+        g_state.top_chunk_ = (malloc_chunk_t*)p;
         g_state.top_size_ = request;
     }
 
     return 1;
 }
 
-static void split_and_insert(MallocChunk* c, uint32_t total_size, uint32_t request_size) {
+static void split_and_insert(malloc_chunk_t* c, uint32_t total_size, uint32_t request_size) {
     const uint32_t rem = total_size - request_size;
 
     if (rem >= MALLOC_MIN_SIZE) {
         chunk_set_size_and_flags(c, request_size, c->size_ & CHUNK_FLAG_MASK);
 
-        MallocChunk* remainder = chunk_next(c);
+        malloc_chunk_t* remainder = chunk_next(c);
         chunk_set_size_and_flags(remainder, rem, CHUNK_IN_USE_PREV | CHUNK_IS_FREE);
 
-        MallocChunk* next_after = chunk_next(remainder);
+        malloc_chunk_t* next_after = chunk_next(remainder);
 
         if (next_after == g_state.top_chunk_) {
             g_state.top_chunk_ = remainder;
@@ -201,7 +300,7 @@ static void split_and_insert(MallocChunk* c, uint32_t total_size, uint32_t reque
             bin_insert(remainder, rem);
         }
     } else {
-        MallocChunk* next = chunk_next(c);
+        malloc_chunk_t* next = chunk_next(c);
 
         if (next != g_state.top_chunk_) {
             next->size_ |= CHUNK_IN_USE_PREV;
@@ -210,11 +309,11 @@ static void split_and_insert(MallocChunk* c, uint32_t total_size, uint32_t reque
 }
 
 static void* carve_top(uint32_t request) {
-    MallocChunk* c = g_state.top_chunk_;
+    malloc_chunk_t* c = g_state.top_chunk_;
     const uint32_t rem = g_state.top_size_ - request;
 
     if (rem >= MALLOC_MIN_SIZE) {
-        g_state.top_chunk_ = (MallocChunk*)((char*)c + request);
+        g_state.top_chunk_ = (malloc_chunk_t*)((char*)c + request);
         g_state.top_size_ = rem;
 
         chunk_set_size_and_flags(c, request, CHUNK_IN_USE_PREV);
@@ -232,29 +331,19 @@ static void* carve_top(uint32_t request) {
     return chunk_to_mem(c);
 }
 
-static void* malloc_internal(size_t size) {
-    if (unlikely(size == 0u)) {
-        return NULL;
-    }
-
-    uint32_t request = (uint32_t)((size + 4u + 7u) & ~7u);
-
-    if (request < MALLOC_MIN_SIZE) {
-        request = MALLOC_MIN_SIZE;
-    }
-
+static void* malloc_internal(size_t request) {
     const uint32_t idx = compute_bin_index(request);
 
     if (idx <= 30u) {
-        MallocChunk* head = &g_state.bins_[idx];
+        malloc_chunk_t* head = &g_state.bins_[idx];
 
         if (head->fd_ != head) {
-            MallocChunk* c = head->fd_;
+            malloc_chunk_t* c = head->fd_;
             bin_remove(c);
 
             c->size_ &= ~CHUNK_IS_FREE;
 
-            MallocChunk* next = chunk_next(c);
+            malloc_chunk_t* next = chunk_next(c);
 
             if (next != g_state.top_chunk_) {
                 next->size_ |= CHUNK_IN_USE_PREV;
@@ -265,8 +354,8 @@ static void* malloc_internal(size_t size) {
     }
 
     for (uint32_t i = idx; i < NUM_BINS; i++) {
-        MallocChunk* head = &g_state.bins_[i];
-        MallocChunk* c = head->fd_;
+        malloc_chunk_t* head = &g_state.bins_[i];
+        malloc_chunk_t* c = head->fd_;
 
         while (c != head) {
             const uint32_t c_size = chunk_size(c);
@@ -293,26 +382,10 @@ static void* malloc_internal(size_t size) {
     return carve_top(request);
 }
 
-static void free_internal(void* mem) {
-    if (unlikely(!mem)) {
-        return;
-    }
-
-    if (unlikely((uintptr_t)mem % MALLOC_ALIGNMENT != 0u)) {
-        return;
-    }
-
-    MallocChunk* c = mem_to_chunk(mem);
-
-    if (unlikely(chunk_is_free(c))) {
-        return;
-    }
-
-    uint32_t size = chunk_size(c);
-
+static void free_internal(malloc_chunk_t* c, uint32_t size) {
     if (!chunk_prev_in_use(c)) {
         const uint32_t prev_sz = c->prev_size_;
-        MallocChunk* prev = (MallocChunk*)((char*)c - prev_sz);
+        malloc_chunk_t* prev = (malloc_chunk_t*)((char*)c - prev_sz);
 
         bin_remove(prev);
 
@@ -320,7 +393,7 @@ static void free_internal(void* mem) {
         size += prev_sz;
     }
 
-    MallocChunk* next = (MallocChunk*)((char*)c + size);
+    malloc_chunk_t* next = (malloc_chunk_t*)((char*)c + size);
 
     if (next == g_state.top_chunk_) {
         g_state.top_chunk_ = c;
@@ -348,17 +421,10 @@ static void free_internal(void* mem) {
         bin_remove(next);
         size += next_sz;
 
-        next = (MallocChunk*)((char*)c + size);
+        next = (malloc_chunk_t*)((char*)c + size);
     }
 
     chunk_set_size_and_flags(c, size, CHUNK_IN_USE_PREV | CHUNK_IS_FREE);
-
-    if (next == g_state.top_chunk_) {
-        g_state.top_chunk_ = c;
-        g_state.top_size_ += size;
-
-        return;
-    }
 
     next->size_ &= ~CHUNK_IN_USE_PREV;
     next->prev_size_ = size;
@@ -366,45 +432,36 @@ static void free_internal(void* mem) {
     bin_insert(c, size);
 }
 
-static void* realloc_internal(void* ptr, size_t size) {
-    MallocChunk* c = mem_to_chunk(ptr);
-    const uint32_t old_size = chunk_size(c);
-
-    uint32_t request = (uint32_t)((size + 4u + 7u) & ~7u);
-
-    if (request < MALLOC_MIN_SIZE) {
-        request = MALLOC_MIN_SIZE;
-    }
-
+static void* realloc_internal(malloc_chunk_t* c, uint32_t old_size, uint32_t request) {
     if (old_size >= request) {
         split_and_insert(c, old_size, request);
 
-        return ptr;
+        return chunk_to_mem(c);
     }
 
-    MallocChunk* next = chunk_next(c);
+    malloc_chunk_t* next = chunk_next(c);
 
     if (next == g_state.top_chunk_) {
         const uint32_t needed = request - old_size;
 
         if (g_state.top_size_ < needed) {
             if (unlikely(!extend_heap(needed))) {
-                goto slow_path;
+                return NULL;
             }
 
             next = chunk_next(c);
 
             if (unlikely(next != g_state.top_chunk_)) {
-                goto slow_path;
+                return NULL;
             }
         }
 
-        g_state.top_chunk_ = (MallocChunk*)((char*)next + needed);
+        g_state.top_chunk_ = (malloc_chunk_t*)((char*)next + needed);
         g_state.top_size_ -= needed;
 
         chunk_set_size_and_flags(c, request, c->size_ & CHUNK_FLAG_MASK);
 
-        return ptr;
+        return chunk_to_mem(c);
     }
 
     if (chunk_is_free(next)) {
@@ -418,36 +475,53 @@ static void* realloc_internal(void* ptr, size_t size) {
 
             split_and_insert(c, total, request);
 
-            return ptr;
+            return chunk_to_mem(c);
         }
     }
 
-slow_path:
-    void* new_ptr = malloc_internal(size);
-
-    if (unlikely(!new_ptr)) {
-        return NULL;
-    }
-
-    uint32_t copy_size = old_size - 4u;
-
-    if (copy_size > size) {
-        copy_size = (uint32_t)size;
-    }
-
-    memcpy(new_ptr, ptr, copy_size);
-    free_internal(ptr);
-
-    return new_ptr;
+    return NULL;
 }
 
 void* malloc(size_t size) {
+    if (unlikely(size == 0u)) {
+        return NULL;
+    }
+
+    uint32_t request = (uint32_t)((size + 4u + 7u) & ~7u);
+
+    if (request < MALLOC_MIN_SIZE) {
+        request = MALLOC_MIN_SIZE;
+    }
+
+    if (unlikely(request >= MALLOC_MMAP_THRESHOLD)) {
+        return mmap_alloc(request);
+    }
+
+    if (likely(request <= TCACHE_MAX_SIZE)) {
+        tcache_t* tcache = get_tcache();
+
+        if (likely(tcache != NULL)) {
+            const uint32_t idx = (request - MALLOC_MIN_SIZE) >> 3u;
+            tcache_bin_t* bin = &tcache->bins_[idx];
+
+            if (bin->count_ > 0u) {
+                malloc_chunk_t* c = bin->head_;
+                
+                bin->head_ = c->fd_;
+                bin->count_--;
+
+                return chunk_to_mem(c);
+            }
+        }
+    }
+
     lock_heap();
     ensure_inited();
 
-    void* res = malloc_internal(size);
+    void* res = malloc_internal(request);
 
     unlock_heap();
+
     return res;
 }
 
@@ -456,9 +530,41 @@ void free(void* ptr) {
         return;
     }
 
+    malloc_chunk_t* c = mem_to_chunk(ptr);
+
+    if (unlikely((c->size_ & CHUNK_IS_MMAPPED) != 0u)) {
+        mmap_free(c);
+
+        return;
+    }
+
+    const uint32_t size = chunk_size(c);
+
+    if (likely(size <= TCACHE_MAX_SIZE)) {
+        tcache_t* tcache = get_tcache();
+
+        if (likely(tcache != NULL)) {
+            const uint32_t idx = (size - MALLOC_MIN_SIZE) >> 3u;
+            tcache_bin_t* bin = &tcache->bins_[idx];
+
+            if (bin->count_ < TCACHE_MAX_ENTRIES) {
+                if (unlikely(bin->head_ == c)) {
+                    abort(); /* Double free detected in fast path */
+                }
+
+                c->fd_ = bin->head_;
+                
+                bin->head_ = c;
+                bin->count_++;
+
+                return;
+            }
+        }
+    }
+
     lock_heap();
 
-    free_internal(ptr);
+    free_internal(c, size);
 
     unlock_heap();
 }
@@ -466,20 +572,18 @@ void free(void* ptr) {
 void* calloc(size_t nelem, size_t elsize) {
     const size_t size = nelem * elsize;
 
-    if (unlikely(nelem != 0u && size / nelem != elsize)) {
+    if (unlikely(nelem != 0u 
+        && size / nelem != elsize)) {
+        
         return NULL;
     }
 
-    lock_heap();
-    ensure_inited();
-
-    void* ptr = malloc_internal(size);
+    void* ptr = malloc(size);
 
     if (likely(ptr != NULL)) {
         memset(ptr, 0, size);
     }
 
-    unlock_heap();
     return ptr;
 }
 
@@ -490,14 +594,53 @@ void* realloc(void* ptr, size_t size) {
 
     if (unlikely(size == 0u)) {
         free(ptr);
+
         return NULL;
     }
+
+    malloc_chunk_t* c = mem_to_chunk(ptr);
+
+    if (unlikely((c->size_ & CHUNK_IS_MMAPPED) != 0u)) {
+        const uint32_t old_size = chunk_size(c);
+        const uint32_t copy_size = (size < old_size) ? (uint32_t)size : old_size;
+
+        void* new_ptr = malloc(size);
+
+        if (likely(new_ptr != NULL)) {
+            memcpy(new_ptr, ptr, copy_size);
+            free(ptr);
+        }
+
+        return new_ptr;
+    }
+
+    uint32_t request = (uint32_t)((size + 4u + 7u) & ~7u);
+
+    if (request < MALLOC_MIN_SIZE) {
+        request = MALLOC_MIN_SIZE;
+    }
+
+    const uint32_t old_size = chunk_size(c);
 
     lock_heap();
     ensure_inited();
 
-    void* res = realloc_internal(ptr, size);
+    void* res = realloc_internal(c, old_size, request);
 
     unlock_heap();
-    return res;
+
+    if (res != NULL) {
+        return res;
+    }
+
+    void* new_ptr = malloc(size);
+
+    if (likely(new_ptr != NULL)) {
+        const uint32_t copy_size = (old_size - 4u < size) ? old_size - 4u : (uint32_t)size;
+        
+        memcpy(new_ptr, ptr, copy_size);
+        free(ptr);
+    }
+
+    return new_ptr;
 }
