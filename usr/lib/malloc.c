@@ -53,6 +53,8 @@ typedef struct tcache {
 typedef struct malloc_state {
     malloc_chunk_t bins_[NUM_BINS];
 
+    uint64_t binmap_;
+
     malloc_chunk_t* top_chunk_;
     uint32_t top_size_;
 
@@ -132,6 +134,8 @@ ___inline void bin_insert(malloc_chunk_t* chunk, uint32_t size) {
 
     fwd->bk_ = chunk;
     head->fd_ = chunk;
+
+    g_state.binmap_ |= (1ULL << idx);
 }
 
 ___inline void bin_remove(malloc_chunk_t* chunk) {
@@ -146,6 +150,11 @@ ___inline void bin_remove(malloc_chunk_t* chunk) {
 
     bck->fd_ = fwd;
     fwd->bk_ = bck;
+
+    if (unlikely(fwd == bck)) {
+        const uint32_t idx = compute_bin_index(chunk_size(chunk));
+        g_state.binmap_ &= ~(1ULL << idx);
+    }
 }
 
 ___inline void ensure_inited(void) {
@@ -158,6 +167,8 @@ ___inline void ensure_inited(void) {
         g_state.bins_[i].bk_ = &g_state.bins_[i];
         g_state.bins_[i].size_ = 0u;
     }
+
+    g_state.binmap_ = 0ull;
 
     g_state.top_chunk_ = NULL;
     g_state.top_size_ = 0u;
@@ -342,26 +353,11 @@ static void* carve_top(uint32_t request) {
 static void* malloc_internal(size_t request) {
     const uint32_t idx = compute_bin_index(request);
 
-    if (idx <= 30u) {
-        malloc_chunk_t* head = &g_state.bins_[idx];
+    uint64_t available_map = g_state.binmap_ & (~0ULL << idx);
 
-        if (head->fd_ != head) {
-            malloc_chunk_t* c = head->fd_;
-            bin_remove(c);
-
-            c->size_ &= ~CHUNK_IS_FREE;
-
-            malloc_chunk_t* next = chunk_next(c);
-
-            if (next != g_state.top_chunk_) {
-                next->size_ |= CHUNK_IN_USE_PREV;
-            }
-
-            return chunk_to_mem(c);
-        }
-    }
-
-    for (uint32_t i = idx; i < NUM_BINS; i++) {
+    while (available_map != 0) {
+        const uint32_t i = (uint32_t)__builtin_ctzll(available_map);
+        
         malloc_chunk_t* head = &g_state.bins_[i];
         malloc_chunk_t* c = head->fd_;
 
@@ -379,6 +375,8 @@ static void* malloc_internal(size_t request) {
 
             c = c->fd_;
         }
+
+        available_map &= ~(1ULL << i);
     }
 
     if (g_state.top_size_ < request) {
