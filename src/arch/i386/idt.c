@@ -29,6 +29,7 @@
 #include <hal/simd.h>
 
 #include "paging.h"
+#include "gdt.h"
 #include "idt.h"
 
 #include <mm/vma.h>
@@ -799,6 +800,12 @@ out:
     if (cpu && regs->cs == 0x1B) {
         __atomic_store_n(&cpu->in_kernel, 0u, __ATOMIC_RELEASE);
         rcu_qs_count_inc();
+
+        if (curr && curr->tls_base) {
+            gdt_set_user_tls(cpu->index, (uint32_t)curr->tls_base);
+            
+            regs->fs = ((GDT_USER_TLS_BASE + cpu->index) << 3) | 3;
+        }
     }
 #ifdef KERNEL_PROFILE
     profiler_irq_exit();

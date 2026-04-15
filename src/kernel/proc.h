@@ -122,6 +122,8 @@ typedef struct task {
     
     uint32_t kstack_size;
     void* kstack;
+
+    void* tls_base;
     
     void (*entry)(void*);
     void* arg;

@@ -16,10 +16,11 @@
  * The GDT contains the flat kernel/user code+data segments, per-CPU TSS,
  * and per-CPU data segments for GS-based cpu_current() access.
  */
-#define GDT_ENTRIES (5 + MAX_CPUS + MAX_CPUS)
+#define GDT_ENTRIES (5 + MAX_CPUS * 3)
 
 /* Base index for per-CPU data segments (GS selectors). */
 #define GDT_CPU_DATA_BASE (5 + MAX_CPUS) 
+#define GDT_USER_TLS_BASE (5 + MAX_CPUS * 2)
 
 /*
  * i386 TSS.
@@ -59,6 +60,8 @@ void gdt_load(void);
 
 /* Update esp0 for a given CPU's TSS. */
 void tss_set_stack(int cpu_id, uint32_t kernel_esp);
+
+void gdt_set_user_tls(int cpu_id, uint32_t base);
 
 #ifdef __cplusplus
 }

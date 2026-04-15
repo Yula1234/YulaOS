@@ -33,6 +33,7 @@
 #include <yos/proc.h>
 
 #include <arch/i386/paging.h>
+#include <arch/i386/gdt.h>
 
 #include <lib/string.h>
 
@@ -1986,6 +1987,18 @@ out:
     regs->eax = (uint32_t)result;
 }
 
+static void syscall_set_tls(registers_t* regs, task_t* curr) {
+    curr->tls_base = (void*)regs->ebx;
+    
+    cpu_t* cpu = cpu_current();
+    if (cpu) {
+        gdt_set_user_tls(cpu->index, (uint32_t)curr->tls_base);
+        regs->fs = ((GDT_USER_TLS_BASE + cpu->index) << 3) | 3;
+    }
+    
+    regs->eax = 0;
+}
+
 static const syscall_fn_t syscall_table[] = {
     [0] = syscall_exit,
     [1] = syscall_getpid,
@@ -2043,6 +2056,7 @@ static const syscall_fn_t syscall_table[] = {
     [53] = syscall_mkdirat,
     [54] = syscall_unlinkat,
     [55] = syscall_statat,
+    [56] = syscall_set_tls,
 };
 
 extern "C" void syscall_handler(registers_t* regs) {

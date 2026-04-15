@@ -133,3 +133,9 @@ void tss_set_stack(int cpu_id, uint32_t kernel_esp) {
         tss_entries[cpu_id].esp0 = kernel_esp;
     }
 }
+
+void gdt_set_user_tls(int cpu_id, uint32_t base) {
+    if (cpu_id >= 0 && cpu_id < MAX_CPUS) {
+        gdt_set_gate(GDT_USER_TLS_BASE + cpu_id, base, 0xFFFFFFFF, 0xF2, 0xCF);
+    }
+}
