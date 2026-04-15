@@ -60,11 +60,15 @@ struct RemoteFreeBatch {
 
 struct KmemCache {
     char name[16];
+
     size_t object_size;
 
     uint32_t reciprocal_size;
+
     uint32_t align;
     uint32_t flags;
+
+    uint32_t pages_per_slab;
 
     kernel::SpinLock lock;
 
@@ -119,6 +123,16 @@ public:
             c->align = k_align_default;
             c->flags = 0;
 
+            uint32_t pps = 1;
+            
+            if (size > 128 && size <= 512) {
+                pps = 2;
+            } else if (size > 512) {
+                pps = 4;
+            }
+
+            c->pages_per_slab = pps;
+
             for (int cpu = 0; cpu < MAX_CPUS; cpu++) {
                 c->cpu_slabs[cpu].page = nullptr;
                 
@@ -145,17 +159,19 @@ private:
     static constexpr uint32_t k_remote_pending_shift = 8u;
     static constexpr uint32_t k_remote_pending_inc = 1u << k_remote_pending_shift;
 
-    static uint32_t page_owner_tag(const page_t& page) noexcept {
+    ___inline uint32_t page_owner_tag(const page_t& page) noexcept {
         const uint32_t v = __atomic_load_n(&page._reserved, __ATOMIC_ACQUIRE);
+
         return v & k_owner_tag_mask;
     }
 
-    static uint32_t page_remote_pending(const page_t& page) noexcept {
+    ___inline uint32_t page_remote_pending(const page_t& page) noexcept {
         const uint32_t v = __atomic_load_n(&page._reserved, __ATOMIC_ACQUIRE);
+
         return v >> k_remote_pending_shift;
     }
 
-    static void page_set_owner_tag(page_t& page, uint32_t tag) noexcept {
+    ___inline void page_set_owner_tag(page_t& page, uint32_t tag) noexcept {
         const uint32_t tag_bits = tag & k_owner_tag_mask;
 
         uint32_t expected = __atomic_load_n(&page._reserved, __ATOMIC_RELAXED);
@@ -163,23 +179,19 @@ private:
             const uint32_t desired = (expected & ~k_owner_tag_mask) | tag_bits;
 
             if (__atomic_compare_exchange_n(
-                    &page._reserved,
-                    &expected,
-                    desired,
-                    false,
-                    __ATOMIC_ACQ_REL,
-                    __ATOMIC_RELAXED
+                    &page._reserved, &expected, desired,
+                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
                 )) {
                 return;
             }
         }
     }
 
-    static void page_remote_pending_inc(page_t& page) noexcept {
+    ___inline void page_remote_pending_inc(page_t& page) noexcept {
         __atomic_fetch_add(&page._reserved, k_remote_pending_inc, __ATOMIC_ACQ_REL);
     }
 
-    static void page_remote_pending_dec(page_t& page) noexcept {
+    ___inline void page_remote_pending_dec(page_t& page) noexcept {
         __atomic_fetch_sub(&page._reserved, k_remote_pending_inc, __ATOMIC_ACQ_REL);
     }
 
@@ -261,10 +273,17 @@ public:
             panic("SLUB: free cache mismatch");
         }
 
-        const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+        uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+
+        if (page->objects == 0xFFFFu) {
+            page_virt = reinterpret_cast<uintptr_t>(page->list.prev);
+
+            page = static_cast<page_t*>(page->freelist);
+        }
+
         const uintptr_t off = virt - page_virt;
 
-        if (kernel::unlikely(off >= PAGE_SIZE || cache.object_size == 0)) {
+        if (kernel::unlikely(off >= static_cast<uintptr_t>(cache.pages_per_slab * PAGE_SIZE) || cache.object_size == 0)) {
             panic("SLUB: invalid object address");
         }
 
@@ -486,6 +505,10 @@ public:
             return nullptr;
         }
 
+        if (page->slab_cache && page->objects == 0xFFFFu) {
+            page = static_cast<page_t*>(page->freelist);
+        }
+
         size_t old_size;
         if (page->slab_cache) {
             old_size = static_cast<KmemCache*>(page->slab_cache)->object_size;
@@ -498,6 +521,7 @@ public:
         }
 
         void* new_ptr = malloc(new_size);
+
         if (kernel::likely(new_ptr)) {
             memcpy(new_ptr, ptr, old_size);
             free(ptr);
@@ -596,19 +620,47 @@ public:
                         return 0;
                     }
 
-                    const uintptr_t page_virt = reinterpret_cast<uintptr_t>(page->freelist)
+                    uintptr_t page_virt = reinterpret_cast<uintptr_t>(page->freelist)
                         & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+                    
+                    while (cache.pages_per_slab > 1) {
+                        uint32_t p = paging_get_phys(kernel_page_directory, static_cast<uint32_t>(page_virt));
+                        
+                        if (pmm_->phys_to_page(p) == page) {
+                            break;
+                        }
+
+                        page_virt -= PAGE_SIZE;
+                    }
 
                     free_pages_virt[free_pages_count++] = page_virt;
 
                     local.page = nullptr;
-
                     page->slab_cache = nullptr;
                     page->freelist = nullptr;
+
                     page->objects = 0;
+                    
                     page->list.prev = nullptr;
                     page->list.next = nullptr;
+                    
                     page_set_owner_tag(*page, 0u);
+
+                    for (uint32_t i = 1; i < cache.pages_per_slab; i++) {
+                        uint32_t t_phys = paging_get_phys(kernel_page_directory, 
+                                            static_cast<uint32_t>(page_virt + i * PAGE_SIZE));
+
+                        page_t* t_page = pmm_->phys_to_page(t_phys);
+                        
+                        if (kernel::likely(t_page)) {
+                            t_page->slab_cache = nullptr;
+                            
+                            t_page->objects = 0;
+                            
+                            t_page->freelist = nullptr;
+                            t_page->list.prev = nullptr;
+                        }
+                    }
                 }
             }
 
@@ -617,7 +669,7 @@ public:
 
         for (uint32_t i = 0; i < free_pages_count; i++) {
             if (free_pages_virt[i] != 0u) {
-                vmm_->free_pages(reinterpret_cast<void*>(free_pages_virt[i]), 1);
+                vmm_->free_pages(reinterpret_cast<void*>(free_pages_virt[i]), cache.pages_per_slab);
             }
         }
 
@@ -635,7 +687,7 @@ private:
 
     static constexpr uint32_t k_aligned_alloc_magic = 0x41A11CEDu;
 
-    static uintptr_t align_up_uintptr(uintptr_t value, uintptr_t align) noexcept {
+    ___inline uintptr_t align_up_uintptr(uintptr_t value, uintptr_t align) noexcept {
         return (value + (align - 1u)) & ~(align - 1u);
     }
 
@@ -727,6 +779,7 @@ private:
             kernel_page_directory,
             static_cast<uint32_t>(original_addr)
         );
+
         if (kernel::unlikely(!orig_phys)) {
             return false;
         }
@@ -737,10 +790,18 @@ private:
         }
 
         if (orig_page->slab_cache) {
+            uintptr_t base_virt = original_addr & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+            
+            if (orig_page->objects == 0xFFFFu) {
+                base_virt = reinterpret_cast<uintptr_t>(orig_page->list.prev);
+                orig_page = static_cast<page_t*>(orig_page->freelist);
+            }
+
             const auto* cache = static_cast<const KmemCache*>(orig_page->slab_cache);
+            
             if (cache->object_size > 0u) {
-                const uintptr_t page_base = original_addr & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
-                const uintptr_t offset_in_page = original_addr - page_base;
+                const uintptr_t offset_in_page = original_addr - base_virt;
+            
                 if (kernel::unlikely((offset_in_page % cache->object_size) != 0u)) {
                     return false;
                 }
@@ -762,7 +823,7 @@ private:
      * Slab page lists are doubly-linked through page_t::prev/next.
      * cpu_slab is not part of these lists.
      */
-    static void slab_list_add(page_t*& head, page_t& page) noexcept {
+    ___inline void slab_list_add(page_t*& head, page_t& page) noexcept {
         page.list.next = head;
         page.list.prev = nullptr;
 
@@ -773,7 +834,7 @@ private:
         head = &page;
     }
 
-    static void slab_list_remove(page_t*& head, page_t& page) noexcept {
+    ___inline void slab_list_remove(page_t*& head, page_t& page) noexcept {
         if (page.list.prev) {
             page.list.prev->list.next = page.list.next;
         } else {
@@ -805,7 +866,7 @@ private:
         
         page_set_owner_tag(page, 0u);
 
-        const uint32_t obj_count = PAGE_SIZE / cache.object_size;
+        const uint32_t obj_count = (cache.pages_per_slab * PAGE_SIZE) / cache.object_size;
         uint8_t* base = static_cast<uint8_t*>(virt_addr);
 
         for (uint32_t i = 0; i < obj_count; i++) {
@@ -856,7 +917,7 @@ private:
         return obj;
     }
 
-    static void push_object_to_page_freelist(page_t& page, void* obj) noexcept {
+    ___inline void push_object_to_page_freelist(page_t& page, void* obj) noexcept {
         if (kernel::unlikely(!obj)) {
             panic("SLUB: push null object");
         }
@@ -961,7 +1022,13 @@ private:
                 panic("SLUB: remote free objects underflow");
             }
 
-            const uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+            uintptr_t page_virt = virt & ~static_cast<uintptr_t>(PAGE_SIZE - 1u);
+            
+            if (page->objects == 0xFFFFu) {
+                page_virt = reinterpret_cast<uintptr_t>(page->list.prev);
+            
+                page = static_cast<page_t*>(page->freelist);
+            }
 
             if (kernel::likely(local.page == page)) {
                 push_object_to_page_freelist(*page, it);
@@ -1056,7 +1123,7 @@ private:
                 }
             }
 
-            void* new_virt = vmm_->alloc_pages(1);
+            void* new_virt = vmm_->alloc_pages(cache.pages_per_slab);
             if (kernel::unlikely(!new_virt)) {
                 return nullptr;
             }
@@ -1065,11 +1132,30 @@ private:
                 kernel_page_directory,
                 static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_virt))
             );
+
             page_t* new_page = pmm_->phys_to_page(phys);
 
             if (kernel::unlikely(!new_page)) {
-                vmm_->free_pages(new_virt, 1);
+                vmm_->free_pages(new_virt, cache.pages_per_slab);
                 return nullptr;
+            }
+
+            for (uint32_t i = 1; i < cache.pages_per_slab; i++) {
+                const uint32_t tail_phys = paging_get_phys(
+                    kernel_page_directory, 
+                    static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_virt) + i * PAGE_SIZE)
+                );
+
+                page_t* tail_page = pmm_->phys_to_page(tail_phys);
+                
+                if (kernel::likely(tail_page)) {
+                    tail_page->slab_cache = &cache;
+
+                    tail_page->objects = 0xFFFFu;
+                    tail_page->freelist = new_page;
+                    
+                    tail_page->list.prev = reinterpret_cast<page_t*>(new_virt);
+                }
             }
 
             slub_init_page(cache, *new_page, new_virt);
@@ -1156,21 +1242,40 @@ private:
 
                 page.slab_cache = nullptr;
                 page.freelist = nullptr;
+                
                 page.objects = 0;
+                
                 page.list.prev = nullptr;
                 page.list.next = nullptr;
+
                 page_set_owner_tag(page, 0u);
+
+                for (uint32_t i = 1; i < cache.pages_per_slab; i++) {
+                    uint32_t t_phys = paging_get_phys(kernel_page_directory, 
+                                        static_cast<uint32_t>(page_virt + i * PAGE_SIZE));
+
+                    page_t* t_page = pmm_->phys_to_page(t_phys);
+                    
+                    if (kernel::likely(t_page)) {
+                        t_page->slab_cache = nullptr;
+                        
+                        t_page->objects = 0;
+                        
+                        t_page->freelist = nullptr;
+                        t_page->list.prev = nullptr;
+                    }
+                }
 
                 need_free_page = true;
             }
         }
 
         if (need_free_page) {
-            vmm_->free_pages(reinterpret_cast<void*>(page_virt), 1);
+            vmm_->free_pages(reinterpret_cast<void*>(page_virt), cache.pages_per_slab);
         }
     }
 
-    static bool heap_range_contains(uintptr_t addr) noexcept {
+    ___inline bool heap_range_contains(uintptr_t addr) noexcept {
         const uint64_t start = static_cast<uint64_t>(KERNEL_HEAP_START);
         const uint64_t end = start + static_cast<uint64_t>(KERNEL_HEAP_SIZE);
         const uint64_t v = static_cast<uint64_t>(addr);
@@ -1178,7 +1283,7 @@ private:
         return v >= start && v < end;
     }
 
-    static int get_cache_index(size_t size) noexcept {
+    ___inline int get_cache_index(size_t size) noexcept {
         /*
          * Round size up to the next power-of-two bucket.
          * Implemented via bsr on (size - 1).
@@ -1210,7 +1315,7 @@ private:
         return idx;
     }
 
-    static void copy_cache_name(KmemCache& cache, const char* name) noexcept {
+    ___inline void copy_cache_name(KmemCache& cache, const char* name) noexcept {
         size_t i = 0;
         for (; i + 1u < sizeof(cache.name) && name[i] != '\0'; i++) {
             cache.name[i] = name[i];
@@ -1219,7 +1324,7 @@ private:
         cache.name[i] = '\0';
     }
 
-    static size_t round_up_size(size_t size, size_t align) noexcept {
+    ___inline size_t round_up_size(size_t size, size_t align) noexcept {
         if (size < sizeof(uintptr_t)) {
             size = sizeof(uintptr_t);
         }
@@ -1281,12 +1386,22 @@ private:
         cache->align = align;
         cache->flags = flags;
 
+        uint32_t pps = 1;
+        
+        if (size > 128 && size <= 512) {
+            pps = 2;
+        } else if (size > 512) {
+            pps = 4;
+        }
+        
+        cache->pages_per_slab = pps;
+
         cache->next_dyn = nullptr;
 
         return cache;
     }
 
-    bool is_dynamic_cache(const KmemCache* cache) const noexcept {
+    ___always_inline inline bool is_dynamic_cache(const KmemCache* cache) const noexcept {
         const uintptr_t begin = reinterpret_cast<uintptr_t>(&caches_[0]);
         const uintptr_t end = reinterpret_cast<uintptr_t>(&caches_[k_cache_count]);
         const uintptr_t p = reinterpret_cast<uintptr_t>(cache);
@@ -1333,6 +1448,10 @@ private:
             return requested_size;
         }
 
+        if (page->slab_cache && page->objects == 0xFFFFu) {
+            page = static_cast<page_t*>(page->freelist);
+        }
+
         if (page->slab_cache) {
             const auto* cache = static_cast<const KmemCache*>(page->slab_cache);
             if (kernel::likely(cache->object_size != 0u)) {
@@ -1359,7 +1478,7 @@ private:
 alignas(HeapState) static unsigned char g_heap_storage[sizeof(HeapState)];
 static HeapState* g_heap = nullptr;
 
-static inline HeapState& heap_state_init_once() noexcept {
+___inline HeapState& heap_state_init_once() noexcept {
     if (!g_heap) {
         g_heap = new (g_heap_storage) HeapState();
     }
@@ -1367,7 +1486,7 @@ static inline HeapState& heap_state_init_once() noexcept {
     return *g_heap;
 }
 
-static inline HeapState* heap_state_if_inited() noexcept {
+___inline HeapState* heap_state_if_inited() noexcept {
     return g_heap;
 }
 
