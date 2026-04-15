@@ -6,7 +6,7 @@
 
 #include <kernel/waitq/poll_waitq.h>
 
-#include "vfs.h"
+#include <fs/vfs.h>
 
 /*
  * VFS pipes.

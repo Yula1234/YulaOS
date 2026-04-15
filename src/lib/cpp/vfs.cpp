@@ -1,6 +1,6 @@
 #include <lib/cpp/vfs.h>
 
-#include <fs/pipe.h>
+#include <kernel/ipc/pipe.h>
 
 namespace kernel {
 

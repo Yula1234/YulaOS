@@ -4,7 +4,6 @@
 #include <kernel/ipc/ipc_endpoint.h>
 
 #include <fs/vfs.h>
-#include <fs/pipe.h>
 
 #include <kernel/proc.h>
 #include <kernel/waitq/poll_waitq.h>
@@ -20,6 +19,8 @@
 #include <lib/hash_map.h>
 
 #include <mm/heap.h>
+
+#include "pipe.h"
 
 static bool ipc_name_valid(const char* name) {
     if (!name) {

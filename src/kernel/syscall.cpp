@@ -7,6 +7,7 @@
 #include <kernel/tty/tty_bridge.h>
 #include <kernel/futex/futex.h>
 #include <kernel/input_focus.h>
+#include <kernel/ipc/pipe.h>
 #include <kernel/syscall.h>
 #include <kernel/smp/cpu.h>
 #include <kernel/smp/mb.h>
@@ -17,7 +18,6 @@
 #include <drivers/video/vga.h>
 
 #include <fs/yulafs.h>
-#include <fs/pipe.h>
 #include <fs/vfs.h>
 
 #include <hal/lock.h>
