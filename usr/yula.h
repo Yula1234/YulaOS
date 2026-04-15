@@ -430,4 +430,8 @@ static inline int fb_present(const void* src, uint32_t src_stride, const fb_rect
     return syscall(37, (int)(uintptr_t)&req, 0, 0);
 }
 
+static inline int set_tls(void* tls_base) {
+    return syscall(56, (int)(uintptr_t)tls_base, 0, 0);
+}
+
 #endif

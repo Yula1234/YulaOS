@@ -45,8 +45,9 @@ typedef struct tcache_bin {
 } tcache_bin_t;
 
 typedef struct tcache {
+    struct tcache* self_;
+
     tcache_bin_t bins_[TCACHE_MAX_BINS];
-    uint32_t pid_;
 } tcache_t;
 
 typedef struct malloc_state {
@@ -164,30 +165,35 @@ ___inline void ensure_inited(void) {
     g_state.initialized_ = 1;
 }
 
-___inline tcache_t* get_tcache(void) {
-    const uint32_t pid = (uint32_t)getpid();
-    const uint32_t slot = pid & (TCACHE_SLOTS - 1u);
+static void* mmap_alloc(uint32_t size); 
 
-    tcache_t* t = &g_tcaches[slot];
-    const uint32_t cached_pid = __atomic_load_n(&t->pid_, __ATOMIC_RELAXED);
-
-    if (likely(cached_pid == pid)) {
-        return t;
-    }
-
-    if (cached_pid == 0u) {
-        uint32_t expected = 0u;
-        const bool claimed = __atomic_compare_exchange_n(
-            &t->pid_, &expected, pid, false,
-            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
-        );
-
-        if (claimed) {
-            return t;
+static inline tcache_t* get_tcache(void) {
+    uint16_t fs_sel;
+    
+    __asm__ volatile ("mov %%fs, %0" : "=r"(fs_sel));
+    
+    if (unlikely(fs_sel == 0x23)) {
+        tcache_t* tcb = (tcache_t*)mmap_alloc(sizeof(tcache_t));
+        
+        if (unlikely(!tcb)) {
+            return NULL;
         }
+        
+        for (uint32_t i = 0; i < TCACHE_MAX_BINS; i++) {
+            tcb->bins_[i].head_ = NULL;
+            tcb->bins_[i].count_ = 0u;
+        }
+        
+        tcb->self_ = tcb;
+        
+        set_tls(tcb);
+        return tcb;
     }
-
-    return NULL;
+    
+    tcache_t* tcb;
+    __asm__ volatile ("mov %%fs:0, %0" : "=r"(tcb));
+    
+    return tcb;
 }
 
 static void* mmap_alloc(uint32_t size) {
