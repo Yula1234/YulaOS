@@ -141,6 +141,14 @@ public:
 
     void free_pages(void* addr, uint32_t order) noexcept;
 
+    [[nodiscard]] uint32_t alloc_pages_batch(
+        uint32_t order,
+        pmm_zone_t preferred,
+        void** out, uint32_t cap
+    ) noexcept;
+
+    void free_pages_batch(uint32_t order, void* const* pages, uint32_t n) noexcept;
+
     [[nodiscard]] page_t* phys_to_page(uint32_t phys_addr) noexcept;
     [[nodiscard]] uint32_t page_to_phys(page_t* page) const noexcept;
 

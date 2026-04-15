@@ -17,20 +17,24 @@ namespace kernel {
 
 namespace {
 
+static constexpr uint32_t k_pcp_max_order = 3u;
+
 /*
- * Keep order-0 traffic off the buddy fast path.
+ * Keep k_pcp_max_order traffic off the buddy fast path.
  * Hit rate matters more than perfect global accounting here.
  */
 struct __cacheline_aligned PerCpuPageCache {
-    uint32_t count = 0u;
-    void* phys_pages[256]{};
+    struct OrderList {
+        uint32_t count = 0u;
+        void* phys_pages[256]{};
+    } lists[k_pcp_max_order + 1];
 };
 
-static constexpr uint32_t pcp_capacity = 256u;
-static constexpr uint32_t pcp_refill_batch = 32u;
-static constexpr uint32_t pcp_drain_batch = 128u;
-
 static constexpr uint32_t pcp_refill_order = 5u;
+
+static constexpr uint32_t pcp_capacity[k_pcp_max_order + 1] = {256, 128, 64, 32};
+static constexpr uint32_t pcp_refill_batch[k_pcp_max_order + 1] = {32, 16, 8, 4};
+static constexpr uint32_t pcp_drain_batch[k_pcp_max_order + 1] = {128, 64, 32, 16};
 
 static PerCpuPageCache pcp_caches[MAX_CPUS][PMM_ZONE_COUNT]{};
 
@@ -58,49 +62,22 @@ static inline PerCpuPageCache& pcp_current_cache(pmm_zone_t zone) {
  * Full cache is treated as backpressure: do not let per-cpu caches grow
  * unbounded under a free-heavy workload.
  */
-static inline void pcp_cache_drain(PmmState* pmm, PerCpuPageCache& cache) {
-    if (!pmm
-        || cache.count < pcp_capacity) {
+static inline void pcp_cache_drain(PmmState* pmm, uint32_t order, PerCpuPageCache::OrderList& list) {
+    if (!pmm || list.count < pcp_capacity[order]) {
         return;
     }
 
-    void* batch[pcp_drain_batch] = {};
-
-    const uint32_t drain = (cache.count < pcp_drain_batch)
-        ? cache.count
-        : pcp_drain_batch;
+    void* batch[256] = {};
+    const uint32_t drain = (list.count < pcp_drain_batch[order])
+        ? list.count
+        : pcp_drain_batch[order];
 
     for (uint32_t i = 0u; i < drain; i++) {
-        batch[i] = cache.phys_pages[cache.count - 1u - i];
+        batch[i] = list.phys_pages[list.count - 1u - i];
     }
 
-    cache.count -= drain;
-    pmm->free_pages_order0_batch(batch, drain);
-}
-
-static inline void* pcp_refill_fallback(
-    PmmState* pmm, pmm_zone_t zone,
-    PerCpuPageCache& cache
-) {
-    void* batch[pcp_refill_batch] = {};
-    const uint32_t n = pmm->alloc_pages_order0_batch(zone, batch, pcp_refill_batch);
-    if (kernel::unlikely(n == 0u)) {
-        return nullptr;
-    }
-
-    /*
-     * Return one page immediately and cache the rest.
-     * This keeps the caller fast while still amortizing the buddy work.
-     */
-    for (uint32_t i = 1u;
-         i < n
-         && cache.count < pcp_capacity;
-         i++) {
-
-        cache.phys_pages[cache.count++] = batch[i];
-    }
-
-    return batch[0];
+    list.count -= drain;
+    pmm->free_pages_batch(order, batch, drain);
 }
 
 static inline void pcp_fix_shattered_page_metadata(page_t& page, pmm_zone_t zone) {
@@ -128,64 +105,45 @@ static inline void pcp_fix_shattered_page_metadata(page_t& page, pmm_zone_t zone
     page.list.next = nullptr;
 }
 
-static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone) {
-    /*
-     * Disable IRQs to pin execution on the current CPU.
-     * This keeps the per-cpu cache lockless without requiring preemption
-     * control in early boot paths.
-     */
+static inline void* pcp_alloc_from_cache(PmmState* pmm, pmm_zone_t zone, uint32_t order) {
     kernel::ScopedIrqDisable irq_guard;
 
     PerCpuPageCache& cache = pcp_current_cache(zone);
-    if (kernel::likely(cache.count > 0u)) {
-        return cache.phys_pages[--cache.count];
+    auto& list = cache.lists[order];
+
+    if (kernel::likely(list.count > 0u)) {
+        return list.phys_pages[--list.count];
     }
 
-    void* big_block = pmm->alloc_pages_zone(pcp_refill_order, zone);
-    if (kernel::unlikely(!big_block)) {
-        return pcp_refill_fallback(pmm, zone, cache);
+    void* batch[256] = {};
+    const uint32_t batch_size = pcp_refill_batch[order];
+    const uint32_t n = pmm->alloc_pages_batch(order, zone, batch, batch_size);
+    
+    if (kernel::unlikely(n == 0u)) {
+        return nullptr;
     }
 
-    /*
-     * Prefer shattering a larger block over taking 32 independent order-0
-     * allocations under the buddy lock. This trades a single split for a
-     * predictable refill cost.
-     */
-    uint8_t* base = static_cast<uint8_t*>(big_block);
-
-    for (uint32_t i = 1u; i < pcp_refill_batch; i++) {
-        void* phys = base + (i * PAGE_SIZE);
-
-        page_t* meta = pmm->phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(phys)));
-        if (kernel::unlikely(!meta)) {
-            continue;
-        }
-
-        pcp_fix_shattered_page_metadata(*meta, zone);
-        cache.phys_pages[cache.count++] = phys;
+    for (uint32_t i = 1u; i < n && list.count < pcp_capacity[order]; i++) {
+        list.phys_pages[list.count++] = batch[i];
     }
 
-    page_t* head_meta = pmm->phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(base)));
-    if (kernel::likely(head_meta)) {
-        pcp_fix_shattered_page_metadata(*head_meta, zone);
-    }
-
-    return base;
+    return batch[0];
 }
 
-static inline void pcp_free_to_cache(PmmState* pmm, pmm_zone_t zone, void* addr) {
-    /* See pcp_alloc_from_cache(): irq-off keeps the cache lockless. */
+static inline void pcp_free_to_cache(PmmState* pmm, pmm_zone_t zone, uint32_t order, void* addr) {
     kernel::ScopedIrqDisable irq_guard;
 
     PerCpuPageCache& cache = pcp_current_cache(zone);
-    if (cache.count >= pcp_capacity) {
-        pcp_cache_drain(pmm, cache);
+    auto& list = cache.lists[order];
+
+    if (list.count >= pcp_capacity[order]) {
+        pcp_cache_drain(pmm, order, list);
     }
 
-    if (cache.count < pcp_capacity) {
-        cache.phys_pages[cache.count++] = addr;
+    if (list.count < pcp_capacity[order]) {
+        list.phys_pages[list.count++] = addr;
     } else {
-        pmm->free_pages_order0_batch(&addr, 1u);
+        pmm->free_pages_batch(order, &addr, 1u);
     }
 }
 
@@ -318,18 +276,14 @@ void PmmState::init_regions(
 }
 
 void* PmmState::alloc_pages(uint32_t order) noexcept {
-    if (order == 0u) {
-        /*
-         * Keep the fast path biased towards NORMAL.
-         * DMA pages are a constrained resource; only dip into it when NORMAL
-         * cannot satisfy the request.
-         */
-        void* p = pcp_alloc_from_cache(this, PMM_ZONE_NORMAL);
+    if (order <= k_pcp_max_order) {
+        void* p = pcp_alloc_from_cache(this, PMM_ZONE_NORMAL, order);
+        
         if (p) {
             return p;
         }
 
-        return pcp_alloc_from_cache(this, PMM_ZONE_DMA);
+        return pcp_alloc_from_cache(this, PMM_ZONE_DMA, order);
     }
 
     void* ptr = alloc_pages_zone(order, PMM_ZONE_NORMAL);
@@ -341,12 +295,12 @@ void* PmmState::alloc_pages(uint32_t order) noexcept {
 }
 
 void* PmmState::alloc_pages_zone(uint32_t order, pmm_zone_t zone) noexcept {
-    if (order == 0u) {
+    if (order <= k_pcp_max_order) {
         if (kernel::unlikely(zone >= PMM_ZONE_COUNT)) {
             return nullptr;
         }
 
-        return pcp_alloc_from_cache(this, zone);
+        return pcp_alloc_from_cache(this, zone, order);
     }
 
     SpinLockSafeGuard guard(zones_[zone].lock);
@@ -426,12 +380,19 @@ void* PmmState::alloc_pages_zone_unlocked(uint32_t order, pmm_zone_t zone) noexc
     return reinterpret_cast<void*>(page_to_phys(page));
 }
 
-uint32_t PmmState::alloc_pages_order0_batch(
-    pmm_zone_t preferred,
+uint32_t PmmState::alloc_pages_order0_batch(pmm_zone_t preferred, void** out, uint32_t cap) noexcept {
+    return alloc_pages_batch(0u, preferred, out, cap);
+}
+
+void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept {
+    free_pages_batch(0u, pages, n);
+}
+
+uint32_t PmmState::alloc_pages_batch(
+    uint32_t order, pmm_zone_t preferred,
     void** out, uint32_t cap
 ) noexcept {
-    if (kernel::unlikely(!out
-        || cap == 0u)) {
+    if (kernel::unlikely(!out || cap == 0u || order > PMM_MAX_ORDER)) {
         return 0u;
     }
 
@@ -444,34 +405,21 @@ uint32_t PmmState::alloc_pages_order0_batch(
         fallback = PMM_ZONE_DMA;
     }
 
-    /*
-     * Allocate under a single zone lock at a time.
-     * This avoids lock ping-pong in refill paths and keeps ordering simple.
-     */
     uint32_t n = 0u;
-
     {
         SpinLockSafeGuard guard(zones_[preferred].lock);
-
         for (; n < cap; n++) {
-            void* p = alloc_pages_zone_unlocked(0u, preferred);
-            if (!p) {
-                break;
-            }
-
+            void* p = alloc_pages_zone_unlocked(order, preferred);
+            if (!p) break;
             out[n] = p;
         }
     }
 
     if (n < cap) {
         SpinLockSafeGuard guard(zones_[fallback].lock);
-
         for (; n < cap; n++) {
-            void* p = alloc_pages_zone_unlocked(0u, fallback);
-            if (!p) {
-                break;
-            }
-
+            void* p = alloc_pages_zone_unlocked(order, fallback);
+            if (!p) break;
             out[n] = p;
         }
     }
@@ -479,32 +427,22 @@ uint32_t PmmState::alloc_pages_order0_batch(
     return n;
 }
 
-void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept {
-    if (kernel::unlikely(!pages
-        || n == 0u)) {
+void PmmState::free_pages_batch(uint32_t order, void* const* pages, uint32_t n) noexcept {
+    if (kernel::unlikely(!pages || n == 0u || order > PMM_MAX_ORDER)) {
         return;
     }
 
-    /*
-     * Partition by zone first.
-     * That gives two tight loops with one lock each, which is cheaper than
-     * switching locks per page.
-     */
-    void* dma_pages[pcp_drain_batch] = {};
-    void* normal_pages[pcp_drain_batch] = {};
+    void* dma_pages[256] = {};
+    void* normal_pages[256] = {};
 
     uint32_t dma_count = 0u;
     uint32_t normal_count = 0u;
 
     for (uint32_t i = 0u; i < n; i++) {
-        if (kernel::unlikely(!pages[i])) {
-            continue;
-        }
+        if (kernel::unlikely(!pages[i])) continue;
 
         page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pages[i])));
-        if (kernel::unlikely(!page)) {
-            continue;
-        }
+        if (kernel::unlikely(!page)) continue;
 
         const pmm_zone_t zone = zone_for_flags(page->flags);
         if (zone == PMM_ZONE_DMA) {
@@ -516,53 +454,43 @@ void PmmState::free_pages_order0_batch(void* const* pages, uint32_t n) noexcept 
 
     if (dma_count > 0u) {
         SpinLockSafeGuard guard(zones_[PMM_ZONE_DMA].lock);
-
         for (uint32_t i = 0u; i < dma_count; i++) {
-            free_pages_unlocked(dma_pages[i], 0u);
+            free_pages_unlocked(dma_pages[i], order);
         }
     }
 
     if (normal_count > 0u) {
         SpinLockSafeGuard guard(zones_[PMM_ZONE_NORMAL].lock);
-
         for (uint32_t i = 0u; i < normal_count; i++) {
-            free_pages_unlocked(normal_pages[i], 0u);
+            free_pages_unlocked(normal_pages[i], order);
         }
     }
 }
 
 void PmmState::free_pages(void* addr, uint32_t order) noexcept {
-    if (kernel::unlikely(!addr)) {
-        return;
-    }
-
-    if (kernel::unlikely(order > PMM_MAX_ORDER)) {
+    if (kernel::unlikely(!addr || order > PMM_MAX_ORDER)) {
         return;
     }
 
     page_t* page = phys_to_page(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(addr)));
-
     if (kernel::unlikely(!page)) {
         return;
     }
 
-    if (order == 0u) {
-        if (kernel::unlikely((page->flags & PMM_FLAG_KERNEL) != 0u)) {
-            return;
-        }
-
-        if (kernel::unlikely((page->flags & PMM_FLAG_USED) == 0u)) {
+    if (order <= k_pcp_max_order) {
+        if (kernel::unlikely((page->flags & PMM_FLAG_KERNEL) != 0u || (page->flags & PMM_FLAG_USED) == 0u)) {
             return;
         }
 
         const pmm_zone_t zone = zone_for_flags(page->flags);
 
-        pcp_free_to_cache(this, zone, addr);
-
+        pcp_free_to_cache(this, zone, order, addr);
+        
         return;
     }
 
     const pmm_zone_t zone = zone_for_flags(page->flags);
+
     SpinLockSafeGuard guard(zones_[zone].lock);
 
     free_pages_unlocked(addr, order);
