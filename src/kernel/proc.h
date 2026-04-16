@@ -61,6 +61,7 @@ typedef vma_region_t mmap_area_t;
 
 typedef struct proc_mem {
     uint32_t* page_dir;
+    
     uint32_t prog_break;
     uint32_t heap_start;
 
@@ -68,14 +69,20 @@ typedef struct proc_mem {
 
     rwspinlock_t mmap_lock;
     struct rb_root mmap_tree;
+    
     dlist_head_t mmap_regions;
+
     vma_region_t* mmap_cache;
+    
     uint32_t mmap_top;
     uint32_t free_area_cache;
+    
     uint32_t mem_pages;
 
     uint32_t leader_pid;
     uint32_t refcount;
+
+    volatile uint32_t active_cpus;
 } proc_mem_t;
 
 typedef enum {

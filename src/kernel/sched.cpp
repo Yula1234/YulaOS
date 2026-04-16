@@ -368,9 +368,13 @@ void sched_set_current(task_t* t) {
     tss_set_stack(cpu->index, kstack_top);
 
     proc_mem_t* next_mem = t->mem;
+    
+    uint32_t cpu_bit = 1u << cpu->index;
 
     if (next_mem == nullptr) {
-        if (cpu->active_mem == nullptr) {
+        if (cpu->active_mem != nullptr) {
+            __atomic_fetch_and(&cpu->active_mem->active_cpus, ~cpu_bit, __ATOMIC_RELEASE);
+        } else {
             if (paging_get_dir() != kernel_page_directory) {
                 paging_switch(kernel_page_directory);
             }
@@ -380,12 +384,24 @@ void sched_set_current(task_t* t) {
             proc_mem_retain(next_mem);
             
             if (cpu->active_mem) {
+                __atomic_fetch_and(&cpu->active_mem->active_cpus, ~cpu_bit, __ATOMIC_RELEASE);
+
                 proc_mem_release(cpu->active_mem);
             }
             
             cpu->active_mem = next_mem;
 
+            __atomic_fetch_or(&next_mem->active_cpus, cpu_bit, __ATOMIC_RELEASE);
+
             if (paging_get_dir() != next_mem->page_dir) {
+                paging_switch(next_mem->page_dir);
+            }
+        } else {
+            uint32_t active = __atomic_load_n(&next_mem->active_cpus, __ATOMIC_ACQUIRE);
+
+            if ((active & cpu_bit) == 0u) {
+                __atomic_fetch_or(&next_mem->active_cpus, cpu_bit, __ATOMIC_RELEASE);
+
                 paging_switch(next_mem->page_dir);
             }
         }

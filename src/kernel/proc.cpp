@@ -1383,6 +1383,8 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
     mem->refcount = 1;
     mem->mmap_top = proc::detail::default_mmap_top;
 
+    mem->active_cpus = 0;
+
     vma_init(mem);
 
     mem->page_dir = paging_clone_directory();

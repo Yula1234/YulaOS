@@ -209,21 +209,18 @@ static inline uint32_t smp_tlb_cpu_mask_for_page_dir(uint32_t* page_dir) {
     for (int i = 0; i < cpu_count; i++) {
         cpu_t* c = &cpus[i];
 
-        if (!c->started) {
+        if (!c->started || c->id < 0 || c->id == me_id) {
             continue;
         }
 
-        if (c->id < 0) {
+        proc_mem_t* active_mem = (proc_mem_t*)c->active_mem;
+
+        if (!active_mem || active_mem->page_dir != page_dir) {
             continue;
         }
 
-        if (c->id == me_id) {
-            continue;
-        }
-
-        uint32_t* dir = c->active_mem ? c->active_mem->page_dir : 0;
-
-        if (dir != page_dir) {
+        uint32_t active = __atomic_load_n(&active_mem->active_cpus, __ATOMIC_ACQUIRE);
+        if ((active & (1u << c->index)) == 0u) {
             continue;
         }
 
