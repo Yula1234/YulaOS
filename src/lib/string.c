@@ -291,32 +291,13 @@ int memcmp(const void* a, const void* b, size_t n) {
 }
 
 void memzero_nt_page(void* dst) {
-    uint32_t* p = (uint32_t*)dst;
-    const uint32_t zero = 0;
-
-    for (int i = 0; i < 1024; i += 16) {
-        __asm__ volatile (
-            "movnti %1, 0(%0)\n"
-            "movnti %1, 4(%0)\n"
-            "movnti %1, 8(%0)\n"
-            "movnti %1, 12(%0)\n"
-            "movnti %1, 16(%0)\n"
-            "movnti %1, 20(%0)\n"
-            "movnti %1, 24(%0)\n"
-            "movnti %1, 28(%0)\n"
-            "movnti %1, 32(%0)\n"
-            "movnti %1, 36(%0)\n"
-            "movnti %1, 40(%0)\n"
-            "movnti %1, 44(%0)\n"
-            "movnti %1, 48(%0)\n"
-            "movnti %1, 52(%0)\n"
-            "movnti %1, 56(%0)\n"
-            "movnti %1, 60(%0)\n"
-            :
-            : "r" (p + i), "r" (zero)
-            : "memory"
-        );
-    }
+    uint32_t d0, d1;
     
-    __asm__ volatile ("sfence" ::: "memory");
+    __asm__ volatile (
+        "cld\n\t"
+        "rep stosl\n\t"
+        : "=&c"(d0), "=&D"(d1)
+        : "a"(0), "0"(1024), "1"(dst)
+        : "memory", "cc"
+    );
 }
