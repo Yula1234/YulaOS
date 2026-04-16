@@ -97,6 +97,7 @@ static inline void kernel_enable_sse(void) {
     cr4 |= (1u << 9);
     cr4 |= (1u << 10);
     cr4 |= (1u << 4); /* PSE (Page Size Extension) */
+    cr4 |= (1u << 7); /* PGE (Page Global Enable) */
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 }
 

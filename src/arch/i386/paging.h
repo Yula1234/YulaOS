@@ -37,6 +37,8 @@ extern "C" {
 #define PTE_PWT     0x008u
 #define PTE_PCD     0x010u
 #define PTE_PAT     0x080u
+#define PTE_SUPER   0x080u
+#define PTE_GLOBAL  0x100u
 
 /* paging_map_ex() flags. */
 #define PAGING_MAP_NO_TLB_FLUSH 0x00000001u

@@ -64,6 +64,8 @@ typedef struct {
 
     spinlock_t lock __cacheline_aligned;
 
+    uint32_t* active_page_dir;
+
     volatile uint32_t runq_count;
     volatile uint32_t load_percent;
     

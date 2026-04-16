@@ -900,34 +900,11 @@ void paging_init(uint32_t ram_size_bytes) {
         page_dir[i] = 2; 
     }
 
-    for(uint32_t i = 0; i < ram_size_bytes; i += 4096) { 
+    uint32_t aligned_ram = (ram_size_bytes + 0x3FFFFFu) & ~0x3FFFFFu;
+    for(uint32_t i = 0; i < aligned_ram; i += 0x400000u) { 
         uint32_t pd_idx = i >> 22;
-        uint32_t pt_idx = (i >> 12) & 0x3FF;
-
-        if (!(page_dir[pd_idx] & 1)) {
-            void* pt_phys = pmm_alloc_block();
-            if (!pt_phys) {
-                paging_halt("pmm_alloc_block failed in paging_init");
-            }
-            paging_zero_phys_page((uint32_t)pt_phys);
-
-            /*
-             * PDE flags here mirror the basic kernel mapping policy:
-             * present + RW, supervisor-only.
-             */
-            page_dir[pd_idx] = ((uint32_t)pt_phys) | 3; /* Supervisor | RW | Present */
-        }
         
-        /*
-         * Populate identity mapping at 4KiB granularity.
-         *
-         * This intentionally does not use 4MiB pages (PSE) to keep the
-         * implementation uniform with later fine-grained mappings.
-         */
-        uint32_t* pt = (uint32_t*)(page_dir[pd_idx] & ~0xFFF);
-        pt[pt_idx] = i | 3; /* Supervisor | RW | Present */
-        
-        if (i + 4096 < i) break;
+        page_dir[pd_idx] = i | PTE_PRESENT | PTE_RW | PTE_SUPER | PTE_GLOBAL;
     }
 
     /* Local APIC MMIO is accessed via a fixed physical address on x86. */

@@ -50,6 +50,10 @@ start_32:
     ; CR3
     mov eax, [ebx + 12] 
     mov cr3, eax
+
+    mov eax, cr4
+    or eax, 0x00000090  ; 0x10 (PSE) | 0x80 (PGE)
+    mov cr4, eax
     
     mov eax, cr0
     or eax, 0x80000000

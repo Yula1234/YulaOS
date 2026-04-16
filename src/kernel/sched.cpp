@@ -358,20 +358,20 @@ extern "C" void sched_on_task_entry(void) {
 
 void sched_set_current(task_t* t) {
     cpu_t* cpu = cpu_current();
-
     rcu_qs_count_inc();
 
     uint32_t kstack_top = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t->kstack)) + t->kstack_size;
     kstack_top &= ~0xF; 
-    
     tss_set_stack(cpu->index, kstack_top);
 
     uint32_t* target_dir = (t->mem && t->mem->page_dir) ? t->mem->page_dir : kernel_page_directory;
+    
     if (paging_get_dir() != target_dir) {
         paging_switch(target_dir);
     }
-}
 
+    cpu->active_page_dir = target_dir; 
+}
 void sched_start(task_t* first) {
     sched_set_current(first);
     (void)proc_change_state(first, TASK_RUNNING);
