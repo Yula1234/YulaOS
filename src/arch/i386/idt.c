@@ -278,9 +278,8 @@ static int ensure_user_stack_writable(task_t* curr, uint32_t addr) {
     void* new_page = pmm_alloc_block();
     if (!new_page) return 0;
 
-    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+    paging_map_ex(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7, PAGING_MAP_NO_TLB_FLUSH);
     curr->mem->mem_pages++;
-    __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
     return 1;
 }
 
@@ -413,7 +412,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 
         uint32_t pte_flags = 7u | 0x200u;
 
-        paging_map(curr->mem->page_dir, vaddr, phys, pte_flags);
+        paging_map_ex(curr->mem->page_dir, vaddr, phys, pte_flags, PAGING_MAP_NO_TLB_FLUSH);
 
         vfs_node_release(info.file);
         return 1;
@@ -485,7 +484,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         vfs_node_release(info.file);
     }
 
-    paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+    paging_map_ex(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7, PAGING_MAP_NO_TLB_FLUSH);
 
     curr->mem->mem_pages++;
 
@@ -717,9 +716,8 @@ void isr_handler(registers_t* regs) {
                     void* new_page = pmm_alloc_block();
                     if (new_page) {
                         uint32_t vaddr = cr2 & ~0xFFF;
-                        paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                        paging_map_ex(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7, PAGING_MAP_NO_TLB_FLUSH);
                         curr->mem->mem_pages++;
-                        __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
                         handled = 1;
                     } else {
                         curr->pending_signals |= (1u << SIGSEGV);
@@ -760,11 +758,9 @@ void isr_handler(registers_t* regs) {
                         if (new_page) {
                             uint32_t vaddr = cr2 & ~0xFFF;
                         
-                            paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                            paging_map_ex(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7, PAGING_MAP_NO_TLB_FLUSH);
                         
                             curr->mem->mem_pages++;
-                        
-                            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
                         
                             handled = 1;
                         } else {

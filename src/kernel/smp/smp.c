@@ -70,25 +70,23 @@ void smp_panic_stop_other_cpus(void) {
 }
 
 static inline void tlb_flush_range_local(uint32_t start, uint32_t end) {
-    if (end <= start) {
-        return;
-    }
+    if (end <= start) return;
 
     start &= ~0xFFFu;
     end = (end + 0xFFFu) & ~0xFFFu;
 
     const uint32_t pages = (end - start) >> 12;
-    if (pages > 128u) {
-        uint32_t cr3;
+    if (pages > 64u) {
+        if (start >= 0xC0000000u) {
+            uint32_t cr4;
+            __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
 
-        __asm__ volatile(
-            "mov %%cr3, %0\n\t"
-            "mov %0, %%cr3"
-            : "=r"(cr3)
-            :
-            : "memory"
-        );
-
+            __asm__ volatile("mov %0, %%cr4" :: "r"(cr4 & ~0x80u)); /* Clear PGE */
+            __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));          /* Set PGE */
+        } else {
+            uint32_t cr3;
+            __asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
+        }
         return;
     }
 
