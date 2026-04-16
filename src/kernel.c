@@ -39,6 +39,11 @@
 #include <hal/pic.h>
 #include <hal/io.h>
 
+#include <mm/shrinker.h>
+#include <mm/heap.h>
+#include <mm/pmm.h>
+#include <mm/vmm.h>
+
 #include <fs/yulafs.h>
 #include <fs/bcache.h>
 #include <fs/vfs.h>
@@ -46,10 +51,6 @@
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
 #include <arch/i386/idt.h>
-
-#include <mm/heap.h>
-#include <mm/pmm.h>
-#include <mm/vmm.h>
 
 #include <lib/cpp/ctors.h>
 #include <lib/string.h>
@@ -369,6 +370,8 @@ static void kmain_spawn_service_tasks(void) {
 
     ahci_set_async_mode(1);
     proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
+
+    shrinker_init();
 
 #ifdef KERNEL_PROFILE
     proc_spawn_kthread("profiler", PRIO_LOW, profiler_task, 0);
