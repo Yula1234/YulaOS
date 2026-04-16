@@ -199,7 +199,9 @@ typedef struct task {
     uint8_t term_mode;
 
     /* cacheline 7+ */
-    uint32_t sid __cacheline_aligned;
+    uint32_t start_tick __cacheline_aligned;
+
+    uint32_t sid;
     
     uint32_t pgid;
     dlist_head_t pgrp_node;
@@ -292,8 +294,11 @@ void proc_wake(task_t* t);
 
 int proc_change_state(task_t* t, task_state_t new_state);
 
+void proc_invoke_oom_killer(void);
+
 ___inline task_t* proc_current() { 
     cpu_t* cpu = cpu_current();
+    
     return cpu->current_task; 
 }
 

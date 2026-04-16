@@ -76,21 +76,26 @@ static void mshrinker_task_func(void* arg) {
         proc_usleep(1000000);
 
         uint32_t total = pmm_get_total_blocks();
+        
         uint32_t free = pmm_get_free_blocks();
 
-        if (total == 0) {
-            continue;
-        }
+        if (total == 0) continue;
 
         if (free < (total / 10u)) {
             uint32_t target_free = (total * 15u) / 100u;
             uint32_t pages_to_free = target_free - free;
             
-            kprintf("[mshrinker] Free: %u, Target: %u. Waking up shrinkers.\n", free, target_free);
-            
             run_shrinkers(pages_to_free);
 
-            kprintf("[mshrinker] Done.\n");
+            uint32_t free_after = pmm_get_free_blocks();
+            
+            uint32_t oom_watermark = (total * 3u) / 100u;
+            
+            if (free_after < oom_watermark) {
+                proc_invoke_oom_killer();
+                
+                sched_yield(); 
+            }
         }
     }
 }

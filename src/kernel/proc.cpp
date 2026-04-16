@@ -1558,6 +1558,9 @@ static task_t* alloc_task(void) {
         proc::detail::total_tasks.fetch_add(1u, kernel::memory_order::relaxed);
     }
 
+    extern volatile uint32_t timer_ticks;
+    t->start_tick = timer_ticks;
+
     return t_guard.release();
 }
 
@@ -2803,4 +2806,65 @@ int proc_change_state(task_t* t, task_state_t new_state) {
 
     spinlock_release_safe(&t->state_lock, flags);
     return ok ? 0 : -1;
+}
+
+void proc_invoke_oom_killer(void) {
+    task_t* victim = nullptr;
+
+    uint32_t highest_score = 0;
+
+    {
+        kernel::RcuReadGuard rcu_guard;
+
+        dlist_head_t* it = proc::detail::all_tasks_next_rcu(&proc::detail::all_tasks_head);
+        while (it && it != &proc::detail::all_tasks_head) {
+            task_t* t = container_of(it, task_t, all_tasks_node);
+            it = proc::detail::all_tasks_next_rcu(it);
+
+            if (t->state == TASK_UNUSED || t->state == TASK_ZOMBIE || t->pid <= 1 || !t->mem) {
+                continue;
+            }
+
+            if (t->priority == PRIO_SUPER || t->priority == PRIO_IDLE) {
+                continue;
+            }
+
+            uint32_t score = t->mem->mem_pages;
+
+            if (t->priority >= PRIO_HIGH) {
+                score -= score / 4;
+            }
+
+            uint32_t uptime_ticks = timer_ticks - t->start_tick;
+            uint32_t uptime_sec = uptime_ticks / KERNEL_TIMER_HZ;
+
+            if (uptime_sec < 60) {
+                score += score / 2;
+            } else if (uptime_sec > 3600) {
+                score -= score / 4;
+            }
+
+            if (score > highest_score) {
+                if (proc_task_retain(t)) {
+                    if (victim) {
+                        proc_task_put(victim);
+                    }
+                    victim = t;
+                    highest_score = score;
+                }
+            }
+        }
+    }
+
+    if (victim) {
+        kprintf(
+            "[OOM] Killed process %u (%s). Score: %u, Freed pages: %u\n", 
+            victim->pid, victim->name, highest_score, victim->mem->mem_pages
+        );
+        
+        proc_kill(victim);
+        proc_task_put(victim);
+    } else {
+        panic("Out Of Memory\n");
+    }
 }
