@@ -142,6 +142,8 @@ static void kmain_cpu_init(uint32_t magic, multiboot_info_t* mb_info) {
 
     kernel_init_simd();
 
+    cpu_enable_sysenter();
+
     lapic_init();
     lapic_timer_init(KERNEL_TIMER_HZ);
 }

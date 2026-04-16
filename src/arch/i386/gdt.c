@@ -126,11 +126,17 @@ void gdt_init() {
     __asm__ volatile("ltr %%ax" : : "a" (0x28));
 }
 
+extern int g_sysenter_supported;
+
 /* Update esp0 for a given CPU's TSS. */
 void tss_set_stack(int cpu_id, uint32_t kernel_esp) {
     /* esp0 is used by CPU on CPL3->CPL0 transition (interrupt/syscall). */
     if (cpu_id >= 0 && cpu_id < MAX_CPUS) {
         tss_entries[cpu_id].esp0 = kernel_esp;
+    }
+
+    if (g_sysenter_supported) {
+        __asm__ volatile("wrmsr" : : "c"(0x175), "a"(kernel_esp), "d"(0));
     }
 }
 

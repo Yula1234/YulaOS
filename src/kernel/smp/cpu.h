@@ -23,6 +23,9 @@ struct rcu_head;
 struct task;
 struct proc_mem;
 
+extern int g_sysenter_supported;
+void cpu_enable_sysenter(void);
+
 typedef struct {
     /* cacheline 1 */
     

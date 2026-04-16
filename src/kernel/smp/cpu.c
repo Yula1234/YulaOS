@@ -47,9 +47,26 @@ void cpu_init_system(void) {
     }
 }
 
+int g_sysenter_supported = 0;
+extern void sysenter_entry(void);
+
+void cpu_enable_sysenter(void) {
+    uint32_t a, b, c, d;
+
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
+
+    if (d & (1u << 11)) {
+        g_sysenter_supported = 1;
+
+        __asm__ volatile("wrmsr" : : "c"(0x174), "a"(0x08), "d"(0));
+        __asm__ volatile("wrmsr" : : "c"(0x176), "a"((uint32_t)sysenter_entry), "d"(0));
+    }
+}
+
 void cpu_setup_gs(int cpu_index) {
     if (cpu_index >= 0 && cpu_index < MAX_CPUS) {
         uint16_t selector = ((GDT_CPU_DATA_BASE + cpu_index) << 3) | 3;
+        
         __asm__ volatile("mov %0, %%gs" : : "r"(selector));
     }
 }

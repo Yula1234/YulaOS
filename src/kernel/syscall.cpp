@@ -2061,18 +2061,40 @@ static const syscall_fn_t syscall_table[] = {
 
 extern "C" void syscall_handler(registers_t* regs) {
     __asm__ volatile("sti");
+
     uint32_t sys_num = regs->eax;
+    
     if (sys_num >= (uint32_t)(sizeof(syscall_table) / sizeof(syscall_table[0]))) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
     syscall_fn_t fn = syscall_table[sys_num];
+    
     if (!fn) {
         regs->eax = (uint32_t)-1;
         return;
     }
 
     task_t* curr = proc_current();
+    
+    uint32_t orig_ecx = regs->ecx;
+    uint32_t orig_edx = regs->edx;
+    uint32_t orig_esi = regs->esi;
+    
+    const bool is_sysenter = (regs->err_code == 0x1337);
+    
+    if (is_sysenter) {
+        regs->ecx = regs->edi;
+        regs->edx = regs->esi;
+        regs->esi = regs->ebp;
+    }
+
     fn(regs, curr);
+    
+    if (is_sysenter && sys_num != 16) {
+        regs->ecx = orig_ecx;
+        regs->edx = orig_edx;
+        regs->esi = orig_esi;
+    }
 }

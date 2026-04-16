@@ -116,6 +116,8 @@ void smp_ap_main(cpu_t* cpu_arg) {
         uint32_t fb_size = fb_pitch * fb_height;
         paging_init_mtrr_wc(fb_base, fb_size);
     }
+
+    cpu_enable_sysenter();
     
     lapic_init();
     lapic_timer_init(KERNEL_TIMER_HZ);

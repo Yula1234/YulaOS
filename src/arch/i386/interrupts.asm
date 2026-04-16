@@ -7,6 +7,7 @@ section '.text' executable
 public isr_stub_table
 public load_page_directory
 public enable_paging
+public sysenter_entry
 extrn isr_handler
 extrn double_fault_report
 
@@ -104,6 +105,57 @@ isr_df_entry:
 df_halt:
     hlt
     jmp df_halt
+
+align 4
+sysenter_entry:
+    push 0x23
+    push ecx
+    pushfd
+    or dword [esp], 0x200
+    push 0x1B
+    push edx
+    push 0x1337
+    push 0x80
+    
+    pusha
+    
+    push ds
+    push es
+    push fs
+    push gs
+    
+    mov ax, 0x10 
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    
+    mov eax, esp
+    push eax
+    cld                   
+    call isr_handler
+    pop eax
+    
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    
+    popa                  
+    
+    cmp dword [esp + 4], 0x1337
+    jne .use_iret
+    
+    add esp, 8
+    pop edx
+    add esp, 4
+    popfd
+    pop ecx
+    add esp, 4
+    sysexit
+    
+.use_iret:
+    add esp, 8
+    iret
 
 isr_common:
     pusha
