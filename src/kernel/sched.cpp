@@ -1,21 +1,25 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
+#include <hal/lock.h>
+#include <hal/apic.h>
+#include <hal/simd.h>
+#include <hal/io.h>
+
 #include <arch/i386/context.h>
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
-#include <hal/lock.h>
-#include <hal/io.h>
-#include <hal/simd.h>
-#include <lib/compiler.h>
-#include <lib/rbtree.h>
-#include <kernel/panic.h>
 
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/atomic.h>
 
-#include "sched.h"
 #include <kernel/smp/cpu.h>
+#include <kernel/panic.h>
+
+#include <lib/compiler.h>
+#include <lib/rbtree.h>
+
+#include "sched.h"
 
 extern volatile uint32_t timer_ticks;
 

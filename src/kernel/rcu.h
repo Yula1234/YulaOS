@@ -60,7 +60,7 @@ ___inline uint32_t rcu_qs_count_read(int cpu_idx) {
 ___inline void rcu_qs_count_inc(void) {
     cpu_t* cpu = cpu_current();
 
-    __atomic_fetch_add(&cpu->rcu_qs_count, 1, __ATOMIC_RELAXED);
+    __asm__ volatile("addl $1, %0" : "+m" (cpu->rcu_qs_count) :: "memory"); /* x86 have strong memory model, no lock prefix */
 }
 
 

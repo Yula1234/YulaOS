@@ -545,6 +545,12 @@ void isr_handler(registers_t* regs) {
         goto out;
     }
 
+    if (regs->int_no == IPI_RESCHED_VECTOR) {
+        lapic_eoi();
+
+        goto out;
+    }
+
     if (regs->int_no == IPI_RCU_VECTOR) {
         lapic_eoi();
 

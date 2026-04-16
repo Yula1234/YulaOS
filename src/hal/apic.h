@@ -32,6 +32,7 @@
 #define IPI_PANIC_VECTOR     0xF1
 #define IPI_RCU_VECTOR       0xF2
 #define IPI_PMM_DRAIN_VECTOR 0xF3
+#define IPI_RESCHED_VECTOR   0xF4
 
 #define KERNEL_TIMER_HZ     1000
 
