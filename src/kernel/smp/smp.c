@@ -219,9 +219,7 @@ static inline uint32_t smp_tlb_cpu_mask_for_page_dir(uint32_t* page_dir) {
             continue;
         }
 
-        task_t* t = c->current_task;
-        proc_mem_t* mem = t ? t->mem : 0;
-        uint32_t* dir = mem ? mem->page_dir : 0;
+        uint32_t* dir = c->active_mem ? c->active_mem->page_dir : 0;
 
         if (dir != page_dir) {
             continue;

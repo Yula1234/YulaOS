@@ -21,6 +21,7 @@ extern "C" {
 
 struct rcu_head;
 struct task;
+struct proc_mem;
 
 typedef struct {
     /* cacheline 1 */
@@ -64,7 +65,7 @@ typedef struct {
 
     spinlock_t lock __cacheline_aligned;
 
-    uint32_t* active_page_dir;
+    struct proc_mem* active_mem;
 
     volatile uint32_t runq_count;
     volatile uint32_t load_percent;

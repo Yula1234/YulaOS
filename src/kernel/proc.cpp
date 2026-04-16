@@ -1395,7 +1395,7 @@ static proc_mem_t* proc_mem_create(uint32_t leader_pid) {
     return mem_guard.release();
 }
 
-static void proc_mem_retain(proc_mem_t* mem) {
+extern "C" void proc_mem_retain(proc_mem_t* mem) {
     if (!mem) {
         return;
     }
@@ -1403,7 +1403,7 @@ static void proc_mem_retain(proc_mem_t* mem) {
     __atomic_fetch_add(&mem->refcount, 1, __ATOMIC_RELAXED);
 }
 
-static void proc_mem_release(proc_mem_t* mem) {
+extern "C" void proc_mem_release(proc_mem_t* mem) {
     if (!mem) {
         return;
     }

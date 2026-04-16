@@ -296,6 +296,9 @@ int proc_change_state(task_t* t, task_state_t new_state);
 
 void proc_invoke_oom_killer(void);
 
+void proc_mem_retain(proc_mem_t* mem);
+void proc_mem_release(proc_mem_t* mem);
+
 ___inline task_t* proc_current() { 
     cpu_t* cpu = cpu_current();
     
