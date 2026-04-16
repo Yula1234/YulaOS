@@ -371,7 +371,7 @@ static void kmain_spawn_service_tasks(void) {
     ahci_set_async_mode(1);
     proc_spawn_kthread("syncer", PRIO_LOW, syncer_task, 0);
 
-    shrinker_init();
+    shrinker_start_kthread();
 
 #ifdef KERNEL_PROFILE
     proc_spawn_kthread("profiler", PRIO_LOW, profiler_task, 0);
@@ -388,6 +388,8 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     
     kmain_platform_init();
     kmain_tasks_init();
+
+    shrinker_init();
 
     kmain_devices_init();
     kmain_fs_init();

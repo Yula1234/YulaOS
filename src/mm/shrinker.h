@@ -24,6 +24,7 @@ typedef struct shrinker {
 } shrinker_t;
 
 void shrinker_init(void);
+void shrinker_start_kthread(void);
 
 void register_shrinker(shrinker_t* s);
 void unregister_shrinker(shrinker_t* s);

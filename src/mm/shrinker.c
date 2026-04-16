@@ -97,8 +97,10 @@ static void mshrinker_task_func(void* arg) {
 
 void shrinker_init(void) {
     mutex_init(&g_shrinker_mutex);
-
+    
     dlist_init(&g_shrinker_list);
+}
 
+void shrinker_start_kthread(void) {
     proc_spawn_kthread("mshrinker", PRIO_LOW, mshrinker_task_func, 0);
 }
