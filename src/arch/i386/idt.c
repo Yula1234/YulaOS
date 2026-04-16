@@ -463,6 +463,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 }
 
 extern void proc_check_sleepers(uint32_t current_tick);
+extern void pmm_drain_local_pcp_caches(void);
 
 __attribute__((no_instrument_function))
 void isr_handler(registers_t* regs) {
@@ -502,6 +503,14 @@ void isr_handler(registers_t* regs) {
 
     if (regs->int_no == IPI_TLB_VECTOR) {
         smp_tlb_ipi_handler();
+        lapic_eoi();
+
+        goto out;
+    }
+
+    if (regs->int_no == IPI_PMM_DRAIN_VECTOR) {
+        pmm_drain_local_pcp_caches();
+        
         lapic_eoi();
 
         goto out;

@@ -390,6 +390,7 @@ __attribute__((target("no-sse"))) void kmain(uint32_t magic, multiboot_info_t* m
     kmain_tasks_init();
 
     shrinker_init();
+    pmm_register_shrinker();
 
     kmain_devices_init();
     kmain_fs_init();

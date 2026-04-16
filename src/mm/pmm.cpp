@@ -1,21 +1,27 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <lib/cpp/new.h>
-
-#include <lib/string.h>
-#include <lib/compiler.h>
-
 #include <lib/cpp/lock_guard.h>
-
-#include "pmm.h"
+#include <lib/cpp/new.h>
 
 #include <kernel/smp/cpu.h>
 #include <kernel/rcu.h>
 
+#include <lib/compiler.h>
+#include <lib/string.h>
+
+#include <mm/shrinker.h>
+
+#include <hal/apic.h>
+#include <hal/cpu.h>
+
+#include "pmm.h"
+
 namespace kernel {
 
 namespace {
+
+static kernel::atomic<uint32_t> g_pmm_drain_ack_mask{0};
 
 static constexpr uint32_t k_pcp_max_order = 3u;
 
@@ -886,10 +892,81 @@ extern "C" {
  * Do policy in C++ and treat these as the ABI boundary only.
  */
 
+void pmm_drain_local_pcp_caches(void) {
+    kernel::PmmState* pmm = kernel::pmm_state();
+    
+    if (!pmm) {
+        return;
+    }
+
+    int cpu = hal_cpu_index();
+
+    if (cpu < 0 || cpu >= MAX_CPUS) {
+        return;
+    }
+
+    for (uint32_t zone = 0; zone < PMM_ZONE_COUNT; zone++) {
+        auto& cache = kernel::pcp_caches[cpu][zone];
+
+        for (uint32_t order = 0; order <= kernel::k_pcp_max_order; order++) {
+            auto& list = cache.lists[order];
+
+            if (list.count > 0) {
+                pmm->free_pages_batch(order, list.phys_pages, list.count);
+
+                list.count = 0;
+            }
+        }
+    }
+
+    kernel::g_pmm_drain_ack_mask.fetch_and(~(1u << cpu), kernel::memory_order::release);
+}
+
+static size_t pcp_shrinker_cb(size_t target_pages, void* ctx) {
+    (void)ctx;
+    
+    cpu_t* me = cpu_current();
+    uint32_t mask = 0;
+
+    for (int i = 0; i < cpu_count; i++) {
+        if (cpus[i].started && cpus[i].id >= 0 && cpus[i].id != me->id) {
+            mask |= (1u << cpus[i].index);
+        }
+    }
+
+    kernel::g_pmm_drain_ack_mask.store(mask, kernel::memory_order::release);
+
+    for (int i = 0; i < cpu_count; i++) {
+        if (mask & (1u << cpus[i].index)) {
+            lapic_write(LAPIC_ICRHI, (uint32_t)cpus[i].id << 24);
+            lapic_write(LAPIC_ICRLO, (uint32_t)IPI_PMM_DRAIN_VECTOR | 0x00004000u);
+        }
+    }
+
+    pmm_drain_local_pcp_caches();
+
+    while (kernel::g_pmm_drain_ack_mask.load(kernel::memory_order::acquire) != 0) {
+        kernel::cpu_relax();
+    }
+
+    return target_pages; 
+}
+
+static shrinker_t g_pcp_shrinker = {
+    .name = "pcp_caches",
+    .reclaim = pcp_shrinker_cb,
+    .ctx = nullptr,
+    .list = {nullptr, nullptr}
+};
+
 void pmm_init(uint32_t mem_size, uint32_t kernel_end_addr) {
     kernel::PmmState& pmm = kernel::pmm_state_init_once();
 
     pmm.init(mem_size, kernel_end_addr);
+}
+
+void pmm_register_shrinker(void) {
+    register_shrinker(&g_pcp_shrinker);
 }
 
 void pmm_init_regions(
