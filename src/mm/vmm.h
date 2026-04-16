@@ -112,6 +112,8 @@ private:
     atomic<size_t> used_pages_count_{0u};
 
     PerCpuVmmCache pcp_caches_[MAX_CPUS]{};
+
+    size_t arena_refill_pages_{512};
 };
 
 [[nodiscard]] VmmState* vmm_state() noexcept;

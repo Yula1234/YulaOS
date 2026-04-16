@@ -370,6 +370,20 @@ void VmmState::init() noexcept {
     initial->size = static_cast<size_t>(KERNEL_HEAP_SIZE);
 
     tree_insert(*initial, &free_tree_);
+
+    size_t total_vmm_pages = KERNEL_HEAP_SIZE / PAGE_SIZE; 
+    
+    size_t max_total_arena_pages = total_vmm_pages / 16; 
+
+    size_t per_cpu_refill = max_total_arena_pages / MAX_CPUS;
+
+    if (per_cpu_refill < 256) {
+        per_cpu_refill = 256; 
+    } else if (per_cpu_refill > 4096) {
+        per_cpu_refill = 4096;
+    }
+
+    arena_refill_pages_ = per_cpu_refill;
 }
 
 void* VmmState::alloc_pages(size_t count) noexcept {
@@ -397,8 +411,11 @@ void* VmmState::alloc_pages(size_t count) noexcept {
     }
 
     if (kernel::unlikely(virt_base == 0u)) {
-        static constexpr size_t k_arena_refill_pages = 512u; 
-        size_t carve_pages = (count < k_arena_refill_pages) ? k_arena_refill_pages : count;
+        size_t carve_pages = (count < arena_refill_pages_) ? arena_refill_pages_ : count;
+
+        if (count > arena_refill_pages_ / 2) {
+            carve_pages = count + arena_refill_pages_; 
+        }
 
         uintptr_t old_arena_base = 0u;
         size_t old_arena_pages = 0u;
