@@ -873,8 +873,6 @@ out:
         rcu_qs_count_inc();
 
         if (curr && curr->tls_base) {
-            gdt_set_user_tls(cpu->index, (uint32_t)curr->tls_base);
-            
             regs->fs = ((GDT_USER_TLS_BASE + cpu->index) << 3) | 3;
         }
     }

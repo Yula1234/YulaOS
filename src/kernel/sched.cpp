@@ -371,6 +371,10 @@ void sched_set_current(task_t* t) {
     
     tss_set_stack(cpu->index, kstack_top);
 
+    if (t->tls_base) {
+        gdt_set_user_tls(cpu->index, reinterpret_cast<uint32_t>(t->tls_base));
+    }
+
     proc_mem_t* next_mem = t->mem;
     
     uint32_t cpu_bit = 1u << cpu->index;
