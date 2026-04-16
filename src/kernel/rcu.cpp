@@ -205,16 +205,6 @@ extern "C" void synchronize_rcu(void) {
     }
 }
 
-extern "C" uint32_t rcu_qs_count_read(int cpu_idx) {
-    return __atomic_load_n(&cpus[cpu_idx].rcu_qs_count, __ATOMIC_RELAXED);
-}
-
-extern "C" void rcu_qs_count_inc(void) {
-    cpu_t* cpu = cpu_current();
-
-    __atomic_fetch_add(&cpu->rcu_qs_count, 1, __ATOMIC_RELAXED);
-}
-
 extern "C" void rcu_init_workers(void) {
     for (int i = 0; i < cpu_count; i++) {
         g_rcu_state[i].wq = create_workqueue("rcu");

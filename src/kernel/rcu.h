@@ -3,8 +3,8 @@
 
 #pragma once
 
-
 #include <kernel/smp/cpu_limits.h>
+#include <kernel/smp/cpu.h>
 #include <kernel/smp/mb.h>
 
 #include <lib/compiler.h>
@@ -33,10 +33,6 @@ void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*));
 
 void rcu_process_local(void);
 
-void rcu_qs_count_inc(void);
-
-uint32_t rcu_qs_count_read(int cpu_idx);
-
 ___inline void rcu_ptr_init(rcu_ptr_t* r) {
     __atomic_store_n(&r->ptr, NULL, __ATOMIC_RELAXED);
 }
@@ -57,23 +53,21 @@ ___inline void rcu_read_unlock(void) {
     compiler_mb();
 }
 
+___inline uint32_t rcu_qs_count_read(int cpu_idx) {
+    return __atomic_load_n(&cpus[cpu_idx].rcu_qs_count, __ATOMIC_RELAXED);
+}
+
+___inline void rcu_qs_count_inc(void) {
+    cpu_t* cpu = cpu_current();
+
+    __atomic_fetch_add(&cpu->rcu_qs_count, 1, __ATOMIC_RELAXED);
+}
+
 
 #ifdef __cplusplus
 }
 
 namespace kernel {
-
-__inline__ void rcu_read_lock() {
-    ::rcu_read_lock();
-}
-
-__inline__ void rcu_read_unlock() {
-    ::rcu_read_unlock();
-}
-
-__inline__ void synchronize_rcu() {
-    ::synchronize_rcu();
-}
 
 class RcuReadGuard {
 public:
