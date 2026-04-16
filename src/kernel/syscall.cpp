@@ -279,7 +279,7 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
             proc_mem_t* mem = nullptr;
         } ctx{curr->mem};
 
-        auto visitor = [](uint32_t /*virt*/, uint32_t pte, void* vctx) -> int {
+        auto visitor =[](uint32_t /*virt*/, uint32_t pte, void* vctx) -> int {
             if ((pte & 4u) == 0u) {
                 return 0;
             }
@@ -289,14 +289,24 @@ static void syscall_sbrk(registers_t* regs, task_t* curr) {
                 return 0;
             }
 
-            uint32_t phys = pte & ~0xFFFu;
+            bool is_4m = (pte & (1u << 7)) != 0u;
+            uint32_t phys = is_4m ? (pte & ~0x3FFFFFu) : (pte & ~0xFFFu);
 
             if (ctxp->mem->mem_pages > 0u) {
-                ctxp->mem->mem_pages--;
+                uint32_t pages = is_4m ? 1024 : 1;
+                if (ctxp->mem->mem_pages >= pages) {
+                    ctxp->mem->mem_pages -= pages;
+                } else {
+                    ctxp->mem->mem_pages = 0;
+                }
             }
 
             if (phys != 0u && (pte & 0x200u) == 0u) {
-                pmm_free_block_deferred((void*)phys);
+                if (is_4m) {
+                    pmm_free_pages((void*)phys, 10);
+                } else {
+                    pmm_free_block_deferred((void*)phys);
+                }
             }
 
             return 1;

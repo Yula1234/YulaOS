@@ -324,12 +324,21 @@ void paging_unmap_range_ex(
 
     if (dir == kernel_page_directory) {
         smp_tlb_shootdown_range(start, end);
+        paging_tlb_flush_range_local(start_vaddr, end_vaddr);
+        return;
+    }
+
+    cpu_t* me = cpu_current();
+    int is_dying = (me && me->current_task && me->current_task->state == TASK_ZOMBIE);
+    int refcount = (me && me->current_task && me->current_task->mem && me->current_task->mem->page_dir == dir) ? me->current_task->mem->refcount : 2;
+
+    if (refcount == 1 && is_dying) {
+        return;
     }
 
     paging_tlb_flush_range_local(start_vaddr, end_vaddr);
 
-    cpu_t* me = cpu_current();
-    if (me && me->current_task && me->current_task->mem && me->current_task->mem->refcount > 1) {
+    if (refcount > 1) {
         smp_tlb_shootdown_range_dir(dir, start_vaddr, end_vaddr);
     }
 }

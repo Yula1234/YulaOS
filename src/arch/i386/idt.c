@@ -419,7 +419,33 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         return 1;
     }
 
+    if ((info.map_flags & MAP_STACK) == 0 && !info.file && (info.map_flags & MAP_SHARED) == 0) {
+        uint32_t vaddr_4m = vaddr & ~0x3FFFFFu;
+        uint32_t vaddr_4m_end = vaddr_4m + 0x400000u;
+
+        if (info.vaddr_start <= vaddr_4m && info.vaddr_end >= vaddr_4m_end) {
+            uint32_t pd_idx = vaddr_4m >> 22;
+
+            if ((curr->mem->page_dir[pd_idx] & 1u) == 0) {
+                void* huge_page = pmm_alloc_pages(10);
+
+                if (huge_page) {
+                    for (uint32_t i = 0; i < 1024; i++) {
+                        paging_zero_phys_page((uint32_t)huge_page + i * 4096u);
+                    }
+
+                    paging_map_4m(curr->mem->page_dir, vaddr_4m, (uint32_t)huge_page, 7);
+
+                    curr->mem->mem_pages += 1024;
+
+                    return 1;
+                }
+            }
+        }
+    }
+
     void* new_page = pmm_alloc_block();
+
     if (!new_page) {
         if (info.file) {
             vfs_node_release(info.file);
@@ -440,6 +466,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 
         if (info.file_offset > 0xFFFFFFFFu - rel) {
             vfs_node_release(info.file);
+
             pmm_free_block(new_page);
             return -1;
         }
@@ -448,6 +475,7 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
 
         if (r < 0) {
             vfs_node_release(info.file);
+
             pmm_free_block(new_page);
             return -1;
         }
@@ -458,7 +486,9 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
     }
 
     paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+
     curr->mem->mem_pages++;
+
     return 1;
 }
 
@@ -704,22 +734,52 @@ void isr_handler(registers_t* regs) {
                 }
 
                 if (!handled && cr2 >= curr->mem->heap_start && cr2 < curr->mem->prog_break) {
-                    void* new_page = pmm_alloc_block();
-                    if (new_page) {
-                        uint32_t vaddr = cr2 & ~0xFFF;
-                        paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
-                        curr->mem->mem_pages++;
-                        __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
-                        handled = 1;
-                    } else {
-                        curr->pending_signals |= (1u << SIGSEGV);
-                        if (regs->cs == 0x1B) {
-                            maybe_deliver_pending_signal(curr, regs);
+                    uint32_t vaddr_4m = cr2 & ~0x3FFFFFu;
+                    uint32_t vaddr_4m_end = vaddr_4m + 0x400000u;
+                    uint32_t pd_idx = vaddr_4m >> 22;
+
+                    if (curr->mem->heap_start <= vaddr_4m && curr->mem->prog_break >= vaddr_4m_end && (curr->mem->page_dir[pd_idx] & 1u) == 0) {
+                        void* huge_page = pmm_alloc_pages(10);
+
+                        if (huge_page) {
+                            for (uint32_t i = 0; i < 1024; i++) {
+                                paging_zero_phys_page((uint32_t)huge_page + i * 4096u);
+                            }
+
+                            paging_map_4m(curr->mem->page_dir, vaddr_4m, (uint32_t)huge_page, 7);
+                            
+                            curr->mem->mem_pages += 1024;
+                            
+                            handled = 1;
+                        }
+                    }
+
+                    if (!handled) {
+                        void* new_page = pmm_alloc_block();
+                        
+                        if (new_page) {
+                            uint32_t vaddr = cr2 & ~0xFFF;
+                        
+                            paging_map(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7);
+                        
+                            curr->mem->mem_pages++;
+                        
+                            __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+                        
+                            handled = 1;
+                        } else {
+                            curr->pending_signals |= (1u << SIGSEGV);
+                        
+                            if (regs->cs == 0x1B) {
+                                maybe_deliver_pending_signal(curr, regs);
+                                goto out;
+                            }
+                        
+                            proc_kill(curr);
+                            sched_yield();
+                        
                             goto out;
                         }
-                        proc_kill(curr);
-                        sched_yield();
-                        goto out;
                     }
                 }
 

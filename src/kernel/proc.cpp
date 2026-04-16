@@ -1444,6 +1444,18 @@ extern "C" void proc_mem_release(proc_mem_t* mem) {
             }
 
             if (pde & 4) {
+                if (pde & (1u << 7)) {
+                    uint32_t phys = pde & ~0x3FFFFFu;
+                    
+                    if (phys) {
+                        pmm_free_pages((void*)phys, 10);
+                    }
+                    
+                    mem->page_dir[i] = 0;
+                    
+                    continue;
+                }
+                
                 uint32_t* pt = (uint32_t*)(pde & ~0xFFF);
 
                 for (int j = 0; j < 1024; j++) {

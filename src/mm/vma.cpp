@@ -382,19 +382,25 @@ static void unmap_range(uint32_t* page_dir, uint32_t start, uint32_t end) noexce
         uint32_t freed_pages = 0u;
     } ctx{};
 
-    auto visitor = [](uint32_t /*virt*/, uint32_t pte, void* vctx) -> int {
+    auto visitor =[](uint32_t /*virt*/, uint32_t pte, void* vctx) -> int {
         if ((pte & 4u) == 0u) {
             return 0;
         }
 
-        uint32_t phys = pte & ~page_mask;
+        bool is_4m = (pte & (1u << 7)) != 0u;
+        uint32_t phys = is_4m ? (pte & ~0x3FFFFFu) : (pte & ~0xFFFu);
+        
         if (phys != 0u && (pte & 0x200u) == 0u) {
-            pmm_free_block_deferred((void*)phys);
+            if (is_4m) {
+                pmm_free_pages((void*)phys, 10);
+            } else {
+                pmm_free_block_deferred((void*)phys);
+            }
         }
 
         auto* ctxp = static_cast<UnmapCtx*>(vctx);
         if (ctxp) {
-            ctxp->freed_pages++;
+            ctxp->freed_pages += is_4m ? 1024 : 1;
         }
 
         return 1;
