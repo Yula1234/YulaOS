@@ -15,12 +15,13 @@
 #include <lib/string.h>
 #include <lib/rbtree.h>
 
-#include <drivers/block/bdev.h>
-
 #include <hal/lock.h>
 #include <hal/cpu.h>
 
+#include <mm/shrinker.h>
 #include <mm/heap.h>
+
+#include <drivers/block/bdev.h>
 
 #include "yulafs.h"
 #include "bcache.h"
@@ -1857,6 +1858,22 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     kfree(dots);
 }
 
+extern "C" size_t yulafs_dcache_shrinker_cb(size_t target_pages, void* ctx) {
+    (void)target_pages;
+    (void)ctx;
+    
+    yfs::g_fs.state().dcache.clear();
+    
+    return 1; 
+}
+
+static shrinker_t g_yulafs_dcache_shrinker = {
+    .name = "yulafs_dcache",
+    .reclaim = yulafs_dcache_shrinker_cb,
+    .ctx = nullptr,
+    .list = {nullptr, nullptr}
+};
+
 void yfs::FileSystem::init() {
     /* Mount on valid magic, otherwise format. */
     bcache_init();
@@ -1914,6 +1931,8 @@ void yfs::FileSystem::init() {
         groups_init_or_panic();
         orphan_inode_cleanup();
     }
+
+    register_shrinker(&g_yulafs_dcache_shrinker);
 }
 
 void yulafs_format(uint32_t disk_blocks_4k) {

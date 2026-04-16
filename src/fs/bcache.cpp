@@ -2,23 +2,25 @@
 /* Copyright (C) 2025 Yula1234 */
 
 #include <lib/cpp/hash_traits.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/semaphore.h>
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/dlist.h>
-#include <lib/cpp/lock_guard.h>
 #include <lib/cpp/new.h>
-#include <lib/cpp/semaphore.h>
+
+#include <kernel/smp/cpu.h>
+#include <kernel/sched.h>
+#include <kernel/proc.h>
+
+#include <mm/shrinker.h>
+#include <mm/heap.h>
+#include <mm/pmm.h>
 
 #include <lib/hash_map.h>
 #include <lib/string.h>
 
-#include <kernel/sched.h>
-#include <kernel/smp/cpu.h>
-#include <kernel/proc.h>
-
-#include <mm/heap.h>
-#include <mm/pmm.h>
-
 #include <drivers/block/bdev.h>
+
 #include <hal/lock.h>
 
 #include "bcache.h"
@@ -1029,6 +1031,46 @@ static void bcache_prefetch_worker(void*) {
     }
 }
 
+extern "C" size_t bcache_shrinker_cb(size_t target_pages, void* ctx) {
+    (void)ctx;
+    size_t freed = 0;
+
+    for (uint32_t i = 0; i < BCACHE_SHARDS && freed < target_pages; i++) {
+        BcacheShard& shard = g_shards[i];
+
+        while (freed < target_pages) {
+            EvictedBlock ev{};
+            bool evicted = false;
+
+            {
+                kernel::RwSpinLockNativeWriteGuard meta_guard(shard.meta_lock);
+                evicted = shard.try_evict_one_locked(ev);
+            }
+
+            if (!evicted) {
+                break; 
+            }
+
+            if (ev.dirty) {
+                DiskIo::write_4k(ev.block_idx, ev.data);
+            }
+
+            ev.release_entry();
+            
+            freed++; 
+        }
+    }
+
+    return freed;
+}
+
+static shrinker_t g_bcache_shrinker = {
+    .name = "bcache",
+    .reclaim = bcache_shrinker_cb,
+    .ctx = nullptr,
+    .list = {nullptr, nullptr}
+};
+
 void bcache_init(void) {
     if (!g_entry_cache) {
         g_entry_cache = kmem_cache_create("bcache_e", sizeof(BcacheEntry), 0, 0);
@@ -1061,6 +1103,8 @@ void bcache_init(void) {
     }
 
     g_hot_cache.init();
+
+    register_shrinker(&g_bcache_shrinker);
 }
 
 int bcache_read(uint32_t block_idx, uint8_t* buf) {

@@ -10,8 +10,7 @@
 #include <mm/heap.h>
 #include <mm/pmm.h>
 
-
-#include <hal/compiler.h>
+#include <lib/compiler.h>
 
 __cacheline_aligned static mutex_t g_shrinker_mutex;
 

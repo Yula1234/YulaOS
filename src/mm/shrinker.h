@@ -5,6 +5,7 @@
 #define MM_SHRINKER_H
 
 #include <lib/dlist.h>
+
 #include <stddef.h>
 #include <stdint.h>
 
