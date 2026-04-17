@@ -1378,6 +1378,7 @@ static void syscall_uptime_ms(registers_t* regs, task_t* curr) {
 }
 
 static void syscall_proc_list(registers_t* regs, task_t* curr) {
+    (void) curr;
     yos_proc_info_t* u_buf = (yos_proc_info_t*)regs->ebx;
     uint32_t cap = (uint32_t)regs->ecx;
 
@@ -1392,11 +1393,6 @@ static void syscall_proc_list(registers_t* regs, task_t* curr) {
     }
 
     uint32_t bytes = cap * (uint32_t)sizeof(*u_buf);
-
-    if (!ensure_user_buffer_writable_mappable(curr, (void*)u_buf, bytes)) {
-        regs->eax = (uint32_t)-1;
-        return;
-    }
 
     yos_proc_info_t* k_buf = (yos_proc_info_t*)kmalloc(bytes);
     if (!k_buf) {
@@ -1764,10 +1760,6 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
     uint32_t bytes = 0;
     if (nfds > 0) {
         if (__builtin_mul_overflow(nfds, (uint32_t)sizeof(pollfd_t), &bytes)) {
-            regs->eax = (uint32_t)-1;
-            return;
-        }
-        if (!check_user_buffer_present(curr, u_fds, bytes)) {
             regs->eax = (uint32_t)-1;
             return;
         }
