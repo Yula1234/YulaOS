@@ -5,6 +5,7 @@
 #define MM_VMA_H
 
 #include <lib/maple_tree.h>
+#include <lib/compiler.h>
 
 #include <kernel/rcu.h>
 
@@ -21,7 +22,7 @@ struct proc_mem;
 
 typedef struct vma_region vma_region_t;
 
-struct vma_region {
+struct __cacheline_aligned vma_region {
     uint32_t vaddr_start;
     uint32_t vaddr_end;
 
