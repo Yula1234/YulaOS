@@ -16,9 +16,10 @@ struct vfs_node;
 
 struct proc_mem;
 
-#define VMA_MAP_SHARED  1u
-#define VMA_MAP_PRIVATE 2u
-#define VMA_MAP_STACK   4u
+#define VMA_MAP_SHARED   1u
+#define VMA_MAP_PRIVATE  2u
+#define VMA_MAP_STACK    4u
+#define VMA_MAP_HUGE     8u
 
 typedef struct vma_region vma_region_t;
 

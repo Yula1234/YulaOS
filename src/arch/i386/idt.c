@@ -456,6 +456,27 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         }
     }
 
+    if ((info.map_flags & VMA_MAP_HUGE) != 0) {
+        uint32_t vaddr_4m = vaddr & ~0x3FFFFFu;
+        uint32_t pd_idx = vaddr_4m >> 22;
+
+        if ((curr->mem->page_dir[pd_idx] & 1u) == 0) {
+            
+            void* huge_page = pmm_alloc_pages(10); 
+
+            if (huge_page) {
+
+                for (uint32_t i = 0; i < 1024; i++) {
+                    paging_zero_phys_page((uint32_t)huge_page + i * 4096u);
+                }
+
+                paging_map_4m(curr->mem->page_dir, vaddr_4m, (uint32_t)huge_page, 7);
+                curr->mem->mem_pages += 1024;
+                return 1;
+            }
+        }
+    }
+
     void* new_page = pmm_alloc_block();
 
     if (!new_page) {

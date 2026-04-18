@@ -496,6 +496,10 @@ extern "C" vma_region_t* vma_create(
 
     uint32_t aligned_size = align_up_4k(size + diff);
 
+    if (kernel::likely(aligned_size >= 0x400000u && (aligned_vaddr & 0x3FFFFFu) == 0)) {
+        flags |= VMA_MAP_HUGE;
+    }
+
     uint32_t aligned_file_size = file_size;
 
     if (aligned_file_size > 0xFFFFFFFFu - diff) {
