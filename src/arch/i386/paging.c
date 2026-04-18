@@ -193,6 +193,14 @@ static inline void paging_unlock_dir_safe(uint32_t* dir, uint32_t flags) {
     spinlock_release_safe(paging_select_dir_lock(dir), flags);
 }
 
+static inline spinlock_t* paging_get_pt_lock(uint32_t pde) {
+    uint32_t phys = pde & ~0xFFFu;
+
+    page_t* page = pmm_phys_to_page(phys);
+
+    return &page->pt_lock;
+}
+
 /*
  * Fixmap.
  *
@@ -251,79 +259,94 @@ void paging_unmap_range_ex(
     uint32_t* dir, uint32_t start_vaddr, uint32_t end_vaddr,
     paging_unmap_visitor_t visitor, void* visitor_ctx
 ) {
-    if (!dir) {
+    if (unlikely(!dir)) {
         return;
     }
 
-    if (end_vaddr <= start_vaddr) {
+    if (unlikely(end_vaddr <= start_vaddr)) {
         return;
     }
 
     const uint32_t start = start_vaddr & ~0xFFFu;
     const uint32_t end = (end_vaddr + 0xFFFu) & ~0xFFFu;
 
-    if (end <= start) {
-        return;
-    }
-
-    uint32_t int_flags = paging_lock_dir_safe(dir);
+    if (end <= start) return;
 
     int any_unmapped = 0;
 
-    for (uint32_t virt = start; virt < end; virt += 0x1000u) {
+    for (uint32_t virt = start; virt < end; ) {
         const uint32_t pd_idx = virt >> 22;
 
-        const uint32_t pde = dir[pd_idx];
+        const uint32_t pde = __atomic_load_n(&dir[pd_idx], __ATOMIC_ACQUIRE);
+        
         if ((pde & 1u) == 0u) {
+            virt = (virt & ~0x3FFFFFu) + 0x400000u;
             continue;
         }
 
         if ((pde & (1u << 7)) != 0u) {
+            uint32_t int_flags = paging_lock_dir_safe(dir);
+
             if (visitor) {
                 if (!visitor(virt & ~0x3FFFFFu, pde, visitor_ctx)) {
-                    virt = (virt & ~0x3FFFFFu) + 0x400000u - 0x1000u;
+                    paging_unlock_dir_safe(dir, int_flags);
+                    virt = (virt & ~0x3FFFFFu) + 0x400000u;
                     continue;
                 }
             }
             
             any_unmapped = 1;
 
-            dir[pd_idx] = 0;
-            virt = (virt & ~0x3FFFFFu) + 0x400000u - 0x1000u;
+            __atomic_store_n(&dir[pd_idx], 0, __ATOMIC_RELEASE);
             
+            paging_unlock_dir_safe(dir, int_flags);
+
+            virt = (virt & ~0x3FFFFFu) + 0x400000u;
             continue;
         }
 
-        if (!paging_pde_pt_phys_valid(pde)) {
-            continue;
-        }
+        spinlock_t* pt_lock = paging_get_pt_lock(pde);
+
+        uint32_t int_flags = spinlock_acquire_safe(pt_lock);
 
         uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
-        const uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+        
+        uint32_t chunk_end = (virt & ~0x3FFFFFu) + 0x400000u;
 
-        const uint32_t pte = pt[pt_idx];
-        if ((pte & 1u) == 0u) {
-            continue;
+        if (chunk_end > end) {
+            chunk_end = end;
         }
 
-        if (visitor) {
-            if (!visitor(virt, pte, visitor_ctx)) {
-                continue;
+        while (virt < chunk_end) {
+            const uint32_t pt_idx = (virt >> 12) & 0x3FFu;
+            const uint32_t pte = __atomic_load_n(&pt[pt_idx], __ATOMIC_RELAXED);
+            
+            if ((pte & 1u) != 0u) {
+                int proceed = 1;
+
+                if (visitor) {
+                    if (!visitor(virt, pte, visitor_ctx)) {
+                        proceed = 0;
+                    }
+                }
+
+                if (proceed) {
+                    __atomic_store_n(&pt[pt_idx], 0u, __ATOMIC_RELEASE);
+                    any_unmapped = 1;
+                }
             }
+            virt += 0x1000u;
         }
 
-        pt[pt_idx] = 0u;
-        any_unmapped = 1;
+        spinlock_release_safe(pt_lock, int_flags);
     }
-
-    paging_unlock_dir_safe(dir, int_flags);
 
     if (!any_unmapped) {
         return;
     }
 
     if (dir == kernel_page_directory) {
-        smp_tlb_shootdown_range(start, end);
+        smp_tlb_shootdown_range(start_vaddr, end_vaddr);
         paging_tlb_flush_range_local(start_vaddr, end_vaddr);
         return;
     }
@@ -722,51 +745,56 @@ void paging_map_ex(
         uint32_t desired = (phys & ~0xFFFu) | flags;
         
         if (__atomic_compare_exchange_n(&pt[pt_idx], &expected, desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-            if ((map_flags & PAGING_MAP_NO_TLB_FLUSH) == 0u) {
-                if (dir == kernel_page_directory) {
-                    smp_tlb_shootdown(virt);
-                } else {
-                    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
-                }
-            }
-            return;
+            goto do_shootdown;
         }
+
+        spinlock_t* pt_lock = paging_get_pt_lock(pde);
+
+        uint32_t int_flags = spinlock_acquire_safe(pt_lock);
+        
+        pt[pt_idx] = desired;
+        
+        spinlock_release_safe(pt_lock, int_flags);
+        
+        goto do_shootdown;
     }
 
-    void* new_pt_phys = 0;
     uint32_t int_flags = paging_lock_dir_safe(dir);
 
-    if ((dir[pd_idx] & 1u) == 0u) {
-        paging_unlock_dir_safe(dir, int_flags);
+    if (unlikely((dir[pd_idx] & 1u) == 0u)) {
+        void* new_pt_phys = pmm_alloc_block();
 
-        new_pt_phys = pmm_alloc_block();
         if (!new_pt_phys) {
             paging_halt("pmm_alloc_block failed in paging_map");
         }
 
         paging_zero_phys_page((uint32_t)new_pt_phys);
 
-        int_flags = paging_lock_dir_safe(dir);
-        if ((dir[pd_idx] & 1u) == 0u) {
-            /* Present + RW + USER: kernel and userspace can share PDEs policy-wise. */
-            dir[pd_idx] = ((uint32_t)new_pt_phys) | 7u;
-            new_pt_phys = 0;
-        }
+        spinlock_init(&pmm_phys_to_page((uint32_t)new_pt_phys)->pt_lock);
+
+        dir[pd_idx] = ((uint32_t)new_pt_phys) | 7u;
     }
 
-    /* PT address comes from the PDE. This assumes identity-mapped tables. */
-    uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFFu);
-    pt[pt_idx] = (phys & ~0xFFFu) | flags;
-
+    pde = dir[pd_idx];
+    
     paging_unlock_dir_safe(dir, int_flags);
 
-    if (new_pt_phys) {
-        pmm_free_block(new_pt_phys);
-    }
+    spinlock_t* pt_lock = paging_get_pt_lock(pde);
+
+    int_flags = spinlock_acquire_safe(pt_lock);
+
+    uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+    
+    pt[pt_idx] = (phys & ~0xFFFu) | flags;
+
+    spinlock_release_safe(pt_lock, int_flags);
+
+do_shootdown:
 
     if ((map_flags & PAGING_MAP_NO_TLB_FLUSH) != 0u) {
         return;
     }
+
 
     if (dir == kernel_page_directory) {
         /*
@@ -791,7 +819,7 @@ void paging_map_batch(
     const uint32_t* phys_array, uint32_t count,
     uint32_t flags, uint32_t map_flags
 ) {
-    if (count == 0 || !dir || !phys_array) {
+    if (unlikely(count == 0 || !dir || !phys_array)) {
         return;
     }
 
@@ -799,6 +827,7 @@ void paging_map_batch(
 
     while (pages_done < count) {
         uint32_t virt = virt_start + (pages_done << 12);
+
         uint32_t pd_idx = virt >> 22;
         uint32_t pt_idx = (virt >> 12) & 0x3FFu;
 
@@ -807,36 +836,61 @@ void paging_map_batch(
             chunk_size = count - pages_done;
         }
 
-        void* new_pt_phys = 0;
-        uint32_t int_flags = paging_lock_dir_safe(dir);
+        uint32_t pde = __atomic_load_n(&dir[pd_idx], __ATOMIC_ACQUIRE);
 
-        if ((dir[pd_idx] & 1u) == 0u) {
+        void* new_pt_phys_to_free = 0;
+
+        if (unlikely((pde & 1u) == 0u)) {
+            uint32_t int_flags = paging_lock_dir_safe(dir);
+
+            if ((dir[pd_idx] & 1u) == 0u) {
+                paging_unlock_dir_safe(dir, int_flags);
+
+                void* new_pt_phys = pmm_alloc_block();
+                
+                if (!new_pt_phys) {
+                    paging_halt("pmm_alloc_block failed in paging_map_batch");
+                }
+
+                paging_zero_phys_page((uint32_t)new_pt_phys);
+
+                spinlock_init(&pmm_phys_to_page((uint32_t)new_pt_phys)->pt_lock);
+
+                int_flags = paging_lock_dir_safe(dir);
+
+                if ((dir[pd_idx] & 1u) == 0u) {
+                    uint32_t new_pde = ((uint32_t)new_pt_phys) | 7u;
+
+                    __atomic_store_n(&dir[pd_idx], new_pde, __ATOMIC_RELEASE);
+                } else {
+                    new_pt_phys_to_free = new_pt_phys;
+                }
+            }
+            
+            pde = dir[pd_idx];
+
             paging_unlock_dir_safe(dir, int_flags);
 
-            new_pt_phys = pmm_alloc_block();
-            if (!new_pt_phys) {
-                paging_halt("pmm_alloc_block failed in paging_map_batch");
-            }
-            paging_zero_phys_page((uint32_t)new_pt_phys);
-
-            int_flags = paging_lock_dir_safe(dir);
-            if ((dir[pd_idx] & 1u) == 0u) {
-                dir[pd_idx] = ((uint32_t)new_pt_phys) | 7u;
-                new_pt_phys = 0;
+            if (new_pt_phys_to_free) {
+                pmm_free_block(new_pt_phys_to_free);
             }
         }
 
-        uint32_t* pt = (uint32_t*)(dir[pd_idx] & ~0xFFFu);
+        spinlock_t* pt_lock = paging_get_pt_lock(pde);
+
+        uint32_t pt_int_flags = spinlock_acquire_safe(pt_lock);
+
+        uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+
         for (uint32_t i = 0; i < chunk_size; i++) {
             uint32_t phys = phys_array[pages_done + i];
-            pt[pt_idx + i] = (phys & ~0xFFFu) | flags;
+            
+            uint32_t new_pte = (phys & ~0xFFFu) | flags;
+            
+            __atomic_store_n(&pt[pt_idx + i], new_pte, __ATOMIC_RELEASE);
         }
 
-        paging_unlock_dir_safe(dir, int_flags);
-
-        if (new_pt_phys) {
-            pmm_free_block(new_pt_phys);
-        }
+        spinlock_release_safe(pt_lock, pt_int_flags);
 
         if ((map_flags & PAGING_MAP_NO_TLB_FLUSH) == 0u) {
             if (dir == kernel_page_directory) {

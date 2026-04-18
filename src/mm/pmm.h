@@ -69,6 +69,7 @@ typedef struct {
  */
 typedef struct page {
     uint32_t flags;
+
     int32_t  ref_count;
 
     union {
@@ -84,10 +85,15 @@ typedef struct page {
             struct page* prev;
             struct page* next;
         } list;
+
         rcu_head_t rcu;
     };
 
-    uint32_t _reserved;
+     union {
+        uint32_t _reserved;
+        
+        spinlock_t pt_lock;
+    };
 } page_t;
 
 /*
