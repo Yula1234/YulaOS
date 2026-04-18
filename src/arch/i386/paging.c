@@ -713,6 +713,26 @@ void paging_map_ex(
     uint32_t pd_idx = virt >> 22;
     uint32_t pt_idx = (virt >> 12) & 0x3FF;
 
+    uint32_t pde = __atomic_load_n(&dir[pd_idx], __ATOMIC_ACQUIRE);
+    
+    if ((pde & 1u) != 0u && (pde & (1u << 7)) == 0u) {
+        uint32_t* pt = (uint32_t*)(pde & ~0xFFFu);
+
+        uint32_t expected = 0;
+        uint32_t desired = (phys & ~0xFFFu) | flags;
+        
+        if (__atomic_compare_exchange_n(&pt[pt_idx], &expected, desired, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            if ((map_flags & PAGING_MAP_NO_TLB_FLUSH) == 0u) {
+                if (dir == kernel_page_directory) {
+                    smp_tlb_shootdown(virt);
+                } else {
+                    __asm__ volatile("invlpg (%0)" :: "r" (virt) : "memory");
+                }
+            }
+            return;
+        }
+    }
+
     void* new_pt_phys = 0;
     uint32_t int_flags = paging_lock_dir_safe(dir);
 
