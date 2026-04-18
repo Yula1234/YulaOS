@@ -60,13 +60,15 @@ static void tree_erase(proc_mem_t* mem, vma_region_t* region) noexcept;
 
 static void free_region(vma_region_t* region) noexcept;
 
+static void apply_child_metrics(
+    const vma_region_t* child,
+    uint32_t& min_start, uint32_t& max_end, uint32_t& max_gap,
+    uint32_t parent_edge, bool is_left) noexcept;
+
 static bool vma_region_recalc(vma_region_t* region) noexcept {
     if (!region) {
         return false;
     }
-
-    vma_region_t* left = rb_to_region(region->rb_node.rb_left);
-    vma_region_t* right = rb_to_region(region->rb_node.rb_right);
 
     const uint32_t old_min_start = region->subtree_min_start;
     const uint32_t old_max_end = region->subtree_max_end;
@@ -76,49 +78,17 @@ static bool vma_region_recalc(vma_region_t* region) noexcept {
     uint32_t max_end = region->vaddr_end;
     uint32_t max_gap = 0u;
 
-    if (left) {
-        if (left->subtree_min_start < min_start) {
-            min_start = left->subtree_min_start;
-        }
+    apply_child_metrics(
+        rb_to_region(region->rb_node.rb_left),
+        min_start, max_end, max_gap,
+        region->vaddr_start, true
+    );
 
-        if (left->subtree_max_end > max_end) {
-            max_end = left->subtree_max_end;
-        }
-
-        if (left->subtree_max_gap > max_gap) {
-            max_gap = left->subtree_max_gap;
-        }
-
-        const uint32_t pred_end = left->subtree_max_end;
-        if (pred_end < region->vaddr_start) {
-            const uint32_t gap = region->vaddr_start - pred_end;
-            if (gap > max_gap) {
-                max_gap = gap;
-            }
-        }
-    }
-
-    if (right) {
-        if (right->subtree_min_start < min_start) {
-            min_start = right->subtree_min_start;
-        }
-
-        if (right->subtree_max_end > max_end) {
-            max_end = right->subtree_max_end;
-        }
-
-        if (right->subtree_max_gap > max_gap) {
-            max_gap = right->subtree_max_gap;
-        }
-
-        const uint32_t succ_start = right->subtree_min_start;
-        if (region->vaddr_end < succ_start) {
-            const uint32_t gap = succ_start - region->vaddr_end;
-            if (gap > max_gap) {
-                max_gap = gap;
-            }
-        }
-    }
+    apply_child_metrics(
+        rb_to_region(region->rb_node.rb_right),
+        min_start, max_end, max_gap,
+        region->vaddr_end, false
+    );
 
     region->subtree_min_start = min_start;
     region->subtree_max_end = max_end;
@@ -164,6 +134,99 @@ static const rb_augment_callbacks vma_rb_callbacks = {
     .copy = vma_region_copy,
     .rotate = vma_region_rotate,
 };
+
+static vma_region_t* alloc_region() noexcept;
+
+static vma_region_t* create_initialized_region(
+    uint32_t start, uint32_t end, uint32_t length, uint32_t flags,
+    vfs_node_t* file, uint32_t file_offset, uint32_t file_size) noexcept
+{
+    vma_region_t* r = alloc_region();
+    
+    if (!r) {
+        return nullptr;
+    }
+
+    r->vaddr_start = start;
+    r->vaddr_end = end;
+    r->length = length;
+    r->map_flags = flags;
+    r->file = file;
+    r->file_offset = file_offset;
+    r->file_size = file_size;
+
+    r->subtree_min_start = start;
+    r->subtree_max_end = end;
+    r->subtree_max_gap = 0u;
+
+    r->rb_node.__parent_color = 0;
+    r->rb_node.rb_left = nullptr;
+    r->rb_node.rb_right = nullptr;
+    r->list_node.next = nullptr;
+    r->list_node.prev = nullptr;
+
+    return r;
+}
+
+static void adjust_file_bounds(
+    vma_region_t* region, uint32_t cut_len, uint32_t new_len, bool cut_from_left) noexcept
+{
+    if (!region->file) {
+        region->file_offset = 0u;
+        region->file_size = 0u;
+        return;
+    }
+
+    if (cut_from_left) {
+        region->file_offset += cut_len;
+        
+        if (region->file_size > cut_len) {
+            region->file_size -= cut_len;
+        } else {
+            region->file_size = 0u;
+        }
+    }
+
+    if (region->file_size > new_len) {
+        region->file_size = new_len;
+    }
+}
+
+static void apply_child_metrics(
+    const vma_region_t* child,
+    uint32_t& min_start, uint32_t& max_end, uint32_t& max_gap,
+    uint32_t parent_edge, bool is_left) noexcept
+{
+    if (!child) {
+        return;
+    }
+
+    if (child->subtree_min_start < min_start) {
+        min_start = child->subtree_min_start;
+    }
+
+    if (child->subtree_max_end > max_end) {
+        max_end = child->subtree_max_end;
+    }
+
+    if (child->subtree_max_gap > max_gap) {
+        max_gap = child->subtree_max_gap;
+    }
+
+    if (is_left && child->subtree_max_end < parent_edge) {
+        uint32_t gap = parent_edge - child->subtree_max_end;
+        
+        if (gap > max_gap) {
+            max_gap = gap;
+        }
+    } else if (!is_left && parent_edge < child->subtree_min_start) {
+        uint32_t gap = child->subtree_min_start - parent_edge;
+        
+        if (gap > max_gap) {
+            max_gap = gap;
+        }
+    }
+}
 
 static bool regions_are_mergeable(const vma_region_t* left, const vma_region_t* right) noexcept {
     if (!left || !right) {
@@ -246,32 +309,6 @@ static vma_region_t* tree_find_leq(proc_mem_t* mem, uint32_t vaddr) noexcept {
 
         best = cur;
         node = node->rb_right;
-    }
-
-    return best;
-}
-
-[[maybe_unused]] static vma_region_t* tree_first_ge(proc_mem_t* mem, uint32_t vaddr) noexcept {
-    if (!mem) {
-        return nullptr;
-    }
-
-    rb_node* node = mem->mmap_tree.rb_node;
-    vma_region_t* best = nullptr;
-
-    while (node) {
-        vma_region_t* cur = rb_to_region(node);
-        if (!cur) {
-            break;
-        }
-
-        if (cur->vaddr_start < vaddr) {
-            node = node->rb_right;
-            continue;
-        }
-
-        best = cur;
-        node = node->rb_left;
     }
 
     return best;
@@ -441,6 +478,54 @@ static void free_region(vma_region_t* region) noexcept {
     }
 }
 
+struct UnmapSpanCollector {
+    struct span_t {
+        uint32_t start;
+        uint32_t end;
+    };
+
+    span_t stack_spans[8];
+    span_t* spans = stack_spans;
+    uint32_t cap = 8u;
+    uint32_t len = 0u;
+    bool use_heap = false;
+
+    bool init(uint32_t needed) noexcept {
+        if (needed > 8u) {
+            spans = new (kernel::nothrow) span_t[needed]{};
+            if (!spans) {
+                return false;
+            }
+            cap = needed;
+            use_heap = true;
+        }
+        return true;
+    }
+
+    void push(uint32_t start, uint32_t end) noexcept {
+        if (start >= end) {
+            return;
+        }
+
+        if (len > 0u && start <= spans[len - 1u].end) {
+            if (end > spans[len - 1u].end) {
+                spans[len - 1u].end = end;
+            }
+            return;
+        }
+
+        if (len < cap) {
+            spans[len++] = span_t{start, end};
+        }
+    }
+
+    void cleanup() noexcept {
+        if (use_heap) {
+            delete[] spans;
+        }
+    }
+};
+
 }
 
 extern "C" void vma_init(proc_mem_t* mem) {
@@ -530,32 +615,20 @@ extern "C" vma_region_t* vma_create(
         aligned_file_size = aligned_size;
     }
 
-    vma_region_t* region = alloc_region();
-    if (!region) {
-        return nullptr;
-    }
-
-    region->vaddr_start = aligned_vaddr;
-    region->vaddr_end = aligned_vaddr + aligned_size;
-    region->file_offset = file_offset - diff;
-    region->length = size;
-    region->file_size = aligned_file_size;
-    region->map_flags = flags;
-    region->file = nullptr;
-
-    region->subtree_min_start = region->vaddr_start;
-    region->subtree_max_end = region->vaddr_end;
-    region->subtree_max_gap = 0u;
-
-    region->rb_node.__parent_color = 0;
-    region->rb_node.rb_left = nullptr;
-    region->rb_node.rb_right = nullptr;
-    region->list_node.next = nullptr;
-    region->list_node.prev = nullptr;
-
     if (file) {
         vfs_node_retain(file);
-        region->file = file;
+    }
+
+    vma_region_t* region = create_initialized_region(
+        aligned_vaddr, aligned_vaddr + aligned_size,
+        size, flags, file, file_offset - diff, aligned_file_size
+    );
+
+    if (!region) {
+        if (file) {
+            vfs_node_release(file);
+        }
+        return nullptr;
     }
 
     bool has_overlap = false;
@@ -635,183 +708,90 @@ extern "C" int vma_has_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_exc
 }
 
 extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
-    if (!mem || !mem->page_dir) {
+    if (!mem || !mem->page_dir || (vaddr & page_mask) || len == 0u || vaddr + len < vaddr) {
         return -1;
     }
 
     __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
 
-    struct unmap_span_t {
-        uint32_t start;
-        uint32_t end;
-    };
-
-    unmap_span_t* spans = nullptr;
-    uint32_t spans_cap = 0u;
-    uint32_t spans_len = 0u;
-
-    auto cleanup_spans = [&]() {
-        delete[] spans;
-        spans = nullptr;
-        spans_cap = 0u;
-        spans_len = 0u;
-    };
-
-    if (vaddr & page_mask) {
-        return -1;
-    }
-
-    if (len == 0u) {
-        return -1;
-    }
-
-    if (vaddr + len < vaddr) {
-        return -1;
-    }
-
-    uint32_t aligned_len = align_up_4k(len);
-    uint32_t vaddr_end = vaddr + aligned_len;
+    uint32_t vaddr_end = vaddr + align_up_4k(len);
+    UnmapSpanCollector collector;
 
     {
         kernel::RwSpinLockNativeWriteGuard guard(mem->mmap_lock);
 
         uint32_t need_spans = 0u;
-
         uint32_t scan = vaddr;
+
         while (scan < vaddr_end) {
-            vma_region_t* region = vma_find_unlocked(mem, scan);
-            if (!region || region->vaddr_end <= scan) {
+            vma_region_t* r = vma_find_unlocked(mem, scan);
+            if (!r || r->vaddr_end <= scan) {
                 return -1;
             }
-
             need_spans++;
-            scan = region->vaddr_end;
+            scan = r->vaddr_end;
         }
 
         if (need_spans == 0u) {
             return 0;
         }
 
-        spans = new (kernel::nothrow) unmap_span_t[need_spans]{};
-        if (!spans) {
+        if (!collector.init(need_spans)) {
             return -1;
         }
-
-        spans_cap = need_spans;
-
-        auto push_span = [&](uint32_t start, uint32_t end) {
-            if (start >= end) {
-                return;
-            }
-
-            if (spans_len != 0u) {
-                unmap_span_t& last = spans[spans_len - 1u];
-                if (start <= last.end) {
-                    if (end > last.end) {
-                        last.end = end;
-                    }
-                    return;
-                }
-            }
-
-            if (spans_len < spans_cap) {
-                spans[spans_len++] = unmap_span_t{start, end};
-            }
-        };
 
         scan = vaddr;
         while (scan < vaddr_end) {
             vma_region_t* curr = vma_find_unlocked(mem, scan);
             if (!curr) {
-                cleanup_spans();
+                collector.cleanup();
                 return -1;
             }
 
-            const uint32_t u_start = vaddr;
-            const uint32_t u_end = vaddr_end;
             const uint32_t m_start = curr->vaddr_start;
             const uint32_t m_end = curr->vaddr_end;
-
-            const uint32_t o_start = (u_start > m_start) ? u_start : m_start;
-            const uint32_t o_end = (u_end < m_end) ? u_end : m_end;
+            const uint32_t o_start = (vaddr > m_start) ? vaddr : m_start;
+            const uint32_t o_end = (vaddr_end < m_end) ? vaddr_end : m_end;
 
             if (o_start >= o_end) {
                 scan = m_end;
                 continue;
             }
 
-            push_span(o_start, o_end);
+            collector.push(o_start, o_end);
 
             if (o_start > m_start && o_end < m_end) {
-                vma_region_t* new_right = alloc_region();
+                uint32_t right_len = m_end - o_end;
+                uint32_t right_off = curr->file_offset + (o_end - m_start);
+
+                vma_region_t* new_right = create_initialized_region(
+                    o_end, m_end, right_len, curr->map_flags,
+                    curr->file, curr->file ? right_off : 0u, 0u
+                );
+
                 if (!new_right) {
-                    cleanup_spans();
+                    collector.cleanup();
                     return -1;
                 }
-
-                const uint32_t orig_file_size = curr->file_size;
-                const uint32_t left_len = o_start - m_start;
-                const uint32_t right_len = m_end - o_end;
-                const uint32_t cut_before_right = o_end - m_start;
-
-                new_right->vaddr_start = o_end;
-                new_right->vaddr_end = m_end;
-                new_right->length = right_len;
-                new_right->map_flags = curr->map_flags;
-
-                new_right->subtree_min_start = new_right->vaddr_start;
-                new_right->subtree_max_end = new_right->vaddr_end;
-                new_right->subtree_max_gap = 0u;
-
-                new_right->rb_node.__parent_color = 0;
-                new_right->rb_node.rb_left = nullptr;
-                new_right->rb_node.rb_right = nullptr;
-                new_right->list_node.next = nullptr;
-                new_right->list_node.prev = nullptr;
 
                 if (curr->file) {
                     vfs_node_retain(curr->file);
-                    new_right->file = curr->file;
-                    new_right->file_offset = curr->file_offset + cut_before_right;
-                } else {
-                    new_right->file = nullptr;
-                    new_right->file_offset = 0u;
                 }
 
-                uint32_t right_file_size = 0u;
-                if (orig_file_size > cut_before_right) {
-                    right_file_size = orig_file_size - cut_before_right;
-                }
-                if (right_file_size > right_len) {
-                    right_file_size = right_len;
-                }
-                new_right->file_size = right_file_size;
+                adjust_file_bounds(new_right, o_end - m_start, right_len, true);
 
                 tree_erase(mem, curr);
-
                 curr->vaddr_end = o_start;
-                curr->length = left_len;
+                curr->length = o_start - m_start;
+                adjust_file_bounds(curr, 0u, curr->length, false);
 
-                uint32_t left_file_size = orig_file_size;
-                if (left_file_size > left_len) {
-                    left_file_size = left_len;
-                }
-                curr->file_size = left_file_size;
-
-                if (!tree_insert(mem, curr)) {
+                if (!tree_insert(mem, curr) || !tree_insert(mem, new_right)) {
                     free_region(new_right);
-                    cleanup_spans();
-                    return -1;
-                }
-
-                if (!tree_insert(mem, new_right)) {
-                    free_region(new_right);
-                    cleanup_spans();
+                    collector.cleanup();
                     return -1;
                 }
 
                 dlist_add_tail(&new_right->list_node, &mem->mmap_regions);
-
                 scan = o_end;
                 continue;
             }
@@ -825,55 +805,29 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             }
 
             if (o_start == m_start && o_end < m_end) {
-                const uint32_t cut_len = o_end - m_start;
-                const uint32_t new_len = m_end - o_end;
-
                 tree_erase(mem, curr);
-
                 curr->vaddr_start = o_end;
-                curr->vaddr_end = m_end;
-                curr->length = new_len;
-
-                if (curr->file) {
-                    curr->file_offset += cut_len;
-                }
-
-                if (curr->file_size > cut_len) {
-                    curr->file_size -= cut_len;
-                } else {
-                    curr->file_size = 0u;
-                }
-
-                if (curr->file_size > new_len) {
-                    curr->file_size = new_len;
-                }
+                curr->length = m_end - o_end;
+                adjust_file_bounds(curr, o_end - m_start, curr->length, true);
 
                 if (!tree_insert(mem, curr)) {
-                    cleanup_spans();
+                    collector.cleanup();
                     return -1;
                 }
-
                 scan = o_end;
                 continue;
             }
 
             if (o_start > m_start && o_end == m_end) {
-                const uint32_t new_len = o_start - m_start;
-
                 tree_erase(mem, curr);
-
                 curr->vaddr_end = o_start;
-                curr->length = new_len;
-
-                if (curr->file_size > new_len) {
-                    curr->file_size = new_len;
-                }
+                curr->length = o_start - m_start;
+                adjust_file_bounds(curr, 0u, curr->length, false);
 
                 if (!tree_insert(mem, curr)) {
-                    cleanup_spans();
+                    collector.cleanup();
                     return -1;
                 }
-
                 scan = o_end;
                 continue;
             }
@@ -882,11 +836,16 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         }
     }
 
-    for (uint32_t i = 0u; i < spans_len; i++) {
-        unmap_range(mem->page_dir, spans[i].start, spans[i].end);
+    for (uint32_t i = 0u; i < collector.len; i++) {
+        unmap_range(mem->page_dir, collector.spans[i].start, collector.spans[i].end);
     }
 
-    cleanup_spans();
+    collector.cleanup();
+
+    if (mem->free_area_cache > vaddr) {
+        mem->free_area_cache = vaddr;
+    }
+
     return 0;
 }
 
