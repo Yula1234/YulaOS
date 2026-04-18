@@ -141,12 +141,68 @@ static void mt_erase_region(proc_mem_t* mem, vma_region_t* region) noexcept {
     mt_erase(&mem->mmap_mt, region->vaddr_start, region->vaddr_end - 1u);
 }
 
-static void invalidate_cache(proc_mem_t* mem, const vma_region_t* region) noexcept {
-    vma_region_t* cached = __atomic_load_n(&mem->mmap_cache, __ATOMIC_RELAXED);
-
-    if (cached == region) {
-        __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
+___inline void vmacache_invalidate(proc_mem_t* mem) noexcept {
+    if (mem) {
+        __atomic_fetch_add(&mem->vmacache_seq, 1, __ATOMIC_RELEASE);
     }
+}
+
+static vma_region_t* vmacache_find(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
+    if (!t
+        || !mem) {
+        return nullptr;
+    }
+
+    uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
+    if (t->vmacache_seq != seq) {
+        return nullptr;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        vma_region_t* vma = t->vmacache[i];
+
+        if (vma && vaddr >= vma->vaddr_start && vaddr < vma->vaddr_end) {
+            return vma;
+        }
+    }
+    return nullptr;
+}
+
+static void vmacache_update(task_t* t, proc_mem_t* mem, vma_region_t* vma) noexcept {
+    if (!t
+        || !mem
+        || !vma) {
+        return;
+    }
+
+    uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
+
+    if (t->vmacache_seq != seq) {
+        t->vmacache[0] = nullptr; t->vmacache[1] = nullptr;
+        t->vmacache[2] = nullptr; t->vmacache[3] = nullptr;
+
+        t->vmacache_seq = seq;
+    }
+
+    if (t->vmacache[0] == vma) {
+        return;
+    }
+
+    if (t->vmacache[1] == vma) {
+        t->vmacache[1] = t->vmacache[0];
+        t->vmacache[0] = vma; return; 
+    }
+    
+    if (t->vmacache[2] == vma) {
+        t->vmacache[2] = t->vmacache[1];
+        t->vmacache[1] = t->vmacache[0];
+        t->vmacache[0] = vma; return;
+    }
+    
+    t->vmacache[3] = t->vmacache[2];
+    t->vmacache[2] = t->vmacache[1];
+    t->vmacache[1] = t->vmacache[0];
+    t->vmacache[0] = vma;
 }
 
 static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_region_t* right) noexcept {
@@ -182,29 +238,30 @@ static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_reg
 
     mt_insert_region(mem, left);
 
-    invalidate_cache(mem, right);
+    vmacache_invalidate(mem);
+
     call_rcu(&right->rcu, free_region_rcu_cb);
 }
 
-static vma_region_t* vma_find_unlocked(proc_mem_t* mem, uint32_t vaddr) noexcept {
+static vma_region_t* vma_find_lockless(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
     if (!mem) {
         return nullptr;
     }
 
-    vma_region_t* cached = __atomic_load_n(&mem->mmap_cache, __ATOMIC_RELAXED);
-
-    if (cached && vaddr >= cached->vaddr_start && vaddr < cached->vaddr_end) {
-        return cached;
+    if (t) {
+        vma_region_t* cached = vmacache_find(t, mem, vaddr);
+        
+        if (cached) {
+            return cached;
+        }
     }
 
     vma_region_t* cand = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, vaddr));
 
-    if (!cand) {
-        return nullptr;
-    }
-
-    if (vaddr >= cand->vaddr_start && vaddr < cand->vaddr_end) {
-        __atomic_store_n(&mem->mmap_cache, cand, __ATOMIC_RELAXED);
+    if (cand && vaddr >= cand->vaddr_start && vaddr < cand->vaddr_end) {
+        if (t) {
+            vmacache_update(t, mem, cand);
+        }
 
         return cand;
     }
@@ -374,7 +431,7 @@ extern "C" void vma_init(proc_mem_t* mem) {
 
     mt_init(&mem->mmap_mt);
 
-    __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
+    __atomic_store_n(&mem->vmacache_seq, 0, __ATOMIC_RELAXED);
 
     if (mem->mmap_top == 0u) {
         mem->mmap_top = user_addr_min;
@@ -389,8 +446,6 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
     if (!mem) {
         return;
     }
-
-    __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
 
     kernel::RwSpinLockNativeWriteGuard guard(mem->mmap_lock);
 
@@ -469,21 +524,26 @@ extern "C" vma_region_t* vma_create(
             vma_region_t* merged = region;
 
             uint32_t prev_idx = merged->vaddr_start;
+
             if (mt_prev(&mem->mmap_mt, &prev_idx)) {
                 vma_region_t* prev = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, prev_idx));
+                
                 if (prev && regions_are_mergeable(prev, merged)) {
                     merge_regions_into_left(mem, prev, merged);
+
                     merged = prev;
                 }
             }
 
             while (true) {
                 uint32_t next_idx = merged->vaddr_end;
+
                 if (!mt_next(&mem->mmap_mt, &next_idx)) {
                     break;
                 }
 
                 vma_region_t* next = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, next_idx));
+                
                 if (!next || !regions_are_mergeable(merged, next)) {
                     break;
                 }
@@ -501,29 +561,20 @@ extern "C" vma_region_t* vma_create(
 
     if (has_overlap) {
         free_region(region);
+
         return nullptr;
     }
-
-    __atomic_store_n(&mem->mmap_cache, region, __ATOMIC_RELAXED);
 
     return region;
 }
 
-extern "C" vma_region_t* vma_find(proc_mem_t* mem, uint32_t vaddr) {
-    if (!mem) {
-        return nullptr;
-    }
-
-    kernel::RwSpinLockNativeReadGuard guard(mem->mmap_lock);
-    return vma_find_unlocked(mem, vaddr);
+extern "C" vma_region_t* vma_find(task_t* t, proc_mem_t* mem, uint32_t vaddr) {
+    return vma_find_lockless(t, mem, vaddr);
 }
 
 extern "C" vma_region_t* vma_find_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_excl) {
-    if (!mem) {
-        return nullptr;
-    }
+    kernel::RcuReadGuard guard;
 
-    kernel::RwSpinLockNativeReadGuard guard(mem->mmap_lock);
     return vma_find_overlap_unlocked(mem, start, end_excl);
 }
 
@@ -532,13 +583,13 @@ extern "C" int vma_has_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_exc
 }
 
 extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
-    if (!mem || !mem->page_dir || (vaddr & page_mask) || len == 0u || vaddr + len < vaddr) {
+    if (!mem || !mem->page_dir || (vaddr & page_mask)
+        || len == 0u || vaddr + len < vaddr) {
         return -1;
     }
 
-    __atomic_store_n(&mem->mmap_cache, static_cast<vma_region_t*>(nullptr), __ATOMIC_RELAXED);
-
     uint32_t vaddr_end = vaddr + align_up_4k(len);
+    
     UnmapSpanCollector collector;
 
     {
@@ -548,7 +599,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         uint32_t scan = vaddr;
 
         while (scan < vaddr_end) {
-            vma_region_t* r = vma_find_unlocked(mem, scan);
+            vma_region_t* r = vma_find_lockless(nullptr, mem, scan);
 
             if (!r || r->vaddr_end <= scan) {
                 return -1;
@@ -569,7 +620,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         scan = vaddr;
 
         while (scan < vaddr_end) {
-            vma_region_t* curr = vma_find_unlocked(mem, scan);
+            vma_region_t* curr = vma_find_lockless(nullptr, mem, scan);
 
             if (!curr) {
                 collector.cleanup();
@@ -613,6 +664,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
                 curr->vaddr_end = o_start;
                 curr->length = o_start - m_start;
+
                 adjust_file_bounds(curr, 0u, curr->length, false);
 
                 mt_insert_region(mem, curr);
@@ -624,8 +676,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
             if (o_start == m_start && o_end == m_end) {
                 mt_erase_region(mem, curr);
-                invalidate_cache(mem, curr);
+                
+                vmacache_invalidate(mem);
+
                 call_rcu(&curr->rcu, free_region_rcu_cb);
+                
                 scan = o_end;
                 continue;
             }
@@ -635,9 +690,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
                 curr->vaddr_start = o_end;
                 curr->length = m_end - o_end;
+
                 adjust_file_bounds(curr, o_end - m_start, curr->length, true);
 
                 mt_insert_region(mem, curr);
+
                 scan = o_end;
                 continue;
             }
@@ -647,9 +704,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
                 curr->vaddr_end = o_start;
                 curr->length = o_start - m_start;
+
                 adjust_file_bounds(curr, 0u, curr->length, false);
 
                 mt_insert_region(mem, curr);
+
                 scan = o_end;
                 continue;
             }
@@ -676,7 +735,7 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
         return 0;
     }
 
-    kernel::RwSpinLockNativeReadGuard guard(mem->mmap_lock);
+    kernel::RcuReadGuard guard;
 
     if (end_excl <= start) {
         return 1;
@@ -690,7 +749,7 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
 
     while (cur < end_excl) {
 
-        vma_region_t* region = vma_find_unlocked(mem, cur);
+        vma_region_t* region = vma_find_lockless(nullptr, mem, cur);
 
         if (!region) {
             return 0;

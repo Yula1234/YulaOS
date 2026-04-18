@@ -49,7 +49,9 @@ vma_region_t* vma_create(
     uint32_t file_offset,uint32_t file_size, uint32_t flags
 );
 
-vma_region_t* vma_find(struct proc_mem* mem, uint32_t vaddr);
+struct task;
+
+vma_region_t* vma_find(struct task* t, struct proc_mem* mem, uint32_t vaddr);
 vma_region_t* vma_find_overlap(struct proc_mem* mem, uint32_t start, uint32_t end_excl);
 
 int vma_has_overlap(struct proc_mem* mem, uint32_t start, uint32_t end_excl);

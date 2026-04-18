@@ -244,27 +244,40 @@ typedef struct {
 } mmap_pf_info_t;
 
 static int mmap_pf_lookup(task_t* t, uint32_t vaddr, mmap_pf_info_t* out) {
-    if (!t || !t->mem || !out) {
+    if (!t
+        || !t->mem
+        || !out) {
         return 0;
     }
 
     proc_mem_t* mem = t->mem;
 
-    mmap_area_t* m = vma_find(mem, vaddr);
+    rcu_read_lock();
+
+    mmap_area_t* m = vma_find(t, mem, vaddr);
+    
     if (m) {
         out->vaddr_start = m->vaddr_start;
         out->vaddr_end = m->vaddr_end;
+
         out->file_offset = m->file_offset;
         out->file_size = m->file_size;
+        
         out->map_flags = m->map_flags;
+        
         out->file = m->file;
 
         if (out->file) {
             vfs_node_retain(out->file);
         }
+        
+        rcu_read_unlock();
 
         return 1;
     }
+    
+    rcu_read_unlock();
+    
     return 0;
 }
 

@@ -71,7 +71,7 @@ typedef struct proc_mem {
     rwspinlock_t mmap_lock;
     maple_tree_t mmap_mt;
 
-    vma_region_t* mmap_cache;
+    volatile uint32_t vmacache_seq;
     
     uint32_t mmap_top;
     uint32_t free_area_cache;
@@ -172,6 +172,12 @@ typedef struct task {
 
     /* cacheline 4 */
 
+    uint32_t vmacache_seq __cacheline_aligned;
+
+    vma_region_t* vmacache[4];
+
+    /* cacheline 5 */
+
     spinlock_t state_lock __cacheline_aligned;
 
     volatile task_state_t state;
@@ -183,7 +189,7 @@ typedef struct task {
     
     int is_running_signal;
 
-    /* cacheline 5 */
+    /* cacheline 6 */
 
     struct rb_node sleep_rb __cacheline_aligned;
 
@@ -198,7 +204,7 @@ typedef struct task {
     
     uint32_t wait_for_pid;
 
-    /* cacheline 6 */
+    /* cacheline 7 */
     fd_table_t* fd_table __cacheline_aligned;
 
     uint32_t cwd_inode;
@@ -211,7 +217,7 @@ typedef struct task {
     
     uint8_t term_mode;
 
-    /* cacheline 7+ */
+    /* cacheline 8+ */
     uint32_t start_tick __cacheline_aligned;
 
     uint32_t sid;
