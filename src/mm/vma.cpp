@@ -143,19 +143,22 @@ ___inline void mt_erase_region(proc_mem_t* mem, vma_region_t* region) noexcept {
 }
 
 ___inline void vmacache_invalidate(proc_mem_t* mem) noexcept {
-    if (kernel::likely(mem)) {
-        __atomic_fetch_add(&mem->vmacache_seq, 1, __ATOMIC_RELEASE);
-    }
+    __atomic_fetch_add(&mem->vmacache_seq, 1, __ATOMIC_RELEASE);
 }
 
 ___inline vma_region_t* vmacache_find(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
-    if (kernel::unlikely(!t || !mem)) {
+    const uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
+
+    if (kernel::unlikely(t->vmacache_seq != seq)) {
         return nullptr;
     }
 
-    uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
-    if (kernel::unlikely(t->vmacache_seq != seq)) {
-        return nullptr;
+    const uint32_t idx = (vaddr >> 12) & 3u;
+
+    vma_region_t* vma = t->vmacache[idx];
+    
+    if (kernel::likely(vma && vaddr >= vma->vaddr_start && vaddr < vma->vaddr_end)) {
+        return vma;
     }
 
     for (int i = 0; i < 4; i++) {
@@ -165,6 +168,7 @@ ___inline vma_region_t* vmacache_find(task_t* t, proc_mem_t* mem, uint32_t vaddr
             return vma;
         }
     }
+    
     return nullptr;
 }
 
