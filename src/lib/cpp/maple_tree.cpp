@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <lib/maple_tree.h>
 #include <lib/compiler.h>
 #include <lib/cpp/new.h>
 #include <lib/dlist.h>
@@ -8,8 +9,6 @@
 #include <kernel/locking/spinlock.h>
 
 #include <mm/heap.h>
-
-#include "maple_tree.h"
 
 namespace {
 
