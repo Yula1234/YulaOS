@@ -7,6 +7,7 @@
 #include <lib/compiler.h>
 #include <lib/rbtree.h>
 #include <lib/dlist.h>
+#include <lib/maple_tree.h>
 
 #include <kernel/smp/cpu.h>
 #include <kernel/rcu.h>
@@ -68,9 +69,7 @@ typedef struct proc_mem {
     spinlock_t pt_lock;
 
     rwspinlock_t mmap_lock;
-    struct rb_root mmap_tree;
-    
-    dlist_head_t mmap_regions;
+    maple_tree_t mmap_mt;
 
     vma_region_t* mmap_cache;
     
@@ -96,10 +95,14 @@ typedef enum {
 
 typedef struct file_desc {
     vfs_node_t* node;
+
     uint32_t offset;
     uint32_t flags;
+    
     uint32_t refs;
+    
     spinlock_t lock;
+    
     rcu_head_t rcu;
 } file_desc_t;
 
@@ -111,10 +114,13 @@ typedef enum {
 
 typedef struct fd_table {
     uint32_t refs;
+
     rwspinlock_t lock;
     rcu_ptr_t* fds;
+    
     uint32_t max_fds;
     int fd_next;
+    
     rcu_head_t rcu;
 } fd_table_t;
 

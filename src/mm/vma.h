@@ -1,14 +1,15 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #ifndef MM_VMA_H
 #define MM_VMA_H
 
+#include <lib/maple_tree.h>
+
+#include <kernel/rcu.h>
+
 #include <stdint.h>
 #include <stddef.h>
-
-#include <lib/dlist.h>
-#include <lib/rbtree.h>
 
 struct vfs_node;
 
@@ -32,12 +33,7 @@ struct vma_region {
 
     struct vfs_node* file;
 
-    uint32_t subtree_min_start;
-    uint32_t subtree_max_end;
-    uint32_t subtree_max_gap;
-
-    struct rb_node rb_node;
-    dlist_head_t list_node;
+    rcu_head_t rcu;
 };
 
 #ifdef __cplusplus
@@ -49,17 +45,11 @@ void vma_init(struct proc_mem* mem);
 void vma_destroy(struct proc_mem* mem);
 
 vma_region_t* vma_create(
-    struct proc_mem* mem,
-    uint32_t vaddr,
-    uint32_t size,
-    struct vfs_node* file,
-    uint32_t file_offset,
-    uint32_t file_size,
-    uint32_t flags
+    struct proc_mem* mem, uint32_t vaddr, uint32_t size, struct vfs_node* file,
+    uint32_t file_offset,uint32_t file_size, uint32_t flags
 );
 
 vma_region_t* vma_find(struct proc_mem* mem, uint32_t vaddr);
-
 vma_region_t* vma_find_overlap(struct proc_mem* mem, uint32_t start, uint32_t end_excl);
 
 int vma_has_overlap(struct proc_mem* mem, uint32_t start, uint32_t end_excl);
@@ -68,11 +58,7 @@ int vma_remove(struct proc_mem* mem, uint32_t vaddr, uint32_t len);
 
 int vma_validate_range(struct proc_mem* mem, uint32_t start, uint32_t end_excl);
 
-uint32_t vma_alloc_slot(
-    struct proc_mem* mem,
-    uint32_t size,
-    uint32_t* out_vaddr
-);
+uint32_t vma_alloc_slot(struct proc_mem* mem, uint32_t size,uint32_t* out_vaddr);
 
 #ifdef __cplusplus
 }
