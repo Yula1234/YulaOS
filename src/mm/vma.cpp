@@ -673,17 +673,31 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         kernel::SpinLockNativeGuard guard(mem->mmap_lock);
 
         uint32_t need_spans = 0u;
-        uint32_t scan = vaddr;
+        uint32_t idx = vaddr;
 
-        while (scan < vaddr_end) {
-            vma_region_t* r = vma_find_lockless(nullptr, mem, scan);
+        while (idx < vaddr_end) {
+            vma_region_t* r = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, idx));
+            
+            if (kernel::unlikely(!r)) {
+                if (!mt_next(&mem->mmap_mt, &idx)) {
+                    break;
+                }
 
-            if (kernel::unlikely(!r || r->vaddr_end <= scan)) {
-                return -1;
+                r = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, idx));
+                
+                if (kernel::unlikely(!r)) {
+                    break;
+                }
+                
+                idx = r->vaddr_start;
+
+                if (idx >= vaddr_end) {
+                    break;
+                }
             }
 
             need_spans++;
-            scan = r->vaddr_end;
+            idx = r->vaddr_end;
         }
 
         if (kernel::unlikely(need_spans == 0u)) {
@@ -694,14 +708,28 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             return -1;
         }
 
-        scan = vaddr;
+        idx = vaddr;
 
-        while (scan < vaddr_end) {
-            vma_region_t* curr = vma_find_lockless(nullptr, mem, scan);
-
+        while (idx < vaddr_end) {
+            vma_region_t* curr = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, idx));
+            
             if (kernel::unlikely(!curr)) {
-                collector.cleanup();
-                return -1;
+                if (kernel::unlikely(!mt_next(&mem->mmap_mt, &idx))) {
+                    break;
+                }
+                
+                curr = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, idx));
+                
+                if (kernel::unlikely(!curr)) {
+                    collector.cleanup();
+                    return -1;
+                }
+
+                idx = curr->vaddr_start;
+                
+                if (idx >= vaddr_end) {
+                    break;
+                }
             }
 
             const uint32_t m_start = curr->vaddr_start;
@@ -711,13 +739,13 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             const uint32_t o_end = (vaddr_end < m_end) ? vaddr_end : m_end;
 
             if (o_start >= o_end) {
-                scan = m_end;
+                idx = m_end;
                 continue;
             }
 
             collector.push(o_start, o_end);
 
-            if (o_start > m_start && o_end < m_end) {
+            if (kernel::unlikely(o_start > m_start && o_end < m_end)) {
                 uint32_t right_len = m_end - o_end;
                 uint32_t right_off = curr->file_offset + (o_end - m_start);
 
@@ -726,7 +754,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
                     curr->file, curr->file ? right_off : 0u, 0u
                 );
 
-                if (!new_right) {
+                if (kernel::unlikely(!new_right)) {
                     collector.cleanup();
                     return -1;
                 }
@@ -741,22 +769,21 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
                 curr->vaddr_end = o_start;
                 curr->length = o_start - m_start;
-
                 adjust_file_bounds(curr, 0u, curr->length, false);
 
                 mt_insert_region(mem, curr);
                 mt_insert_region(mem, new_right);
 
-                scan = o_end;
+                idx = o_end;
                 continue;
             }
 
-            if (o_start == m_start && o_end == m_end) {
+            if (kernel::likely(o_start == m_start && o_end == m_end)) {
                 mt_erase_region(mem, curr);
-                
+
                 call_rcu(&curr->rcu, free_region_rcu_cb);
                 
-                scan = o_end;
+                idx = o_end;
                 continue;
             }
 
@@ -770,7 +797,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
                 mt_insert_region(mem, curr);
 
-                scan = o_end;
+                idx = o_end;
                 continue;
             }
 
@@ -784,11 +811,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
                 mt_insert_region(mem, curr);
 
-                scan = o_end;
+                idx = o_end;
                 continue;
             }
 
-            scan = o_end;
+            idx = o_end;
         }
 
         vmacache_invalidate(mem);
