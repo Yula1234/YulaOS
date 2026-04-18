@@ -142,6 +142,14 @@ ___inline void mt_erase_region(proc_mem_t* mem, vma_region_t* region) noexcept {
     mt_erase(&mem->mmap_mt, region->vaddr_start, region->vaddr_end - 1u);
 }
 
+___inline void vma_mru_cache_update(task_t* t, vma_region_t* region) {
+    t->mru_vma = region;
+}
+
+___inline void vma_mru_cache_invalidate(task_t* t) {
+    vma_mru_cache_update(t, nullptr);
+}
+
 ___inline void vmacache_invalidate(proc_mem_t* mem) noexcept {
     __atomic_fetch_add(&mem->vmacache_seq, 1, __ATOMIC_RELEASE);
 }
@@ -151,6 +159,11 @@ ___inline vma_region_t* vmacache_find(task_t* t, proc_mem_t* mem, uint32_t vaddr
 
     if (kernel::unlikely(t->vmacache_seq != seq)) {
         return nullptr;
+    }
+
+    vma_region_t* mru = t->mru_vma;
+    if (kernel::likely(mru && vaddr >= mru->vaddr_start && vaddr < mru->vaddr_end)) {
+        return mru;
     }
 
     const uint32_t idx = (vaddr >> 12) & 3u;
@@ -178,6 +191,8 @@ ___inline void vmacache_update(task_t* t, proc_mem_t* mem, uint32_t vaddr, vma_r
     uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
 
     if (kernel::unlikely(t->vmacache_seq != seq)) {
+        vma_mru_cache_invalidate(t);
+
         t->vmacache[0] = nullptr; t->vmacache[1] = nullptr;
         t->vmacache[2] = nullptr; t->vmacache[3] = nullptr;
         
@@ -187,6 +202,8 @@ ___inline void vmacache_update(task_t* t, proc_mem_t* mem, uint32_t vaddr, vma_r
     uint32_t idx = (vaddr >> 12) & 3u;
 
     t->vmacache[idx] = vma;
+
+    vma_mru_cache_update(t, vma);
 }
 
 static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_region_t* right) noexcept {
@@ -493,6 +510,66 @@ extern "C" vma_region_t* vma_create(
 
     if (file) {
         vfs_node_retain(file);
+    }
+
+    vma_region_t pseudo_new{};
+
+    pseudo_new.vaddr_start = aligned_vaddr;
+    pseudo_new.vaddr_end = aligned_vaddr + aligned_size;
+    
+    pseudo_new.length = size;
+    
+    pseudo_new.map_flags = flags;
+    
+    pseudo_new.file = file;
+    pseudo_new.file_offset = file_offset - diff;
+    pseudo_new.file_size = aligned_file_size;
+
+    {
+        kernel::SpinLockNativeGuard guard(mem->mmap_lock);
+
+        uint32_t prev_idx = pseudo_new.vaddr_start;
+
+        if (kernel::likely(mt_prev(&mem->mmap_mt, &prev_idx))) {
+            vma_region_t* prev = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, prev_idx));
+
+            if (kernel::likely(prev && regions_are_mergeable(prev, &pseudo_new))) {
+                
+                mt_erase_region(mem, prev);
+
+                prev->vaddr_end = pseudo_new.vaddr_end;
+                prev->length += pseudo_new.length;
+                
+                if (prev->file) {
+                    uint32_t new_fsz = prev->file_size + pseudo_new.file_size;
+                    prev->file_size = (new_fsz > (prev->vaddr_end - prev->vaddr_start)) ? (prev->vaddr_end - prev->vaddr_start) : new_fsz;
+                }
+                
+                mt_insert_region(mem, prev);
+                
+                vmacache_invalidate(mem);
+
+                uint32_t next_idx = prev->vaddr_end;
+
+                if (kernel::likely(mt_next(&mem->mmap_mt, &next_idx))) {
+                    vma_region_t* next = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, next_idx));
+
+                    if (kernel::likely(next && regions_are_mergeable(prev, next))) {
+                        merge_regions_into_left(mem, prev, next);
+                    }
+                }
+
+                if (mem->mmap_top < prev->vaddr_end) {
+                    mem->mmap_top = prev->vaddr_end;
+                }
+                
+                if (file) {
+                    vfs_node_release(file);
+                }
+
+                return prev;
+            }
+        }
     }
 
     vma_region_t* region = create_initialized_region(

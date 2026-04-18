@@ -174,6 +174,7 @@ typedef struct task {
 
     uint32_t vmacache_seq __cacheline_aligned;
 
+    vma_region_t* mru_vma;
     vma_region_t* vmacache[4];
 
     /* cacheline 5 */
