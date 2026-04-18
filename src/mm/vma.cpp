@@ -685,8 +685,6 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             if (o_start == m_start && o_end == m_end) {
                 mt_erase_region(mem, curr);
                 
-                vmacache_invalidate(mem);
-
                 call_rcu(&curr->rcu, free_region_rcu_cb);
                 
                 scan = o_end;
@@ -723,6 +721,8 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 
             scan = o_end;
         }
+        
+        vmacache_invalidate(mem);
     }
 
     for (uint32_t i = 0u; i < collector.len; i++) {
