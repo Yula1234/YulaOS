@@ -284,7 +284,7 @@ static inline void paging_tlb_flush_range_local(uint32_t start, uint32_t end) {
     end = (end + 0xFFFu) & ~0xFFFu;
 
     const uint32_t pages = (end - start) >> 12;
-    if (pages > 16u) {
+    if (pages > 64u) {
         uint32_t cr3;
         __asm__ volatile(
             "mov %%cr3, %0\n\t"
