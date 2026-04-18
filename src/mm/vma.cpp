@@ -427,7 +427,7 @@ extern "C" void vma_init(proc_mem_t* mem) {
 
     mt_init_cache();
 
-    rwspinlock_init(&mem->mmap_lock);
+    spinlock_init(&mem->mmap_lock);
 
     mt_init(&mem->mmap_mt);
 
@@ -447,7 +447,7 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
         return;
     }
 
-    kernel::RwSpinLockNativeWriteGuard guard(mem->mmap_lock);
+    kernel::SpinLockNativeGuard guard(mem->mmap_lock);
 
     uint32_t idx = 0u;
     while (true) {
@@ -514,7 +514,7 @@ extern "C" vma_region_t* vma_create(
     bool has_overlap = false;
 
     {
-        kernel::RwSpinLockNativeWriteGuard guard(mem->mmap_lock);
+        kernel::SpinLockNativeGuard guard(mem->mmap_lock);
 
         has_overlap = vma_find_overlap_unlocked(mem, region->vaddr_start, region->vaddr_end) != nullptr;
 
@@ -593,7 +593,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
     UnmapSpanCollector collector;
 
     {
-        kernel::RwSpinLockNativeWriteGuard guard(mem->mmap_lock);
+        kernel::SpinLockNativeGuard guard(mem->mmap_lock);
 
         uint32_t need_spans = 0u;
         uint32_t scan = vaddr;
@@ -772,7 +772,7 @@ extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out
         return 0;
     }
 
-    kernel::RwSpinLockNativeWriteGuard guard(mem->mmap_lock);
+    kernel::SpinLockNativeGuard guard(mem->mmap_lock);
 
     if (size == 0u) {
         return 0;

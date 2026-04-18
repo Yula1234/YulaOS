@@ -68,7 +68,7 @@ typedef struct proc_mem {
 
     spinlock_t pt_lock;
 
-    rwspinlock_t mmap_lock;
+    spinlock_t mmap_lock;
     maple_tree_t mmap_mt;
 
     volatile uint32_t vmacache_seq;
