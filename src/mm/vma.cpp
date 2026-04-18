@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <lib/cpp/lock_guard.h>
+#include <lib/compiler.h>
+#include <lib/cpp/new.h>
+
 #include <mm/heap.h>
 #include <mm/vma.h>
 #include <mm/pmm.h>
-
-#include <lib/cpp/lock_guard.h>
-#include <lib/cpp/new.h>
 
 #include <arch/i386/paging.h>
 
@@ -27,26 +28,26 @@ constexpr uint32_t user_stack_addr_max = 0x80000000u;
 
 static kmem_cache_t* g_vma_region_cache = nullptr;
 
-static inline uint32_t align_down_4k(uint32_t v) noexcept {
+___inline uint32_t align_down_4k(uint32_t v) noexcept {
     return v & ~page_mask;
 }
 
-static inline uint32_t align_up_4k(uint32_t v) noexcept {
+___inline uint32_t align_up_4k(uint32_t v) noexcept {
     return (v + page_mask) & ~page_mask;
 }
 
-static inline bool ranges_overlap(uint32_t a_start, uint32_t a_end, uint32_t b_start, uint32_t b_end) noexcept {
+___inline bool ranges_overlap(uint32_t a_start, uint32_t a_end, uint32_t b_start, uint32_t b_end) noexcept {
     return (a_start < b_end) && (b_start < a_end);
 }
 
-static inline uint32_t region_span(const vma_region_t* region) noexcept {
+___inline uint32_t region_span(const vma_region_t* region) noexcept {
     return region ? (region->vaddr_end - region->vaddr_start) : 0u;
 }
 
-static void free_region(vma_region_t* region) noexcept;
+___inline void free_region(vma_region_t* region) noexcept;
 
 static void free_region_rcu_cb(rcu_head_t* head) noexcept {
-    if (!head) {
+    if (kernel::unlikely(!head)) {
         return;
     }
 
@@ -62,7 +63,7 @@ static vma_region_t* create_initialized_region(
 {
     vma_region_t* r = alloc_region();
 
-    if (!r) {
+    if (kernel::unlikely(!r)) {
         return nullptr;
     }
 
@@ -83,7 +84,7 @@ static vma_region_t* create_initialized_region(
 static void adjust_file_bounds(
     vma_region_t* region, uint32_t cut_len, uint32_t new_len, bool cut_from_left) noexcept
 {
-    if (!region->file) {
+    if (kernel::unlikely(!region->file)) {
         region->file_offset = 0u;
         region->file_size = 0u;
 
@@ -106,7 +107,7 @@ static void adjust_file_bounds(
 }
 
 static bool regions_are_mergeable(const vma_region_t* left, const vma_region_t* right) noexcept {
-    if (!left || !right) {
+    if (kernel::unlikely(!left || !right)) {
         return false;
     }
 
@@ -133,58 +134,55 @@ static bool regions_are_mergeable(const vma_region_t* left, const vma_region_t* 
     return true;
 }
 
-static void mt_insert_region(proc_mem_t* mem, vma_region_t* region) noexcept {
+___inline void mt_insert_region(proc_mem_t* mem, vma_region_t* region) noexcept {
     mt_store(&mem->mmap_mt, region->vaddr_start, region->vaddr_end - 1u, region);
 }
 
-static void mt_erase_region(proc_mem_t* mem, vma_region_t* region) noexcept {
+___inline void mt_erase_region(proc_mem_t* mem, vma_region_t* region) noexcept {
     mt_erase(&mem->mmap_mt, region->vaddr_start, region->vaddr_end - 1u);
 }
 
 ___inline void vmacache_invalidate(proc_mem_t* mem) noexcept {
-    if (mem) {
+    if (kernel::likely(mem)) {
         __atomic_fetch_add(&mem->vmacache_seq, 1, __ATOMIC_RELEASE);
     }
 }
 
-static vma_region_t* vmacache_find(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
-    if (!t
-        || !mem) {
+___inline vma_region_t* vmacache_find(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
+    if (kernel::unlikely(!t || !mem)) {
         return nullptr;
     }
 
     uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
-    if (t->vmacache_seq != seq) {
+    if (kernel::unlikely(t->vmacache_seq != seq)) {
         return nullptr;
     }
 
     for (int i = 0; i < 4; i++) {
         vma_region_t* vma = t->vmacache[i];
 
-        if (vma && vaddr >= vma->vaddr_start && vaddr < vma->vaddr_end) {
+        if (kernel::likely(vma && vaddr >= vma->vaddr_start && vaddr < vma->vaddr_end)) {
             return vma;
         }
     }
     return nullptr;
 }
 
-static void vmacache_update(task_t* t, proc_mem_t* mem, vma_region_t* vma) noexcept {
-    if (!t
-        || !mem
-        || !vma) {
+___inline void vmacache_update(task_t* t, proc_mem_t* mem, vma_region_t* vma) noexcept {
+    if (kernel::unlikely(!t || !mem || !vma)) {
         return;
     }
 
     uint32_t seq = __atomic_load_n(&mem->vmacache_seq, __ATOMIC_ACQUIRE);
 
-    if (t->vmacache_seq != seq) {
+    if (kernel::unlikely(t->vmacache_seq != seq)) {
         t->vmacache[0] = nullptr; t->vmacache[1] = nullptr;
         t->vmacache[2] = nullptr; t->vmacache[3] = nullptr;
 
         t->vmacache_seq = seq;
     }
 
-    if (t->vmacache[0] == vma) {
+    if (kernel::likely(t->vmacache[0] == vma)) {
         return;
     }
 
@@ -206,7 +204,7 @@ static void vmacache_update(task_t* t, proc_mem_t* mem, vma_region_t* vma) noexc
 }
 
 static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_region_t* right) noexcept {
-    if (!mem || !left || !right) {
+    if (kernel::unlikely(!mem || !left || !right)) {
         return;
     }
 
@@ -243,23 +241,23 @@ static void merge_regions_into_left(proc_mem_t* mem, vma_region_t* left, vma_reg
     call_rcu(&right->rcu, free_region_rcu_cb);
 }
 
-static vma_region_t* vma_find_lockless(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
-    if (!mem) {
+___inline vma_region_t* vma_find_lockless(task_t* t, proc_mem_t* mem, uint32_t vaddr) noexcept {
+    if (kernel::unlikely(!mem)) {
         return nullptr;
     }
 
-    if (t) {
+    if (kernel::likely(t)) {
         vma_region_t* cached = vmacache_find(t, mem, vaddr);
         
-        if (cached) {
+        if (kernel::likely(cached)) {
             return cached;
         }
     }
 
     vma_region_t* cand = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, vaddr));
 
-    if (cand && vaddr >= cand->vaddr_start && vaddr < cand->vaddr_end) {
-        if (t) {
+    if (kernel::likely(cand && vaddr >= cand->vaddr_start && vaddr < cand->vaddr_end)) {
+        if (kernel::likely(t)) {
             vmacache_update(t, mem, cand);
         }
 
@@ -270,17 +268,17 @@ static vma_region_t* vma_find_lockless(task_t* t, proc_mem_t* mem, uint32_t vadd
 }
 
 static vma_region_t* vma_find_overlap_unlocked(proc_mem_t* mem, uint32_t start, uint32_t end_excl) noexcept {
-    if (!mem || end_excl <= start) {
+    if (kernel::unlikely(!mem || end_excl <= start)) {
         return nullptr;
     }
 
     vma_region_t* cand = static_cast<vma_region_t*>(mt_load(&mem->mmap_mt, start));
 
-    if (cand && ranges_overlap(start, end_excl, cand->vaddr_start, cand->vaddr_end)) {
+    if (kernel::unlikely(cand && ranges_overlap(start, end_excl, cand->vaddr_start, cand->vaddr_end))) {
         return cand;
     }
 
-    if (cand) {
+    if (kernel::unlikely(cand)) {
         uint32_t next_idx = cand->vaddr_end;
         vma_region_t* next = static_cast<vma_region_t*>(mt_find_after(&mem->mmap_mt, next_idx));
 
@@ -337,20 +335,21 @@ static void unmap_range(uint32_t* page_dir, uint32_t start, uint32_t end) noexce
     (void)aligned_end;
 }
 
-static void release_region_file(vma_region_t* region) noexcept {
-    if (region && region->file) {
+___inline void release_region_file(vma_region_t* region) noexcept {
+    if (kernel::likely(region && region->file)) {
         vfs_node_release(region->file);
+
         region->file = nullptr;
     }
 }
 
-static vma_region_t* alloc_region() noexcept {
-    if (!g_vma_region_cache) {
+___inline vma_region_t* alloc_region() noexcept {
+    if (kernel::unlikely(!g_vma_region_cache)) {
         return nullptr;
     }
 
     void* obj = kmem_cache_alloc(g_vma_region_cache);
-    if (!obj) {
+    if (kernel::unlikely(!obj)) {
         return nullptr;
     }
 
@@ -358,10 +357,11 @@ static vma_region_t* alloc_region() noexcept {
     return region;
 }
 
-static void free_region(vma_region_t* region) noexcept {
-    if (region) {
+___inline void free_region(vma_region_t* region) noexcept {
+    if (kernel::likely(region)) {
         release_region_file(region);
-        region->~vma_region_t();
+
+        region->~vma_region_t();        
         kmem_cache_free(g_vma_region_cache, region);
     }
 }
@@ -374,24 +374,30 @@ struct UnmapSpanCollector {
 
     span_t stack_spans[8];
     span_t* spans = stack_spans;
+    
     uint32_t cap = 8u;
     uint32_t len = 0u;
+
     bool use_heap = false;
 
     bool init(uint32_t needed) noexcept {
-        if (needed > 8u) {
+        if (kernel::unlikely(needed > 8u)) {
             spans = new (kernel::nothrow) span_t[needed]{};
-            if (!spans) {
+
+            if (kernel::unlikely(!spans)) {
                 return false;
             }
+            
             cap = needed;
+            
             use_heap = true;
         }
+
         return true;
     }
 
     void push(uint32_t start, uint32_t end) noexcept {
-        if (start >= end) {
+        if (kernel::unlikely(start >= end)) {
             return;
         }
 
@@ -399,6 +405,7 @@ struct UnmapSpanCollector {
             if (end > spans[len - 1u].end) {
                 spans[len - 1u].end = end;
             }
+
             return;
         }
 
@@ -408,7 +415,7 @@ struct UnmapSpanCollector {
     }
 
     void cleanup() noexcept {
-        if (use_heap) {
+        if (kernel::unlikely(use_heap)) {
             delete[] spans;
         }
     }
@@ -417,11 +424,11 @@ struct UnmapSpanCollector {
 }
 
 extern "C" void vma_init(proc_mem_t* mem) {
-    if (!mem) {
+    if (kernel::unlikely(!mem)) {
         return;
     }
 
-    if (!g_vma_region_cache) {
+    if (kernel::unlikely(!g_vma_region_cache)) {
         g_vma_region_cache = kmem_cache_create("vma", sizeof(vma_region_t), 0u, 0u);
     }
 
@@ -443,7 +450,7 @@ extern "C" void vma_init(proc_mem_t* mem) {
 }
 
 extern "C" void vma_destroy(proc_mem_t* mem) {
-    if (!mem) {
+    if (kernel::unlikely(!mem)) {
         return;
     }
 
@@ -452,7 +459,8 @@ extern "C" void vma_destroy(proc_mem_t* mem) {
     uint32_t idx = 0u;
     while (true) {
         vma_region_t* region = static_cast<vma_region_t*>(mt_find_after(&mem->mmap_mt, idx));
-        if (!region) {
+
+        if (kernel::unlikely(!region)) {
             break;
         }
 
@@ -470,11 +478,11 @@ extern "C" vma_region_t* vma_create(
     vfs_node_t* file, uint32_t file_offset, uint32_t file_size,
     uint32_t flags
 ) {
-    if (!mem) {
+    if (kernel::unlikely(!mem)) {
         return nullptr;
     }
 
-    if (size == 0u) {
+    if (kernel::unlikely(size == 0u)) {
         return nullptr;
     }
 
@@ -504,10 +512,11 @@ extern "C" vma_region_t* vma_create(
         size, flags, file, file_offset - diff, aligned_file_size
     );
 
-    if (!region) {
+    if (kernel::unlikely(!region)) {
         if (file) {
             vfs_node_release(file);
         }
+
         return nullptr;
     }
 
@@ -518,7 +527,7 @@ extern "C" vma_region_t* vma_create(
 
         has_overlap = vma_find_overlap_unlocked(mem, region->vaddr_start, region->vaddr_end) != nullptr;
 
-        if (!has_overlap) {
+        if (kernel::likely(!has_overlap)) {
             mt_insert_region(mem, region);
 
             vma_region_t* merged = region;
@@ -559,7 +568,7 @@ extern "C" vma_region_t* vma_create(
         }
     }
 
-    if (has_overlap) {
+    if (kernel::likely(has_overlap)) {
         free_region(region);
 
         return nullptr;
@@ -583,8 +592,7 @@ extern "C" int vma_has_overlap(proc_mem_t* mem, uint32_t start, uint32_t end_exc
 }
 
 extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
-    if (!mem || !mem->page_dir || (vaddr & page_mask)
-        || len == 0u || vaddr + len < vaddr) {
+    if (kernel::unlikely(!mem || !mem->page_dir || (vaddr & page_mask) || len == 0u || vaddr + len < vaddr)) {
         return -1;
     }
 
@@ -601,7 +609,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         while (scan < vaddr_end) {
             vma_region_t* r = vma_find_lockless(nullptr, mem, scan);
 
-            if (!r || r->vaddr_end <= scan) {
+            if (kernel::unlikely(!r || r->vaddr_end <= scan)) {
                 return -1;
             }
 
@@ -609,11 +617,11 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
             scan = r->vaddr_end;
         }
 
-        if (need_spans == 0u) {
+        if (kernel::unlikely(need_spans == 0u)) {
             return 0;
         }
 
-        if (!collector.init(need_spans)) {
+        if (kernel::unlikely(!collector.init(need_spans))) {
             return -1;
         }
 
@@ -622,7 +630,7 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
         while (scan < vaddr_end) {
             vma_region_t* curr = vma_find_lockless(nullptr, mem, scan);
 
-            if (!curr) {
+            if (kernel::unlikely(!curr)) {
                 collector.cleanup();
                 return -1;
             }
@@ -731,17 +739,17 @@ extern "C" int vma_remove(proc_mem_t* mem, uint32_t vaddr, uint32_t len) {
 }
 
 extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_excl) {
-    if (!mem || !mem->page_dir) {
+    if (kernel::unlikely(!mem || !mem->page_dir)) {
         return 0;
     }
 
     kernel::RcuReadGuard guard;
 
-    if (end_excl <= start) {
+    if (kernel::likely(end_excl <= start)) {
         return 1;
     }
 
-    if (start < user_addr_min || end_excl > user_addr_max) {
+    if (kernel::unlikely(start < user_addr_min || end_excl > user_addr_max)) {
         return 0;
     }
 
@@ -751,11 +759,11 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
 
         vma_region_t* region = vma_find_lockless(nullptr, mem, cur);
 
-        if (!region) {
+        if (kernel::unlikely(!region)) {
             return 0;
         }
 
-        if (region->vaddr_start >= region->vaddr_end) {
+        if (kernel::unlikely(region->vaddr_start >= region->vaddr_end)) {
             return 0;
         }
 
@@ -768,13 +776,13 @@ extern "C" int vma_validate_range(proc_mem_t* mem, uint32_t start, uint32_t end_
 }
 
 extern "C" uint32_t vma_alloc_slot(proc_mem_t* mem, uint32_t size, uint32_t* out_vaddr) {
-    if (!mem || !out_vaddr) {
+    if (kernel::unlikely(!mem || !out_vaddr)) {
         return 0;
     }
 
     kernel::SpinLockNativeGuard guard(mem->mmap_lock);
 
-    if (size == 0u) {
+    if (kernel::unlikely(size == 0u)) {
         return 0;
     }
 
