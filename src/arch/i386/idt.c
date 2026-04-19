@@ -477,50 +477,77 @@ static int handle_mmap_demand_fault(task_t* curr, uint32_t cr2) {
         }
     }
 
-    void* new_page = pmm_alloc_block();
+    uint32_t batch_pages = 8;
+    
+    uint32_t max_vma_pages = (info.vaddr_end - vaddr) >> 12;
 
-    if (!new_page) {
-        if (info.file) {
-            vfs_node_release(info.file);
-        }
-        return -1;
+    if (batch_pages > max_vma_pages) {
+        batch_pages = max_vma_pages;
     }
 
-    memzero_nt_page(new_page);
+    uint32_t pt_idx = (vaddr >> 12) & 0x3FFu;
+    uint32_t pt_remaining = 1024u - pt_idx;
 
-    if ((info.map_flags & MAP_STACK) == 0 &&
-        info.file &&
-        info.file->ops &&
-        info.file->ops->read &&
-        rel < info.file_size) {
+    if (batch_pages > pt_remaining) {
+        batch_pages = pt_remaining;
+    }
 
-        uint32_t bytes = info.file_size - rel;
-        if (bytes > 4096) bytes = 4096;
+    uint32_t mapped_count = 0;
 
-        if (info.file_offset > 0xFFFFFFFFu - rel) {
-            vfs_node_release(info.file);
+    for (uint32_t i = 0; i < batch_pages; i++) {
+        uint32_t curr_vaddr = vaddr + (i * 4096u);
+        uint32_t curr_rel   = rel + (i * 4096u);
 
-            pmm_free_block(new_page);
-            return -1;
+        if (i > 0) {
+            uint32_t existing_pte;
+            if (paging_get_present_pte(curr->mem->page_dir, curr_vaddr, &existing_pte)) {
+                break;
+            }
         }
 
-        int r = info.file->ops->read(info.file, info.file_offset + rel, bytes, new_page);
-
-        if (r < 0) {
-            vfs_node_release(info.file);
-
-            pmm_free_block(new_page);
-            return -1;
+        void* new_page = pmm_alloc_block();
+        if (!new_page) {
+            if (i == 0) {
+                if (info.file) vfs_node_release(info.file);
+                return -1;
+            }
+            break;
         }
+
+        memzero_nt_page(new_page);
+
+        if ((info.map_flags & MAP_STACK) == 0 &&
+            info.file &&
+            info.file->ops &&
+            info.file->ops->read &&
+            curr_rel < info.file_size) {
+
+            uint32_t bytes = info.file_size - curr_rel;
+            if (bytes > 4096) bytes = 4096;
+
+            if (info.file_offset > 0xFFFFFFFFu - curr_rel) {
+                pmm_free_block(new_page);
+                break;
+            }
+
+            int r = info.file->ops->read(info.file, info.file_offset + curr_rel, bytes, new_page);
+
+            if (r < 0) {
+                pmm_free_block(new_page);
+                break;
+            }
+        }
+
+        paging_map_ex(curr->mem->page_dir, curr_vaddr, (uint32_t)new_page, 7, PAGING_MAP_NO_TLB_FLUSH);
+
+        mapped_count++;
     }
 
     if (info.file) {
         vfs_node_release(info.file);
     }
 
-    paging_map_ex(curr->mem->page_dir, vaddr, (uint32_t)new_page, 7, PAGING_MAP_NO_TLB_FLUSH);
-
-    curr->mem->mem_pages++;
+    curr->mem->mem_pages += mapped_count;
 
     return 1;
 }
