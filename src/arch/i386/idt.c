@@ -677,6 +677,8 @@ void isr_handler(registers_t* regs) {
             }
 
             int from_user = (regs->cs == 0x1B);
+            int yield_needed = 0;
+
             if (likely(from_user && curr && curr->state == TASK_RUNNING && curr->pid != 0)) {
                 if (likely(curr->exec_start > 0)) {
                     uint64_t delta_exec = cpu->sched_ticks - curr->exec_start;
@@ -693,10 +695,42 @@ void isr_handler(registers_t* regs) {
 
                 if (unlikely(curr->ticks_left == 0)) {
                     curr->ticks_left = curr->quantum;
-                    lapic_eoi();
-                    sched_yield();
-                    goto out;
+                    
+                    if (cpu->runq_count == 0 && curr->pending_signals == 0) {
+                        yield_needed = 0;
+                    } else {
+                        yield_needed = 1;
+                    }
                 }
+            }
+
+            if (cpu->index != 0) {
+                uint32_t ticks_to_next = 1;
+                
+                if (cpu->runq_count == 0 && curr && curr->pid != 0 && !yield_needed) {
+                    uint32_t sleep_ticks = 0xFFFFFFFFu;
+                    
+                    if (cpu->sleep_next_wake_tick != 0xFFFFFFFFu) {
+                        if (cpu->sleep_next_wake_tick > timer_ticks) {
+                            sleep_ticks = cpu->sleep_next_wake_tick - timer_ticks;
+                        } else {
+                            sleep_ticks = 1;
+                        }
+                    }
+                    
+                    uint32_t quantum_ticks = curr->ticks_left;
+                    if (quantum_ticks == 0) quantum_ticks = 1;
+
+                    ticks_to_next = (sleep_ticks < quantum_ticks) ? sleep_ticks : quantum_ticks;
+                    
+                    const uint32_t max_sleep_shot = KERNEL_TIMER_HZ * 2;
+
+                    if (ticks_to_next > max_sleep_shot) {
+                        ticks_to_next = max_sleep_shot;
+                    }
+                }
+                
+                lapic_timer_oneshot(ticks_to_next);
             }
 
             lapic_eoi();
@@ -705,6 +739,10 @@ void isr_handler(registers_t* regs) {
 
             if (curr) {
                 maybe_deliver_pending_signal(curr, regs);
+            }
+
+            if (yield_needed) {
+                sched_yield();
             }
 
             goto out;

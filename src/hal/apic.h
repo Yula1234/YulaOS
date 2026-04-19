@@ -37,7 +37,10 @@
 #define KERNEL_TIMER_HZ     1000
 
 void lapic_init(void);
+
 void lapic_timer_init(uint32_t hz);
+void lapic_timer_oneshot(uint32_t ticks_to_wait);
+
 void lapic_eoi(void);
 
 static inline uint32_t lapic_read(uint32_t reg) {

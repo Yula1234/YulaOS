@@ -437,6 +437,12 @@ void sched_yield(void) {
     rcu_qs_count_inc();
 
     if (kernel::likely(prev && prev->state == TASK_RUNNING && prev->pid != 0)) {
+        if (me->runq_count == 0 && prev->pending_signals == 0) {
+            return;
+        }
+    }
+
+    if (kernel::likely(prev && prev->state == TASK_RUNNING && prev->pid != 0)) {
         task_t* leftmost = me->runq_leftmost;
 
         if (kernel::unlikely(!leftmost)) {
@@ -448,15 +454,8 @@ void sched_yield(void) {
         }
     }
 
-    uint32_t irq_flags;
-    __asm__ volatile(
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "cli"
-        : "=r"(irq_flags)
-        :
-        : "memory"
-    );
+    uint32_t irq_flags = irq_save();
+    
     const bool irq_was_enabled = (irq_flags & 0x200u) != 0u;
 
     if (kernel::likely(prev && prev != me->idle_task && prev->pid != 0)) {

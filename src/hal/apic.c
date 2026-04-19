@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Yula1234
 
+#include <kernel/smp/cpu.h>
+
 #include "apic.h"
 #include "io.h"
 
@@ -77,18 +79,38 @@ void lapic_init() {
 void lapic_timer_init(uint32_t hz) {
     if (ticks_per_tick == 0) {
         uint32_t ticks_per_10ms = calibrate_apic_timer();
-        
         if (ticks_per_10ms < 1000) {
             ticks_per_10ms = 150000;
         }
-        
         uint32_t ticks_per_second = ticks_per_10ms * 100;
         ticks_per_tick = ticks_per_second / hz;
     }
     
-    if (ticks_per_tick == 0) ticks_per_tick = 1000;
+    if (ticks_per_tick == 0) {
+        ticks_per_tick = 1000;
+    }
 
-    lapic_write(LAPIC_TIMER, 32 | 0x20000); 
+    cpu_t* cpu = cpu_current();
+    if (cpu && cpu->index == 0) {
+        lapic_write(LAPIC_TIMER, 32 | 0x20000); 
+    } else {
+        lapic_write(LAPIC_TIMER, 32 | 0x00000); 
+    }
+    
     lapic_write(LAPIC_TIMER_DIV, 0x3); 
     lapic_write(LAPIC_TIMER_INIT, ticks_per_tick);
+}
+
+void lapic_timer_oneshot(uint32_t ticks_to_wait) {
+    if (ticks_to_wait == 0) {
+        ticks_to_wait = 1;
+    }
+    
+    uint64_t hw_ticks = (uint64_t)ticks_to_wait * (uint64_t)ticks_per_tick;
+
+    if (hw_ticks > 0xFFFFFFFFull) {
+        hw_ticks = 0xFFFFFFFFull;
+    }
+    
+    lapic_write(LAPIC_TIMER_INIT, (uint32_t)hw_ticks);
 }
