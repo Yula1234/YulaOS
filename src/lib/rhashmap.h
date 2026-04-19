@@ -3,29 +3,33 @@
 
 #pragma once
 
-#include <lib/cpp/hash_traits.h>
-#include <lib/cpp/lock_guard.h>
-#include <lib/cpp/utility.h>
-#include <lib/cpp/rwlock.h>
-#include <lib/cpp/atomic.h>
-#include <lib/cpp/new.h>
-
-#include <kernel/smp/cpu.h>
-#include <kernel/panic.h>
-#include <kernel/rcu.h>
-
-#include <lib/compiler.h>
-#include <lib/types.h>
-
-#include <mm/heap.h>
-
 #include <stddef.h>
 #include <stdint.h>
 
+#include <lib/types.h>
+#include <lib/compiler.h>
+#include <lib/cpp/new.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/utility.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/hash_traits.h>
+
+#include <kernel/rcu.h>
+#include <kernel/smp/cpu.h>
+#include <kernel/panic.h>
+
+#include <mm/heap.h>
+
 namespace kernel {
 
+/*
+ * RHashNode is embedded inside the value structure.
+ * It is aligned to 2 bytes to reserve the lowest bit for the RCU 'nulls' marker.
+ * Hash memoization avoids expensive re-hashing during table resize.
+ */
 struct alignas(2) RHashNode {
     atomic_ptr_t next_;
+    uint32_t hash_;
 };
 
 template <
@@ -40,10 +44,19 @@ class RHashTable {
 private:
     struct BucketArray {
         rcu_head_t rcu;
+
         size_t capacity;
         size_t mask;
         
         atomic_ptr_t buckets[];
+    };
+
+    struct alignas(64) BucketLock {
+        SpinLock lock;
+    };
+
+    struct alignas(64) PerCpuCounter {
+        atomic<int32_t> count{0};
     };
 
     static constexpr uintptr_t k_nulls_flag = 1u;
@@ -67,7 +80,8 @@ private:
             return nullptr;
         }
 
-        const size_t offset = reinterpret_cast<size_t>(&(reinterpret_cast<V*>(4096)->*NodeMember)) - 4096u;
+        const size_t offset = reinterpret_cast<size_t>(&(reinterpret_cast<V*>(4096u)->*NodeMember)) - 4096u;
+
         return reinterpret_cast<V*>(reinterpret_cast<char*>(node) - offset);
     }
 
@@ -88,6 +102,7 @@ private:
         }
 
         BucketArray* tbl = new (mem) BucketArray();
+
         tbl->capacity = capacity;
         tbl->mask = capacity - 1u;
 
@@ -105,66 +120,28 @@ private:
         kfree(tbl);
     }
 
+    void add_size_(int32_t delta) noexcept {
+        cpu_t* cpu = cpu_current();
+        const int idx = cpu ? cpu->index : 0;
+
+        size_counters_[idx].count.fetch_add(delta, memory_order::relaxed);
+    }
+
+    uint32_t get_size_() const noexcept {
+        int32_t total = 0;
+
+        for (int i = 0; i < MAX_CPUS; i++) {
+            total += size_counters_[i].count.load(memory_order::relaxed);
+        }
+
+        return total < 0 ? 0u : static_cast<uint32_t>(total);
+    }
+
 public:
     enum class InsertResult {
         Inserted,
         AlreadyPresent,
         Failed
-    };
-
-    class RcuValueView {
-    public:
-        RcuValueView() = default;
-
-        RcuValueView(const RHashTable& map, const K& key)
-            : guard_() {
-            value_ = map.find_unprotected_(key);
-        }
-
-        RcuValueView(const RcuValueView&) = delete;
-        RcuValueView& operator=(const RcuValueView&) = delete;
-
-        RcuValueView(RcuValueView&& other) noexcept
-            : value_(other.value_) {
-            other.value_ = nullptr;
-        }
-
-        RcuValueView& operator=(RcuValueView&& other) noexcept {
-            if (this == &other) {
-                return *this;
-            }
-
-            value_ = other.value_;
-            other.value_ = nullptr;
-
-            return *this;
-        }
-
-        ~RcuValueView() = default;
-
-        explicit operator bool() const noexcept {
-            return value_ != nullptr;
-        }
-
-        V* value_ptr() noexcept {
-            return value_;
-        }
-
-        const V* value_ptr() const noexcept {
-            return value_;
-        }
-
-        V* operator->() noexcept {
-            return value_;
-        }
-
-        const V* operator->() const noexcept {
-            return value_;
-        }
-
-    private:
-        RcuReadGuard guard_;
-        V* value_ = nullptr;
     };
 
     RHashTable() {
@@ -189,14 +166,6 @@ public:
         }
     }
 
-    RcuValueView find(const K& key) const noexcept {
-        return RcuValueView(*this, key);
-    }
-
-    bool contains(const K& key) const noexcept {
-        return static_cast<bool>(find(key));
-    }
-
     InsertResult insert_unique(V* value) noexcept {
         if (!value) {
             return InsertResult::Failed;
@@ -206,42 +175,51 @@ public:
         const K& key = extract(*value);
         const uint32_t hash = Hash::hash(key);
 
-        ReadGuard r_guard(resize_rwlock_);
+        RHashNode* new_node = node_from_value_(value);
+        new_node->hash_ = hash;
 
+        RcuReadGuard r_guard;
+
+    retry:
         BucketArray* tbl = current_table_.read();
         if (!tbl) {
             return InsertResult::Failed;
         }
 
-        const uint32_t bucket_idx = hash & tbl->mask;
         const uint32_t lock_idx = hash & k_lock_mask;
 
         {
-            SpinLockSafeGuard s_guard(locks_[lock_idx]);
+            SpinLockSafeGuard s_guard(locks_[lock_idx].lock);
 
+            if (tbl != current_table_.read()) {
+                goto retry;
+            }
+
+            const uint32_t bucket_idx = hash & tbl->mask;
             void* ptr = atomic_ptr_read(&tbl->buckets[bucket_idx]);
 
             while (!is_nulls_(ptr)) {
                 RHashNode* node = static_cast<RHashNode*>(ptr);
-                V* val = value_from_node_(node);
+                
+                if (node->hash_ == hash) {
+                    V* val = value_from_node_(node);
 
-                if (extract(*val) == key) {
-                    return InsertResult::AlreadyPresent;
+                    if (extract(*val) == key) {
+                        return InsertResult::AlreadyPresent;
+                    }
                 }
 
                 ptr = atomic_ptr_read(&node->next_);
             }
 
-            RHashNode* new_node = node_from_value_(value);
-
             atomic_ptr_set(&new_node->next_, atomic_ptr_read(&tbl->buckets[bucket_idx]));
             atomic_ptr_store_explicit(&tbl->buckets[bucket_idx], new_node, ATOMIC_RELEASE);
         }
 
-        const uint32_t current_size = size_.fetch_add(1u, memory_order::relaxed) + 1u;
+        add_size_(1);
 
-        if (current_size > tbl->capacity * 2u) {
-            maybe_resize_();
+        if (get_size_() > tbl->capacity * 2u) {
+            schedule_resize_();
         }
 
         return InsertResult::Inserted;
@@ -251,31 +229,41 @@ public:
         const uint32_t hash = Hash::hash(key);
         KeyExtractor extract;
 
-        ReadGuard r_guard(resize_rwlock_);
+        RcuReadGuard r_guard;
 
+    retry:
         BucketArray* tbl = current_table_.read();
         if (!tbl) {
             return nullptr;
         }
 
-        const uint32_t bucket_idx = hash & tbl->mask;
         const uint32_t lock_idx = hash & k_lock_mask;
 
-        SpinLockSafeGuard s_guard(locks_[lock_idx]);
+        SpinLockSafeGuard s_guard(locks_[lock_idx].lock);
+
+        if (tbl != current_table_.read()) {
+            goto retry;
+        }
+
+        const uint32_t bucket_idx = hash & tbl->mask;
 
         atomic_ptr_t* prev_ptr = &tbl->buckets[bucket_idx];
         void* ptr = atomic_ptr_read(prev_ptr);
 
         while (!is_nulls_(ptr)) {
             RHashNode* node = static_cast<RHashNode*>(ptr);
-            V* val = value_from_node_(node);
+            
+            if (node->hash_ == hash) {
+                V* val = value_from_node_(node);
 
-            if (extract(*val) == key) {
-                void* next = atomic_ptr_read(&node->next_);
-                atomic_ptr_store_explicit(prev_ptr, next, ATOMIC_RELEASE);
-                
-                size_.fetch_sub(1u, memory_order::relaxed);
-                return val;
+                if (extract(*val) == key) {
+                    void* next = atomic_ptr_read(&node->next_);
+                    atomic_ptr_store_explicit(prev_ptr, next, ATOMIC_RELEASE);
+                    
+                    add_size_(-1);
+
+                    return val;
+                }
             }
 
             prev_ptr = &node->next_;
@@ -285,36 +273,19 @@ public:
         return nullptr;
     }
 
-    void clear() noexcept {
-        WriteGuard w_guard(resize_rwlock_);
-        
-        BucketArray* tbl = current_table_.read();
-        if (!tbl) {
-            return;
-        }
-
-        for (size_t i = 0; i < tbl->capacity; ++i) {
-            atomic_ptr_set(&tbl->buckets[i], make_nulls_(static_cast<uint32_t>(i)));
-        }
-
-        size_.store(0u, memory_order::relaxed);
-    }
-
     template<typename F>
-    bool with_value(const K& key, F func) const {
-        RcuValueView view = find(key);
+    bool with_value_unlocked(const K& key, F func) const noexcept {
+        RcuReadGuard r_guard;
 
-        if (!view) {
+        V* val = find_unprotected_(key);
+        if (!val) {
             return false;
         }
 
-        func(*view.value_ptr());
-        return true;
+        return func(val);
     }
 
 private:
-    friend class RcuValueView;
-
     V* find_unprotected_(const K& key) const noexcept {
         const uint32_t hash = Hash::hash(key);
         KeyExtractor extract;
@@ -330,10 +301,13 @@ private:
 
         while (!is_nulls_(ptr)) {
             RHashNode* node = static_cast<RHashNode*>(ptr);
-            V* val = value_from_node_(node);
+            
+            if (node->hash_ == hash) {
+                V* val = value_from_node_(node);
 
-            if (extract(*val) == key) {
-                return val;
+                if (extract(*val) == key) {
+                    return val;
+                }
             }
 
             ptr = atomic_ptr_read(&node->next_);
@@ -346,51 +320,50 @@ private:
         return nullptr;
     }
 
-    void maybe_resize_() noexcept {
-        const uint32_t current_size = size_.load(memory_order::acquire);
-        BucketArray* tbl = current_table_.read();
-
-        if (!tbl || current_size < tbl->capacity * 2u) {
+    void schedule_resize_() noexcept {
+        if (!resize_lock_.try_acquire()) {
             return;
         }
 
-        WriteGuard w_guard(resize_rwlock_);
-
-        tbl = current_table_.read();
-        if (current_size < tbl->capacity * 2u) {
+        BucketArray* old_tbl = current_table_.read();
+        if (!old_tbl || get_size_() < old_tbl->capacity * 2u) {
+            resize_lock_.release();
             return;
         }
 
-        const size_t new_cap = tbl->capacity * 2u;
+        const size_t new_cap = old_tbl->capacity * 2u;
+
         BucketArray* new_tbl = allocate_buckets_(new_cap);
         if (!new_tbl) {
+            resize_lock_.release();
             return;
         }
 
-        KeyExtractor extract;
+        uint32_t irq_flags = irq_save();
 
-        for (size_t i = 0; i < tbl->capacity; ++i) {
-            void* ptr = atomic_ptr_read(&tbl->buckets[i]);
+        for (size_t i = 0; i < k_num_locks; i++) {
+            locks_[i].lock.acquire();
+        }
+
+        for (size_t i = 0; i < old_tbl->capacity; ++i) {
+            void* ptr = atomic_ptr_read(&old_tbl->buckets[i]);
 
             RHashNode* low_head = static_cast<RHashNode*>(make_nulls_(static_cast<uint32_t>(i)));
             RHashNode* low_tail = nullptr;
 
-            RHashNode* high_head = static_cast<RHashNode*>(make_nulls_(static_cast<uint32_t>(i + tbl->capacity)));
+            RHashNode* high_head = static_cast<RHashNode*>(make_nulls_(static_cast<uint32_t>(i + old_tbl->capacity)));
             RHashNode* high_tail = nullptr;
 
             while (!is_nulls_(ptr)) {
                 RHashNode* node = static_cast<RHashNode*>(ptr);
-                V* val = value_from_node_(node);
                 
-                const uint32_t hash = Hash::hash(extract(*val));
-
-                if (hash & tbl->capacity) {
+                if (node->hash_ & old_tbl->capacity) {
                     if (high_tail) {
                         atomic_ptr_set(&high_tail->next_, node);
                     } else {
                         high_head = node;
                     }
-                    
+
                     high_tail = node;
                 } else {
                     if (low_tail) {
@@ -398,7 +371,7 @@ private:
                     } else {
                         low_head = node;
                     }
-                    
+
                     low_tail = node;
                 }
 
@@ -410,24 +383,32 @@ private:
             }
 
             if (high_tail) {
-                atomic_ptr_set(&high_tail->next_, make_nulls_(static_cast<uint32_t>(i + tbl->capacity)));
+                atomic_ptr_set(&high_tail->next_, make_nulls_(static_cast<uint32_t>(i + old_tbl->capacity)));
             }
 
             atomic_ptr_set(&new_tbl->buckets[i], low_head);
-            atomic_ptr_set(&new_tbl->buckets[i + tbl->capacity], high_head);
+            atomic_ptr_set(&new_tbl->buckets[i + old_tbl->capacity], high_head);
         }
 
         current_table_.assign(new_tbl);
 
-        call_rcu(&tbl->rcu, free_bucket_array_rcu_);
+        for (size_t i = 0; i < k_num_locks; i++) {
+            locks_[i].lock.release();
+        }
+
+        irq_restore(irq_flags);
+
+        call_rcu(&old_tbl->rcu, free_bucket_array_rcu_);
+
+        resize_lock_.release();
     }
 
     RcuPtr<BucketArray> current_table_{};
     
-    atomic<uint32_t> size_{0u};
+    PerCpuCounter size_counters_[MAX_CPUS]{};
     
-    RwLock resize_rwlock_{};
-    SpinLock locks_[k_num_locks]{};
+    SpinLock resize_lock_{};
+    BucketLock locks_[k_num_locks]{};
 };
 
 } // namespace kernel

@@ -16,9 +16,9 @@
 #include <lib/rhashmap.h>
 #include <lib/string.h>
 
-#include <fs/vfs.h>
-
 #include <mm/heap.h>
+
+#include <fs/vfs.h>
 
 #include "pipe.h"
 
@@ -240,18 +240,15 @@ public:
         poll_waitq_put(&poll_waitq);
     }
 
-    kernel::string name;
-
+public:
     kernel::RHashNode hash_node;
     rcu_head_t rcu;
-    
+
+    kernel::string name;
     kernel::SpinLock lock;
-    
     kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> pending_conns;
-    
     poll_waitq_t poll_waitq;
     vfs_node_t* listen_node;
-    
     uint32_t refcount;
     uint32_t closing;
 };
@@ -293,24 +290,24 @@ struct IpcEndpointKeyExtractor {
 
 class IpcEndpointRegistry {
 public:
-    bool add(const kernel::string& name, IpcEndpoint* ep) {
-        (void)name;
+    bool add(IpcEndpoint* ep) {
         if (!ep) {
             return false;
         }
 
-        ep->retain();
+        ep->retain(); 
         
         if (endpoints.insert_unique(ep) == decltype(endpoints)::InsertResult::Inserted) {
             return true;
         }
 
-        ep->release();
+        ep->release(); 
         return false;
     }
 
     void remove(const kernel::string& name) {
         IpcEndpoint* ep = endpoints.remove(name);
+
         if (ep) {
             call_rcu(&ep->rcu,[](rcu_head_t* head) {
                 IpcEndpoint* e = container_of(head, IpcEndpoint, rcu);
@@ -321,25 +318,32 @@ public:
 
     bool find_and_retain(const kernel::string& name,
                          kernel::IntrusiveRef<IpcEndpoint>& out) {
-        auto view = endpoints.find(name);
-        if (!view) {
-            return false;
-        }
+        
+        return endpoints.with_value_unlocked(
+            name,
+            [&out](IpcEndpoint* ep) -> bool {
+                if (!ep) {
+                    return false;
+                }
 
-        IpcEndpoint* ep = view.value_ptr();
+                if (!ep->retain()) {
+                    return false;
+                }
 
-        if (!ep->retain()) {
-            return false;
-        }
-
-        out = kernel::IntrusiveRef<IpcEndpoint>::adopt(ep);
-        return true;
+                out = kernel::IntrusiveRef<IpcEndpoint>::adopt(ep);
+                return true;
+            }
+        );
     }
 
 private:
     kernel::RHashTable<
-        kernel::string, IpcEndpoint, &IpcEndpoint::hash_node, 
-        IpcEndpointKeyExtractor, kernel::HashTraits<kernel::string>, 128
+        kernel::string, 
+        IpcEndpoint, 
+        &IpcEndpoint::hash_node, 
+        IpcEndpointKeyExtractor, 
+        kernel::HashTraits<kernel::string>, 
+        128
     > endpoints;
 };
 
@@ -368,6 +372,7 @@ struct vfs_node* ipc_listen_create(const char* name) {
     if (ipc_name_valid(name)) {
         node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
     }
+    
     if (!node) {
         return nullptr;
     }
@@ -380,6 +385,7 @@ struct vfs_node* ipc_listen_create(const char* name) {
 
     memset(node, 0, sizeof(*node));
     strlcpy(node->name, "ipc_listen", sizeof(node->name));
+    
     node->flags = VFS_FLAG_IPC_LISTEN;
     node->refs = 1;
     node->ops = &ipc_listen_ops;
@@ -394,7 +400,7 @@ struct vfs_node* ipc_listen_create(const char* name) {
         ep->release();
     };
 
-    if (!g_endpoints.add(kernel::string(name), ep)) {
+    if (!g_endpoints.add(ep)) {
         kfree(node);
         ep->shutdown();
         ep->release();
