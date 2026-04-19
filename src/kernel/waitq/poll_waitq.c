@@ -1,29 +1,36 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
+#include <kernel/locking/guards.h>
+#include <kernel/panic.h>
+#include <kernel/proc.h>
+
 #include <hal/lock.h>
 #include <hal/irq.h>
 #include <hal/cpu.h>
 
-#include <kernel/panic.h>
-#include <kernel/proc.h>
+#include <lib/compiler.h>
+#include <lib/atomic.h>
 
 #include "poll_waitq.h"
 
 static int poll_waitq_waiter_is_clean(const poll_waiter_t* w) {
-    if (!w) {
+    if (unlikely(!w)) {
+        panic("poll_waitq_waiter_is_clean: called on null poll_waiter_t*\n");
+    }
+
+    if (unlikely(w->task != 0
+        || w->q != 0)) {
         return 0;
     }
 
-    if (w->task != 0 || w->q != 0) {
+    if (unlikely(w->q_node.next != 0
+        || w->q_node.prev != 0)) {
         return 0;
     }
 
-    if (w->q_node.next != 0 || w->q_node.prev != 0) {
-        return 0;
-    }
-
-    if (w->task_node.next != 0 || w->task_node.prev != 0) {
+    if (unlikely(w->task_node.next != 0
+        || w->task_node.prev != 0)) {
         return 0;
     }
 
@@ -31,7 +38,7 @@ static int poll_waitq_waiter_is_clean(const poll_waiter_t* w) {
 }
 
 static int poll_waitq_try_unlink_node(dlist_head_t* node) {
-    if (!node) {
+    if (unlikely(!node)) {
         return 0;
     }
 
@@ -39,12 +46,12 @@ static int poll_waitq_try_unlink_node(dlist_head_t* node) {
 }
 
 void poll_waitq_init(poll_waitq_t* q) {
-    if (!q) {
-        return;
+    if (unlikely(!q)) {
+        panic("poll_waitq_init: called on null poll_waitq_t*\n");
     }
     
     spinlock_init(&q->lock);
-    
+
     dlist_init(&q->waiters);
 
     q->refs = 1u;
@@ -52,13 +59,9 @@ void poll_waitq_init(poll_waitq_t* q) {
     q->finalize_ctx = 0;
 }
 
-void poll_waitq_init_finalizable(
-    poll_waitq_t* q,
-    void (*finalize)(void* ctx),
-    void* finalize_ctx
-) {
-    if (!q) {
-        return;
+void poll_waitq_init_finalizable(poll_waitq_t* q, void (*finalize)(void* ctx),void* finalize_ctx) {
+    if (unlikely(!q)) {
+        panic("poll_waitq_init_finalizable: called on null poll_waitq_t*\n");
     }
 
     poll_waitq_init(q);
@@ -68,30 +71,30 @@ void poll_waitq_init_finalizable(
 }
 
 void poll_waitq_retain(poll_waitq_t* q) {
-    if (!q) {
-        return;
+    if (unlikely(!q)) {
+        panic("poll_waitq_retain: called on null poll_waitq_t*\n");
     }
 
     __atomic_fetch_add(&q->refs, 1u, __ATOMIC_RELAXED);
 }
 
 void poll_waitq_put(poll_waitq_t* q) {
-    if (!q) {
-        return;
+    if (unlikely(!q)) {
+        panic("poll_waitq_put: called on null poll_waitq_t*\n");
     }
 
     uint32_t old_refs = __atomic_fetch_sub(&q->refs, 1u, __ATOMIC_ACQ_REL);
 
-    if (old_refs == 0u) {
+    if (unlikely(old_refs == 0u)) {
         panic("POLL: waitq_put underflow");
     }
 
-    if (old_refs == 1u) {
+    if (unlikely(old_refs == 1u)) {
         void (*finalize)(void*) = q->finalize;
         void* finalize_ctx = q->finalize_ctx;
 
-        if (!finalize) {
-            panic("POLL: waitq finalized without finalizer");
+        if (unlikely(!finalize)) {
+            panic("POLL: waitq finalized without finalizer\n");
         }
 
         finalize(finalize_ctx);
@@ -99,140 +102,153 @@ void poll_waitq_put(poll_waitq_t* q) {
 }
 
 int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
-    if (!q || !w || !task) return -1;
+    if (unlikely(!q || !w || !task)) {
+        panic("poll_waitq_register: some of arguments are null\n");
+    }
 
-    uint32_t q_flags = spinlock_acquire_safe(&q->lock);
+    guard_spinlock_safe(&q->lock);
 
-    if (!poll_waitq_waiter_is_clean(w)) {
-        spinlock_release_safe(&q->lock, q_flags);
+    if (unlikely(!poll_waitq_waiter_is_clean(w))) {
         return -1;
     }
 
-    if (!proc_task_retain(task)) {
-        spinlock_release_safe(&q->lock, q_flags);
+    if (unlikely(!proc_task_retain(task))) {
         return -1;
     }
 
     poll_waitq_retain(q);
 
-    spinlock_acquire(&task->poll_lock);
+    {
+        guard_spinlock(&task->poll_lock);
 
-    w->task = task;
-    w->q = q;
+        w->task = task;
+        w->q = q;
 
-    atomic_uint_store_explicit(&w->triggered_events, 0, ATOMIC_RELAXED);
+        atomic_uint_store_explicit(&w->triggered_events, 0, ATOMIC_RELAXED);
 
-    dlist_add_tail(&w->q_node, &q->waiters);
-    dlist_add_tail(&w->task_node, &task->poll_waiters);
-
-    spinlock_release(&task->poll_lock);
-    spinlock_release_safe(&q->lock, q_flags);
+        dlist_add_tail(&w->q_node, &q->waiters);
+        dlist_add_tail(&w->task_node, &task->poll_waiters);
+    }
 
     return 0;
 }
 
+static int poll_waitq_do_unregister(struct task* task, poll_waiter_t* target_w) {
+    uint32_t flags = irq_save();
+
+    poll_waitq_t* q_to_put = 0;
+    
+    int status = 1;
+
+    {
+        guard_spinlock(&task->poll_lock);
+
+        poll_waiter_t* w = target_w;
+        
+        if (!w) {
+            if (dlist_empty(&task->poll_waiters)) {
+                status = -1;
+            } else {
+                w = container_of(task->poll_waiters.next, poll_waiter_t, task_node);
+            }
+        }
+
+        if (w) {
+            poll_waitq_t* q = w->q;
+
+            if (!q) {
+                if (w->task) {
+                    w->task = 0;
+
+                    proc_task_put(task);
+                }
+
+                poll_waitq_try_unlink_node(&w->task_node);
+            } else if (unlikely(!spinlock_try_acquire(&q->lock))) {
+                status = 0;
+            } else {
+                if (poll_waitq_try_unlink_node(&w->q_node)) {
+                    w->q = 0;
+                }
+
+                if (poll_waitq_try_unlink_node(&w->task_node)) {
+                    w->task = 0;
+                    proc_task_put(task);
+                }
+
+                spinlock_release(&q->lock);
+                
+                q_to_put = q;
+            }
+        }
+    }
+
+    irq_restore(flags);
+
+    if (q_to_put) {
+        poll_waitq_put(q_to_put);
+    }
+
+    return status;
+}
+
 void poll_waitq_unregister(poll_waiter_t* w) {
-    if (!w) {
-        return;
+    if (unlikely(!w)) {
+        panic("poll_waitq_unregister: called on null poll_waiter_t*\n");
     }
 
     task_t* task = w->task;
+
     if (!task) {
         task = proc_current();
     }
 
-    if (!task) {
-        return;
-    }
-
-restart:
-    uint32_t flags = irq_save();
-
-    spinlock_acquire(&task->poll_lock);
-
-    poll_waitq_t* q = w->q;
-    if (!q) {
-        if (w->task) {
-            w->task = 0;
-
-            proc_task_put(task);
-        }
-
-        poll_waitq_try_unlink_node(&w->task_node);
-
-        spinlock_release(&task->poll_lock);
-        
-        irq_restore(flags);
-        return;
-    }
-
-    if (!spinlock_try_acquire(&q->lock)) {
-        spinlock_release(&task->poll_lock);
-        
-        irq_restore(flags);
-        
+    while (poll_waitq_do_unregister(task, w) == 0) {
         cpu_relax();
-        
-        goto restart;
     }
-
-    if (poll_waitq_try_unlink_node(&w->q_node)) {
-        w->q = 0;
-    }
-
-    if (poll_waitq_try_unlink_node(&w->task_node)) {
-        w->task = 0;
-        
-        proc_task_put(task);
-    }
-
-    spinlock_release(&q->lock);
-    spinlock_release(&task->poll_lock);
-
-    irq_restore(flags);
-
-    poll_waitq_put(q);
 }
 
 void poll_waitq_wake_all(poll_waitq_t* q, uint32_t events) {
-    if (!q) return;
+    if (unlikely(!q)) {
+        panic("poll_waitq_wake_all: called on null poll_waitq_t*\n");
+    }
 
-    uint32_t q_flags = spinlock_acquire_safe(&q->lock);
+    guard_spinlock_safe(&q->lock);
 
     for (dlist_head_t* it = q->waiters.next; it != &q->waiters; it = it->next) {
         
         poll_waiter_t* w = container_of(it, poll_waiter_t, q_node);
-        
+
         task_t* task = w->task;
 
         atomic_uint_fetch_or_explicit(&w->triggered_events, events, ATOMIC_RELEASE);
 
-        if (task) {
+        if (likely(task != 0)) {
             proc_wake(task);
         }
     }
-
-    spinlock_release_safe(&q->lock, q_flags);
 }
 
 void poll_waitq_detach_all(poll_waitq_t* q) {
-    if (!q) return;
+    if (unlikely(!q)) {
+        panic("poll_waitq_detach_all: called on null poll_waitq_t*\n");
+    }
 
-    uint32_t q_flags = spinlock_acquire_safe(&q->lock);
+    guard_spinlock_safe(&q->lock);
 
     while (!dlist_empty(&q->waiters)) {
         poll_waiter_t* w = container_of(q->waiters.next, poll_waiter_t, q_node);
+
         task_t* task = w->task;
 
         if (task) {
-            spinlock_acquire(&task->poll_lock);
+            guard_spinlock(&task->poll_lock);
 
             if (poll_waitq_try_unlink_node(&w->task_node)) {
                 w->task = 0;
+
                 proc_task_put(task);
             }
-
-            spinlock_release(&task->poll_lock);
         }
 
         if (poll_waitq_try_unlink_node(&w->q_node)) {
@@ -241,65 +257,22 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
 
         poll_waitq_put(q);
     }
-
-    spinlock_release_safe(&q->lock, q_flags);
 }
 
 void poll_task_cleanup(struct task* task) {
-    if (!task) {
-        return;
+    if (unlikely(!task)) {
+        panic("poll_task_cleanup: called on null struct task*\n");
     }
 
-restart:
-    uint32_t flags = irq_save();
-    spinlock_acquire(&task->poll_lock);
+    for (;;) {
+        int status = poll_waitq_do_unregister(task, 0);
 
-    while (!dlist_empty(&task->poll_waiters)) {
-        poll_waiter_t* w = container_of(task->poll_waiters.next, poll_waiter_t, task_node);
-        poll_waitq_t* q = w->q;
+        if (status == -1) {
+            break;
+        }
 
-        if (q) {
-            if (!spinlock_try_acquire(&q->lock)) {
-                spinlock_release(&task->poll_lock);
-                
-                irq_restore(flags);
-                
-                cpu_relax();
-
-                goto restart;
-            }
-
-            if (poll_waitq_try_unlink_node(&w->q_node)) {
-                w->q = 0;
-            }
-
-            if (poll_waitq_try_unlink_node(&w->task_node)) {
-                if (w->task) {
-                    w->task = 0;
-
-                    proc_task_put(task);
-                }
-            }
-
-            spinlock_release(&q->lock);
-            spinlock_release(&task->poll_lock);
-
-            irq_restore(flags);
-
-            poll_waitq_put(q);
-            goto restart;
-        } else {
-            if (poll_waitq_try_unlink_node(&w->task_node)) {
-                if (w->task) {
-                    w->task = 0;
-
-                    proc_task_put(task);
-                }
-            }
+        if (status == 0) {
+            cpu_relax();
         }
     }
-
-    spinlock_release(&task->poll_lock);
-    
-    irq_restore(flags);
 }
