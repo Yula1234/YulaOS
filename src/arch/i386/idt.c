@@ -609,6 +609,8 @@ void isr_handler(registers_t* regs) {
     if (regs->int_no == IPI_RESCHED_VECTOR) {
         lapic_eoi();
 
+        sched_yield();
+
         goto out;
     }
 
