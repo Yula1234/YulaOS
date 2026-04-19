@@ -241,12 +241,17 @@ ___inline void dequeue_task(cpu_t* cpu, task_t* p) {
     proc_task_put(p);
 }
 
+void sched_resched_cpu(cpu_t* target) {
+    lapic_write(LAPIC_ICRHI, target->id << 24);
+    lapic_write(LAPIC_ICRLO, IPI_RESCHED_VECTOR | 0x4000);
+}
+
 void sched_add(task_t* t) {
-    if (!t || t->pid == 0) {
+    if (kernel::unlikely(!t || t->pid == 0)) {
         return;
     }
 
-    if (t->assigned_cpu == -1) {
+    if (kernel::unlikely(t->assigned_cpu == -1)) {
         t->assigned_cpu = get_best_cpu();
     }
     
@@ -257,16 +262,16 @@ void sched_add(task_t* t) {
 
     {
         kernel::SpinLockNativeGuard state_guard(t->state_lock);
-        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+        if (kernel::unlikely(t->state == TASK_ZOMBIE || t->state == TASK_UNUSED)) {
             return;
         }
     }
 
-    if (t->is_queued) {
+    if (kernel::unlikely(t->is_queued)) {
         return;
     }
 
-    if (target->current_task == t) {
+    if (kernel::likely(target->current_task == t)) {
         return;
     }
 
@@ -308,6 +313,14 @@ void sched_add(task_t* t) {
     enqueue_task(target, t);
 
     g_cpu_cache.store(cpu_cache_invalid, kernel::memory_order::relaxed);
+
+    if (target->current_task && target->current_task->pid != 0) {
+        if (t->vruntime < target->current_task->vruntime) {
+            if (target->id != cpu_current()->id) {
+                sched_resched_cpu(target);
+            }
+        }
+    }
 }
 
 ___inline task_t* pick_next_cfs(cpu_t* cpu) {
