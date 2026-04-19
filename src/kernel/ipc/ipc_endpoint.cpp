@@ -1,22 +1,22 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
+#include <lib/cpp/intrusive_ref.h>
+#include <lib/cpp/lock_guard.h>
+#include <lib/cpp/utility.h>
+#include <lib/cpp/string.h>
+#include <lib/cpp/dlist.h>
+#include <lib/cpp/new.h>
+#include <lib/cpp/vfs.h>
 
 #include <kernel/ipc/ipc_endpoint.h>
+#include <kernel/waitq/poll_waitq.h>
+#include <kernel/proc.h>
+
+#include <lib/rhashmap.h>
+#include <lib/string.h>
 
 #include <fs/vfs.h>
-
-#include <kernel/proc.h>
-#include <kernel/waitq/poll_waitq.h>
-
-#include <lib/cpp/lock_guard.h>
-#include <lib/cpp/intrusive_ref.h>
-#include <lib/cpp/new.h>
-#include <lib/cpp/utility.h>
-#include <lib/cpp/vfs.h>
-#include <lib/cpp/dlist.h>
-#include <lib/cpp/string.h>
-#include <lib/string.h>
-#include <lib/hash_map.h>
 
 #include <mm/heap.h>
 
@@ -235,17 +235,23 @@ public:
         return p;
     }
 
-private:
     void finalize() {
         poll_waitq_detach_all(&poll_waitq);
         poll_waitq_put(&poll_waitq);
     }
 
     kernel::string name;
+
+    kernel::RHashNode hash_node;
+    rcu_head_t rcu;
+    
     kernel::SpinLock lock;
+    
     kernel::DBLinkedList<kernel::IntrusiveRef<IpcPendingConn>> pending_conns;
+    
     poll_waitq_t poll_waitq;
     vfs_node_t* listen_node;
+    
     uint32_t refcount;
     uint32_t closing;
 };
@@ -279,33 +285,62 @@ void IpcPendingConn::release() {
     delete this;
 }
 
+struct IpcEndpointKeyExtractor {
+    const kernel::string& operator()(const IpcEndpoint& ep) const {
+        return ep.endpoint_name();
+    }
+};
+
 class IpcEndpointRegistry {
 public:
     bool add(const kernel::string& name, IpcEndpoint* ep) {
-        return endpoints.insert_unique(name, ep);
+        (void)name;
+        if (!ep) {
+            return false;
+        }
+
+        ep->retain();
+        
+        if (endpoints.insert_unique(ep) == decltype(endpoints)::InsertResult::Inserted) {
+            return true;
+        }
+
+        ep->release();
+        return false;
     }
 
     void remove(const kernel::string& name) {
-        endpoints.remove(name);
+        IpcEndpoint* ep = endpoints.remove(name);
+        if (ep) {
+            call_rcu(&ep->rcu,[](rcu_head_t* head) {
+                IpcEndpoint* e = container_of(head, IpcEndpoint, rcu);
+                e->release();
+            });
+        }
     }
 
     bool find_and_retain(const kernel::string& name,
                          kernel::IntrusiveRef<IpcEndpoint>& out) {
-        return endpoints.with_value_unlocked(
-            name,
-            [&out](IpcEndpoint* ep) -> bool {
-                if (!ep) {
-                    return false;
-                }
+        auto view = endpoints.find(name);
+        if (!view) {
+            return false;
+        }
 
-                out = kernel::IntrusiveRef<IpcEndpoint>::from_borrowed(ep);
-                return (bool)out;
-            }
-        );
+        IpcEndpoint* ep = view.value_ptr();
+
+        if (!ep->retain()) {
+            return false;
+        }
+
+        out = kernel::IntrusiveRef<IpcEndpoint>::adopt(ep);
+        return true;
     }
 
 private:
-    HashMap<kernel::string, IpcEndpoint*, 128> endpoints;
+    kernel::RHashTable<
+        kernel::string, IpcEndpoint, &IpcEndpoint::hash_node, 
+        IpcEndpointKeyExtractor, kernel::HashTraits<kernel::string>, 128
+    > endpoints;
 };
 
 static IpcEndpointRegistry g_endpoints;
