@@ -41,8 +41,12 @@ static int poll_waitq_try_unlink_node(dlist_head_t* node) {
 }
 
 void poll_waitq_init(poll_waitq_t* q) {
-    if (!q) return;
+    if (!q) {
+        return;
+    }
+    
     spinlock_init(&q->lock);
+    
     dlist_init(&q->waiters);
 
     q->refs = 1u;
@@ -118,6 +122,8 @@ int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
     w->task = task;
     w->q = q;
 
+    atomic_uint_store_explicit(&w->triggered_events, 0, ATOMIC_RELAXED);
+
     dlist_add_tail(&w->q_node, &q->waiters);
     dlist_add_tail(&w->task_node, &task->poll_waiters);
 
@@ -190,14 +196,19 @@ restart:
     poll_waitq_put(q);
 }
 
-void poll_waitq_wake_all(poll_waitq_t* q) {
+void poll_waitq_wake_all(poll_waitq_t* q, uint32_t events) {
     if (!q) return;
 
     uint32_t q_flags = spinlock_acquire_safe(&q->lock);
 
     for (dlist_head_t* it = q->waiters.next; it != &q->waiters; it = it->next) {
+        
         poll_waiter_t* w = container_of(it, poll_waiter_t, q_node);
+        
         task_t* task = w->task;
+
+        atomic_uint_fetch_or_explicit(&w->triggered_events, events, ATOMIC_RELEASE);
+
         if (task) {
             proc_wake(task);
         }

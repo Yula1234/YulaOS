@@ -156,7 +156,7 @@ public:
             }
         }
 
-        poll_waitq_wake_all(&poll_waitq);
+        poll_waitq_wake_all(&poll_waitq, VFS_POLLHUP);
 
         while (!to_release.empty()) {
             kernel::IntrusiveRef<IpcPendingConn> p;
@@ -187,7 +187,7 @@ public:
             }
         }
 
-        poll_waitq_wake_all(&poll_waitq);
+        poll_waitq_wake_all(&poll_waitq, VFS_POLLIN);
         return true;
     }
 

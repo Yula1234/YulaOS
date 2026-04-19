@@ -382,7 +382,7 @@ static size_t pty_echo_to_master(const uint8_t* data, size_t size, void* ctx) {
 
     if (n != 0) {
         sem_signal_n(&ch->sem_read, n);
-        poll_waitq_wake_all(&p->poll_waitq);
+        poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
     }
 
     return (size_t)n;
@@ -489,7 +489,7 @@ static int pty_chan_read(pty_pair_t* p, pty_chan_t* ch, uint32_t size, void* buf
         }
         sem_give_n(&ch->sem_write, n);
         if (n > 0) {
-            poll_waitq_wake_all(&p->poll_waitq);
+            poll_waitq_wake_all(&p->poll_waitq, VFS_POLLOUT);
         }
 
         if (read_count > 0) {
@@ -542,7 +542,7 @@ __attribute__((unused)) static int pty_chan_read_nonblock(pty_pair_t* p, pty_cha
     }
     sem_signal_n(&ch->sem_write, n);
     if (n > 0) {
-        poll_waitq_wake_all(&p->poll_waitq);
+        poll_waitq_wake_all(&p->poll_waitq, VFS_POLLOUT);
     }
     return (int)n;
 }
@@ -574,7 +574,7 @@ __attribute__((unused)) static int pty_chan_write_nonblock(pty_pair_t* p, pty_ch
     spinlock_release_safe(&p->lock, flags);
 
     sem_signal_n(&ch->sem_read, size);
-    poll_waitq_wake_all(&p->poll_waitq);
+    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
     return (int)size;
 }
 
@@ -614,7 +614,7 @@ __attribute__((unused)) static int pty_chan_write(pty_pair_t* p, pty_chan_t* ch,
 
         sem_give_n(&ch->sem_read, n);
         if (n > 0) {
-            poll_waitq_wake_all(&p->poll_waitq);
+            poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
         }
     }
 
@@ -648,7 +648,7 @@ static int pty_master_write(vfs_node_t* node, uint32_t offset, uint32_t size, co
     }
 
     pty_ld_receive(p->ld, (const uint8_t*)buffer, (size_t)size);
-    poll_waitq_wake_all(&p->poll_waitq);
+    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
     return (int)size;
 }
 
@@ -893,7 +893,7 @@ static int pty_close(vfs_node_t* node) {
     sem_wake_all(&p->m2s.sem_write);
     sem_wake_all(&p->s2m.sem_read);
     sem_wake_all(&p->s2m.sem_write);
-    poll_waitq_wake_all(&p->poll_waitq);
+    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN | VFS_POLLOUT | VFS_POLLHUP);
 
     if (do_unregister && pts_id != 0u) {
         char name[32];

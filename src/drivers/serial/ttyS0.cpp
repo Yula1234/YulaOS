@@ -83,7 +83,7 @@ static void drain_rx(void) {
         }
 
         g_ld.receive_bytes(buf, n);
-        poll_waitq_wake_all(&g_poll_waitq);
+        poll_waitq_wake_all(&g_poll_waitq, VFS_POLLIN);
     }
 }
 

@@ -56,7 +56,7 @@ static void kbd_put_char(char c) {
     if (!was_full) {
         sem_signal(&kbd_sem);
     }
-    poll_waitq_wake_all(&kbd_poll_waitq);
+    poll_waitq_wake_all(&kbd_poll_waitq, VFS_POLLIN);
     spinlock_release_safe(&kbd_buf_lock, flags);
 }
 
@@ -133,7 +133,7 @@ static int kbd_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* tas
 }
 
 void kbd_poll_notify_focus_change(void) {
-    poll_waitq_wake_all(&kbd_poll_waitq);
+    poll_waitq_wake_all(&kbd_poll_waitq, VFS_POLLIN);
 }
 
 extern volatile uint32_t timer_ticks;

@@ -1823,23 +1823,18 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
         (void)proc_change_state(t, TASK_RUNNING);
     };
-
-    int result = 0;
-
-    int ready = 0;
+    
     for (uint32_t i = 0; i < nfds; i++) {
         pollfd_t* p = &k_fds[i];
         p->revents = 0;
 
         int32_t fd = p->fd;
-        int16_t ev = p->events;
-
         if (fd < 0) {
+            p->revents = VFS_POLLNVAL;
             continue;
         }
 
         kernel::RcuReadGuard rcu_guard;
-        
         fd_table_t* ft = curr->fd_table;
         file_desc_t* d = nullptr;
 
@@ -1847,38 +1842,86 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
             d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
         }
 
-        if (!d || !d->node) {
+        if (d && d->node) {
+            if (waiters && (p->events & (VFS_POLLIN | VFS_POLLOUT)) != 0) {
+                if (d->node->ops && d->node->ops->poll_register) {
+                    (void)d->node->ops->poll_register(d->node, &waiters[i], curr);
+                }
+            }
+        } else {
             p->revents = VFS_POLLNVAL;
-            ready++;
-            continue;
         }
 
-        vfs_node_t* node = d->node;
-
-        if (waiters && (ev & (VFS_POLLIN | VFS_POLLOUT)) != 0) {
-            if (node->ops && node->ops->poll_register) {
-                (void)node->ops->poll_register(node, &waiters[i], curr);
-            }
-        }
-
-        if (node->ops && node->ops->poll_status) {
-            int16_t rev = (int16_t)node->ops->poll_status(node, ev);
-            if (rev != 0) {
-                p->revents = rev;
-                ready++;
-            }
+        if (waiters) {
+            atomic_uint_store_explicit(&waiters[i].triggered_events, 0xFFFFFFFFu, ATOMIC_RELAXED);
         }
     }
 
-    if (ready > 0) {
-        result = ready;
-        goto out;
-    }
+    int result = 0;
 
     for (;;) {
         if (curr->pending_signals != 0) {
             unblock_curr(curr);
             result = -2;
+            goto out;
+        }
+
+        if (proc_change_state(curr, TASK_WAITING) != 0) {
+            unblock_curr(curr);
+            continue;
+        }
+
+        smp_mb(); 
+
+        int ready = 0;
+        for (uint32_t i = 0; i < nfds; i++) {
+            pollfd_t* p = &k_fds[i];
+
+            if (p->fd < 0 || p->revents == VFS_POLLNVAL) {
+                if (p->revents != 0) ready++;
+                continue;
+            }
+
+            uint32_t triggers = 0xFFFFFFFFu;
+
+            if (waiters) {
+                triggers = atomic_uint_xchg_explicit(&waiters[i].triggered_events, 0, ATOMIC_ACQ_REL);
+            }
+
+            if (triggers == 0) {
+                continue;
+            }
+
+            if ((triggers & (p->events | VFS_POLLERR | VFS_POLLHUP | VFS_POLLNVAL)) == 0) {
+                continue;
+            }
+
+            int16_t rev = 0;
+
+            kernel::RcuReadGuard rcu_guard;
+            fd_table_t* ft = curr->fd_table;
+            file_desc_t* d = nullptr;
+
+            if (ft && (uint32_t)p->fd < ft->max_fds) {
+                d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[p->fd]));
+            }
+
+            if (!d || !d->node) {
+                rev = VFS_POLLNVAL;
+            } else {
+                vfs_node_t* node = d->node;
+                if (node->ops && node->ops->poll_status) {
+                    rev = (int16_t)node->ops->poll_status(node, p->events);
+                }
+            }
+
+            p->revents = rev;
+            if (rev != 0) ready++;
+        }
+
+        if (ready > 0) {
+            unblock_curr(curr);
+            result = ready;
             goto out;
         }
 
@@ -1893,56 +1936,14 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
 
         if (have_deadline) {
-            proc_sleep_add(curr, end_tick);
+            if (curr->state == TASK_WAITING) {
+                proc_sleep_add(curr, end_tick);
+            }
         } else {
-            if (proc_change_state(curr, TASK_WAITING) != 0) {
-                unblock_curr(curr);
-                result = -2;
-                goto out;
+            if (curr->state == TASK_WAITING) {
+                sched_yield();
             }
-            sched_yield();
         }
-
-        ready = 0;
-        for (uint32_t i = 0; i < nfds; i++) {
-            pollfd_t* p = &k_fds[i];
-
-            if (p->fd < 0 || p->revents == VFS_POLLNVAL) {
-                if (p->revents != 0) ready++;
-                continue;
-            }
-
-            int32_t fd = p->fd;
-            int16_t ev = p->events;
-            int16_t rev = 0;
-
-            kernel::RcuReadGuard rcu_guard;
-            fd_table_t* ft = curr->fd_table;
-            file_desc_t* d = nullptr;
-
-            if (ft && (uint32_t)fd < ft->max_fds) {
-                d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
-            }
-
-            if (!d || !d->node) {
-                rev = VFS_POLLNVAL;
-            } else {
-                vfs_node_t* node = d->node;
-                if (node->ops && node->ops->poll_status) {
-                    rev = (int16_t)node->ops->poll_status(node, ev);
-                }
-            }
-
-            p->revents = rev;
-            if (rev != 0) ready++;
-        }
-
-        if (ready > 0) {
-            unblock_curr(curr);
-            result = ready;
-            goto out;
-        }
-
     }
 
 out:

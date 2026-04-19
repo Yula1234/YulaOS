@@ -180,7 +180,7 @@ static int mouse_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, task_t* t
 }
 
 void mouse_poll_notify_focus_change(void) {
-    poll_waitq_wake_all(&mouse_poll_waitq);
+    poll_waitq_wake_all(&mouse_poll_waitq, VFS_POLLIN);
 }
 
 static vfs_ops_t mouse_ops = {
@@ -224,7 +224,7 @@ void mouse_inject_delta(int dx, int dy, int buttons) {
 
     __asm__ volatile("pushl %0; popfl" : : "r"(flags) : "memory");
 
-    poll_waitq_wake_all(&mouse_poll_waitq);
+    poll_waitq_wake_all(&mouse_poll_waitq, VFS_POLLIN);
 }
 
 void mouse_vfs_init(void) {
@@ -404,6 +404,6 @@ void mouse_process_byte(uint8_t data) {
         if (mouse_x >= max_w) mouse_x = max_w - 1;
         if (mouse_y >= max_h) mouse_y = max_h - 1;
 
-        poll_waitq_wake_all(&mouse_poll_waitq);
+        poll_waitq_wake_all(&mouse_poll_waitq, VFS_POLLIN);
     }
 }

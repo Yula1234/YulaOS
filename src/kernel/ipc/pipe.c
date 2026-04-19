@@ -171,7 +171,7 @@ ___inline int pipe_read_impl(vfs_node_t* node, uint32_t size, void* buffer, int 
                                 
                                 sem_signal_all(&p->sem_write);
 
-                                poll_waitq_wake_all(&p->poll_waitq);
+                                poll_waitq_wake_all(&p->poll_waitq, VFS_POLLOUT);
                                 
                                 if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > (rp + n1)) {
                                     sem_signal_all(&p->sem_read);
@@ -189,7 +189,7 @@ ___inline int pipe_read_impl(vfs_node_t* node, uint32_t size, void* buffer, int 
 
                     sem_signal_all(&p->sem_write);
 
-                    poll_waitq_wake_all(&p->poll_waitq);
+                    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLOUT);
 
                     if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > (rp + take)) {
                         sem_signal_all(&p->sem_read);
@@ -296,7 +296,7 @@ ___inline int pipe_write_impl(vfs_node_t* node, uint32_t size, const void* buffe
                                 
                                 sem_signal_all(&p->sem_read);
 
-                                poll_waitq_wake_all(&p->poll_waitq);
+                                poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
 
                                 if (p->size - ((wp + n1) - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
                                     sem_signal_all(&p->sem_write);
@@ -314,7 +314,7 @@ ___inline int pipe_write_impl(vfs_node_t* node, uint32_t size, const void* buffe
 
                     sem_signal_all(&p->sem_read);
 
-                    poll_waitq_wake_all(&p->poll_waitq);
+                    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
 
                     if (p->size - ((wp + take) - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
                         sem_signal_all(&p->sem_write);
@@ -509,7 +509,7 @@ static int pipe_close(vfs_node_t* node) {
         sem_signal_all(&p->sem_read);
     }
 
-    poll_waitq_wake_all(&p->poll_waitq);
+    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLHUP | VFS_POLLIN | VFS_POLLOUT);
 
     if (readers_left == 0 && writers_left == 0) {
         poll_waitq_detach_all(&p->poll_waitq);
