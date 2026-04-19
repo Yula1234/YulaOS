@@ -1826,118 +1826,59 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
 
     int result = 0;
 
-    for (;;) {
-        if (waiters) {
-            for (uint32_t i = 0; i < nfds; i++) {
-                poll_waitq_unregister(&waiters[i]);
-                memset(&waiters[i], 0, sizeof(poll_waiter_t));
-            }
-        }
+    int ready = 0;
+    for (uint32_t i = 0; i < nfds; i++) {
+        pollfd_t* p = &k_fds[i];
+        p->revents = 0;
 
-        if (curr->pending_signals != 0) {
-            unblock_curr(curr);
-            result = -2;
-            goto out;
-        }
+        int32_t fd = p->fd;
+        int16_t ev = p->events;
 
-        if (nfds == 0) {
-            if (timeout_ms == 0) {
-                unblock_curr(curr);
-                goto out;
-            }
-            if (have_deadline && timer_ticks >= end_tick) {
-                unblock_curr(curr);
-                goto out;
-            }
-
-            if (have_deadline) {
-                proc_sleep_add(curr, end_tick);
-            } else {
-                if (proc_change_state(curr, TASK_WAITING) != 0) {
-                    unblock_curr(curr);
-                    result = -2;
-                    goto out;
-                }
-                sched_yield();
-            }
+        if (fd < 0) {
             continue;
         }
 
-        for (uint32_t i = 0; i < nfds; i++) {
-            pollfd_t* p = &k_fds[i];
+        kernel::RcuReadGuard rcu_guard;
+        
+        fd_table_t* ft = curr->fd_table;
+        file_desc_t* d = nullptr;
 
-            if (p->revents != 0) continue;
+        if (ft && (uint32_t)fd < ft->max_fds) {
+            d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
+        }
 
-            int32_t fd = p->fd;
-            int16_t ev = p->events;
+        if (!d || !d->node) {
+            p->revents = VFS_POLLNVAL;
+            ready++;
+            continue;
+        }
 
-            if (fd < 0) continue;
-            if ((ev & (VFS_POLLIN | VFS_POLLOUT)) == 0) continue;
+        vfs_node_t* node = d->node;
 
-            kernel::RcuReadGuard rcu_guard;
-
-            fd_table_t* ft = curr->fd_table;
-            file_desc_t* d = nullptr;
-
-            if (ft && fd >= 0 && (uint32_t)fd < ft->max_fds) {
-                d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
-            }
-
-            if (!d || !d->node) {
-                continue;
-            }
-
-            vfs_node_t* node = d->node;
+        if (waiters && (ev & (VFS_POLLIN | VFS_POLLOUT)) != 0) {
             if (node->ops && node->ops->poll_register) {
                 (void)node->ops->poll_register(node, &waiters[i], curr);
             }
         }
 
-        if (proc_change_state(curr, TASK_WAITING) != 0) {
-            unblock_curr(curr);
-            continue;
-        }
-        smp_mb();
-
-        /* RCU protected */
-        int ready = 0;
-        for (uint32_t i = 0; i < nfds; i++) {
-            pollfd_t* p = &k_fds[i];
-
-            int32_t fd = p->fd;
-            int16_t ev = p->events;
-            int16_t rev = 0;
-
-            if (fd < 0) {
-                rev = VFS_POLLNVAL;
-            } else {
-                kernel::RcuReadGuard rcu_guard;
-
-                fd_table_t* ft = curr->fd_table;
-                file_desc_t* d = nullptr;
-
-                if (ft && fd >= 0 && (uint32_t)fd < ft->max_fds) {
-                    d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
-                }
-
-                if (!d || !d->node) {
-                    rev = VFS_POLLNVAL;
-                } else {
-                    vfs_node_t* node = d->node;
-
-                    if (node->ops && node->ops->poll_status) {
-                        rev = (int16_t)node->ops->poll_status(node, ev);
-                    }
-                }
+        if (node->ops && node->ops->poll_status) {
+            int16_t rev = (int16_t)node->ops->poll_status(node, ev);
+            if (rev != 0) {
+                p->revents = rev;
+                ready++;
             }
-
-            p->revents = rev;
-            if (rev != 0) ready++;
         }
+    }
 
-        if (ready > 0) {
+    if (ready > 0) {
+        result = ready;
+        goto out;
+    }
+
+    for (;;) {
+        if (curr->pending_signals != 0) {
             unblock_curr(curr);
-            result = ready;
+            result = -2;
             goto out;
         }
 
@@ -1952,14 +1893,56 @@ static void syscall_poll(registers_t* regs, task_t* curr) {
         }
 
         if (have_deadline) {
-            if (curr->state == TASK_WAITING) {
-                proc_sleep_add(curr, end_tick);
-            }
+            proc_sleep_add(curr, end_tick);
         } else {
-            if (curr->state == TASK_WAITING) {
-                sched_yield();
+            if (proc_change_state(curr, TASK_WAITING) != 0) {
+                unblock_curr(curr);
+                result = -2;
+                goto out;
             }
+            sched_yield();
         }
+
+        ready = 0;
+        for (uint32_t i = 0; i < nfds; i++) {
+            pollfd_t* p = &k_fds[i];
+
+            if (p->fd < 0 || p->revents == VFS_POLLNVAL) {
+                if (p->revents != 0) ready++;
+                continue;
+            }
+
+            int32_t fd = p->fd;
+            int16_t ev = p->events;
+            int16_t rev = 0;
+
+            kernel::RcuReadGuard rcu_guard;
+            fd_table_t* ft = curr->fd_table;
+            file_desc_t* d = nullptr;
+
+            if (ft && (uint32_t)fd < ft->max_fds) {
+                d = static_cast<file_desc_t*>(rcu_ptr_read(&ft->fds[fd]));
+            }
+
+            if (!d || !d->node) {
+                rev = VFS_POLLNVAL;
+            } else {
+                vfs_node_t* node = d->node;
+                if (node->ops && node->ops->poll_status) {
+                    rev = (int16_t)node->ops->poll_status(node, ev);
+                }
+            }
+
+            p->revents = rev;
+            if (rev != 0) ready++;
+        }
+
+        if (ready > 0) {
+            unblock_curr(curr);
+            result = ready;
+            goto out;
+        }
+
     }
 
 out:
