@@ -173,8 +173,22 @@ ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
 
     struct rb_node **link = &cpu->runq_root.rb_node;
     struct rb_node *parent = nullptr;
+
     struct task *entry;
+
     int leftmost = 1;
+
+    if (kernel::likely(cpu->runq_leftmost && p->vruntime < cpu->runq_leftmost->vruntime)) {
+        parent = &cpu->runq_leftmost->rb_node;
+
+        rb_link_node(&p->rb_node, parent, &parent->rb_left);
+        rb_insert_color(&p->rb_node, &cpu->runq_root);
+        
+        cpu->runq_leftmost = p;
+
+        __atomic_fetch_add(&cpu->runq_count, 1, __ATOMIC_RELAXED);
+        return; 
+    }
 
     while (*link) {
         parent = *link;
@@ -191,8 +205,9 @@ ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
     rb_link_node(&p->rb_node, parent, link);
     rb_insert_color(&p->rb_node, &cpu->runq_root);
     
-    if (leftmost)
+    if (kernel::likely(leftmost)) {
         cpu->runq_leftmost = p;
+    }
         
     __atomic_fetch_add(&cpu->runq_count, 1, __ATOMIC_RELAXED);
 }
@@ -400,7 +415,7 @@ void sched_set_current(task_t* t) {
             }
         } else {
             uint32_t active = __atomic_load_n(&next_mem->active_cpus, __ATOMIC_ACQUIRE);
-            
+
             if ((active & cpu_bit) == 0u) {
                 __atomic_fetch_or(&next_mem->active_cpus, cpu_bit, __ATOMIC_RELEASE);
 
