@@ -10,22 +10,20 @@
 
 #include "poll_waitq.h"
 
-extern "C" {
-
 static int poll_waitq_waiter_is_clean(const poll_waiter_t* w) {
     if (!w) {
         return 0;
     }
 
-    if (w->task != nullptr || w->q != nullptr) {
+    if (w->task != 0 || w->q != 0) {
         return 0;
     }
 
-    if (w->q_node.next != nullptr || w->q_node.prev != nullptr) {
+    if (w->q_node.next != 0 || w->q_node.prev != 0) {
         return 0;
     }
 
-    if (w->task_node.next != nullptr || w->task_node.prev != nullptr) {
+    if (w->task_node.next != 0 || w->task_node.prev != 0) {
         return 0;
     }
 
@@ -50,8 +48,8 @@ void poll_waitq_init(poll_waitq_t* q) {
     dlist_init(&q->waiters);
 
     q->refs = 1u;
-    q->finalize = nullptr;
-    q->finalize_ctx = nullptr;
+    q->finalize = 0;
+    q->finalize_ctx = 0;
 }
 
 void poll_waitq_init_finalizable(
@@ -155,7 +153,7 @@ restart:
     poll_waitq_t* q = w->q;
     if (!q) {
         if (w->task) {
-            w->task = nullptr;
+            w->task = 0;
 
             proc_task_put(task);
         }
@@ -179,11 +177,11 @@ restart:
     }
 
     if (poll_waitq_try_unlink_node(&w->q_node)) {
-        w->q = nullptr;
+        w->q = 0;
     }
 
     if (poll_waitq_try_unlink_node(&w->task_node)) {
-        w->task = nullptr;
+        w->task = 0;
         
         proc_task_put(task);
     }
@@ -230,7 +228,7 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
             spinlock_acquire(&task->poll_lock);
 
             if (poll_waitq_try_unlink_node(&w->task_node)) {
-                w->task = nullptr;
+                w->task = 0;
                 proc_task_put(task);
             }
 
@@ -238,7 +236,7 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
         }
 
         if (poll_waitq_try_unlink_node(&w->q_node)) {
-            w->q = nullptr;
+            w->q = 0;
         }
 
         poll_waitq_put(q);
@@ -272,12 +270,12 @@ restart:
             }
 
             if (poll_waitq_try_unlink_node(&w->q_node)) {
-                w->q = nullptr;
+                w->q = 0;
             }
 
             if (poll_waitq_try_unlink_node(&w->task_node)) {
                 if (w->task) {
-                    w->task = nullptr;
+                    w->task = 0;
 
                     proc_task_put(task);
                 }
@@ -293,7 +291,7 @@ restart:
         } else {
             if (poll_waitq_try_unlink_node(&w->task_node)) {
                 if (w->task) {
-                    w->task = nullptr;
+                    w->task = 0;
 
                     proc_task_put(task);
                 }
@@ -304,6 +302,4 @@ restart:
     spinlock_release(&task->poll_lock);
     
     irq_restore(flags);
-}
-
 }
