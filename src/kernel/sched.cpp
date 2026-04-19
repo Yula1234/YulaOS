@@ -362,13 +362,13 @@ extern "C" void sched_on_task_entry(void) {
 
 void sched_set_current(task_t* t) {
     cpu_t* cpu = cpu_current();
-    
+
     rcu_qs_count_inc();
 
     uint32_t kstack_top = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t->kstack)) + t->kstack_size;
 
     kstack_top &= ~0xF; 
-    
+
     tss_set_stack(cpu->index, kstack_top);
 
     if (t->tls_base) {
@@ -376,27 +376,21 @@ void sched_set_current(task_t* t) {
     }
 
     proc_mem_t* next_mem = t->mem;
-    
+
     uint32_t cpu_bit = 1u << cpu->index;
 
     if (next_mem == nullptr) {
-        if (cpu->active_mem != nullptr) {
-            __atomic_fetch_and(&cpu->active_mem->active_cpus, ~cpu_bit, __ATOMIC_RELEASE);
-        } else {
-            if (paging_get_dir() != kernel_page_directory) {
-                paging_switch(kernel_page_directory);
-            }
-        }
+        return;
     } else {
         if (cpu->active_mem != next_mem) {
             proc_mem_retain(next_mem);
-            
+
             if (cpu->active_mem) {
                 __atomic_fetch_and(&cpu->active_mem->active_cpus, ~cpu_bit, __ATOMIC_RELEASE);
 
                 proc_mem_release(cpu->active_mem);
             }
-            
+
             cpu->active_mem = next_mem;
 
             __atomic_fetch_or(&next_mem->active_cpus, cpu_bit, __ATOMIC_RELEASE);
@@ -406,7 +400,7 @@ void sched_set_current(task_t* t) {
             }
         } else {
             uint32_t active = __atomic_load_n(&next_mem->active_cpus, __ATOMIC_ACQUIRE);
-
+            
             if ((active & cpu_bit) == 0u) {
                 __atomic_fetch_or(&next_mem->active_cpus, cpu_bit, __ATOMIC_RELEASE);
 
@@ -437,12 +431,10 @@ void sched_yield(void) {
     rcu_qs_count_inc();
 
     if (kernel::likely(prev && prev->state == TASK_RUNNING && prev->pid != 0)) {
-        if (me->runq_count == 0 && prev->pending_signals == 0) {
+        if (kernel::unlikely(me->runq_count == 0 && prev->pending_signals == 0)) {
             return;
         }
-    }
 
-    if (kernel::likely(prev && prev->state == TASK_RUNNING && prev->pid != 0)) {
         task_t* leftmost = me->runq_leftmost;
 
         if (kernel::unlikely(!leftmost)) {
