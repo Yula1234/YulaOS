@@ -4,6 +4,7 @@
 #include <kernel/waitq/poll_waitq.h>
 #include <kernel/uaccess/uaccess.h>
 
+#include <kernel/locking/guards.h>
 #include <kernel/locking/mutex.h>
 #include <kernel/locking/sem.h>
 
@@ -103,12 +104,8 @@ static void pipe_private_release(void* private_data) {
     poll_waitq_put(&p->poll_waitq);
 }
 
-___inline int pipe_read_impl(
-    vfs_node_t* node, uint32_t size, void* buffer, int block, int is_user
-) {
-    if (!node 
-        || !buffer
-        || size == 0u) {
+___inline int pipe_read_impl(vfs_node_t* node, uint32_t size, void* buffer, int block, int is_user) {
+    if (!node || !buffer || size == 0u) {
         return 0;
     }
 
@@ -125,114 +122,107 @@ ___inline int pipe_read_impl(
     char* buf = (char*)buffer;
     uint32_t read_count = 0u;
 
-    mutex_lock(&p->read_lock);
-
     while (read_count < size) {
-        uint32_t wp, rp, available;
+        bool waited = false;
 
         for (;;) {
-            wp = __atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE);
-            
-            rp = p->read_ptr;
-            available = wp - rp;
+            {
+                guard_mutex(&p->read_lock);
 
-            if (available > 0) {
-                break;
-            }
-
-            if (__atomic_load_n(&p->writers, __ATOMIC_ACQUIRE) == 0) {
-                if (!block && read_count == 0) {
-                    mutex_unlock(&p->read_lock);
-
-                    return -1; /* Broken pipe for nonblock */
-                }
-                goto out; /* EOF */
-            }
-
-            if (!block) {
-                mutex_unlock(&p->read_lock);
-                return 0; /* EAGAIN */
-            }
-
-            mutex_unlock(&p->read_lock);
-
-            sem_wait(&p->sem_read);
-            
-            mutex_lock(&p->read_lock);
-
-            /* Drain spurious wakeups */
-            while (sem_try_acquire(&p->sem_read)) {}
-        }
-
-        const uint32_t want = size - read_count;
-        const uint32_t take = (want < available) ? want : available;
-
-        const uint32_t rp_mod = rp % p->size;
-        const uint32_t contig = p->size - rp_mod;
-
-        const uint32_t n1 = (take < contig) ? take : contig;
-
-        if (is_user) {
-            if (uaccess_copy_to_user(&buf[read_count], &p->buffer[rp_mod], n1) != 0) {
-                if (read_count == 0) {
-                    read_count = (uint32_t)-1;
+                if (waited) {
+                    while (sem_try_acquire(&p->sem_read)) {}
                 }
 
-                goto out;
-            }
-        } else {
-            memcpy(&buf[read_count], &p->buffer[rp_mod], n1);
-        }
+                const uint32_t wp = __atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE);
 
-        const uint32_t n2 = take - n1;
-        if (n2 > 0u) {
-            if (is_user) {
-                if (uaccess_copy_to_user(&buf[read_count + n1], &p->buffer[0], n2) != 0) {
-                    /* Commit what succeeded and abort */
-                    __atomic_store_n(&p->read_ptr, rp + n1, __ATOMIC_RELEASE);
+                const uint32_t rp = p->read_ptr;
+                const uint32_t available = wp - rp;
 
-                    read_count += n1;
-                    
+                if (available > 0) {
+                    const uint32_t want = size - read_count;
+                    const uint32_t take = (want < available) ? want : available;
+
+                    const uint32_t rp_mod = rp % p->size;
+                    const uint32_t contig = p->size - rp_mod;
+
+                    const uint32_t n1 = (take < contig) ? take : contig;
+
+                    if (is_user) {
+                        if (uaccess_copy_to_user(&buf[read_count], &p->buffer[rp_mod], n1) != 0) {
+                            if (read_count == 0) {
+                                read_count = (uint32_t)-1;
+                            }
+                            
+                            if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > rp) {
+                                sem_signal_all(&p->sem_read);
+                            }
+
+                            return (int)read_count;
+                        }
+                    } else {
+                        memcpy(&buf[read_count], &p->buffer[rp_mod], n1);
+                    }
+
+                    const uint32_t n2 = take - n1;
+                    if (n2 > 0u) {
+                        if (is_user) {
+                            if (uaccess_copy_to_user(&buf[read_count + n1], &p->buffer[0], n2) != 0) {
+                                __atomic_store_n(&p->read_ptr, rp + n1, __ATOMIC_RELEASE);
+                                
+                                sem_signal_all(&p->sem_write);
+
+                                poll_waitq_wake_all(&p->poll_waitq);
+                                
+                                if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > (rp + n1)) {
+                                    sem_signal_all(&p->sem_read);
+                                }
+
+                                return -1;
+                            }
+                        } else {
+                            memcpy(&buf[read_count + n1], &p->buffer[0], n2);
+                        }
+                    }
+
+                    __atomic_store_n(&p->read_ptr, rp + take, __ATOMIC_RELEASE);
+                    read_count += take;
+
                     sem_signal_all(&p->sem_write);
-                    
+
                     poll_waitq_wake_all(&p->poll_waitq);
 
-                    goto out;
+                    if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > (rp + take)) {
+                        sem_signal_all(&p->sem_read);
+                    }
+
+                    break;
                 }
-            } else {
-                memcpy(&buf[read_count + n1], &p->buffer[0], n2);
+
+                if (__atomic_load_n(&p->writers, __ATOMIC_ACQUIRE) == 0) {
+                    return (!block && read_count == 0) ? -1 : (int)read_count;
+                }
+
+                if (!block) {
+                    return 0;
+                }
+
             }
+
+            sem_wait(&p->sem_read);
+
+            waited = true;
         }
-
-        __atomic_store_n(&p->read_ptr, rp + take, __ATOMIC_RELEASE);
-        read_count += take;
-
-        sem_signal_all(&p->sem_write);
-
-        poll_waitq_wake_all(&p->poll_waitq);
 
         if (read_count > 0u) {
-            break; /* Short reads are allowed, return fast */
+            break;
         }
     }
-
-out:
-    /* Leave the door open for other readers if there is still data */
-    if (__atomic_load_n(&p->write_ptr, __ATOMIC_ACQUIRE) > p->read_ptr) {
-        sem_signal_all(&p->sem_read);
-    }
-
-    mutex_unlock(&p->read_lock);
 
     return (int)read_count;
 }
 
-___inline int pipe_write_impl(
-    vfs_node_t* node, uint32_t size, const void* buffer, int block, int is_user
-) {
-    if (!node
-        || !buffer
-        || size == 0u) {
+___inline int pipe_write_impl(vfs_node_t* node, uint32_t size, const void* buffer, int block, int is_user) {
+    if (!node || !buffer || size == 0u) {
         return 0;
     }
 
@@ -253,120 +243,101 @@ ___inline int pipe_write_impl(
     }
 
     const char* buf = (const char*)buffer;
-    
     uint32_t written_count = 0u;
 
     const uint32_t require_space = (!block || size <= p->size) ? size : 1u;
 
-    mutex_lock(&p->write_lock);
-
     while (written_count < size) {
-        uint32_t wp, rp, space;
+        bool waited = false;
 
         for (;;) {
-            rp = __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE);
+            {
+                guard_mutex(&p->write_lock);
 
-            wp = p->write_ptr;
-            space = p->size - (wp - rp);
-
-            if (space >= require_space) {
-                break;
-            }
-
-            if (__atomic_load_n(&p->readers, __ATOMIC_ACQUIRE) == 0) {
-                if (written_count == 0u) {
-                    written_count = (uint32_t)-1;
+                if (waited) {
+                    while (sem_try_acquire(&p->sem_write)) {}
                 }
 
-                goto out;
-            }
+                const uint32_t rp = __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE);
+                
+                const uint32_t wp = p->write_ptr;
+                const uint32_t space = p->size - (wp - rp);
 
-            if (!block) {
-                mutex_unlock(&p->write_lock);
-
-                return 0; /* EAGAIN */
-            }
-
-            mutex_unlock(&p->write_lock);
-
-            sem_wait(&p->sem_write);
-            
-            mutex_lock(&p->write_lock);
-
-            /* Drain spurious wakeups */
-            while (sem_try_acquire(&p->sem_write)) {}
-        }
-
-        /* Prevent writing to a closed pipe if reader died while we were checking space */
-        if (__atomic_load_n(&p->readers, __ATOMIC_ACQUIRE) == 0) {
-            if (written_count == 0u) {
-                written_count = (uint32_t)-1;
-            }
-
-            goto out;
-        }
-
-        const uint32_t want = size - written_count;
-        const uint32_t take = (!block) ? want : ((want < space) ? want : space);
-
-        const uint32_t wp_mod = wp % p->size;
-        const uint32_t contig = p->size - wp_mod;
-
-        const uint32_t n1 = (take < contig) ? take : contig;
-
-        if (is_user) {
-            if (uaccess_copy_from_user(&p->buffer[wp_mod], &buf[written_count], n1) != 0) {
-                if (written_count == 0) {
-                    written_count = (uint32_t)-1;
+                if (__atomic_load_n(&p->readers, __ATOMIC_ACQUIRE) == 0) {
+                    return (written_count == 0u) ? -1 : (int)written_count;
                 }
 
-                goto out;
-            }
-        } else {
-            memcpy(&p->buffer[wp_mod], &buf[written_count], n1);
-        }
+                if (space >= require_space) {
+                    const uint32_t want = size - written_count;
+                    const uint32_t take = (!block) ? want : ((want < space) ? want : space);
 
-        const uint32_t n2 = take - n1;
+                    const uint32_t wp_mod = wp % p->size;
+                    const uint32_t contig = p->size - wp_mod;
 
-        if (n2 > 0u) {
-            if (is_user) {
-                if (uaccess_copy_from_user(&p->buffer[0], &buf[written_count + n1], n2) != 0) {
-                    /* Commit n1 and return error */
-                    __atomic_store_n(&p->write_ptr, wp + n1, __ATOMIC_RELEASE);
+                    const uint32_t n1 = (take < contig) ? take : contig;
 
-                    written_count = (uint32_t)-1; 
-                    
+                    if (is_user) {
+                        if (uaccess_copy_from_user(&p->buffer[wp_mod], &buf[written_count], n1) != 0) {
+                            if (p->size - (wp - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
+                                sem_signal_all(&p->sem_write);
+                            }
+
+                            return (written_count == 0) ? -1 : (int)written_count;
+                        }
+                    } else {
+                        memcpy(&p->buffer[wp_mod], &buf[written_count], n1);
+                    }
+
+                    const uint32_t n2 = take - n1;
+                    if (n2 > 0u) {
+                        if (is_user) {
+                            if (uaccess_copy_from_user(&p->buffer[0], &buf[written_count + n1], n2) != 0) {
+                                __atomic_store_n(&p->write_ptr, wp + n1, __ATOMIC_RELEASE);
+                                
+                                sem_signal_all(&p->sem_read);
+
+                                poll_waitq_wake_all(&p->poll_waitq);
+
+                                if (p->size - ((wp + n1) - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
+                                    sem_signal_all(&p->sem_write);
+                                }
+                                return -1;
+                            }
+                        } else {
+                            memcpy(&p->buffer[0], &buf[written_count + n1], n2);
+                        }
+                    }
+
+                    __atomic_store_n(&p->write_ptr, wp + take, __ATOMIC_RELEASE);
+
+                    written_count += take;
+
                     sem_signal_all(&p->sem_read);
-                    
+
                     poll_waitq_wake_all(&p->poll_waitq);
 
-                    goto out;
+                    if (p->size - ((wp + take) - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
+                        sem_signal_all(&p->sem_write);
+                    }
+
+                    break;
                 }
-            } else {
-                memcpy(&p->buffer[0], &buf[written_count + n1], n2);
+
+                if (!block) {
+                    return 0;
+                }
+
             }
+
+            sem_wait(&p->sem_write);
+
+            waited = true;
         }
-
-        __atomic_store_n(&p->write_ptr, wp + take, __ATOMIC_RELEASE);
-        
-        written_count += take;
-
-        sem_signal_all(&p->sem_read);
-
-        poll_waitq_wake_all(&p->poll_waitq);
 
         if (!block) {
-            break; /* Nonblock completes the entire chunk at once */
+            break;
         }
     }
-
-out:
-    /* Chain-wake other writers if space remains */
-    if (p->size - (p->write_ptr - __atomic_load_n(&p->read_ptr, __ATOMIC_ACQUIRE)) > 0u) {
-        sem_signal_all(&p->sem_write);
-    }
-
-    mutex_unlock(&p->write_lock);
 
     return (int)written_count;
 }
