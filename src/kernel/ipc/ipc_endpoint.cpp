@@ -13,7 +13,7 @@
 #include <kernel/waitq/poll_waitq.h>
 #include <kernel/proc.h>
 
-#include <lib/rhashmap.h>
+#include <lib/rhashtable.h>
 #include <lib/string.h>
 
 #include <mm/heap.h>

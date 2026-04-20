@@ -29,7 +29,7 @@ struct alignas(2) RHashNode {
     uint32_t     hash_;
 };
 
-namespace rhashmap_detail {
+namespace rhashtable_detail {
 
 #if __SIZEOF_POINTER__ == 8
     static constexpr bool      k_use_tags   = true;
@@ -151,7 +151,7 @@ class RHashTable {
         }
 
         const size_t offset =
-            rhashmap_detail::member_offset<V, RHashNode, NodeMember>();
+            rhashtable_detail::member_offset<V, RHashNode, NodeMember>();
 
         return reinterpret_cast<V*>(
             reinterpret_cast<char*>(node) - offset
@@ -185,7 +185,7 @@ class RHashTable {
 
             atomic_ptr_set(
                 &tbl->buckets[i].head_,
-                rhashmap_detail::make_nulls(static_cast<uint32_t>(i))
+                rhashtable_detail::make_nulls(static_cast<uint32_t>(i))
             );
         }
 
@@ -231,14 +231,14 @@ class RHashTable {
         return approx_count_() > tbl->capacity * k_resize_threshold;
     }
 
-    rhashmap_detail::WalkResult walk_chain_rcu_(
+    rhashtable_detail::WalkResult walk_chain_rcu_(
         atomic_ptr_t* head_ptr,
         uint32_t      bucket_idx,
         uint32_t      hash,
         const K&      key,
         V**           out_val
     ) const noexcept {
-        using namespace rhashmap_detail;
+        using namespace rhashtable_detail;
 
         KeyExtractor    extract;
         const uint16_t  want_tag = tag_from_hash(hash);
@@ -280,7 +280,7 @@ class RHashTable {
         BucketArray* new_tbl,
         size_t       i
     ) noexcept {
-        using namespace rhashmap_detail;
+        using namespace rhashtable_detail;
 
         const uint32_t low_nulls  = static_cast<uint32_t>(i);
         const uint32_t high_nulls = static_cast<uint32_t>(i + old_tbl->capacity);
@@ -410,7 +410,7 @@ class RHashTable {
     }
 
     V* find_unprotected_(const K& key) const noexcept {
-        using namespace rhashmap_detail;
+        using namespace rhashtable_detail;
 
         const uint32_t hash = Hash::hash(key);
 
@@ -514,14 +514,14 @@ public:
             }
 
             const uint16_t want_tag =
-                rhashmap_detail::tag_from_hash(hash);
+                rhashtable_detail::tag_from_hash(hash);
 
             void* ptr = atomic_ptr_read(&bucket.head_);
 
-            while (!rhashmap_detail::is_nulls(ptr)) {
+            while (!rhashtable_detail::is_nulls(ptr)) {
 
-                if (rhashmap_detail::tag_of(ptr) == want_tag) {
-                    RHashNode* node = rhashmap_detail::decode_ptr(ptr);
+                if (rhashtable_detail::tag_of(ptr) == want_tag) {
+                    RHashNode* node = rhashtable_detail::decode_ptr(ptr);
                     V*         existing = value_from_node_(node);
 
                     if (extract(*existing) == key) {
@@ -529,10 +529,10 @@ public:
                     }
                 }
 
-                RHashNode* node = rhashmap_detail::decode_ptr(ptr);
+                RHashNode* node = rhashtable_detail::decode_ptr(ptr);
                 void*      next = atomic_ptr_read(&node->next_);
 
-                __builtin_prefetch(rhashmap_detail::decode_ptr(next), 0, 1);
+                __builtin_prefetch(rhashtable_detail::decode_ptr(next), 0, 1);
 
                 ptr = next;
             }
@@ -544,7 +544,7 @@ public:
 
             atomic_ptr_store_explicit(
                 &bucket.head_,
-                rhashmap_detail::encode_ptr(new_node, hash),
+                rhashtable_detail::encode_ptr(new_node, hash),
                 ATOMIC_RELEASE
             );
         }
@@ -583,18 +583,18 @@ public:
             }
 
             const uint16_t want_tag =
-                rhashmap_detail::tag_from_hash(hash);
+                rhashtable_detail::tag_from_hash(hash);
 
             atomic_ptr_t* prev_ptr = &bucket.head_;
             void*         ptr      = atomic_ptr_read(prev_ptr);
 
-            while (!rhashmap_detail::is_nulls(ptr)) {
-                RHashNode* node = rhashmap_detail::decode_ptr(ptr);
+            while (!rhashtable_detail::is_nulls(ptr)) {
+                RHashNode* node = rhashtable_detail::decode_ptr(ptr);
                 void*      next = atomic_ptr_read(&node->next_);
 
-                __builtin_prefetch(rhashmap_detail::decode_ptr(next), 0, 1);
+                __builtin_prefetch(rhashtable_detail::decode_ptr(next), 0, 1);
 
-                if (rhashmap_detail::tag_of(ptr) == want_tag) {
+                if (rhashtable_detail::tag_of(ptr) == want_tag) {
                     V* val = value_from_node_(node);
 
                     if (extract(*val) == key) {

@@ -12,7 +12,7 @@
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/mutex.h>
 
-#include <lib/rhashmap.h>
+#include <lib/rhashtable.h>
 #include <lib/string.h>
 #include <lib/rbtree.h>
 
