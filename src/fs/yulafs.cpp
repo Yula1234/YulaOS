@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
+#include <kernel/locking/guards.h>
 #include <kernel/output/kprintf.h>
 #include <kernel/smp/cpu.h>
 #include <kernel/panic.h>
@@ -11,7 +12,7 @@
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/mutex.h>
 
-#include <lib/hash_map.h>
+#include <lib/rhashmap.h>
 #include <lib/string.h>
 #include <lib/rbtree.h>
 
@@ -65,6 +66,21 @@ struct DcacheKey {
     }
 };
 
+struct DcacheEntry {
+    kernel::RHashNode hash_node;
+    rcu_head_t        rcu;
+    dlist_head_t      lru_node;
+
+    DcacheKey   key;
+    yfs_ino_t   target_ino;
+};
+
+struct DcacheKeyExtractor {
+    const DcacheKey& operator()(const DcacheEntry& entry) const {
+        return entry.key;
+    }
+};
+
 class FileSystem {
 public:
     struct State {
@@ -95,7 +111,17 @@ public:
         kernel::atomic<uint32_t> global_free_blocks{0};
         kernel::atomic<uint32_t> global_free_inodes{0};
 
-        HashMap<DcacheKey, yfs_ino_t, 1024> dcache{};
+        kernel::RHashTable<
+            DcacheKey,
+            DcacheEntry,
+            &DcacheEntry::hash_node,
+            DcacheKeyExtractor,
+            kernel::HashTraits<DcacheKey>,
+            1024
+        > dcache{};
+
+        spinlock_t   dcache_lru_lock{};
+        dlist_head_t dcache_lru{};
 
         InodeTableCacheSlot inode_table_cache[MAX_CPUS][inode_table_cache_slots];
         spinlock_t inode_table_cache_lock[MAX_CPUS];
@@ -112,6 +138,8 @@ public:
             : groups(nullptr)
             , group_count(0)
         {
+            spinlock_init(&dcache_lru_lock);
+            dlist_init(&dcache_lru);
         }
     };
 
@@ -242,6 +270,46 @@ struct KfreeDeleter {
     }
 };
 
+static kmem_cache_t* g_dcache_cache = nullptr;
+
+static void dcache_free_rcu(rcu_head_t* head) {
+    yfs::DcacheEntry* entry = container_of(head, yfs::DcacheEntry, rcu);
+    kmem_cache_free(g_dcache_cache, entry);
+}
+
+static void dcache_clear_all() {
+    auto& state = yfs::g_fs.state();
+
+    for (;;) {
+        yfs::DcacheEntry* entry_to_remove = nullptr;
+
+        {
+            kernel::SpinLockNativeSafeGuard guard(state.dcache_lru_lock);
+
+            if (!dlist_empty(&state.dcache_lru)) {
+                entry_to_remove = container_of(
+                    state.dcache_lru.next, yfs::DcacheEntry, lru_node
+                );
+
+                dlist_del(&entry_to_remove->lru_node);
+                
+                entry_to_remove->lru_node.next = nullptr;
+                entry_to_remove->lru_node.prev = nullptr;
+            }
+        }
+
+        if (!entry_to_remove) {
+            break;
+        }
+
+        yfs::DcacheEntry* removed = state.dcache.remove(entry_to_remove->key);
+
+        if (removed) {
+            call_rcu(&removed->rcu, dcache_free_rcu);
+        }
+    }
+}
+
 #define YFS_SCRATCH_SLOTS (yfs::FileSystem::State::scratch_slots)
 
 static uint8_t (&yfs_scratch_used)[
@@ -249,6 +317,7 @@ static uint8_t (&yfs_scratch_used)[
 ][
     yfs::FileSystem::State::scratch_slots
 ] = yfs_state.yfs_scratch_used;
+
 static spinlock_t (&yfs_scratch_lock)[MAX_CPUS] = yfs_state.yfs_scratch_lock;
 
 static yfs::FileSystem::State::InodeRuntimeState*& inode_state = yfs_state.inode_state;
@@ -522,23 +591,34 @@ void yfs::FileSystem::scratch_release(int slot) {
 }
 
 void yfs::FileSystem::dcache_insert(yfs_ino_t parent, const char* name, yfs_ino_t target) {
-    /*
-     * Only cache hits.
-     * Skipping misses avoids extra invalidation rules on create/unlink.
-     */
     if (!name || name[0] == '\0') {
         return;
     }
 
-    DcacheKey key{};
-    key.parent_ino = parent;
-    strlcpy(key.name, name, sizeof(key.name));
+    DcacheEntry* entry = (DcacheEntry*)kmem_cache_alloc(g_dcache_cache);
+    if (!entry) {
+        return;
+    }
 
-    state_.dcache.insert_or_assign(key, target);
+    entry->key.parent_ino = parent;
+    strlcpy(entry->key.name, name, sizeof(entry->key.name));
+    entry->target_ino = target;
+
+    entry->lru_node.next = nullptr;
+    entry->lru_node.prev = nullptr;
+
+    auto res = state_.dcache.insert_unique(entry);
+
+    if (res == decltype(state_.dcache)::InsertResult::Inserted) {
+        uint32_t flags = spinlock_acquire_safe(&state_.dcache_lru_lock);
+        dlist_add_tail(&entry->lru_node, &state_.dcache_lru);
+        spinlock_release_safe(&state_.dcache_lru_lock, flags);
+    } else {
+        kmem_cache_free(g_dcache_cache, entry);
+    }
 }
 
 yfs_ino_t yfs::FileSystem::dcache_lookup(yfs_ino_t parent, const char* name) {
-    /* 0 is a safe miss value (inode 0 is reserved). */
     if (!name || name[0] == '\0') {
         return 0;
     }
@@ -548,7 +628,13 @@ yfs_ino_t yfs::FileSystem::dcache_lookup(yfs_ino_t parent, const char* name) {
     strlcpy(key.name, name, sizeof(key.name));
 
     yfs_ino_t out = 0;
-    return state_.dcache.try_get(key, out) ? out : 0;
+
+    state_.dcache.with_value_unlocked(key, [&out](DcacheEntry* entry) {
+        out = entry->target_ino;
+        return true;
+    });
+
+    return out;
 }
 
 void yfs::FileSystem::dcache_invalidate_entry(yfs_ino_t parent, const char* name) {
@@ -560,7 +646,19 @@ void yfs::FileSystem::dcache_invalidate_entry(yfs_ino_t parent, const char* name
     key.parent_ino = parent;
     strlcpy(key.name, name, sizeof(key.name));
 
-    state_.dcache.remove(key);
+    DcacheEntry* removed = state_.dcache.remove(key);
+
+    if (removed) {
+        uint32_t flags = spinlock_acquire_safe(&state_.dcache_lru_lock);
+        if (removed->lru_node.next) {
+            dlist_del(&removed->lru_node);
+            removed->lru_node.next = nullptr;
+            removed->lru_node.prev = nullptr;
+        }
+        spinlock_release_safe(&state_.dcache_lru_lock, flags);
+
+        call_rcu(&removed->rcu, dcache_free_rcu);
+    }
 }
 
 static void flush_sb(void) {
@@ -1846,7 +1944,7 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
     inode_state_init_or_panic(sb.total_inodes);
     groups_init_or_panic();
 
-    yfs_state.dcache.clear();
+    dcache_clear_all();
 
     yulafs_mkdir("/bin");
     yulafs_mkdir("/home");
@@ -1859,12 +1957,47 @@ void yfs::FileSystem::format(uint32_t disk_blocks_4k) {
 }
 
 extern "C" size_t yulafs_dcache_shrinker_cb(size_t target_pages, void* ctx) {
-    (void)target_pages;
     (void)ctx;
-    
-    yfs::g_fs.state().dcache.clear();
-    
-    return 1; 
+
+    size_t entries_per_page = 4096 / sizeof(yfs::DcacheEntry);
+    if (entries_per_page == 0) {
+        entries_per_page = 1;
+    }
+
+    size_t target_entries = target_pages * entries_per_page;
+    if (target_entries == 0) {
+        target_entries = 1;
+    }
+
+    size_t freed = 0;
+    auto& state = yfs::g_fs.state();
+
+    while (freed < target_entries) {
+        yfs::DcacheEntry* entry_to_remove = nullptr;
+
+        uint32_t flags = spinlock_acquire_safe(&state.dcache_lru_lock);
+        if (!dlist_empty(&state.dcache_lru)) {
+            entry_to_remove = container_of(
+                state.dcache_lru.next, yfs::DcacheEntry, lru_node
+            );
+            dlist_del(&entry_to_remove->lru_node);
+            entry_to_remove->lru_node.next = nullptr;
+            entry_to_remove->lru_node.prev = nullptr;
+        }
+        spinlock_release_safe(&state.dcache_lru_lock, flags);
+
+        if (!entry_to_remove) {
+            break;
+        }
+
+        yfs::DcacheEntry* removed = state.dcache.remove(entry_to_remove->key);
+        if (removed) {
+            call_rcu(&removed->rcu, dcache_free_rcu);
+            freed++;
+        }
+    }
+
+    return freed / entries_per_page;
 }
 
 static shrinker_t g_yulafs_dcache_shrinker = {
@@ -1875,7 +2008,12 @@ static shrinker_t g_yulafs_dcache_shrinker = {
 };
 
 void yfs::FileSystem::init() {
-    /* Mount on valid magic, otherwise format. */
+    if (!g_dcache_cache) {
+        g_dcache_cache = kmem_cache_create(
+            "yfs_dcache", sizeof(yfs::DcacheEntry), 0, 0
+        );
+    }
+
     bcache_init();
 
     for (int cpu = 0; cpu < cpu_count; cpu++) {
@@ -1897,7 +2035,7 @@ void yfs::FileSystem::init() {
         }
     }
 
-    state_.dcache.clear();
+    dcache_clear_all();
 
     uint8_t* buf = (uint8_t*)kmalloc(YFS_BLOCK_SIZE);
     if (!buf) {
