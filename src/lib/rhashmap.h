@@ -14,6 +14,7 @@
 #include <kernel/rcu.h>
 
 #include <lib/compiler.h>
+#include <lib/atomic.h>
 #include <lib/types.h>
 
 #include <mm/heap.h>
