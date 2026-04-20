@@ -14,6 +14,7 @@
 #include <kernel/proc.h>
 
 #include <lib/string.h>
+#include <lib/chashmap.h>
 
 #include <stddef.h>
 
@@ -190,19 +191,6 @@ typedef struct __attribute__((packed)) {
 #define VIRGL_CMD_RCR_PAYLOAD_DWORDS 13u
 #define VIRGL_CMD0(cmd, obj, len) ((uint32_t)((cmd) | ((obj) << 8) | ((len) << 16)))
 
-typedef struct {
-    uint32_t resource_id;
-    uint8_t state;
-    uint8_t pad[3];
-} vgpu_attached_slot_t;
-
-#define VGPU_VIRGL_ATTACHED_CAP 1024u
-
-typedef struct {
-    vgpu_attached_slot_t slots[VGPU_VIRGL_ATTACHED_CAP];
-    uint32_t len;
-    uint32_t tombs;
-} vgpu_attached_set_t;
 
 typedef struct {
     int active;
@@ -224,7 +212,7 @@ typedef struct {
     uint32_t ctrl_resp_phys;
     void* async_ctrl_slots;
     virtio_gpu_fb_t fb;
-    vgpu_attached_set_t attached;
+    chashmap_t* attached;
 } virtio_gpu_state_t;
 
 static virtio_gpu_state_t g_vgpu;
@@ -388,78 +376,6 @@ static int vgpu_ctrlq_can_sleep(void) {
     return (eflags & 0x200u) != 0u;
 }
 
-static uint32_t vgpu_hash_u32(uint32_t x) {
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
-static void vgpu_attached_reset(vgpu_attached_set_t* s) {
-    if (!s) return;
-    memset(s, 0, sizeof(*s));
-}
-
-static int vgpu_attached_contains(const vgpu_attached_set_t* s, uint32_t resource_id) {
-    if (!s || resource_id == 0u) return 0;
-
-    uint32_t mask = VGPU_VIRGL_ATTACHED_CAP - 1u;
-    uint32_t pos = vgpu_hash_u32(resource_id) & mask;
-    for (uint32_t probe = 0; probe < VGPU_VIRGL_ATTACHED_CAP; probe++) {
-        const vgpu_attached_slot_t* slot = &s->slots[pos];
-        if (slot->state == 0u) return 0;
-        if (slot->state == 1u && slot->resource_id == resource_id) return 1;
-        pos = (pos + 1u) & mask;
-    }
-
-    return 0;
-}
-
-static void vgpu_attached_remove(vgpu_attached_set_t* s, uint32_t resource_id) {
-    if (!s || resource_id == 0u) return;
-
-    uint32_t mask = VGPU_VIRGL_ATTACHED_CAP - 1u;
-    uint32_t pos = vgpu_hash_u32(resource_id) & mask;
-    for (uint32_t probe = 0; probe < VGPU_VIRGL_ATTACHED_CAP; probe++) {
-        vgpu_attached_slot_t* slot = &s->slots[pos];
-        if (slot->state == 0u) return;
-        if (slot->state == 1u && slot->resource_id == resource_id) {
-            slot->state = 2u;
-            slot->resource_id = 0u;
-            if (s->len) s->len--;
-            s->tombs++;
-            return;
-        }
-        pos = (pos + 1u) & mask;
-    }
-}
-
-static void vgpu_attached_insert(vgpu_attached_set_t* s, uint32_t resource_id) {
-    if (!s || resource_id == 0u) return;
-    if (vgpu_attached_contains(s, resource_id)) return;
-
-    uint32_t mask = VGPU_VIRGL_ATTACHED_CAP - 1u;
-    uint32_t pos = vgpu_hash_u32(resource_id) & mask;
-    vgpu_attached_slot_t* tomb = 0;
-
-    for (uint32_t probe = 0; probe < VGPU_VIRGL_ATTACHED_CAP; probe++) {
-        vgpu_attached_slot_t* slot = &s->slots[pos];
-        if (slot->state == 0u) {
-            vgpu_attached_slot_t* dst = tomb ? tomb : slot;
-            dst->state = 1u;
-            dst->resource_id = resource_id;
-            s->len++;
-            return;
-        }
-
-        if (slot->state == 2u && !tomb) {
-            tomb = slot;
-        }
-        pos = (pos + 1u) & mask;
-    }
-}
 
 static int vgpu_virgl_ctx_ensure_locked(void) {
     if (!g_vgpu.active || !g_vgpu.virgl_supported) return 0;
@@ -489,7 +405,7 @@ static int vgpu_virgl_attach_resource_locked(uint32_t resource_id) {
     if (resource_id == 0u) return 0;
     if (!vgpu_virgl_ctx_ensure_locked()) return 0;
 
-    if (vgpu_attached_contains(&g_vgpu.attached, resource_id)) {
+    if (chashmap_find(g_vgpu.attached, resource_id)) {
         return 1;
     }
 
@@ -504,7 +420,7 @@ static int vgpu_virgl_attach_resource_locked(uint32_t resource_id) {
         return 0;
     }
 
-    vgpu_attached_insert(&g_vgpu.attached, resource_id);
+    chashmap_insert_unique(g_vgpu.attached, resource_id, (void*)1);
     return 1;
 }
 
@@ -512,12 +428,12 @@ static int vgpu_virgl_detach_resource_locked(uint32_t resource_id) {
     if (resource_id == 0u) return 0;
     if (!g_vgpu.active || !g_vgpu.virgl_supported) return 0;
 
-    if (!vgpu_attached_contains(&g_vgpu.attached, resource_id)) {
+    if (!chashmap_find(g_vgpu.attached, resource_id)) {
         return 1;
     }
 
     if (!g_vgpu.virgl_ctx_ready) {
-        vgpu_attached_remove(&g_vgpu.attached, resource_id);
+        chashmap_remove(g_vgpu.attached, resource_id);
         return 1;
     }
 
@@ -532,7 +448,7 @@ static int vgpu_virgl_detach_resource_locked(uint32_t resource_id) {
         return 0;
     }
 
-    vgpu_attached_remove(&g_vgpu.attached, resource_id);
+    chashmap_remove(g_vgpu.attached, resource_id);
     return 1;
 }
 
@@ -566,7 +482,11 @@ static void vgpu_cleanup_state(void) {
         pci->msi_vector = 0;
     }
 
-    vgpu_attached_reset(&g_vgpu.attached);
+    if (g_vgpu.attached) {
+        chashmap_destroy(g_vgpu.attached);
+        g_vgpu.attached = NULL;
+    }
+
     g_vgpu.virgl_supported = 0;
     g_vgpu.virgl_ctx_ready = 0;
     g_vgpu.virgl_ctx_id = 0u;
@@ -885,7 +805,12 @@ static int virtio_gpu_probe(virtio_device_t* vdev) {
 
     memset(&g_vgpu, 0, sizeof(g_vgpu));
     mutex_init(&g_vgpu.lock);
-    vgpu_attached_reset(&g_vgpu.attached);
+
+    g_vgpu.attached = chashmap_create();
+    if (!g_vgpu.attached) {
+        vgpu_cleanup_state();
+        return -1;
+    }
 
     g_vgpu.vdev = vdev;
 
