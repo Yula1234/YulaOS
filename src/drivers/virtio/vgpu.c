@@ -7,9 +7,11 @@
 #include <mm/heap.h>
 #include <mm/pmm.h>
 
+#include <hal/cpu.h>
 #include <hal/lock.h>
 #include <hal/irq.h>
 
+#include <kernel/locking/guards.h>
 #include <kernel/smp/mb.h>
 #include <kernel/proc.h>
 
@@ -266,7 +268,7 @@ static int vgpu_ctrlq_wait_token(virtqueue_token_t* token) {
             return 0;
         }
 
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 
@@ -366,8 +368,7 @@ static int vgpu_ctrlq_submit_async_locked(const void* cmd, uint32_t cmd_len, uin
 }
 
 static int vgpu_ctrlq_can_sleep(void) {
-    uint32_t eflags;
-    __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
+    const uint32_t eflags = get_eflags();
 
     if (!proc_current()) {
         return 0;
@@ -466,10 +467,14 @@ static uint32_t vgpu_pages_order_for_bytes(uint32_t bytes) {
     return order;
 }
 
-static void vgpu_mark_inactive_locked(void) {
-    g_vgpu.active = 0;
+static void vgpu_reset_scanout_bound_locked(void) {
     g_vgpu.scanout_bound_resource_id = 0;
     memset(&g_vgpu.scanout_bound_rect, 0, sizeof(g_vgpu.scanout_bound_rect));
+}
+
+static void vgpu_mark_inactive_locked(void) {
+    g_vgpu.active = 0;
+    vgpu_reset_scanout_bound_locked();
 }
 
 static void vgpu_cleanup_state(void) {
@@ -630,7 +635,7 @@ static int vgpu_ctrlq_submit_sg_locked(const uint64_t* addrs,
                 return 0;
             }
 
-            __asm__ volatile("pause");
+            cpu_relax();
         }
     }
 
@@ -1100,10 +1105,9 @@ int virtio_gpu_resource_create_3d(uint32_t resource_id,
                                   uint32_t last_level,
                                   uint32_t nr_samples,
                                   uint32_t flags) {
-    mutex_lock(&g_vgpu.lock);
+    guard_mutex(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
-        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1124,11 +1128,9 @@ int virtio_gpu_resource_create_3d(uint32_t resource_id,
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
@@ -1143,10 +1145,9 @@ int virtio_gpu_transfer_to_host_3d(uint32_t resource_id,
                                    uint32_t h,
                                    uint32_t d,
                                    uint64_t offset) {
-    mutex_lock(&g_vgpu.lock);
+    guard_mutex(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
-        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
@@ -1167,25 +1168,23 @@ int virtio_gpu_transfer_to_host_3d(uint32_t resource_id,
 
     if (!vgpu_ctrlq_submit_locked(sizeof(*cmd), sizeof(virtio_gpu_ctrl_hdr_t), VIRTIO_GPU_RESP_OK_NODATA)) {
         vgpu_mark_inactive_locked();
-        mutex_unlock(&g_vgpu.lock);
         return -1;
     }
 
-    mutex_unlock(&g_vgpu.lock);
     return 0;
 }
 
 int virtio_gpu_virgl_resource_attach(uint32_t resource_id) {
-    mutex_lock(&g_vgpu.lock);
-    int ok = vgpu_virgl_attach_resource_locked(resource_id);
-    mutex_unlock(&g_vgpu.lock);
+    guard_mutex(&g_vgpu.lock);
+
+    const int ok = vgpu_virgl_attach_resource_locked(resource_id);
     return ok ? 0 : -1;
 }
 
 int virtio_gpu_virgl_resource_detach(uint32_t resource_id) {
-    mutex_lock(&g_vgpu.lock);
-    int ok = vgpu_virgl_detach_resource_locked(resource_id);
-    mutex_unlock(&g_vgpu.lock);
+    guard_mutex(&g_vgpu.lock);
+
+    const int ok = vgpu_virgl_detach_resource_locked(resource_id);
     return ok ? 0 : -1;
 }
 
