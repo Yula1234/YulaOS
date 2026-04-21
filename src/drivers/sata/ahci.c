@@ -17,6 +17,7 @@
 #include <lib/idr.h>
 
 #include <hal/delay.h>
+#include <hal/cpu.h>
 #include <hal/irq.h>
 
 #include "ahci.h"
@@ -560,7 +561,7 @@ static void stop_cmd(ahci_hba_t* hba, int port_no) {
 
 static void start_cmd(ahci_hba_t* hba, int port_no) {
     while ((ahci_hba_port_read(hba, port_no, AHCI_PORT_CMD(port_no)) & HBA_PxCMD_CR) != 0u) {
-        __asm__ volatile("pause" ::: "memory");
+        cpu_relax();
     }
 
     uint32_t cmd = ahci_hba_port_read(hba, port_no, AHCI_PORT_CMD(port_no));
@@ -1022,7 +1023,7 @@ static int ahci_send_command(
             sem_wait(&state->slot_sem[new_slot]);
         } else {
             while ((ioread32(hba->iomem, AHCI_PORT_CI(port_no)) & (1u << new_slot)) != 0u) {
-                __asm__ volatile("pause");
+                cpu_relax();
             }
         }
 
@@ -1044,7 +1045,7 @@ static int ahci_send_command(
         sem_wait(&state->slot_sem[slot]);
     } else {
         while ((ioread32(hba->iomem, AHCI_PORT_CI(port_no)) & (1u << slot)) != 0u) {
-            __asm__ volatile("pause");
+            cpu_relax();
         }
     }
 
@@ -1236,7 +1237,7 @@ static void ahci_reset_controller(ahci_hba_t* hba) {
     ahci_write(hba, AHCI_HBA_GHC, ghc);
 
     while ((ahci_read(hba, AHCI_HBA_GHC) & 1u) != 0u) {
-        __asm__ volatile("pause" ::: "memory");
+        cpu_relax();
     }
 
     ghc = ahci_read(hba, AHCI_HBA_GHC);
