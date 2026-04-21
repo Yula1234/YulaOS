@@ -291,13 +291,34 @@ int memcmp(const void* a, const void* b, size_t n) {
 }
 
 void memzero_nt_page(void* dst) {
-    uint32_t d0, d1;
-    
+    uint32_t count = 64; 
+    const uint32_t zero = 0;
+
     __asm__ volatile (
-        "cld\n\t"
-        "rep stosl\n\t"
-        : "=&c"(d0), "=&D"(d1)
-        : "a"(0), "0"(1024), "1"(dst)
+        ".align 16\n"
+        "1:\n\t"
+        "movnti %[z],   0(%[p])\n\t"
+        "movnti %[z],   4(%[p])\n\t"
+        "movnti %[z],   8(%[p])\n\t"
+        "movnti %[z],  12(%[p])\n\t"
+        "movnti %[z],  16(%[p])\n\t"
+        "movnti %[z],  20(%[p])\n\t"
+        "movnti %[z],  24(%[p])\n\t"
+        "movnti %[z],  28(%[p])\n\t"
+        "movnti %[z],  32(%[p])\n\t"
+        "movnti %[z],  36(%[p])\n\t"
+        "movnti %[z],  40(%[p])\n\t"
+        "movnti %[z],  44(%[p])\n\t"
+        "movnti %[z],  48(%[p])\n\t"
+        "movnti %[z],  52(%[p])\n\t"
+        "movnti %[z],  56(%[p])\n\t"
+        "movnti %[z],  60(%[p])\n\t"
+        "add $64, %[p]\n\t"
+        "dec %[c]\n\t"
+        "jnz 1b\n\t"
+        "sfence\n\t"
+        : [p] "+r" (dst), [c] "+r" (count)
+        : [z] "r" (zero)
         : "memory", "cc"
     );
 }
