@@ -923,6 +923,41 @@ void proc_init(void) {
     proc::detail::initial_fpu_state = fpu_state_guard.release();
 }
 
+static inline rcu_ptr_t* alloc_fd_array(uint32_t cap) {
+    size_t bytes = sizeof(rcu_head_t) + sizeof(rcu_ptr_t) * cap;
+    uint8_t* mem = static_cast<uint8_t*>(kmalloc(bytes));
+    if (!mem) return nullptr;
+    return reinterpret_cast<rcu_ptr_t*>(mem + sizeof(rcu_head_t));
+}
+
+static void free_fd_array_rcu_cb(rcu_head_t* head) {
+    kfree(head);
+}
+
+static inline void free_fd_array_deferred(rcu_ptr_t* fds) {
+    if (!fds) {
+        return;
+    }
+
+    rcu_head_t* head = reinterpret_cast<rcu_head_t*>(
+        reinterpret_cast<uint8_t*>(fds) - sizeof(rcu_head_t)
+    );
+    
+    call_rcu(head, free_fd_array_rcu_cb);
+}
+
+static inline void free_fd_array_sync(rcu_ptr_t* fds) {
+    if (!fds) {
+        return;
+    }
+    
+    rcu_head_t* head = reinterpret_cast<rcu_head_t*>(
+        reinterpret_cast<uint8_t*>(fds) - sizeof(rcu_head_t)
+    );
+    
+    kfree(head);
+}
+
 void proc_fd_table_init(task_t* t) {
     if (!t) return;
 
@@ -938,7 +973,7 @@ void proc_fd_table_init(task_t* t) {
     rwspinlock_init(&ft->lock);
     
     ft->max_fds = 32;
-    ft->fds = static_cast<rcu_ptr_t*>(kmalloc(sizeof(rcu_ptr_t) * ft->max_fds));
+    ft->fds = alloc_fd_array(ft->max_fds);
     if (!ft->fds) {
         kfree(ft);
         t->fd_table = 0;
@@ -995,7 +1030,7 @@ static void fd_table_release_rcu(rcu_head_t* head) {
             }
         }
 
-        kfree(ft->fds);
+        free_fd_array_sync(ft->fds); 
     }
 
     kfree(ft);
@@ -1052,7 +1087,7 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd, rcu_ptr_t**
         new_cap *= 2;
     }
     
-    rcu_ptr_t* new_fds = static_cast<rcu_ptr_t*>(kmalloc(sizeof(rcu_ptr_t) * new_cap));
+    rcu_ptr_t* new_fds = alloc_fd_array(new_cap);
     if (!new_fds) {
         return -1;
     }
@@ -1113,9 +1148,9 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     }
 
     if (old_fds) {
-        synchronize_rcu();
-        kfree(old_fds);
+        free_fd_array_deferred(old_fds);
     }
+
     return ret;
 }
 
@@ -1146,9 +1181,9 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     }
 
     if (old_fds) {
-        synchronize_rcu();
-        kfree(old_fds);
+        free_fd_array_deferred(old_fds);
     }
+    
     return ret;
 }
 
@@ -1213,8 +1248,7 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
     }
 
     if (old_fds) {
-        synchronize_rcu();
-        kfree(old_fds);
+        free_fd_array_deferred(old_fds);
     }
     
     if (found == -1) return -1;
@@ -1274,7 +1308,7 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     kernel::RwSpinLockNativeReadGuard src_guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
-    ft.get()->fds = static_cast<rcu_ptr_t*>(kmalloc(sizeof(rcu_ptr_t) * ft.get()->max_fds));
+    ft.get()->fds = alloc_fd_array(ft.get()->max_fds);
     if (!ft.get()->fds) {
         return 0;
     }
