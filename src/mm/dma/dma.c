@@ -18,8 +18,6 @@
 
 #endif
 
-extern void smp_tlb_shootdown_range(uint32_t start, uint32_t end);
-
 ___inline uint32_t size_to_order(size_t size) {
     uint32_t pages = (size + PAGE_SIZE - 1u) / PAGE_SIZE;
     
@@ -64,7 +62,13 @@ ___inline void* __dma_alloc(size_t size, uint32_t* out_phys, uint32_t pte_flags)
         curr_p += PAGE_SIZE;
     }
 
-    smp_tlb_shootdown_range(virt_addr, virt_addr + (pages * PAGE_SIZE));
+    /*
+     * Don't do a TLB shootdown here, because according to the specification,
+     * the lack of mapping is not cached by the processor. It's safe not to
+     * invalidate TLB on other cores by sending IPI interrupts, since the
+     * mapping is new. dma_free_coherent() uses paging_unmap_range(), which
+     * automatically invalidates TLB on the required cores during unmapping.
+     */
 
     uint8_t* zero_ptr = (uint8_t*)virt_ptr;
     for (uint32_t i = 0u; i < pages; i++) {
