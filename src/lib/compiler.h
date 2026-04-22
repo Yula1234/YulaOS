@@ -7,6 +7,7 @@
 #define ___always_inline __attribute__((always_inline))
 #define ___inline __attribute__((always_inline)) static inline
 #define ___noinline __attribute__((noinline))
+#define ___unused __attribute__((unused))
 
 #ifdef __cplusplus
 
