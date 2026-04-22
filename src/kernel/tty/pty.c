@@ -941,6 +941,7 @@ static int pty_close(vfs_node_t* node) {
             vfs_node_release(slave_node);
 
             pty_pair_release(p);
+            pty_pair_release(p);
 
             return 0;
         }
