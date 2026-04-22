@@ -63,6 +63,8 @@ size_t ldisc_write_transform(
 
 bool ldisc_has_readable(const ldisc_t* ld);
 
+void ldisc_bootinit_wq(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -21,6 +21,7 @@
 #include <kernel/output/console.h>
 #include <kernel/init/init.h>
 #include <kernel/init/boot.h>
+#include <kernel/tty/ldisc.h>
 #include <kernel/profiler.h>
 #include <kernel/smp/cpu.h>
 #include <kernel/tty/tty.h>
@@ -345,7 +346,11 @@ static void kmain_spawn_core_tasks(void) {
     rcu_init_workers();
     
     task_t* tty_t = proc_spawn_kthread("tty", PRIO_GUI, tty_task, 0);
+
+    ldisc_bootinit_wq();
+
     task_t* init_t = proc_spawn_kthread("init", PRIO_USER, init_task, 0);
+
     if (!tty_t || !init_t) {
         kmain_handle_kthread_failure();
     }

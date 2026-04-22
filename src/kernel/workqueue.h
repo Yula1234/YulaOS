@@ -16,8 +16,12 @@ typedef void (*work_func_t)(struct WorkStruct* work);
 
 typedef struct WorkStruct {
     struct WorkStruct* next_;
+    
     work_func_t func_;
+
     uint32_t pending_;
+
+    volatile uint32_t executing_;
 } work_struct_t;
 
 static inline void init_work(work_struct_t* work, work_func_t func) {
@@ -28,6 +32,7 @@ static inline void init_work(work_struct_t* work, work_func_t func) {
     work->next_ = 0;
     work->func_ = func;
     work->pending_ = 0;
+    work->executing_ = 0;
 }
 
 struct WorkQueue;
@@ -39,6 +44,8 @@ workqueue_t* create_workqueue(const char* name);
 void destroy_workqueue(workqueue_t* wq);
 
 int queue_work(workqueue_t* wq, work_struct_t* work);
+
+void flush_work(work_struct_t* work);
 
 #ifdef __cplusplus
 }

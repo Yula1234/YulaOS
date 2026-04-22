@@ -115,9 +115,13 @@ static void workqueue_worker_task(void* arg) {
 
             __atomic_store_n(&work->pending_, 0, __ATOMIC_RELEASE);
 
+            __atomic_store_n(&work->executing_, 1, __ATOMIC_RELAXED);
+
             if (likely(func)) {
                 func(work);
             }
+
+            __atomic_store_n(&work->executing_, 0, __ATOMIC_RELEASE);
 
             continue;
         }
@@ -141,9 +145,13 @@ static void workqueue_worker_task(void* arg) {
 
             __atomic_store_n(&work->pending_, 0, __ATOMIC_RELEASE);
 
+            __atomic_store_n(&work->executing_, 1, __ATOMIC_RELAXED);
+
             if (likely(func)) {
                 func(work);
             }
+
+            __atomic_store_n(&work->executing_, 0, __ATOMIC_RELEASE);
 
             continue;
         }
@@ -234,4 +242,16 @@ int queue_work(workqueue_t* wq, work_struct_t* work) {
     }
 
     return 1;
+}
+
+void flush_work(work_struct_t* work) {
+    if (unlikely(!work)) {
+        return;
+    }
+    
+    while (__atomic_load_n(&work->pending_, __ATOMIC_ACQUIRE) != 0 ||
+           __atomic_load_n(&work->executing_, __ATOMIC_ACQUIRE) != 0) {
+        cpu_relax();
+        sched_yield();
+    }
 }
