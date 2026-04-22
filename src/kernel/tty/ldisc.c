@@ -201,17 +201,17 @@ static void queue_echo_bytes_locked(ldisc_t* ld, const uint8_t* data, size_t len
     }
 }
 
-static void queue_echo_char_locked(ldisc_t* ld, uint8_t c) {
+___inline void queue_echo_char_locked(ldisc_t* ld, uint8_t c) {
     queue_echo_bytes_locked(ld, &c, 1u);
 }
 
-static void queue_echo_erase_locked(ldisc_t* ld) {
+___inline void queue_echo_erase_locked(ldisc_t* ld) {
     const uint8_t seq[3] = { '\b', ' ', '\b' };
 
     queue_echo_bytes_locked(ld, seq, sizeof(seq));
 }
 
-static void queue_echo_signal_locked(ldisc_t* ld, int sig) {
+___inline void queue_echo_signal_locked(ldisc_t* ld, int sig) {
     uint8_t seq[4];
     size_t n = 0u;
 
@@ -457,7 +457,7 @@ void ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size) {
     }
 }
 
-static bool is_interrupted(task_t* curr) {
+___inline bool is_interrupted(task_t* curr) {
     if (curr && curr->pending_signals != 0u) {
         return true;
     }
