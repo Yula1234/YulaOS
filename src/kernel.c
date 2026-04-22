@@ -19,12 +19,12 @@
 
 #include <kernel/symbols/symbols.h>
 #include <kernel/output/console.h>
-#include <kernel/tty/pty/pty.h>
 #include <kernel/init/init.h>
 #include <kernel/init/boot.h>
 #include <kernel/profiler.h>
 #include <kernel/smp/cpu.h>
 #include <kernel/tty/tty.h>
+#include <kernel/tty/pty.h>
 #include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/proc.h>

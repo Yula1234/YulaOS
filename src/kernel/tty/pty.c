@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 Yula1234 */
 
 #include <kernel/waitq/poll_waitq.h>
+#include <kernel/tty/ldisc.h>
 #include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/proc.h>
@@ -15,7 +16,6 @@
 
 #include <mm/heap.h>
 
-#include "pty_ld_bridge.h"
 #include "pty.h"
 
 #define PTY_BUF_SIZE 4096u
@@ -50,7 +50,7 @@ typedef struct {
     yos_termios_t termios;
     yos_winsize_t winsz;
 
-    pty_ld_handle_t* ld;
+    ldisc_t* ld;
 
     uint32_t session_sid;
     uint32_t fg_pgid;
@@ -294,7 +294,7 @@ static void pty_pair_destroy(pty_pair_t* p) {
     }
 
     if (p->ld) {
-        pty_ld_destroy(p->ld);
+        ldisc_destroy(p->ld);
         p->ld = 0;
     }
 
@@ -309,6 +309,33 @@ static void pty_poll_waitq_finalize(void* ctx) {
     }
 
     kfree(p);
+}
+
+static void pty_update_ldisc_config(pty_pair_t* p) {
+    if (!p || !p->ld) return;
+
+    ldisc_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    cfg.canonical_ = (p->termios.c_lflag & YOS_LFLAG_ICANON) != 0;
+    cfg.echo_      = (p->termios.c_lflag & YOS_LFLAG_ECHO) != 0;
+    cfg.isig_      = (p->termios.c_lflag & YOS_LFLAG_ISIG) != 0;
+
+    cfg.igncr_     = (p->termios.c_iflag & YOS_IFLAG_IGNCR) != 0;
+    cfg.icrnl_     = (p->termios.c_iflag & YOS_IFLAG_ICRNL) != 0;
+    cfg.inlcr_     = (p->termios.c_iflag & YOS_IFLAG_INLCR) != 0;
+
+    cfg.opost_     = (p->termios.c_oflag & YOS_OFLAG_OPOST) != 0;
+    cfg.onlcr_     = (p->termios.c_oflag & YOS_OFLAG_ONLCR) != 0;
+
+    cfg.vmin_      = p->termios.c_cc[YOS_VMIN];
+    cfg.vtime_     = p->termios.c_cc[YOS_VTIME];
+    cfg.vintr_     = p->termios.c_cc[YOS_VINTR];
+    cfg.vquit_     = p->termios.c_cc[YOS_VQUIT];
+    cfg.vsusp_     = p->termios.c_cc[YOS_VSUSP];
+    cfg.veof_      = 0x04u;
+
+    ldisc_set_config(p->ld, &cfg);
 }
 
 static pty_pair_t* pty_pair_create(void) {
@@ -328,11 +355,15 @@ static pty_pair_t* pty_pair_create(void) {
     p->termios.c_cc[YOS_VMIN] = 1u;
     p->termios.c_cc[YOS_VTIME] = 0u;
 
-    p->ld = pty_ld_create(&p->termios, pty_echo_to_master, p, pty_isig_to_fg_pgrp, p);
+    p->ld = ldisc_create();
+
     if (!p->ld) {
         kfree(p);
         return 0;
     }
+    
+    ldisc_set_callbacks(p->ld, pty_echo_to_master, p, pty_isig_to_fg_pgrp, p);
+    pty_update_ldisc_config(p);
 
     p->refs = 1;
     spinlock_init(&p->lock);
@@ -647,7 +678,8 @@ static int pty_master_write(vfs_node_t* node, uint32_t offset, uint32_t size, co
         return -1;
     }
 
-    pty_ld_receive(p->ld, (const uint8_t*)buffer, (size_t)size);
+    ldisc_receive(p->ld, (const uint8_t*)buffer, (size_t)size);
+
     poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
     return (int)size;
 }
@@ -683,13 +715,13 @@ static int pty_slave_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
     }
 
     if (master_open == 0) {
-        const int has_readable = p->ld ? pty_ld_has_readable(p->ld) : 0;
+        const int has_readable = p->ld ? (ldisc_has_readable(p->ld) ? 1 : 0) : 0;
         if (!has_readable) {
             return 0;
         }
     }
 
-    size_t n = pty_ld_read(p->ld, buffer, (size_t)size);
+    size_t n = ldisc_read(p->ld, buffer, (size_t)size);
     if (n == (size_t)-2) {
         return -2;
     }
@@ -723,7 +755,7 @@ static int pty_slave_write(vfs_node_t* node, uint32_t offset, uint32_t size, con
         }
     }
 
-    size_t n = pty_ld_write(p->ld, buffer, (size_t)size);
+    size_t n = ldisc_write_transform(p->ld, buffer, (size_t)size, pty_echo_to_master, p);
     return (int)n;
 }
 
@@ -750,7 +782,7 @@ static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             memcpy(&p->termios, arg, sizeof(p->termios));
 
             if (p->ld) {
-                (void)pty_ld_set_termios(p->ld, &p->termios);
+                pty_update_ldisc_config(p);
             }
             break;
         case YOS_TIOCGWINSZ:
@@ -1115,7 +1147,7 @@ int pty_poll_info(vfs_node_t* node, uint32_t* out_available, uint32_t* out_space
         peer_open = p->devfs_registered;
     } else {
         if (p->ld) {
-            avail = pty_ld_has_readable(p->ld) ? 1u : 0u;
+            avail = ldisc_has_readable(p->ld) ? 1u : 0u;
         } else {
             avail = 0;
         }

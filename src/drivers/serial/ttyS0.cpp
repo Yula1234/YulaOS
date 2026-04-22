@@ -9,7 +9,7 @@
 #include <kernel/term/term.h>
 #include <kernel/tty/tty_internal.h>
 #include <kernel/tty/tty_service.h>
-#include <kernel/tty/line_discipline.h>
+#include <kernel/tty/ldisc.h>
 
 #include <kernel/proc.h>
 #include <kernel/waitq/poll_waitq.h>
@@ -20,7 +20,7 @@
 
 namespace {
 
-static kernel::tty::LineDiscipline g_ld;
+static ldisc_t* g_ld = nullptr;
 static yos_termios_t g_termios;
 
 static poll_waitq_t g_poll_waitq;
@@ -82,31 +82,33 @@ static void drain_rx(void) {
             break;
         }
 
-        g_ld.receive_bytes(buf, n);
+        ldisc_receive(g_ld, buf, n);
         poll_waitq_wake_all(&g_poll_waitq, VFS_POLLIN);
     }
 }
 
-static kernel::tty::LineDisciplineConfig config_from_termios(const yos_termios_t& t) {
-    kernel::tty::LineDisciplineConfig cfg;
+static ldisc_config_t config_from_termios(const yos_termios_t& t) {
+    ldisc_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
 
-    cfg.canonical = (t.c_lflag & YOS_LFLAG_ICANON) != 0;
-    cfg.echo = (t.c_lflag & YOS_LFLAG_ECHO) != 0;
-    cfg.isig = (t.c_lflag & YOS_LFLAG_ISIG) != 0;
+    cfg.canonical_ = (t.c_lflag & YOS_LFLAG_ICANON) != 0;
+    cfg.echo_ = (t.c_lflag & YOS_LFLAG_ECHO) != 0;
+    cfg.isig_ = (t.c_lflag & YOS_LFLAG_ISIG) != 0;
 
-    cfg.igncr = (t.c_iflag & YOS_IFLAG_IGNCR) != 0;
-    cfg.icrnl = (t.c_iflag & YOS_IFLAG_ICRNL) != 0;
-    cfg.inlcr = (t.c_iflag & YOS_IFLAG_INLCR) != 0;
+    cfg.igncr_ = (t.c_iflag & YOS_IFLAG_IGNCR) != 0;
+    cfg.icrnl_ = (t.c_iflag & YOS_IFLAG_ICRNL) != 0;
+    cfg.inlcr_ = (t.c_iflag & YOS_IFLAG_INLCR) != 0;
 
-    cfg.opost = (t.c_oflag & YOS_OFLAG_OPOST) != 0;
-    cfg.onlcr = (t.c_oflag & YOS_OFLAG_ONLCR) != 0;
+    cfg.opost_ = (t.c_oflag & YOS_OFLAG_OPOST) != 0;
+    cfg.onlcr_ = (t.c_oflag & YOS_OFLAG_ONLCR) != 0;
 
-    cfg.vmin = t.c_cc[YOS_VMIN];
-    cfg.vtime = t.c_cc[YOS_VTIME];
+    cfg.vmin_ = t.c_cc[YOS_VMIN];
+    cfg.vtime_ = t.c_cc[YOS_VTIME];
 
-    cfg.vintr = t.c_cc[YOS_VINTR];
-    cfg.vquit = t.c_cc[YOS_VQUIT];
-    cfg.vsusp = t.c_cc[YOS_VSUSP];
+    cfg.vintr_ = t.c_cc[YOS_VINTR];
+    cfg.vquit_ = t.c_cc[YOS_VQUIT];
+    cfg.vsusp_ = t.c_cc[YOS_VSUSP];
+    cfg.veof_  = 0x04u;
 
     return cfg;
 }
@@ -157,14 +159,14 @@ int ttyS0_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffe
     for (;;) {
         drain_rx();
 
-        if (g_ld.has_readable()) {
+        if (ldisc_has_readable(g_ld)) {
             break;
         }
 
         proc_usleep(2000);
     }
 
-    size_t n = g_ld.read(buffer, size);
+    size_t n = ldisc_read(g_ld, buffer, size);
     return (int)n;
 }
 
@@ -195,7 +197,7 @@ int ttyS0_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void
 
     serial_core_poll();
 
-    size_t n = g_ld.write_transform(buffer, size, serial_emit, 0);
+    size_t n = ldisc_write_transform(g_ld, buffer, size, serial_emit, nullptr);
 
     kernel::term::Term* term = active_term();
     if (term && size != 0) {
@@ -228,8 +230,8 @@ int ttyS0_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
 
         memcpy(&g_termios, arg, sizeof(g_termios));
 
-        kernel::tty::LineDisciplineConfig cfg = config_from_termios(g_termios);
-        g_ld.set_config(cfg);
+        ldisc_config_t cfg = config_from_termios(g_termios);
+        ldisc_set_config(g_ld, &cfg);
 
         return 0;
     }
@@ -314,7 +316,7 @@ static int ttyS0_vfs_poll_status(vfs_node_t* node, int events) {
 
     drain_rx();
 
-    if (g_ld.has_readable()) {
+    if (ldisc_has_readable(g_ld)) {
         return VFS_POLLIN;
     }
 
@@ -366,9 +368,15 @@ extern "C" void ttyS0_init(void) {
     g_termios.c_cc[YOS_VMIN] = 1u;
     g_termios.c_cc[YOS_VTIME] = 0u;
 
-    g_ld.set_echo_emitter(echo_emit, 0);
-    g_ld.set_signal_emitter(tty_signal_emit, 0);
-    g_ld.set_config(config_from_termios(g_termios));
+    g_ld = ldisc_create();
+    
+    if (g_ld) {
+        ldisc_set_callbacks(g_ld, echo_emit, nullptr, tty_signal_emit, nullptr);
+    
+        ldisc_config_t cfg = config_from_termios(g_termios);
+    
+        ldisc_set_config(g_ld, &cfg);
+    }
 
     poll_waitq_init(&g_poll_waitq);
 
@@ -377,7 +385,7 @@ extern "C" void ttyS0_init(void) {
 
 extern "C" int ttyS0_poll_ready(void) {
     drain_rx();
-    return g_ld.has_readable() ? 1 : 0;
+    return ldisc_has_readable(g_ld) ? 1 : 0;
 }
 
 extern "C" int ttyS0_poll_waitq_register(poll_waiter_t* w, task_t* task) {
