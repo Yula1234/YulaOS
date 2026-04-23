@@ -1,14 +1,28 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#ifndef DRIVERS_VIRTQUEUE_H
-#define DRIVERS_VIRTQUEUE_H
+#ifndef DRIVERS_VIRTIO_VIRTQUEUE_H
+#define DRIVERS_VIRTIO_VIRTQUEUE_H
 
-#include <hal/lock.h>
+#include <kernel/locking/spinlock.h>
+#include <kernel/locking/sem.h>
+
 #include <mm/iomem.h>
 
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define VRING_DESC_F_NEXT  1u
+#define VRING_DESC_F_WRITE 2u
+
+#define VRING_USED_F_NO_NOTIFY    1u
+#define VRING_USED_F_NO_INTERRUPT 2u
+
+#define VIRTIO_F_EVENT_IDX (1ull << 29u)
 
 typedef struct __attribute__((packed)) {
     uint64_t addr;
@@ -16,14 +30,6 @@ typedef struct __attribute__((packed)) {
     uint16_t flags;
     uint16_t next;
 } vring_desc_t;
-
-#define VRING_DESC_F_NEXT  1u
-#define VRING_DESC_F_WRITE 2u
-
-#define VRING_USED_F_NO_NOTIFY 1u
-#define VRING_USED_F_NO_INTERRUPT 2u
-
-#define VIRTIO_F_EVENT_IDX (1ull << 29u)
 
 typedef struct __attribute__((packed)) {
     uint16_t flags;
@@ -44,31 +50,31 @@ typedef struct __attribute__((packed)) {
 
 typedef struct virtqueue_token {
     semaphore_t sem;
-    uint32_t used_len;
+    uint32_t    used_len;
 
     void (*on_complete)(struct virtqueue_token* token, void* ctx);
-    void* on_complete_ctx;
+    void*   on_complete_ctx;
     uint8_t auto_destroy;
     uint8_t _pad[3];
 
     struct virtqueue* owner_vq;
-    uint16_t pool_index;
+    uint16_t          pool_index;
 } virtqueue_token_t;
 
 typedef struct virtqueue {
     uint16_t queue_index;
     uint16_t size;
 
-    vring_desc_t* desc;
+    vring_desc_t*  desc;
     vring_avail_t* avail;
-    vring_used_t* used;
+    vring_used_t*  used;
 
     __iomem* notify_iomem;
     uint32_t notify_iomem_off;
 
-    void* ring_mem;
+    void*    ring_mem;
     uint32_t ring_phys;
-    size_t ring_alloc_size;
+    size_t   ring_alloc_size;
 
     uint16_t free_head;
     uint16_t num_free;
@@ -76,46 +82,50 @@ typedef struct virtqueue {
     uint16_t avail_idx;
     uint16_t last_used_idx;
 
-    uint8_t event_idx_enabled;
-    uint8_t _pad[3];
+    uint8_t  event_idx_enabled;
+    uint8_t  _pad[3];
 
-    void* aux_mem;
-    virtqueue_token_t** pending;
+    void*                aux_mem;
+    virtqueue_token_t**  pending;
 
     virtqueue_token_t* tokens;
-    uint16_t* token_next;
-    uint16_t token_free_head;
-    uint16_t token_num_free;
+    uint16_t*          token_next;
+    uint16_t           token_free_head;
+    uint16_t           token_num_free;
 
     spinlock_t lock;
 } virtqueue_t;
 
-int virtqueue_init(virtqueue_t* vq, uint16_t queue_index, uint16_t size, __iomem* notify_region, uint32_t notify_offset);
+int virtqueue_init(
+    virtqueue_t* vq, uint16_t queue_index, uint16_t size,
+    __iomem* notify_region, uint32_t notify_offset
+);
+
 void virtqueue_destroy(virtqueue_t* vq);
 
-int virtqueue_submit(virtqueue_t* vq,
-                     const uint64_t* addrs,
-                     const uint32_t* lens,
-                     const uint16_t* flags,
-                     uint16_t count,
-                     uint16_t* out_head,
-                     virtqueue_token_t** out_token);
+int virtqueue_submit(
+    virtqueue_t* vq, const uint64_t* addrs, const uint32_t* lens,
+    const uint16_t* flags, uint16_t count, uint16_t* out_head,
+    virtqueue_token_t** out_token
+);
 
-int virtqueue_submit_cb(virtqueue_t* vq,
-                        const uint64_t* addrs,
-                        const uint32_t* lens,
-                        const uint16_t* flags,
-                        uint16_t count,
-                        void (*on_complete)(virtqueue_token_t*, void*),
-                        void* on_complete_ctx,
-                        uint8_t auto_destroy);
+int virtqueue_submit_cb(
+    virtqueue_t* vq, const uint64_t* addrs, const uint32_t* lens, const uint16_t* flags,
+    uint16_t count, void (*on_complete)(virtqueue_token_t*, void*),
+    void* on_complete_ctx, uint8_t auto_destroy
+);
 
 uint32_t virtqueue_token_wait(virtqueue_token_t* token);
 uint32_t virtqueue_token_wait_timeout(virtqueue_token_t* token, uint32_t deadline_tick);
+
 void virtqueue_token_destroy(virtqueue_token_t* token);
 
 void virtqueue_handle_irq(virtqueue_t* vq);
 
 void virtqueue_set_event_idx(virtqueue_t* vq, int enabled);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
