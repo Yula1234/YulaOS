@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #ifndef DRIVERS_PCI_H
 #define DRIVERS_PCI_H
@@ -16,8 +16,10 @@
 extern "C" {
 #endif
 
-uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
-void pci_write(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value);
+uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset);
+
+void pci_write(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset, uint32_t value);
+
 int pci_msi_configure(uint8_t bus, uint8_t slot, uint8_t func, uint8_t vector, uint8_t dest_apic_id);
 
 #define PCI_MATCH_VENDOR_ID  (1u << 0)
@@ -90,14 +92,14 @@ int pci_register_driver(pci_driver_t* driver);
 
 int pci_request_irq(pci_device_t* dev, irq_handler_t handler, void* ctx);
 
-uint32_t pci_dev_read32(const pci_device_t* dev, uint8_t offset);
-void pci_dev_write32(pci_device_t* dev, uint8_t offset, uint32_t value);
+uint32_t pci_dev_read32(const pci_device_t* dev, uint16_t offset);
+void pci_dev_write32(pci_device_t* dev, uint16_t offset, uint32_t value);
 
-uint16_t pci_dev_read16(const pci_device_t* dev, uint8_t offset);
-void pci_dev_write16(pci_device_t* dev, uint8_t offset, uint16_t value);
+uint16_t pci_dev_read16(const pci_device_t* dev, uint16_t offset);
+void pci_dev_write16(pci_device_t* dev, uint16_t offset, uint16_t value);
 
-uint8_t pci_dev_read8(const pci_device_t* dev, uint8_t offset);
-void pci_dev_write8(pci_device_t* dev, uint8_t offset, uint8_t value);
+uint8_t pci_dev_read8(const pci_device_t* dev, uint16_t offset);
+void pci_dev_write8(pci_device_t* dev, uint16_t offset, uint8_t value);
 
 void pci_dev_enable_busmaster(pci_device_t* dev);
 int pci_dev_enable_msi(pci_device_t* dev, uint8_t vector, uint8_t dest_apic_id);
