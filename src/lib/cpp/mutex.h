@@ -1,14 +1,14 @@
 #ifndef LIB_CPP_MUTEX_H
 #define LIB_CPP_MUTEX_H
 
-#include <lib/cpp/semaphore.h>
+#include <kernel/locking/mutex.h>
 
 namespace kernel {
 
 class Mutex {
 public:
-    Mutex()
-        : sem_(1) {
+    Mutex() {
+        mutex_init(&mut_);
     }
 
     Mutex(const Mutex&) = delete;
@@ -18,19 +18,19 @@ public:
     Mutex& operator=(Mutex&&) = delete;
 
     void lock() {
-        sem_.wait();
+        mutex_lock(&mut_);
     }
 
     void unlock() {
-        sem_.signal();
+        mutex_unlock(&mut_);
     }
 
     bool try_lock() {
-        return sem_.try_acquire();
+        return mutex_try_lock(&mut_);
     }
 
 private:
-    Semaphore sem_;
+    mutex_t mut_;
 };
 
 class MutexGuard {
