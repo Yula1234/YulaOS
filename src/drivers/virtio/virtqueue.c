@@ -11,9 +11,12 @@
 #include <lib/compiler.h>
 #include <lib/string.h>
 
+#include <stdbool.h>
+
 #include "virtqueue.h"
 
 ___inline uint16_t vq_mod(uint16_t x, uint16_t size) {
+    /* size is always a power of two in VirtIO */
     return x & (size - 1u);
 }
 
@@ -68,13 +71,10 @@ static void virtqueue_build_free_list(virtqueue_t* vq) {
     vq->free_head = 0u;
 
     for (uint16_t i = 0u; i < vq->size - 1u; i++) {
-        vq->desc[i].next  = (uint16_t)(i + 1u);
-        vq->desc[i].flags = VRING_DESC_F_NEXT;
+        vq->shadow_free[i] = (uint16_t)(i + 1u);
     }
 
-    vq->desc[vq->size - 1u].next  = 0u;
-    vq->desc[vq->size - 1u].flags = 0u;
-
+    vq->shadow_free[vq->size - 1u] = 0u;
     vq->num_free = vq->size;
 }
 
@@ -91,6 +91,7 @@ static void virtqueue_tokens_init(virtqueue_t* vq) {
 
         t->on_complete     = NULL;
         t->on_complete_ctx = NULL;
+        t->chain_len       = 0u;
         t->auto_destroy    = 0u;
 
         t->owner_vq   = vq;
@@ -129,6 +130,7 @@ static virtqueue_token_t* virtqueue_token_alloc_locked(virtqueue_t* vq) {
 
     token->on_complete     = NULL;
     token->on_complete_ctx = NULL;
+    token->chain_len       = 0u;
     token->auto_destroy    = 0u;
 
     return token;
@@ -152,6 +154,7 @@ static void virtqueue_token_free_locked(virtqueue_t* vq, virtqueue_token_t* toke
 
     token->on_complete     = NULL;
     token->on_complete_ctx = NULL;
+    token->chain_len       = 0u;
     token->auto_destroy    = 0u;
 
     vq->token_next[idx] = vq->token_free_head;
@@ -213,13 +216,12 @@ int virtqueue_init(
     vq->avail_idx     = 0u;
     vq->last_used_idx = 0u;
 
-    virtqueue_build_free_list(vq);
+    const size_t pending_bytes     = (size_t)size * sizeof(virtqueue_token_t*);
+    const size_t token_bytes       = (size_t)size * sizeof(virtqueue_token_t);
+    const size_t next_bytes        = (size_t)size * sizeof(uint16_t);
+    const size_t shadow_free_bytes = (size_t)size * sizeof(uint16_t);
 
-    const size_t pending_bytes = (size_t)size * sizeof(virtqueue_token_t*);
-    const size_t token_bytes   = (size_t)size * sizeof(virtqueue_token_t);
-    const size_t next_bytes    = (size_t)size * sizeof(uint16_t);
-
-    const size_t aux_bytes = pending_bytes + token_bytes + next_bytes;
+    const size_t aux_bytes = pending_bytes + token_bytes + next_bytes + shadow_free_bytes;
 
     vq->aux_mem = kzalloc(aux_bytes);
 
@@ -237,7 +239,11 @@ int virtqueue_init(
     aux += token_bytes;
 
     vq->token_next = (uint16_t*)aux;
+    aux += next_bytes;
 
+    vq->shadow_free = (uint16_t*)aux;
+
+    virtqueue_build_free_list(vq);
     virtqueue_tokens_init(vq);
 
     return 1;
@@ -271,6 +277,7 @@ void virtqueue_destroy(virtqueue_t* vq) {
 
     vq->tokens          = NULL;
     vq->token_next      = NULL;
+    vq->shadow_free     = NULL;
     vq->token_free_head = 0u;
     vq->token_num_free  = 0u;
 
@@ -290,7 +297,7 @@ void virtqueue_destroy(virtqueue_t* vq) {
     vq->notify_iomem_off = 0u;
 }
 
-static int virtqueue_alloc_desc_chain(virtqueue_t* vq, uint16_t count, uint16_t* out_head) {
+___inline int virtqueue_alloc_desc_chain(virtqueue_t* vq, uint16_t count, uint16_t* out_head) {
     if (unlikely(vq->num_free < count)) {
         return 0;
     }
@@ -299,7 +306,7 @@ static int virtqueue_alloc_desc_chain(virtqueue_t* vq, uint16_t count, uint16_t*
     uint16_t cur = head;
 
     for (uint16_t i = 0u; i < count; i++) {
-        const uint16_t next = vq->desc[cur].next;
+        const uint16_t next = vq->shadow_free[cur];
 
         if (i == count - 1u) {
             vq->free_head = next;
@@ -314,29 +321,18 @@ static int virtqueue_alloc_desc_chain(virtqueue_t* vq, uint16_t count, uint16_t*
     return 1;
 }
 
-static void virtqueue_free_desc_chain(virtqueue_t* vq, uint16_t head) {
+___inline void virtqueue_free_desc_chain_fast(virtqueue_t* vq, uint16_t head, uint16_t count) {
     uint16_t cur = head;
-    uint16_t count = 0u;
 
-    for (;;) {
-        const uint16_t flags = vq->desc[cur].flags;
-        const uint16_t next  = vq->desc[cur].next;
-
-        vq->desc[cur].flags = 0u;
-        count++;
-
-        if ((flags & VRING_DESC_F_NEXT) == 0u) {
-            break;
-        }
-
-        cur = next;
+    /* Traverse the shadow list entirely in cacheable memory */
+    for (uint16_t i = 0u; i < count - 1u; i++) {
+        cur = vq->shadow_free[cur];
     }
 
-    vq->desc[cur].next  = vq->free_head;
-    vq->desc[cur].flags |= VRING_DESC_F_NEXT;
-
+    vq->shadow_free[cur] = vq->free_head;
     vq->free_head = head;
-    vq->num_free  = (uint16_t)(vq->num_free + count);
+
+    vq->num_free = (uint16_t)(vq->num_free + count);
 }
 
 ___inline int __virtqueue_do_submit(
@@ -360,68 +356,80 @@ ___inline int __virtqueue_do_submit(
         return 0;
     }
 
-    guard_spinlock_safe(&vq->lock);
-
-    virtqueue_token_t* token = virtqueue_token_alloc_locked(vq);
-
-    if (unlikely(!token)) {
-        return 0;
-    }
-
-    token->on_complete     = on_complete;
-    token->on_complete_ctx = on_complete_ctx;
-    token->auto_destroy    = auto_destroy;
-
+    int do_notify = 0;
     uint16_t head = 0u;
+    virtqueue_token_t* token = NULL;
 
-    if (unlikely(!virtqueue_alloc_desc_chain(vq, count, &head))) {
-        goto err_free_token;
-    }
+    {
+        guard_spinlock_safe(&vq->lock);
 
-    if (unlikely(vq->pending && vq->pending[head])) {
-        goto err_free_desc;
-    }
+        token = virtqueue_token_alloc_locked(vq);
 
-    vq->pending[head] = token;
+        if (unlikely(!token)) {
+            return 0;
+        }
 
-    uint16_t cur = head;
+        token->on_complete     = on_complete;
+        token->on_complete_ctx = on_complete_ctx;
+        token->chain_len       = count;
+        token->auto_destroy    = auto_destroy;
 
-    for (uint16_t i = 0u; i < count; i++) {
-        const uint16_t next = vq->desc[cur].next;
+        if (unlikely(!virtqueue_alloc_desc_chain(vq, count, &head))) {
+            virtqueue_token_free_locked(vq, token);
+            return 0;
+        }
 
-        vq->desc[cur].addr = addrs[i];
-        vq->desc[cur].len  = lens[i];
+        if (unlikely(vq->pending && vq->pending[head])) {
+            virtqueue_free_desc_chain_fast(vq, head, count);
+            virtqueue_token_free_locked(vq, token);
+            return 0;
+        }
 
-        uint16_t f = flags[i];
+        vq->pending[head] = token;
 
-        if (i + 1u < count) {
-            vq->desc[cur].next = next;
-            f |= VRING_DESC_F_NEXT;
-            vq->desc[cur].flags = f;
+        uint16_t cur = head;
 
-            cur = next;
-        } else {
-            vq->desc[cur].next = 0u;
-            f &= (uint16_t)~VRING_DESC_F_NEXT;
-            vq->desc[cur].flags = f;
+        for (uint16_t i = 0u; i < count; i++) {
+            const uint16_t next = vq->shadow_free[cur];
+
+            vq->desc[cur].addr = addrs[i];
+            vq->desc[cur].len  = lens[i];
+
+            uint16_t f = flags[i];
+
+            if (i + 1u < count) {
+                vq->desc[cur].next = next;
+                f |= VRING_DESC_F_NEXT;
+                vq->desc[cur].flags = f;
+
+                cur = next;
+            } else {
+                vq->desc[cur].next = 0u;
+                f &= (uint16_t)~VRING_DESC_F_NEXT;
+                vq->desc[cur].flags = f;
+            }
+        }
+
+        const uint16_t avail_slot = vq_mod(vq->avail_idx, vq->size);
+
+        vq->avail->ring[avail_slot] = head;
+
+        smp_wmb();
+
+        const uint16_t old_idx = vq->avail_idx;
+        const uint16_t new_idx = old_idx + 1u;
+
+        vq->avail_idx  = new_idx;
+        vq->avail->idx = new_idx;
+
+        smp_mb();
+
+        if (vq->notify_iomem && virtqueue_should_notify(vq, old_idx, new_idx)) {
+            do_notify = 1;
         }
     }
 
-    const uint16_t avail_slot = vq_mod(vq->avail_idx, vq->size);
-
-    vq->avail->ring[avail_slot] = head;
-
-    smp_wmb();
-
-    const uint16_t old_idx = vq->avail_idx;
-    const uint16_t new_idx = old_idx + 1u;
-
-    vq->avail_idx  = new_idx;
-    vq->avail->idx = new_idx;
-
-    smp_mb();
-
-    if (vq->notify_iomem && virtqueue_should_notify(vq, old_idx, new_idx)) {
+    if (do_notify) {
         iowrite16(vq->notify_iomem, vq->notify_iomem_off, vq->queue_index);
     }
 
@@ -434,14 +442,6 @@ ___inline int __virtqueue_do_submit(
     }
 
     return 1;
-
-err_free_desc:
-    virtqueue_free_desc_chain(vq, head);
-
-err_free_token:
-    virtqueue_token_free_locked(vq, token);
-
-    return 0;
 }
 
 int virtqueue_submit(
@@ -529,15 +529,23 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
     CompletionEntry completions[32];
     uint32_t completion_count = 0u;
 
-    {
-        guard_spinlock_safe(&vq->lock);
+    for (;;) {
+        completion_count = 0u;
+        bool has_more = false;
 
-        for (;;) {
+        {
+            guard_spinlock_safe(&vq->lock);
+
             const uint16_t used_idx = vq->used->idx;
 
             smp_rmb();
 
             while (vq->last_used_idx != used_idx) {
+                if (unlikely(completion_count >= 32u)) {
+                    has_more = true;
+                    break;
+                }
+
                 const uint16_t slot = vq_mod(vq->last_used_idx, vq->size);
                 const vring_used_elem_t e = vq->used->ring[slot];
 
@@ -550,27 +558,21 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
                         token->used_len = e.len;
                         vq->pending[head] = NULL;
 
-                        virtqueue_free_desc_chain(vq, head);
+                        virtqueue_free_desc_chain_fast(vq, head, token->chain_len);
 
-                        sem_signal(&token->sem);
+                        completions[completion_count].token_           = token;
+                        completions[completion_count].on_complete_     = token->on_complete;
+                        completions[completion_count].on_complete_ctx_ = token->on_complete_ctx;
+                        completions[completion_count].auto_destroy_    = token->auto_destroy;
 
-                        if (token->on_complete && completion_count < 32u) {
-                            completions[completion_count].token_           = token;
-                            completions[completion_count].on_complete_     = token->on_complete;
-                            completions[completion_count].on_complete_ctx_ = token->on_complete_ctx;
-                            completions[completion_count].auto_destroy_    = token->auto_destroy;
-
-                            completion_count++;
-                        }
-                    } else {
-                        virtqueue_free_desc_chain(vq, head);
+                        completion_count++;
                     }
                 }
 
                 vq->last_used_idx++;
             }
 
-            if (vq->event_idx_enabled) {
+            if (!has_more && vq->event_idx_enabled) {
                 uint16_t* used_event_ptr = (uint16_t*)(
                     (uintptr_t)vq->avail
                     + sizeof(vring_avail_t)
@@ -582,21 +584,27 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
                 smp_mb();
 
                 if (vq->used->idx != vq->last_used_idx) {
-                    continue;
+                    has_more = true;
                 }
             }
-
-            break;
         }
-    }
 
-    for (uint32_t i = 0; i < completion_count; i++) {
-        CompletionEntry* c = &completions[i];
+        for (uint32_t i = 0u; i < completion_count; i++) {
+            CompletionEntry* c = &completions[i];
 
-        c->on_complete_(c->token_, c->on_complete_ctx_);
+            sem_signal(&c->token_->sem);
 
-        if (c->auto_destroy_) {
-            virtqueue_token_destroy(c->token_);
+            if (c->on_complete_) {
+                c->on_complete_(c->token_, c->on_complete_ctx_);
+            }
+
+            if (c->auto_destroy_) {
+                virtqueue_token_destroy(c->token_);
+            }
+        }
+
+        if (!has_more) {
+            break;
         }
     }
 }

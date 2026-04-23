@@ -9,6 +9,8 @@
 
 #include <mm/iomem.h>
 
+#include <hal/align.h>
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -53,9 +55,11 @@ typedef struct virtqueue_token {
     uint32_t    used_len;
 
     void (*on_complete)(struct virtqueue_token* token, void* ctx);
-    void*   on_complete_ctx;
-    uint8_t auto_destroy;
-    uint8_t _pad[3];
+    void*    on_complete_ctx;
+    
+    uint16_t chain_len;
+    uint8_t  auto_destroy;
+    uint8_t  _pad[1];
 
     struct virtqueue* owner_vq;
     uint16_t          pool_index;
@@ -65,10 +69,6 @@ typedef struct virtqueue {
     uint16_t queue_index;
     uint16_t size;
 
-    vring_desc_t*  desc;
-    vring_avail_t* avail;
-    vring_used_t*  used;
-
     __iomem* notify_iomem;
     uint32_t notify_iomem_off;
 
@@ -76,43 +76,64 @@ typedef struct virtqueue {
     uint32_t ring_phys;
     size_t   ring_alloc_size;
 
-    uint16_t free_head;
-    uint16_t num_free;
-
-    uint16_t avail_idx;
-    uint16_t last_used_idx;
+    void*                aux_mem;
+    virtqueue_token_t*   tokens;
+    uint16_t*            token_next;
 
     uint8_t  event_idx_enabled;
-    uint8_t  _pad[3];
+    uint8_t  _pad_cold[3];
 
-    void*                aux_mem;
-    virtqueue_token_t**  pending;
+    spinlock_t lock __cacheline_aligned;
 
-    virtqueue_token_t* tokens;
-    uint16_t*          token_next;
-    uint16_t           token_free_head;
-    uint16_t           token_num_free;
+    vring_desc_t*  desc;
+    vring_avail_t* avail;
 
-    spinlock_t lock;
-} virtqueue_t;
+    uint16_t* shadow_free;
+    uint16_t  free_head;
+    uint16_t  num_free;
+    uint16_t  avail_idx;
+
+    uint16_t  token_free_head;
+    uint16_t  token_num_free;
+    uint8_t   _pad_tx[4];
+
+    vring_used_t*       used __cacheline_aligned;
+    virtqueue_token_t** pending;
+    
+    uint16_t last_used_idx;
+    uint8_t  _pad_rx[6];
+
+} __cacheline_aligned virtqueue_t;
 
 int virtqueue_init(
-    virtqueue_t* vq, uint16_t queue_index, uint16_t size,
-    __iomem* notify_region, uint32_t notify_offset
+    virtqueue_t* vq,
+    uint16_t queue_index,
+    uint16_t size,
+    __iomem* notify_region,
+    uint32_t notify_offset
 );
 
 void virtqueue_destroy(virtqueue_t* vq);
 
 int virtqueue_submit(
-    virtqueue_t* vq, const uint64_t* addrs, const uint32_t* lens,
-    const uint16_t* flags, uint16_t count, uint16_t* out_head,
+    virtqueue_t* vq,
+    const uint64_t* addrs,
+    const uint32_t* lens,
+    const uint16_t* flags,
+    uint16_t count,
+    uint16_t* out_head,
     virtqueue_token_t** out_token
 );
 
 int virtqueue_submit_cb(
-    virtqueue_t* vq, const uint64_t* addrs, const uint32_t* lens, const uint16_t* flags,
-    uint16_t count, void (*on_complete)(virtqueue_token_t*, void*),
-    void* on_complete_ctx, uint8_t auto_destroy
+    virtqueue_t* vq,
+    const uint64_t* addrs,
+    const uint32_t* lens,
+    const uint16_t* flags,
+    uint16_t count,
+    void (*on_complete)(virtqueue_token_t*, void*),
+    void* on_complete_ctx,
+    uint8_t auto_destroy
 );
 
 uint32_t virtqueue_token_wait(virtqueue_token_t* token);
