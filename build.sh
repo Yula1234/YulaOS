@@ -214,8 +214,8 @@ echo "[run] qemu..."
 export vblank_mode=0
 export __GL_SYNC_TO_VBLANK=0
 
-QEMU_ARGS="-device ahci,id=ahci -global kvm-pit.lost_tick_policy=discard
--device ide-hd,drive=disk,bus=ahci.0 -machine q35,pcspk-audiodev=snd0 -m 1G
+QEMU_ARGS="-global kvm-pit.lost_tick_policy=discard
+-device ide-hd,drive=disk,bus=ide.0 -machine q35,pcspk-audiodev=snd0 -m 1G
 -device piix3-usb-uhci,id=uhci -device usb-kbd,bus=uhci.0,port=1
 -netdev user,id=net0 -device ne2k_isa,netdev=net0 -chardev stdio,id=charserial0,signal=off -serial chardev:charserial0
 -drive id=disk,file=${DISK_IMG},if=none,format=raw,cache=unsafe,aio=io_uring
