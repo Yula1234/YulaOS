@@ -582,12 +582,10 @@ static int vgpu_ctrlq_submit_locked(uint32_t cmd_len, uint32_t resp_len, uint32_
 
     const int ok = vgpu_ctrlq_wait_token(token);
     if (!ok) {
-        virtqueue_token_destroy(token);
         virtqueue_destroy(&g_vgpu.ctrlq);
         return 0;
     }
 
-    virtqueue_token_destroy(token);
     const virtio_gpu_ctrl_hdr_t* rhdr = (const virtio_gpu_ctrl_hdr_t*)g_vgpu.ctrl_resp;
     return rhdr->type == expected_resp_type;
 }
@@ -639,7 +637,6 @@ static int vgpu_ctrlq_submit_sg_locked(const uint64_t* addrs,
         }
     }
 
-    virtqueue_token_destroy(token);
     const virtio_gpu_ctrl_hdr_t* rhdr = (const virtio_gpu_ctrl_hdr_t*)g_vgpu.ctrl_resp;
     return rhdr->type == expected_resp_type;
 }
@@ -709,7 +706,6 @@ static int vgpu_ctrlq_submit(uint32_t cmd_len, uint32_t resp_len, uint32_t expec
     mutex_lock(&g_vgpu.lock);
 
     if (!wait_ok) {
-        virtqueue_token_destroy(token);
         virtqueue_destroy(&g_vgpu.ctrlq);
         vgpu_mark_inactive_locked();
 
@@ -718,8 +714,6 @@ static int vgpu_ctrlq_submit(uint32_t cmd_len, uint32_t resp_len, uint32_t expec
         mutex_unlock(&g_vgpu.lock);
         return 0;
     }
-
-    virtqueue_token_destroy(token);
 
     const virtio_gpu_ctrl_hdr_t* rhdr = (const virtio_gpu_ctrl_hdr_t*)slot->resp;
     const int ok = rhdr && rhdr->type == expected_resp_type;

@@ -62,7 +62,6 @@ typedef struct virtqueue_token {
     uint8_t  _pad[1];
 
     struct virtqueue* owner_vq;
-    uint16_t          pool_index;
 } virtqueue_token_t;
 
 typedef struct virtqueue {
@@ -78,7 +77,6 @@ typedef struct virtqueue {
 
     void*                aux_mem;
     virtqueue_token_t*   tokens;
-    uint16_t*            token_next;
 
     uint8_t  event_idx_enabled;
     uint8_t  _pad_cold[3];

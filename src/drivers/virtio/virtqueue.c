@@ -11,6 +11,8 @@
 #include <lib/compiler.h>
 #include <lib/string.h>
 
+#include <arch/i386/paging.h>
+
 #include <stdbool.h>
 
 #include "virtqueue.h"
@@ -79,87 +81,12 @@ static void virtqueue_build_free_list(virtqueue_t* vq) {
 }
 
 static void virtqueue_tokens_init(virtqueue_t* vq) {
-    vq->token_free_head = 0u;
-    vq->token_num_free  = vq->size;
-
     for (uint16_t i = 0u; i < vq->size; i++) {
         virtqueue_token_t* t = &vq->tokens[i];
+        t->owner_vq = vq;
 
         sem_init(&t->sem, 0);
-
-        t->used_len = 0u;
-
-        t->on_complete     = NULL;
-        t->on_complete_ctx = NULL;
-        t->chain_len       = 0u;
-        t->auto_destroy    = 0u;
-
-        t->owner_vq   = vq;
-        t->pool_index = i;
-
-        vq->token_next[i] = (uint16_t)(i + 1u);
     }
-
-    if (vq->size != 0u) {
-        vq->token_next[vq->size - 1u] = (uint16_t)0xFFFFu;
-    }
-}
-
-static virtqueue_token_t* virtqueue_token_alloc_locked(virtqueue_t* vq) {
-    if (unlikely(!vq
-        || vq->token_num_free == 0u)) {
-        return NULL;
-    }
-
-    const uint16_t idx = vq->token_free_head;
-
-    if (unlikely(idx == (uint16_t)0xFFFFu
-        || idx >= vq->size)) {
-        return NULL;
-    }
-
-    vq->token_free_head = vq->token_next[idx];
-    vq->token_next[idx] = (uint16_t)0xFFFFu;
-    vq->token_num_free  = (uint16_t)(vq->token_num_free - 1u);
-
-    virtqueue_token_t* token = &vq->tokens[idx];
-
-    token->used_len = 0u;
-
-    sem_reset(&token->sem, 0);
-
-    token->on_complete     = NULL;
-    token->on_complete_ctx = NULL;
-    token->chain_len       = 0u;
-    token->auto_destroy    = 0u;
-
-    return token;
-}
-
-static void virtqueue_token_free_locked(virtqueue_t* vq, virtqueue_token_t* token) {
-    if (unlikely(!vq
-        || !token)) {
-        return;
-    }
-
-    const uint16_t idx = token->pool_index;
-
-    if (unlikely(idx >= vq->size)) {
-        return;
-    }
-
-    token->used_len = 0u;
-
-    sem_reset(&token->sem, 0);
-
-    token->on_complete     = NULL;
-    token->on_complete_ctx = NULL;
-    token->chain_len       = 0u;
-    token->auto_destroy    = 0u;
-
-    vq->token_next[idx] = vq->token_free_head;
-    vq->token_free_head = idx;
-    vq->token_num_free  = (uint16_t)(vq->token_num_free + 1u);
 }
 
 int virtqueue_init(
@@ -184,14 +111,22 @@ int virtqueue_init(
     spinlock_init(&vq->lock);
 
     const uint32_t ring_bytes = virtqueue_ring_bytes(size);
-    uint32_t ring_phys = 0u;
 
-    void* mem = dma_alloc_coherent((size_t)ring_bytes, &ring_phys);
+    void* mem = kmalloc_a((size_t)ring_bytes);
+
+    uint32_t ring_phys = mem ? paging_get_phys(kernel_page_directory, (uint32_t)mem) : 0u;
 
     if (unlikely(!mem
         || ring_phys == 0u)) {
+
+        if (mem) {
+            kfree(mem);
+        }
+
         return 0;
     }
+
+    memset(mem, 0, ring_bytes);
 
     vq->ring_mem        = mem;
     vq->ring_phys       = ring_phys;
@@ -218,10 +153,9 @@ int virtqueue_init(
 
     const size_t pending_bytes     = (size_t)size * sizeof(virtqueue_token_t*);
     const size_t token_bytes       = (size_t)size * sizeof(virtqueue_token_t);
-    const size_t next_bytes        = (size_t)size * sizeof(uint16_t);
     const size_t shadow_free_bytes = (size_t)size * sizeof(uint16_t);
 
-    const size_t aux_bytes = pending_bytes + token_bytes + next_bytes + shadow_free_bytes;
+    const size_t aux_bytes = pending_bytes + token_bytes + shadow_free_bytes;
 
     vq->aux_mem = kzalloc(aux_bytes);
 
@@ -238,12 +172,10 @@ int virtqueue_init(
     vq->tokens = (virtqueue_token_t*)aux;
     aux += token_bytes;
 
-    vq->token_next = (uint16_t*)aux;
-    aux += next_bytes;
-
     vq->shadow_free = (uint16_t*)aux;
 
     virtqueue_build_free_list(vq);
+
     virtqueue_tokens_init(vq);
 
     return 1;
@@ -276,13 +208,12 @@ void virtqueue_destroy(virtqueue_t* vq) {
     }
 
     vq->tokens          = NULL;
-    vq->token_next      = NULL;
     vq->shadow_free     = NULL;
     vq->token_free_head = 0u;
     vq->token_num_free  = 0u;
 
     if (vq->ring_mem) {
-        dma_free_coherent(vq->ring_mem, vq->ring_alloc_size, vq->ring_phys);
+        kfree(vq->ring_mem);
 
         vq->ring_mem        = NULL;
         vq->ring_phys       = 0u;
@@ -363,25 +294,27 @@ ___inline int __virtqueue_do_submit(
     {
         guard_spinlock_safe(&vq->lock);
 
-        token = virtqueue_token_alloc_locked(vq);
+
+        if (unlikely(!virtqueue_alloc_desc_chain(vq, count, &head))) {
+            return 0;
+        }
+
+        token = &vq->tokens[head];
 
         if (unlikely(!token)) {
             return 0;
         }
 
+        sem_reset(&token->sem, 0);
+
+        token->used_len        = 0u;
         token->on_complete     = on_complete;
         token->on_complete_ctx = on_complete_ctx;
         token->chain_len       = count;
         token->auto_destroy    = auto_destroy;
 
-        if (unlikely(!virtqueue_alloc_desc_chain(vq, count, &head))) {
-            virtqueue_token_free_locked(vq, token);
-            return 0;
-        }
-
         if (unlikely(vq->pending && vq->pending[head])) {
             virtqueue_free_desc_chain_fast(vq, head, count);
-            virtqueue_token_free_locked(vq, token);
             return 0;
         }
 
@@ -498,22 +431,6 @@ uint32_t virtqueue_token_wait_timeout(virtqueue_token_t* token, uint32_t deadlin
     return token->used_len;
 }
 
-void virtqueue_token_destroy(virtqueue_token_t* token) {
-    if (unlikely(!token)) {
-        return;
-    }
-
-    virtqueue_t* vq = token->owner_vq;
-
-    if (unlikely(!vq)) {
-        return;
-    }
-
-    guard_spinlock_safe(&vq->lock);
-
-    virtqueue_token_free_locked(vq, token);
-}
-
 void virtqueue_handle_irq(virtqueue_t* vq) {
     if (unlikely(!vq)) {
         return;
@@ -596,10 +513,6 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
 
             if (c->on_complete_) {
                 c->on_complete_(c->token_, c->on_complete_ctx_);
-            }
-
-            if (c->auto_destroy_) {
-                virtqueue_token_destroy(c->token_);
             }
         }
 
