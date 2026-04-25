@@ -260,18 +260,24 @@ void tty_release(tty_t* tty) {
     }
 }
 
-void tty_receive(tty_t* tty, const uint8_t* data, uint32_t size) {
+size_t tty_receive(tty_t* tty, const uint8_t* data, uint32_t size) {
     if (unlikely(!tty
         || !data
         || size == 0u)) {
-        return;
+        return 0;
     }
+
+    size_t w = 0;
 
     if (likely(tty->ldisc)) {
-        ldisc_receive(tty->ldisc, data, size);
+        w = ldisc_receive(tty->ldisc, data, size);
 
-        poll_waitq_wake_all(&tty->poll_waitq, VFS_POLLIN);
+        if (w > 0) {
+            poll_waitq_wake_all(&tty->poll_waitq, VFS_POLLIN);
+        }
     }
+    
+    return w;
 }
 
 static void tty_private_retain(void* private_data) {

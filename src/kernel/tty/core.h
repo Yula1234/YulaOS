@@ -64,7 +64,7 @@ tty_t* tty_alloc(const tty_driver_ops_t* ops, void* driver_data);
 void tty_retain(tty_t* tty);
 void tty_release(tty_t* tty);
 
-void tty_receive(tty_t* tty, const uint8_t* data, uint32_t size);
+size_t tty_receive(tty_t* tty, const uint8_t* data, uint32_t size);
 
 void tty_bind_vfs_node(tty_t* tty, vfs_node_t* node);
 

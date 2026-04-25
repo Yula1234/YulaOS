@@ -41,6 +41,8 @@ struct ldisc {
 
     dlist_head_t read_waiters_;
 
+    semaphore_t write_sem_;
+
     ldisc_config_t cfg_;
 
     ldisc_emit_fn_t   echo_emit_;
@@ -270,9 +272,9 @@ static bool try_isig_locked(ldisc_t* ld, uint8_t b) {
     return true;
 }
 
-static void receive_byte_locked(ldisc_t* ld, uint8_t b) {
+static bool receive_byte_locked(ldisc_t* ld, uint8_t b) {
     if (ld->cfg_.igncr_ && b == '\r') {
-        return;
+        return true;
     }
 
     if (ld->cfg_.icrnl_ && b == '\r') {
@@ -282,20 +284,20 @@ static void receive_byte_locked(ldisc_t* ld, uint8_t b) {
     }
 
     if (try_isig_locked(ld, b)) {
-        return;
+        return true;
     }
 
     if (!ld->cfg_.canonical_) {
-        ring_push_chunk(
-            ld->rx_buf_, &ld->rx_head_, &ld->rx_count_, 
-            LDISC_RX_CAP, &b, 1u
-        );
+        if (ld->rx_count_ >= LDISC_RX_CAP) {
+            return false;
+        }
+
+        ring_push_chunk(ld->rx_buf_, &ld->rx_head_, &ld->rx_count_, LDISC_RX_CAP, &b, 1u);
 
         queue_echo_char_locked(ld, b);
-
+        
         wake_read_waiters_locked(ld);
-
-        return;
+        return true;
     }
 
     if (b == 0x08u || b == 0x7Fu) {
@@ -305,52 +307,49 @@ static void receive_byte_locked(ldisc_t* ld, uint8_t b) {
             queue_echo_erase_locked(ld);
         }
 
-        return;
+        return true;
     }
 
-    if (b == ld->cfg_.veof_) {
-        ring_push_chunk(
-            ld->rx_buf_, &ld->rx_head_, &ld->rx_count_, 
-            LDISC_RX_CAP, ld->line_buf_, ld->line_len_
-        );
+    if (b == ld->cfg_.veof_ || b == '\n') {
+        uint32_t needed = ld->line_len_;
         
-        if (ld->canon_count_ < LDISC_MAX_LINES) {
-            ld->canon_lens_[ld->canon_head_] = ld->line_len_;
-            ld->canon_head_ = (ld->canon_head_ + 1u) % LDISC_MAX_LINES;
-
-            ld->canon_count_++;
+        if (b == '\n') {
+            needed++;
         }
+
+        if (ld->rx_count_ + needed > LDISC_RX_CAP) {
+            return false;
+        }
+
+        if (ld->canon_count_ >= LDISC_MAX_LINES) {
+            return false;
+        }
+
+        if (b == '\n') {
+            ld->line_buf_[ld->line_len_++] = b;
+        }
+
+        ring_push_chunk(ld->rx_buf_, &ld->rx_head_, &ld->rx_count_, LDISC_RX_CAP, ld->line_buf_, ld->line_len_);
+        
+        ld->canon_lens_[ld->canon_head_] = ld->line_len_;
+        ld->canon_head_ = (ld->canon_head_ + 1u) % LDISC_MAX_LINES;
+        ld->canon_count_++;
 
         ld->line_len_ = 0u;
 
         wake_read_waiters_locked(ld);
-
-        return;
+        return true;
     }
 
-    if (ld->line_len_ < LDISC_LINE_CAP) {
-        ld->line_buf_[ld->line_len_++] = b;
+    if (ld->line_len_ >= LDISC_LINE_CAP) {
+        return false;
     }
+
+    ld->line_buf_[ld->line_len_++] = b;
 
     queue_echo_char_locked(ld, b);
-
-    if (b == '\n') {
-        ring_push_chunk(
-            ld->rx_buf_, &ld->rx_head_, &ld->rx_count_, 
-            LDISC_RX_CAP, ld->line_buf_, ld->line_len_
-        );
-        
-        if (ld->canon_count_ < LDISC_MAX_LINES) {
-            ld->canon_lens_[ld->canon_head_] = ld->line_len_;
-            ld->canon_head_ = (ld->canon_head_ + 1u) % LDISC_MAX_LINES;
-        
-            ld->canon_count_++;
-        }
-
-        ld->line_len_ = 0u;
-
-        wake_read_waiters_locked(ld);
-    }
+    
+    return true;
 }
 
 ldisc_t* ldisc_create(void) {
@@ -369,6 +368,8 @@ ldisc_t* ldisc_create(void) {
     spinlock_init(&ld->echo_lock_);
 
     dlist_init(&ld->read_waiters_);
+
+    sem_init(&ld->write_sem_, 0);
 
     init_work(&ld->echo_work_, echo_worker_task);
 
@@ -443,18 +444,30 @@ void ldisc_set_callbacks(
     ld->sig_ctx_   = sig_ctx;
 }
 
-void ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size) {
+size_t ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size) {
     if (unlikely(!ld
         || !data
         || size == 0u)) {
-        return;
+        return 0u;
     }
 
     guard_spinlock_safe(&ld->rx_lock_);
 
+    size_t written = 0;
+
     for (size_t i = 0u; i < size; i++) {
-        receive_byte_locked(ld, data[i]);
+        if (!receive_byte_locked(ld, data[i])) {
+            break;
+        }
+
+        written++;
     }
+
+    return written;
+}
+
+void ldisc_wait_space(ldisc_t* ld) {
+    sem_wait(&ld->write_sem_);
 }
 
 ___inline bool is_interrupted(task_t* curr) {
@@ -573,6 +586,8 @@ size_t ldisc_read(ldisc_t* ld, void* out, size_t size) {
                 LDISC_RX_CAP, dst, to_copy
             );
 
+            sem_signal_all(&ld->write_sem_);
+
             n += to_copy;
 
             if (to_copy < line_len) {
@@ -626,6 +641,8 @@ size_t ldisc_read(ldisc_t* ld, void* out, size_t size) {
     );
 
     n += to_copy;
+
+    sem_signal_all(&ld->write_sem_);
 
     spinlock_release_safe(&ld->rx_lock_, flags);
 

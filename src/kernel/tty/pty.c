@@ -133,23 +133,46 @@ static int pty_master_hw_write(tty_t* tty, const void* buf, uint32_t size) {
 
     pty_pair_t* p = (pty_pair_t*)tty->driver_data;
 
-    int is_slave_open = 0;
+    uint32_t total_written = 0;
 
-    {
-        guard_spinlock_safe(&p->lock);
-        
-        is_slave_open = p->slave_open;
+    const uint8_t* cbuf = (const uint8_t*)buf;
+
+    while (total_written < size) {
+        int is_slave_open = 0;
+
+        {
+            guard_spinlock_safe(&p->lock);
+
+            is_slave_open = p->slave_open;
+        }
+
+        if (!is_slave_open) {
+            return total_written > 0 ? (int)total_written : -1;
+        }
+
+        size_t w = 0;
+
+        if (likely(p->slave_tty)) {
+            w = tty_receive(p->slave_tty, cbuf + total_written, size - total_written);
+        }
+
+        if (w > 0) {
+            total_written += w;
+        } else {
+            task_t* curr = proc_current();
+
+            if (curr && curr->pending_signals != 0) {
+                return total_written > 0 ? (int)total_written : -2;
+            }
+
+            if (p->slave_tty && p->slave_tty->ldisc) {
+                ldisc_wait_space(p->slave_tty->ldisc);
+            } else {
+                break;
+            }
+        }
     }
-
-    if (!is_slave_open) {
-        return -1; 
-    }
-
-    if (likely(p->slave_tty)) {
-        tty_receive(p->slave_tty, (const uint8_t*)buf, size);
-    }
-
-    return (int)size;
+    return (int)total_written;
 }
 
 static void pty_master_hw_close(tty_t* tty) {
@@ -280,23 +303,46 @@ static int pty_slave_hw_write(tty_t* tty, const void* buf, uint32_t size) {
 
     pty_pair_t* p = (pty_pair_t*)tty->driver_data;
 
-    int is_master_open = 0;
+    uint32_t total_written = 0;
 
-    {
-        guard_spinlock_safe(&p->lock);
-        
-        is_master_open = p->master_open;
+    const uint8_t* cbuf = (const uint8_t*)buf;
+
+    while (total_written < size) {
+        int is_master_open = 0;
+
+        {
+            guard_spinlock_safe(&p->lock);
+            is_master_open = p->master_open;
+        }
+
+        if (!is_master_open) {
+            return total_written > 0 ? (int)total_written : -1; 
+        }
+
+        size_t w = 0;
+
+        if (likely(p->master_tty)) {
+            w = tty_receive(p->master_tty, cbuf + total_written, size - total_written);
+        }
+
+        if (w > 0) {
+            total_written += w;
+        } else {
+            task_t* curr = proc_current();
+            
+            if (curr && curr->pending_signals != 0) {
+                return total_written > 0 ? (int)total_written : -2;
+            }
+
+            if (p->master_tty && p->master_tty->ldisc) {
+                ldisc_wait_space(p->master_tty->ldisc);
+            } else {
+                break;
+            }
+        }
     }
 
-    if (!is_master_open) {
-        return -1; 
-    }
-
-    if (likely(p->master_tty)) {
-        tty_receive(p->master_tty, (const uint8_t*)buf, size);
-    }
-
-    return (int)size;
+    return (int)total_written;
 }
 
 static void pty_slave_hw_close(tty_t* tty) {

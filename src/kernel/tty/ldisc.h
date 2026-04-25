@@ -51,7 +51,7 @@ void ldisc_set_callbacks(
     void* sig_ctx
 );
 
-void ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size);
+size_t ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size);
 
 size_t ldisc_read(ldisc_t* ld, void* out, size_t size);
 
@@ -62,6 +62,8 @@ size_t ldisc_write_transform(
 );
 
 bool ldisc_has_readable(const ldisc_t* ld);
+
+void ldisc_wait_space(ldisc_t* ld);
 
 void ldisc_bootinit_wq(void);
 
