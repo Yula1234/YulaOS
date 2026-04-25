@@ -243,7 +243,6 @@ void uart_port_poll(uart_port_t* port) {
     }
 }
 
-extern volatile int g_kernel_panic_in_progress;
 void uart_port_console_write(void* ctx, const char* data, size_t size) {
     uart_port_t* port = (uart_port_t*)ctx;
 
@@ -254,7 +253,7 @@ void uart_port_console_write(void* ctx, const char* data, size_t size) {
     }
 
 
-    if (unlikely(g_kernel_panic_in_progress)) {
+    if (unlikely(panic_in_progress())) {
         if (port->ops && port->ops->putc_sync) {
             for (size_t i = 0u; i < size; i++) {
                 port->ops->putc_sync(port, data[i]);
