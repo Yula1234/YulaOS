@@ -95,17 +95,29 @@ static void uart_irq_handler(___unused registers_t* regs, void* ctx) {
         return;
     }
 
-    {
-        guard_spinlock_safe(&port->rx_lock);
+    if (port->ops->handle_irq) {
+        port->ops->handle_irq(port);
+    }
+}
 
-        pump_rx_unlocked(port);
+void uart_core_on_rx_ready(uart_port_t* port) {
+    if (unlikely(!port)) {
+        return;
     }
 
-    {
-        guard_spinlock_safe(&port->tx_lock);
+    guard_spinlock_safe(&port->rx_lock);
 
-        pump_tx_unlocked(port);
+    pump_rx_unlocked(port);
+}
+
+void uart_core_on_tx_ready(uart_port_t* port) {
+    if (unlikely(!port)) {
+        return;
     }
+
+    guard_spinlock_safe(&port->tx_lock);
+
+    pump_tx_unlocked(port);
 }
 
 int uart_port_register(uart_port_t* port, uint32_t baud_rate) {

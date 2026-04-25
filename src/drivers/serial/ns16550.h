@@ -4,7 +4,7 @@
 #ifndef DRIVERS_SERIAL_NS16550_H
 #define DRIVERS_SERIAL_NS16550_H
 
-#include <drivers/serial/core.h>
+#include "core.h"
 
 #ifdef __cplusplus
 extern "C" {

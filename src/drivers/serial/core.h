@@ -34,6 +34,8 @@ typedef struct uart_ops {
     void    (*write_byte)(uart_port_t* port, uint8_t byte);
 
     void (*putc_sync)(uart_port_t* port, char c);
+
+    void (*handle_irq)(uart_port_t* port);
 } uart_ops_t;
 
 typedef struct uart_ring {
@@ -76,6 +78,9 @@ void uart_port_wait_rx(uart_port_t* port);
 void uart_port_poll(uart_port_t* port);
 
 void uart_port_console_write(void* ctx, const char* data, size_t size);
+
+void uart_core_on_rx_ready(uart_port_t* port);
+void uart_core_on_tx_ready(uart_port_t* port);
 
 #ifdef __cplusplus
 }
