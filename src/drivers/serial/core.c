@@ -49,6 +49,31 @@ static int ring_pop(uart_ring_t* r, uint8_t* out) {
     return 1;
 }
 
+static size_t ring_peek_chunk(const uart_ring_t* r, const uint8_t** out_ptr) {
+    if (unlikely(r->count == 0u)) {
+        return 0u;
+    }
+
+    *out_ptr = &r->data[r->tail];
+
+    const size_t contig = UART_RING_SIZE - r->tail;
+
+    if (r->count < contig) {
+        return r->count;
+    }
+
+    return contig;
+}
+
+static void ring_consume(uart_ring_t* r, size_t consumed) {
+    if (unlikely(consumed == 0u)) {
+        return;
+    }
+
+    r->tail = (r->tail + consumed) % UART_RING_SIZE;
+    r->count -= consumed;
+}
+
 static void pump_rx_unlocked(uart_port_t* port) {
     int data_received = 0;
 
@@ -66,18 +91,38 @@ static void pump_rx_unlocked(uart_port_t* port) {
 }
 
 static void pump_tx_unlocked(uart_port_t* port) {
-    while (port->tx_ring.count != 0u) {
-        if (!port->ops->tx_ready(port)) {
-            break;
+    if (port->ops->write_buffer) {
+        while (port->tx_ring.count != 0u) {
+            const uint8_t* chunk_ptr = NULL;
+            
+            const size_t chunk_len = ring_peek_chunk(&port->tx_ring, &chunk_ptr);
+
+            if (unlikely(chunk_len == 0u)) {
+                break;
+            }
+
+            const size_t accepted = port->ops->write_buffer(port, chunk_ptr, chunk_len);
+
+            if (accepted == 0u) {
+                break;
+            }
+
+            ring_consume(&port->tx_ring, accepted);
         }
+    } else {
+        while (port->tx_ring.count != 0u) {
+            if (!port->ops->tx_ready(port)) {
+                break;
+            }
 
-        uint8_t b = 0u;
+            uint8_t b = 0u;
 
-        if (!ring_pop(&port->tx_ring, &b)) {
-            break;
+            if (!ring_pop(&port->tx_ring, &b)) {
+                break;
+            }
+
+            port->ops->write_byte(port, b);
         }
-
-        port->ops->write_byte(port, b);
     }
 
     if (port->tx_ring.count == 0u) {

@@ -33,6 +33,8 @@ typedef struct uart_ops {
     uint8_t (*read_byte)(uart_port_t* port);
     void    (*write_byte)(uart_port_t* port, uint8_t byte);
 
+    size_t  (*write_buffer)(uart_port_t* port, const uint8_t* data, size_t len);
+
     void (*putc_sync)(uart_port_t* port, char c);
 
     void (*handle_irq)(uart_port_t* port);

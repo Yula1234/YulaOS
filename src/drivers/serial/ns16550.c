@@ -43,6 +43,8 @@
 #define IIR_INT_LINE_STAT   0x06u
 #define IIR_INT_RX_TIMEOUT  0x0Cu
 
+#define NS16550_TX_FIFO_SIZE 16u
+
 typedef struct {
     uint8_t cached_ier;
 } ns16550_state_t;
@@ -202,18 +204,43 @@ static void ns16550_handle_irq(uart_port_t* port) {
     }
 }
 
+static size_t ns16550_write_buffer(uart_port_t* port, const uint8_t* data, size_t len) {
+    if (unlikely(len == 0u)) {
+        return 0u;
+    }
+
+    const uint8_t lsr = uart_read8(port, REG_LSR);
+
+    if ((lsr & LSR_THR_EMPTY) == 0u) {
+        return 0u;
+    }
+
+    size_t to_write = len;
+
+    if (to_write > NS16550_TX_FIFO_SIZE) {
+        to_write = NS16550_TX_FIFO_SIZE;
+    }
+
+    for (size_t i = 0u; i < to_write; i++) {
+        uart_write8(port, REG_DATA, data[i]);
+    }
+
+    return to_write;
+}
+
 
 static const uart_ops_t g_ns16550_ops = {
-    .init       = ns16550_init,
-    .shutdown   = ns16550_shutdown,
-    .tx_start   = ns16550_tx_start,
-    .tx_stop    = ns16550_tx_stop,
-    .rx_ready   = ns16550_rx_ready,
-    .tx_ready   = ns16550_tx_ready,
-    .read_byte  = ns16550_read_byte,
-    .write_byte = ns16550_write_byte,
-    .putc_sync  = ns16550_putc_sync,
-    .handle_irq = ns16550_handle_irq,
+    .init         = ns16550_init,
+    .shutdown     = ns16550_shutdown,
+    .tx_start     = ns16550_tx_start,
+    .tx_stop      = ns16550_tx_stop,
+    .rx_ready     = ns16550_rx_ready,
+    .tx_ready     = ns16550_tx_ready,
+    .read_byte    = ns16550_read_byte,
+    .write_byte   = ns16550_write_byte,
+    .write_buffer = ns16550_write_buffer,
+    .putc_sync    = ns16550_putc_sync,
+    .handle_irq   = ns16550_handle_irq,
 };
 
 const uart_ops_t* ns16550_get_ops(void) {
