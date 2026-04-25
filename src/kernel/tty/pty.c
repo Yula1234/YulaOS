@@ -2,7 +2,9 @@
 /* Copyright (C) 2026 Yula1234 */
 
 #include <kernel/waitq/poll_waitq.h>
-#include <kernel/tty/ldisc.h>
+#include <kernel/locking/guards.h>
+#include <kernel/tty/core.h>
+#include <kernel/tty/pty.h>
 #include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/proc.h>
@@ -16,71 +18,43 @@
 
 #include <mm/heap.h>
 
-#include "pty.h"
-
-#define PTY_BUF_SIZE 4096u
-#define PTY_BATCH    1024u
-
 typedef struct {
-    char buffer[PTY_BUF_SIZE];
-    uint32_t read_ptr;
-    uint32_t write_ptr;
-
-    semaphore_t sem_read;
-    semaphore_t sem_write;
-} pty_chan_t;
-
-typedef struct {
-    volatile uint32_t refs;
+    uint32_t   id;
 
     spinlock_t lock;
-    poll_waitq_t poll_waitq;
 
-    pty_chan_t m2s;
-    pty_chan_t s2m;
-
-    uint32_t id;
-    int devfs_registered;
-
-    vfs_node_t* slave_node;
+    volatile uint32_t refs;
 
     int master_open;
+
     int slave_open;
+    int slave_ever_opened;
+    
+    int devfs_registered;
 
-    yos_termios_t termios;
-    yos_winsize_t winsz;
-
-    ldisc_t* ld;
-
-    uint32_t session_sid;
-    uint32_t fg_pgid;
+    tty_t* master_tty;
+    tty_t* slave_tty;
 } pty_pair_t;
-
-static size_t pty_echo_to_master(const uint8_t* data, size_t size, void* ctx);
-static void pty_isig_to_fg_pgrp(int sig, void* ctx);
-
-static void pty_pair_destroy(pty_pair_t* p);
-
-static void pty_poll_waitq_finalize(void* ctx);
-
-static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n);
 
 static idr_t g_pty_idr;
 
 static void pty_make_pts_name(char out[32], uint32_t id) {
     char tmp[11];
-    uint32_t n = 0;
+    uint32_t n = 0u;
 
     if (id == 0u) {
         tmp[n++] = '0';
     } else {
-        while (id > 0u && n < 10u) {
-            tmp[n++] = (char)('0' + (id % 10u));
-            id /= 10u;
+        uint32_t val = id;
+        
+        while (val > 0u && n < 10u) {
+            tmp[n++] = (char)('0' + (val % 10u));
+            val /= 10u;
         }
     }
 
-    uint32_t pos = 0;
+    uint32_t pos = 0u;
+    
     out[pos++] = 'p';
     out[pos++] = 't';
     out[pos++] = 's';
@@ -89,1003 +63,408 @@ static void pty_make_pts_name(char out[32], uint32_t id) {
     while (n > 0u && pos < 31u) {
         out[pos++] = tmp[--n];
     }
+    
     out[pos] = '\0';
 }
 
-static uint32_t sem_take_up_to(semaphore_t* sem, uint32_t max) {
-    if (max == 0) return 0;
-
-    sem_wait(sem);
-
-    uint32_t taken = 1;
-    while (taken < max && sem_try_acquire(sem)) {
-        taken++;
-    }
-
-    return taken;
-}
-
-static void sem_give_n(semaphore_t* sem, uint32_t n) {
-    while (n--) {
-        sem_signal(sem);
-    }
-}
-
-static uint32_t sem_try_take_up_to(semaphore_t* sem, uint32_t max) {
-    if (!sem || max == 0) return 0;
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-    int c = sem->count;
-    if (c <= 0) {
-        spinlock_release_safe(&sem->lock, flags);
-        return 0;
-    }
-    uint32_t avail = (uint32_t)c;
-    uint32_t take = (avail < max) ? avail : max;
-    sem->count -= (int)take;
-    spinlock_release_safe(&sem->lock, flags);
-    return take;
-}
-
-static void sem_signal_n(semaphore_t* sem, uint32_t n) {
-    if (!sem || n == 0) return;
-
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-    sem->count += (int)n;
-
-    while (n-- && !dlist_empty(&sem->wait_list)) {
-        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
-
-        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-        dlist_del(&t->sem_node);
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
-            __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-            continue;
-        }
-
-        if (proc_change_state(t, TASK_RUNNABLE) == 0) {
-            sched_add(t);
-        }
-
-        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-    }
-
-    spinlock_release_safe(&sem->lock, flags);
-}
-
-static int sem_try_take_n(semaphore_t* sem, uint32_t n) {
-    if (n == 0) return 1;
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-    if (sem->count >= (int)n) {
-        sem->count -= (int)n;
-        spinlock_release_safe(&sem->lock, flags);
-        return 1;
-    }
-    spinlock_release_safe(&sem->lock, flags);
-    return 0;
-}
-
-static void sem_wake_all(semaphore_t* sem) {
-    uint32_t flags = spinlock_acquire_safe(&sem->lock);
-
-    while (!dlist_empty(&sem->wait_list)) {
-        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
-
-        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-        dlist_del(&t->sem_node);
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        sem->count++;
-
-        if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
-            __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-            continue;
-        }
-
-        if (proc_change_state(t, TASK_RUNNABLE) == 0) {
-            sched_add(t);
-        }
-
-        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-    }
-
-    spinlock_release_safe(&sem->lock, flags);
-}
-
-static void pty_pair_retain(void* private_data) {
-    if (!private_data) return;
-
-    pty_pair_t* p = (pty_pair_t*)private_data;
-
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            panic("PTY: pair_retain after free");
-        }
-
-        if (__atomic_compare_exchange_n(
-                &p->refs,
-                &expected,
-                expected + 1u,
-                0,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            return;
-        }
-    }
-}
-
-static void pty_pair_release(void* private_data) {
-    if (!private_data) return;
-    pty_pair_t* p = (pty_pair_t*)private_data;
-
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
-        if (expected == 0u) {
-            panic("PTY: pair_release underflow");
-        }
-
-        const uint32_t desired = expected - 1u;
-
-        if (__atomic_compare_exchange_n(
-                &p->refs,
-                &expected,
-                desired,
-                0,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_RELAXED
-            )) {
-            if (desired != 0u) {
-                return;
-            }
-
-            break;
-        }
-    }
-
-    pty_pair_destroy(p);
-}
-
 static void pty_pair_destroy(pty_pair_t* p) {
-    if (!p) {
-        return;
-    }
-
-    uint32_t slave_id = 0u;
-    int do_unregister = 0;
-
-    {
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-
-        if (p->devfs_registered) {
-            do_unregister = 1;
-            p->devfs_registered = 0;
-            slave_id = p->id;
-        }
-
-        p->slave_node = 0;
-
-        spinlock_release_safe(&p->lock, flags);
-    }
-
-    if (do_unregister && slave_id != 0u) {
-        idr_remove(&g_pty_idr, (int)slave_id);
-
-        char name[32];
-        pty_make_pts_name(name, slave_id);
-
-        vfs_node_t* slave_node = devfs_take(name);
-        if (slave_node) {
-            slave_node->ops = 0;
-            slave_node->private_data = 0;
-            slave_node->private_release = 0;
-            vfs_node_release(slave_node);
-        }
-    }
-
-    if (p->ld) {
-        ldisc_destroy(p->ld);
-        p->ld = 0;
-    }
-
-    poll_waitq_detach_all(&p->poll_waitq);
-    poll_waitq_put(&p->poll_waitq);
-}
-
-static void pty_poll_waitq_finalize(void* ctx) {
-    pty_pair_t* p = (pty_pair_t*)ctx;
-    if (!p) {
+    if (unlikely(!p)) {
         return;
     }
 
     kfree(p);
 }
 
-static void pty_update_ldisc_config(pty_pair_t* p) {
-    if (!p || !p->ld) return;
-
-    ldisc_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
-
-    cfg.canonical_ = (p->termios.c_lflag & YOS_LFLAG_ICANON) != 0;
-    cfg.echo_      = (p->termios.c_lflag & YOS_LFLAG_ECHO) != 0;
-    cfg.isig_      = (p->termios.c_lflag & YOS_LFLAG_ISIG) != 0;
-
-    cfg.igncr_     = (p->termios.c_iflag & YOS_IFLAG_IGNCR) != 0;
-    cfg.icrnl_     = (p->termios.c_iflag & YOS_IFLAG_ICRNL) != 0;
-    cfg.inlcr_     = (p->termios.c_iflag & YOS_IFLAG_INLCR) != 0;
-
-    cfg.opost_     = (p->termios.c_oflag & YOS_OFLAG_OPOST) != 0;
-    cfg.onlcr_     = (p->termios.c_oflag & YOS_OFLAG_ONLCR) != 0;
-
-    cfg.vmin_      = p->termios.c_cc[YOS_VMIN];
-    cfg.vtime_     = p->termios.c_cc[YOS_VTIME];
-    cfg.vintr_     = p->termios.c_cc[YOS_VINTR];
-    cfg.vquit_     = p->termios.c_cc[YOS_VQUIT];
-    cfg.vsusp_     = p->termios.c_cc[YOS_VSUSP];
-    cfg.veof_      = 0x04u;
-
-    ldisc_set_config(p->ld, &cfg);
-}
-
-static pty_pair_t* pty_pair_create(void) {
-    pty_pair_t* p = (pty_pair_t*)kmalloc(sizeof(*p));
-    if (!p) return 0;
-
-    memset(p, 0, sizeof(*p));
-
-    p->termios.c_iflag = YOS_IFLAG_ICRNL;
-    p->termios.c_oflag = YOS_OFLAG_OPOST | YOS_OFLAG_ONLCR;
-    p->termios.c_lflag = YOS_LFLAG_ECHO | YOS_LFLAG_ISIG | YOS_LFLAG_ICANON;
-
-    p->termios.c_cc[YOS_VINTR] = 0x03u;
-    p->termios.c_cc[YOS_VQUIT] = 0x1Cu;
-    p->termios.c_cc[YOS_VSUSP] = 0x1Au;
-
-    p->termios.c_cc[YOS_VMIN] = 1u;
-    p->termios.c_cc[YOS_VTIME] = 0u;
-
-    p->ld = ldisc_create();
-
-    if (!p->ld) {
-        kfree(p);
-        return 0;
-    }
-    
-    ldisc_set_callbacks(p->ld, pty_echo_to_master, p, pty_isig_to_fg_pgrp, p);
-    pty_update_ldisc_config(p);
-
-    p->refs = 1;
-    spinlock_init(&p->lock);
-    poll_waitq_init_finalizable(&p->poll_waitq, pty_poll_waitq_finalize, p);
-
-    sem_init(&p->m2s.sem_read, 0);
-    sem_init(&p->m2s.sem_write, (int)PTY_BUF_SIZE);
-
-    sem_init(&p->s2m.sem_read, 0);
-    sem_init(&p->s2m.sem_write, (int)PTY_BUF_SIZE);
-
-    p->winsz.ws_row = 25;
-    p->winsz.ws_col = 80;
-    p->winsz.ws_xpixel = 0;
-    p->winsz.ws_ypixel = 0;
-
-    return p;
-}
-
-static size_t pty_echo_to_master(const uint8_t* data, size_t size, void* ctx) {
-    if (!data || size == 0 || !ctx) {
-        return 0;
-    }
-
-    pty_pair_t* p = (pty_pair_t*)ctx;
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-
-    if (!p->devfs_registered) {
-        spinlock_release_safe(&p->lock, flags);
-        return 0;
-    }
-
-    pty_chan_t* ch = &p->s2m;
-    const uint32_t space = PTY_BUF_SIZE - (ch->write_ptr - ch->read_ptr);
-
-    uint32_t n = (uint32_t)size;
-    if (n > space) {
-        n = space;
-    }
-
-    if (n != 0) {
-        (void)pty_chan_write_locked(ch, (const char*)data, n);
-    }
-
-    spinlock_release_safe(&p->lock, flags);
-
-    if (n != 0) {
-        sem_signal_n(&ch->sem_read, n);
-        poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
-    }
-
-    return (size_t)n;
-}
-
-static void pty_isig_to_fg_pgrp(int sig, void* ctx) {
-    if (!ctx) {
+static void pty_pair_retain(pty_pair_t* p) {
+    if (unlikely(!p)) {
         return;
     }
 
-    pty_pair_t* p = (pty_pair_t*)ctx;
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
+        
+        if (unlikely(expected == 0u)) {
+            panic("PTY: pair_retain after free");
+        }
 
-    uint32_t pgid = 0;
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    pgid = p->fg_pgid;
-    spinlock_release_safe(&p->lock, flags);
-
-    if (pgid != 0) {
-        (void)proc_signal_pgrp(pgid, (uint32_t)sig);
+        if (__atomic_compare_exchange_n(
+                &p->refs, &expected, expected + 1u,
+                0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
+            )) {
+            return;
+        }
     }
 }
 
-static uint32_t pty_chan_read_locked(pty_chan_t* ch, char* dst, uint32_t n) {
-    if (!ch || !dst || n == 0) return 0;
-
-    uint32_t rp = ch->read_ptr % PTY_BUF_SIZE;
-    uint32_t contig = PTY_BUF_SIZE - rp;
-
-    uint32_t n1 = n;
-    if (n1 > contig) n1 = contig;
-    memcpy(&dst[0], &ch->buffer[rp], n1);
-    ch->read_ptr += n1;
-
-    uint32_t n2 = n - n1;
-    if (n2 > 0) {
-        memcpy(&dst[n1], &ch->buffer[0], n2);
-        ch->read_ptr += n2;
+static void pty_pair_release(pty_pair_t* p) {
+    if (unlikely(!p)) {
+        return;
     }
 
-    return n;
-}
-
-static uint32_t pty_chan_write_locked(pty_chan_t* ch, const char* src, uint32_t n) {
-    if (!ch || !src || n == 0) return 0;
-
-    uint32_t wp = ch->write_ptr % PTY_BUF_SIZE;
-    uint32_t contig = PTY_BUF_SIZE - wp;
-
-    uint32_t n1 = n;
-    if (n1 > contig) n1 = contig;
-    memcpy(&ch->buffer[wp], &src[0], n1);
-    ch->write_ptr += n1;
-
-    uint32_t n2 = n - n1;
-    if (n2 > 0) {
-        memcpy(&ch->buffer[0], &src[n1], n2);
-        ch->write_ptr += n2;
-    }
-
-    return n;
-}
-
-static int pty_chan_read(pty_pair_t* p, pty_chan_t* ch, uint32_t size, void* buffer, const int* peer_open_field) {
-    if (!p || !ch || !buffer || size == 0) return 0;
-
-    char* buf = (char*)buffer;
-    uint32_t read_count = 0;
-
-    while (read_count < size) {
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        uint32_t available = ch->write_ptr - ch->read_ptr;
-        int peer_open = peer_open_field ? *peer_open_field : 0;
-        spinlock_release_safe(&p->lock, flags);
-
-        if (available == 0 && peer_open == 0) {
-            return (int)read_count;
+    for (;;) {
+        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
+        
+        if (unlikely(expected == 0u)) {
+            panic("PTY: pair_release underflow");
         }
 
-        uint32_t want = size - read_count;
-        if (want > PTY_BATCH) want = PTY_BATCH;
+        const uint32_t desired = expected - 1u;
 
-        uint32_t take = sem_take_up_to(&ch->sem_read, want);
-
-        flags = spinlock_acquire_safe(&p->lock);
-        uint32_t now_avail = ch->write_ptr - ch->read_ptr;
-        peer_open = peer_open_field ? *peer_open_field : 0;
-
-        if (now_avail == 0 && peer_open == 0) {
-            spinlock_release_safe(&p->lock, flags);
-            sem_give_n(&ch->sem_read, take);
-            return (int)read_count;
-        }
-
-        uint32_t n = take;
-        if (n > now_avail) n = now_avail;
-
-        (void)pty_chan_read_locked(ch, &buf[read_count], n);
-        read_count += n;
-
-        spinlock_release_safe(&p->lock, flags);
-
-        if (n < take) {
-            sem_give_n(&ch->sem_read, take - n);
-        }
-        sem_give_n(&ch->sem_write, n);
-        if (n > 0) {
-            poll_waitq_wake_all(&p->poll_waitq, VFS_POLLOUT);
-        }
-
-        if (read_count > 0) {
-            return (int)read_count;
+        if (__atomic_compare_exchange_n(
+                &p->refs, &expected, desired,
+                0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
+            )) {
+            
+            if (desired == 0u) {
+                pty_pair_destroy(p);
+            }
+            
+            return;
         }
     }
-
-    return (int)read_count;
 }
 
-__attribute__((unused)) static int pty_chan_read_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, void* buffer, const int* peer_open_field) {
-    if (!p || !ch || !buffer || size == 0) return 0;
-
-    char* buf = (char*)buffer;
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    uint32_t available = ch->write_ptr - ch->read_ptr;
-    int peer_open = peer_open_field ? *peer_open_field : 0;
-    spinlock_release_safe(&p->lock, flags);
-
-    if (available == 0) {
-        if (peer_open == 0) return -1;
+static int pty_master_hw_write(tty_t* tty, const void* buf, uint32_t size) {
+    if (unlikely(!tty
+        || !buf
+        || size == 0u)) {
         return 0;
     }
 
-    uint32_t want = size;
-    if (want > PTY_BATCH) want = PTY_BATCH;
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
 
-    uint32_t take = sem_try_take_up_to(&ch->sem_read, want);
-    if (take == 0) return 0;
+    int is_slave_open = 0;
 
-    flags = spinlock_acquire_safe(&p->lock);
-    uint32_t now_avail = ch->write_ptr - ch->read_ptr;
-    peer_open = peer_open_field ? *peer_open_field : 0;
-
-    if (now_avail == 0 && peer_open == 0) {
-        spinlock_release_safe(&p->lock, flags);
-        sem_give_n(&ch->sem_read, take);
-        return -1;
-    }
-
-    uint32_t n = take;
-    if (n > now_avail) n = now_avail;
-
-    (void)pty_chan_read_locked(ch, &buf[0], n);
-    spinlock_release_safe(&p->lock, flags);
-
-    if (n < take) {
-        sem_signal_n(&ch->sem_read, take - n);
-    }
-    sem_signal_n(&ch->sem_write, n);
-    if (n > 0) {
-        poll_waitq_wake_all(&p->poll_waitq, VFS_POLLOUT);
-    }
-    return (int)n;
-}
-
-__attribute__((unused)) static int pty_chan_write_nonblock(pty_pair_t* p, pty_chan_t* ch, uint32_t size, const void* buffer, const int* peer_open_field) {
-    if (!p || !ch || !buffer || size == 0) return 0;
-    if (size > PTY_BUF_SIZE) return 0;
-
-    const char* buf = (const char*)buffer;
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    int peer_open = peer_open_field ? *peer_open_field : 0;
-    spinlock_release_safe(&p->lock, flags);
-    if (peer_open == 0) return -1;
-
-    if (!sem_try_take_n(&ch->sem_write, size)) {
-        return 0;
-    }
-
-    flags = spinlock_acquire_safe(&p->lock);
-    peer_open = peer_open_field ? *peer_open_field : 0;
-    if (peer_open == 0) {
-        spinlock_release_safe(&p->lock, flags);
-        sem_signal_n(&ch->sem_write, size);
-        return -1;
-    }
-
-    (void)pty_chan_write_locked(ch, buf, size);
-    spinlock_release_safe(&p->lock, flags);
-
-    sem_signal_n(&ch->sem_read, size);
-    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
-    return (int)size;
-}
-
-__attribute__((unused)) static int pty_chan_write(pty_pair_t* p, pty_chan_t* ch, uint32_t size, const void* buffer, const int* peer_open_field) {
-    if (!p || !ch || !buffer || size == 0) return 0;
-
-    const char* buf = (const char*)buffer;
-    uint32_t written_count = 0;
-
-    while (written_count < size) {
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        int peer_open = peer_open_field ? *peer_open_field : 0;
-        spinlock_release_safe(&p->lock, flags);
-
-        if (peer_open == 0) {
-            return (written_count > 0) ? (int)written_count : -1;
-        }
-
-        uint32_t want = size - written_count;
-        if (want > PTY_BATCH) want = PTY_BATCH;
-
-        uint32_t take = sem_take_up_to(&ch->sem_write, want);
-
-        flags = spinlock_acquire_safe(&p->lock);
-        peer_open = peer_open_field ? *peer_open_field : 0;
-        if (peer_open == 0) {
-            spinlock_release_safe(&p->lock, flags);
-            sem_give_n(&ch->sem_write, take);
-            return (written_count > 0) ? (int)written_count : -1;
-        }
-
-        uint32_t n = take;
-        (void)pty_chan_write_locked(ch, &buf[written_count], n);
-        written_count += n;
-
-        spinlock_release_safe(&p->lock, flags);
-
-        sem_give_n(&ch->sem_read, n);
-        if (n > 0) {
-            poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
-        }
-    }
-
-    return (int)written_count;
-}
-
-static int pty_master_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
-    (void)offset;
-    if (!node || !buffer || size == 0) return 0;
-    if ((node->flags & VFS_FLAG_PTY_MASTER) == 0) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    if (!p->ld) {
-        return -1;
-    }
-    return pty_chan_read(p, &p->s2m, size, buffer, &p->devfs_registered);
-}
-
-static int pty_master_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {
-    (void)offset;
-    if (!node || !buffer || size == 0) return 0;
-    if ((node->flags & VFS_FLAG_PTY_MASTER) == 0) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    if (!p->ld) {
-        return -1;
-    }
-
-    ldisc_receive(p->ld, (const uint8_t*)buffer, (size_t)size);
-
-    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN);
-    return (int)size;
-}
-
-static int pty_slave_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer) {
-    (void)offset;
-    if (!node || !buffer || size == 0) return 0;
-    if ((node->flags & VFS_FLAG_PTY_SLAVE) == 0) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    task_t* curr = proc_current();
-    if (curr && curr->controlling_tty && curr->controlling_tty->ops == node->ops &&
-        curr->controlling_tty->private_data == node->private_data) {
-
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        uint32_t fg = p->fg_pgid;
-        spinlock_release_safe(&p->lock, flags);
-
-        if (fg != 0 && curr->pgid != fg) {
-            (void)proc_signal_pgrp(curr->pgid, SIGTTIN);
-            sched_yield();
-            return -1;
-        }
-    }
-
-    int master_open;
     {
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        master_open = p->master_open;
-        spinlock_release_safe(&p->lock, flags);
+        guard_spinlock_safe(&p->lock);
+        
+        is_slave_open = p->slave_open;
     }
 
-    if (master_open == 0) {
-        const int has_readable = p->ld ? (ldisc_has_readable(p->ld) ? 1 : 0) : 0;
-        if (!has_readable) {
-            return 0;
-        }
+    if (!is_slave_open) {
+        return -1; 
     }
 
-    size_t n = ldisc_read(p->ld, buffer, (size_t)size);
-    if (n == (size_t)-2) {
-        return -2;
+    if (likely(p->slave_tty)) {
+        tty_receive(p->slave_tty, (const uint8_t*)buf, size);
     }
 
-    return (int)n;
+    return (int)size;
 }
 
-static int pty_slave_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer) {
-    (void)offset;
-    if (!node || !buffer || size == 0) return 0;
-    if ((node->flags & VFS_FLAG_PTY_SLAVE) == 0) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    task_t* curr = proc_current();
-    if (curr && curr->controlling_tty && curr->controlling_tty->ops == node->ops &&
-        curr->controlling_tty->private_data == node->private_data) {
-
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        uint32_t fg = p->fg_pgid;
-        yos_termios_t termios = p->termios;
-        spinlock_release_safe(&p->lock, flags);
-
-        const int is_bg = (fg != 0 && curr->pgid != fg);
-        const int tostop = (termios.c_lflag & YOS_LFLAG_TOSTOP) != 0;
-        if (is_bg && tostop) {
-            (void)proc_signal_pgrp(curr->pgid, SIGTTOU);
-            sched_yield();
-            return -1;
-        }
+static void pty_master_hw_close(tty_t* tty) {
+    if (unlikely(!tty)) {
+        return;
     }
 
-    size_t n = ldisc_write_transform(p->ld, buffer, (size_t)size, pty_echo_to_master, p);
-    return (int)n;
-}
-
-static int pty_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
-    if (!node) return -1;
-    if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    if (!arg && req != YOS_TIOCSCTTY) {
-        return -1;
-    }
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    switch (req) {
-        case YOS_TIOCGPTN:
-            *(uint32_t*)arg = p->id;
-            break;
-        case YOS_TCGETS:
-            memcpy(arg, &p->termios, sizeof(p->termios));
-            break;
-        case YOS_TCSETS:
-            memcpy(&p->termios, arg, sizeof(p->termios));
-
-            if (p->ld) {
-                pty_update_ldisc_config(p);
-            }
-            break;
-        case YOS_TIOCGWINSZ:
-            memcpy(arg, &p->winsz, sizeof(p->winsz));
-            break;
-        case YOS_TIOCSWINSZ:
-            memcpy(&p->winsz, arg, sizeof(p->winsz));
-            break;
-
-        case YOS_TIOCGSID:
-            *(uint32_t*)arg = p->session_sid;
-            break;
-
-        case YOS_TIOCSCTTY: {
-            if ((node->flags & VFS_FLAG_PTY_SLAVE) == 0) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            task_t* curr = proc_current();
-            if (!curr) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            if (curr->pid != curr->sid) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            if (curr->controlling_tty) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            vfs_node_retain(node);
-            curr->controlling_tty = node;
-
-            p->session_sid = curr->sid;
-            if (p->fg_pgid == 0) {
-                p->fg_pgid = curr->pgid;
-            }
-
-            break;
-        }
-
-        case YOS_TCGETPGRP:
-            *(uint32_t*)arg = p->fg_pgid;
-            break;
-
-        case YOS_TCSETPGRP: {
-            task_t* curr = proc_current();
-            if (!curr) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            uint32_t pgid = *(uint32_t*)arg;
-            if (pgid == 0) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            if (p->session_sid != 0 && p->session_sid != curr->sid) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            if (!proc_pgrp_in_session(pgid, curr->sid)) {
-                spinlock_release_safe(&p->lock, flags);
-                return -1;
-            }
-
-            p->fg_pgid = pgid;
-            break;
-        }
-        default:
-            spinlock_release_safe(&p->lock, flags);
-            return -1;
-    }
-    spinlock_release_safe(&p->lock, flags);
-    return 0;
-}
-
-static int pty_master_open(vfs_node_t* node) {
-    if (!node) return -1;
-    if ((node->flags & VFS_FLAG_PTY_MASTER) == 0) return -1;
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    p->master_open++;
-    spinlock_release_safe(&p->lock, flags);
-    return 0;
-}
-
-static int pty_slave_open(vfs_node_t* node) {
-    if (!node) return -1;
-    if ((node->flags & VFS_FLAG_PTY_SLAVE) == 0) return -1;
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    if (p->master_open <= 0) {
-        spinlock_release_safe(&p->lock, flags);
-        return -1;
-    }
-    p->slave_open++;
-    spinlock_release_safe(&p->lock, flags);
-    return 0;
-}
-
-static int pty_close(vfs_node_t* node) {
-    if (!node) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) {
-        return 0;
-    }
-
-    pty_pair_retain(p);
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
 
     int do_unregister = 0;
-    uint32_t pts_id = 0;
+    uint32_t pts_id = 0u;
 
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    if (node->flags & VFS_FLAG_PTY_MASTER) {
-        if (p->master_open > 0) p->master_open--;
-        if (p->master_open == 0 && p->devfs_registered) {
+    {
+        guard_spinlock_safe(&p->lock);
+        
+        if (p->master_open > 0) {
+            p->master_open--;
+        }
+
+        if (p->master_open == 0
+            && p->devfs_registered) {
             do_unregister = 1;
+            
             p->devfs_registered = 0;
+            
             pts_id = p->id;
         }
-    } else if (node->flags & VFS_FLAG_PTY_SLAVE) {
-        if (p->slave_open > 0) p->slave_open--;
     }
-    spinlock_release_safe(&p->lock, flags);
 
-    sem_wake_all(&p->m2s.sem_read);
-    sem_wake_all(&p->m2s.sem_write);
-    sem_wake_all(&p->s2m.sem_read);
-    sem_wake_all(&p->s2m.sem_write);
-    poll_waitq_wake_all(&p->poll_waitq, VFS_POLLIN | VFS_POLLOUT | VFS_POLLHUP);
+    if (p->slave_tty) {
+        poll_waitq_wake_all(&p->slave_tty->poll_waitq, VFS_POLLHUP | VFS_POLLIN | VFS_POLLOUT);
+    }
 
-    if (do_unregister && pts_id != 0u) {
+    if (do_unregister
+        && pts_id != 0u) {
+        idr_remove(&g_pty_idr, (int)pts_id);
+
         char name[32];
         pty_make_pts_name(name, pts_id);
 
         vfs_node_t* slave_node = devfs_take(name);
+        
         if (slave_node) {
-            slave_node->ops = 0;
-
-            slave_node->private_data = 0;
-            slave_node->private_release = 0;
-
             vfs_node_release(slave_node);
-
-            pty_pair_release(p);
-            pty_pair_release(p);
-
-            return 0;
         }
     }
 
     pty_pair_release(p);
-    return 0;
 }
 
-static int pty_vfs_poll_status(vfs_node_t* node, int events) {
-    if (!node) {
+static int pty_master_hw_poll_status(tty_t* tty, int events) {
+    if (unlikely(!tty)) {
         return 0;
     }
 
-    if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) {
-        return 0;
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
+    
+    int revents = 0;
+    int slave_open = 0;
+
+    {
+        guard_spinlock_safe(&p->lock);
+        
+        slave_open = p->slave_open;
     }
 
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) {
-        return VFS_POLLHUP;
+    if ((events & VFS_POLLOUT) != 0) {
+        if (slave_open > 0) {
+            revents |= VFS_POLLOUT;
+        }
     }
 
-    uint32_t avail = 0;
-    uint32_t space = 0;
-    int peer_open = 0;
-
-    if (pty_poll_info(node, &avail, &space, &peer_open) != 0) {
-        return VFS_POLLERR;
+    if (p->slave_ever_opened && slave_open == 0) {
+        revents |= VFS_POLLHUP;
     }
 
-    int rev = 0;
-
-    if ((events & VFS_POLLIN) && avail > 0) {
-        rev |= VFS_POLLIN;
-    }
-
-    if ((events & VFS_POLLOUT) && peer_open > 0 && space > 0) {
-        rev |= VFS_POLLOUT;
-    }
-
-    if (peer_open == 0) {
-        rev |= VFS_POLLHUP;
-    }
-
-    return rev;
+    return revents;
 }
 
-static int pty_vfs_poll_register(vfs_node_t* node, poll_waiter_t* w, struct task* task) {
-    return pty_poll_waitq_register(node, w, task);
-}
-
-static vfs_ops_t pty_master_ops = {
-    .read = pty_master_read,
-    .write = pty_master_write,
-    .open = pty_master_open,
-    .close = pty_close,
-    .ioctl = pty_ioctl,
-    .get_phys_page = 0,
-    .poll_status = pty_vfs_poll_status,
-    .poll_register = pty_vfs_poll_register,
-};
-
-static vfs_ops_t pty_slave_ops = {
-    .read = pty_slave_read,
-    .write = pty_slave_write,
-    .open = pty_slave_open,
-    .close = pty_close,
-    .ioctl = pty_ioctl,
-    .get_phys_page = 0,
-    .poll_status = pty_vfs_poll_status,
-    .poll_register = pty_vfs_poll_register,
-};
-
-static int pty_ptmx_open(vfs_node_t* node) {
-    if (!node) return -1;
-
-    pty_pair_t* p = pty_pair_create();
-    if (!p) return -1;
-
-    vfs_node_t* slave = (vfs_node_t*)kmalloc(sizeof(*slave));
-    if (!slave) {
-        pty_pair_release(p);
+static int pty_master_hw_ioctl(tty_t* tty, uint32_t req, void* arg) {
+    if (unlikely(!tty)) {
         return -1;
     }
 
-    memset(slave, 0, sizeof(*slave));
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
+
+    switch (req) {
+        case YOS_TIOCGPTN: {
+            if (!arg) return -1;
+
+            *(uint32_t*)arg = p->id;
+            return 0;
+        }
+        default:
+            return -1;
+    }
+}
+
+static const tty_driver_ops_t g_pty_master_ops = {
+    .write         = pty_master_hw_write,
+    .ioctl         = pty_master_hw_ioctl,
+    .close         = pty_master_hw_close,
+    .poll_status   = pty_master_hw_poll_status,
+    .open = 0, .set_termios = 0,
+};
+
+static int pty_slave_hw_open(tty_t* tty) {
+    if (unlikely(!tty)) {
+        return -1;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
+
+    guard_spinlock_safe(&p->lock);
+    
+    p->slave_open++;
+    p->slave_ever_opened = 1;
+    
+    return 0;
+}
+
+static int pty_slave_hw_write(tty_t* tty, const void* buf, uint32_t size) {
+    if (unlikely(!tty
+        || !buf
+        || size == 0u)) {
+        return 0;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
+
+    int is_master_open = 0;
+
+    {
+        guard_spinlock_safe(&p->lock);
+        
+        is_master_open = p->master_open;
+    }
+
+    if (!is_master_open) {
+        return -1; 
+    }
+
+    if (likely(p->master_tty)) {
+        tty_receive(p->master_tty, (const uint8_t*)buf, size);
+    }
+
+    return (int)size;
+}
+
+static void pty_slave_hw_close(tty_t* tty) {
+    if (unlikely(!tty)) {
+        return;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
+
+    {
+        guard_spinlock_safe(&p->lock);
+        
+        if (p->slave_open > 0) {
+            p->slave_open--;
+        }
+    }
+
+    if (p->master_tty) {
+        poll_waitq_wake_all(&p->master_tty->poll_waitq, VFS_POLLHUP | VFS_POLLIN | VFS_POLLOUT);
+    }
+
+    pty_pair_release(p);
+}
+
+static int pty_slave_hw_poll_status(tty_t* tty, int events) {
+    if (unlikely(!tty)) {
+        return 0;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)tty->driver_data;
+    
+    int revents = 0;
+    int master_open = 0;
+
+    {
+        guard_spinlock_safe(&p->lock);
+        
+        master_open = p->master_open;
+    }
+
+    if ((events & VFS_POLLOUT) != 0) {
+        if (master_open > 0) {
+            revents |= VFS_POLLOUT;
+        }
+    }
+
+    if (master_open == 0) {
+        revents |= VFS_POLLHUP;
+    }
+
+    return revents;
+}
+
+static const tty_driver_ops_t g_pty_slave_ops = {
+    .open          = pty_slave_hw_open,
+    .write         = pty_slave_hw_write,
+    .close         = pty_slave_hw_close,
+    .poll_status   = pty_slave_hw_poll_status,
+    .ioctl = 0, .set_termios = 0,
+};
+
+static void configure_raw_ldisc(tty_t* tty) {
+    if (!tty
+        || !tty->ldisc) {
+        return;
+    }
+
+    ldisc_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    cfg.canonical_ = 0;
+    cfg.echo_      = 0;
+    cfg.isig_      = 0;
+    cfg.igncr_     = 0;
+    cfg.icrnl_     = 0;
+    cfg.inlcr_     = 0;
+    cfg.opost_     = 0;
+    cfg.onlcr_     = 0;
+    cfg.vmin_      = 1u;
+    cfg.vtime_     = 0u;
+
+    ldisc_set_config(tty->ldisc, &cfg);
+}
+
+static int pty_ptmx_open(vfs_node_t* node) {
+    if (unlikely(!node)) {
+        return -1;
+    }
+
+    pty_pair_t* p = (pty_pair_t*)kmalloc(sizeof(pty_pair_t));
+    if (!p) {
+        return -1;
+    }
+
+    memset(p, 0, sizeof(*p));
+
+    p->refs = 1u;
+
+    spinlock_init(&p->lock);
 
     int id = idr_alloc(&g_pty_idr, p);
 
     if (id < 0) {
         pty_pair_release(p);
-        kfree(slave);
         return -1;
     }
 
     p->id = (uint32_t)id;
 
-    char pts_name[32];
-    pty_make_pts_name(pts_name, p->id);
-
-    node->flags |= VFS_FLAG_PTY_MASTER;
-    node->ops = &pty_master_ops;
-
-    {
-        uint32_t flags = spinlock_acquire_safe(&p->lock);
-        p->master_open++;
-        spinlock_release_safe(&p->lock, flags);
+    pty_pair_retain(p);
+    
+    p->master_tty = tty_alloc(&g_pty_master_ops, p);
+    
+    if (!p->master_tty) {
+        pty_pair_release(p);
+        idr_remove(&g_pty_idr, id);
+        pty_pair_release(p);
+        return -1;
     }
-
-    strlcpy(slave->name, pts_name, sizeof(slave->name));
-    slave->flags = VFS_FLAG_PTY_SLAVE;
-    slave->size = 0;
-    slave->inode_idx = 0;
-    slave->refs = 1;
-    slave->ops = &pty_slave_ops;
-    slave->private_data = p;
-    slave->private_retain = pty_pair_retain;
-    slave->private_release = pty_pair_release;
+    
+    configure_raw_ldisc(p->master_tty);
 
     pty_pair_retain(p);
-    devfs_register(slave);
-
-    if (devfs_fetch(pts_name) != slave) {
+    
+    p->slave_tty = tty_alloc(&g_pty_slave_ops, p);
+    
+    if (!p->slave_tty) {
+        pty_pair_release(p);
+        tty_release(p->master_tty);
         idr_remove(&g_pty_idr, id);
-
         pty_pair_release(p);
-        pty_pair_release(p);
-
-        kfree(slave);
-
         return -1;
     }
 
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-    p->slave_node = slave;
-    p->devfs_registered = 1;
-    spinlock_release_safe(&p->lock, flags);
+    node->flags |= VFS_FLAG_PTY_MASTER;
+    
+    tty_bind_vfs_node(p->master_tty, node);
 
-    pty_pair_retain(p);
+    tty_release(p->master_tty);
 
-    node->private_data = p;
-    node->private_retain = pty_pair_retain;
-    node->private_release = pty_pair_release;
+    vfs_node_t* slave_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    
+    if (!slave_node) {
+        tty_release(p->slave_tty);
+        tty_release(p->master_tty);
+        idr_remove(&g_pty_idr, id);
+        pty_pair_release(p);
+        return -1;
+    }
+
+    memset(slave_node, 0, sizeof(*slave_node));
+    pty_make_pts_name(slave_node->name, p->id);
+
+    slave_node->flags = VFS_FLAG_PTY_SLAVE;
+    slave_node->refs  = 1u;
+
+    tty_bind_vfs_node(p->slave_tty, slave_node);
+
+    tty_release(p->slave_tty);
+
+    devfs_register(slave_node);
+
+    {
+        guard_spinlock_safe(&p->lock);
+        
+        p->master_open = 1;
+        p->devfs_registered = 1;
+    }
 
     pty_pair_release(p);
 
@@ -1093,7 +472,6 @@ static int pty_ptmx_open(vfs_node_t* node) {
 }
 
 void pty_init(void) {
-
     static vfs_ops_t ptmx_ops;
     static vfs_node_t ptmx_node;
 
@@ -1103,72 +481,14 @@ void pty_init(void) {
 
     idr_init(&g_pty_idr);
 
-    ptmx_ops.read = 0;
-    ptmx_ops.write = 0;
-    ptmx_ops.open = 0;
-    ptmx_ops.close = 0;
-    ptmx_ops.ioctl = 0;
+    memset(&ptmx_ops, 0, sizeof(ptmx_ops));
+    ptmx_ops.open = pty_ptmx_open;
 
     memset(&ptmx_node, 0, sizeof(ptmx_node));
     strlcpy(ptmx_node.name, "ptmx", sizeof(ptmx_node.name));
-    ptmx_node.flags = 0;
-    ptmx_node.size = 0;
-    ptmx_node.inode_idx = 0;
-    ptmx_node.refs = 1;
-    ptmx_node.ops = &ptmx_ops;
-    ptmx_node.private_data = 0;
-    ptmx_node.private_retain = 0;
-    ptmx_node.private_release = 0;
 
-    ptmx_ops.open = pty_ptmx_open;
+    ptmx_node.refs = 1u;
+    ptmx_node.ops  = &ptmx_ops;
 
     devfs_register(&ptmx_node);
-}
-
-int pty_poll_info(vfs_node_t* node, uint32_t* out_available, uint32_t* out_space, int* out_peer_open) {
-    if (out_available) *out_available = 0;
-    if (out_space) *out_space = 0;
-    if (out_peer_open) *out_peer_open = 0;
-
-    if (!node) return -1;
-    if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) return -1;
-
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    uint32_t flags = spinlock_acquire_safe(&p->lock);
-
-    uint32_t avail = 0;
-    uint32_t space = 0;
-    int peer_open = 0;
-
-    if (node->flags & VFS_FLAG_PTY_MASTER) {
-        avail = p->s2m.write_ptr - p->s2m.read_ptr;
-        space = PTY_BUF_SIZE - (p->m2s.write_ptr - p->m2s.read_ptr);
-        peer_open = p->devfs_registered;
-    } else {
-        if (p->ld) {
-            avail = ldisc_has_readable(p->ld) ? 1u : 0u;
-        } else {
-            avail = 0;
-        }
-        space = PTY_BUF_SIZE - (p->s2m.write_ptr - p->s2m.read_ptr);
-        peer_open = p->master_open;
-    }
-
-    spinlock_release_safe(&p->lock, flags);
-
-    if (out_available) *out_available = avail;
-    if (out_space) *out_space = space;
-    if (out_peer_open) *out_peer_open = peer_open;
-    return 0;
-}
-
-int pty_poll_waitq_register(vfs_node_t* node, poll_waiter_t* w, struct task* task) {
-    if (!node || !w || !task) return -1;
-    if ((node->flags & (VFS_FLAG_PTY_MASTER | VFS_FLAG_PTY_SLAVE)) == 0) return -1;
-    pty_pair_t* p = (pty_pair_t*)node->private_data;
-    if (!p) return -1;
-
-    return poll_waitq_register(&p->poll_waitq, w, task);
 }
