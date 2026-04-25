@@ -1,9 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
-#include <drivers/serial/serial_core.h>
 #include <drivers/audio/pc_speaker.h>
-#include <drivers/serial/ns16550.h>
 #include <drivers/input/keyboard.h>
 #include <drivers/virtio/vgpu.h>
 #include <drivers/video/fbdev.h>
@@ -261,13 +259,11 @@ static void kmain_platform_init(void) {
     ensure_bsp_cpu_index_zero();
 }
 
+extern void __do_init_uart(void);
 static void kmain_devices_init(void) {
     vga_init();
 
-    ns16550_init(NS16550_COM1);
-
-    serial_core_init(NS16550_COM1);
-    console_set_writer(serial_core_console_write, 0);
+    __do_init_uart();
 
     kbd_init();
     mouse_init();
