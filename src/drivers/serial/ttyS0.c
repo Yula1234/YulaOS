@@ -1,18 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <kernel/tty/tty_service.h>
-#include <kernel/tty/tty_internal.h>
+#include <kernel/locking/guards.h>
 #include <kernel/tty/core.h>
-
-#include <kernel/term/term.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 
 #include <drivers/serial/serial_core.h>
-#include <drivers/serial/ttyS0.h>
+#include <drivers/driver.h>
 
-#include <lib/cpp/lock_guard.h>
 #include <lib/compiler.h>
 #include <lib/string.h>
 
@@ -20,38 +16,21 @@
 
 #include <fs/vfs.h>
 
-namespace {
-
-static tty_t* g_ttyS0 = nullptr;
+static tty_t* g_ttyS0 = NULL;
 
 static vfs_node_t g_ttyS0_node;
 
-static kernel::term::Term* get_active_term(void) {
-    tty_handle_t* active = kernel::tty::TtyService::instance().get_active_for_render();
-
-    return tty_term_ptr(active);
-}
-
 static int ttyS0_hw_write(___unused tty_t* tty, const void* buf, uint32_t size) {
-    if (!buf || size == 0u) {
+    if (!buf
+        || size == 0u) {
         return 0;
     }
 
-    const uint8_t* data = static_cast<const uint8_t*>(buf);
+    const uint8_t* data = (const uint8_t*)buf;
 
-    size_t written = serial_core_write(data, size);
+    const size_t written = serial_core_write(data, size);
 
-    kernel::term::Term* term = get_active_term();
-
-    if (term) {
-        term->write(static_cast<const char*>(buf), size);
-
-        kernel::tty::TtyService::instance().request_render(
-            kernel::tty::TtyService::RenderReason::Output
-        );
-    }
-
-    return static_cast<int>(written);
+    return (int)written;
 }
 
 static int ttyS0_hw_poll_status(___unused tty_t* tty, int events) {
@@ -65,12 +44,11 @@ static int ttyS0_hw_poll_status(___unused tty_t* tty, int events) {
 }
 
 static const tty_driver_ops_t g_ttyS0_ops = {
-    .open          = nullptr,
     .write         = ttyS0_hw_write,
-    .ioctl         = nullptr,
-    .close         = nullptr,
-    .set_termios   = nullptr,
     .poll_status   = ttyS0_hw_poll_status,
+
+    .open = NULL, .ioctl = NULL,
+    .close = NULL, .set_termios = NULL,
 };
 
 static void ttyS0_rx_kthread(void* arg) {
@@ -81,23 +59,21 @@ static void ttyS0_rx_kthread(void* arg) {
     for (;;) {
         serial_core_poll();
 
-        size_t n = serial_core_read(rx_buf, sizeof(rx_buf));
+        const size_t n = serial_core_read(rx_buf, sizeof(rx_buf));
 
         if (n > 0) {
-            tty_receive(g_ttyS0, rx_buf, static_cast<uint32_t>(n));
+            tty_receive(g_ttyS0, rx_buf, (uint32_t)n);
         } else {
             proc_usleep(2000);
         }
     }
 }
 
-}
-
-extern "C" void ttyS0_init(void) {
-    g_ttyS0 = tty_alloc(&g_ttyS0_ops, nullptr);
+static int ttyS0_driver_init(void) {
+    g_ttyS0 = tty_alloc(&g_ttyS0_ops, NULL);
 
     if (!g_ttyS0) {
-        return;
+        return -1;
     }
 
     memset(&g_ttyS0_node, 0, sizeof(g_ttyS0_node));
@@ -112,7 +88,16 @@ extern "C" void ttyS0_init(void) {
 
     ___unused task_t* rx_worker = proc_spawn_kthread(
         "ttyS0_rx", PRIO_HIGH,
-        ttyS0_rx_kthread,
-        nullptr
+        ttyS0_rx_kthread, NULL
     );
+
+    return 0;
 }
+
+DRIVER_REGISTER(
+    .name = "ttyS0",
+    .klass = DRIVER_CLASS_CHAR,
+    .stage = DRIVER_STAGE_VFS,
+    .init = ttyS0_driver_init,
+    .shutdown = NULL
+);

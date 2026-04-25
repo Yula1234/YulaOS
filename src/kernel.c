@@ -5,7 +5,6 @@
 #include <drivers/audio/pc_speaker.h>
 #include <drivers/serial/ns16550.h>
 #include <drivers/input/keyboard.h>
-#include <drivers/serial/ttyS0.h>
 #include <drivers/virtio/vgpu.h>
 #include <drivers/video/fbdev.h>
 #include <drivers/input/mouse.h>
@@ -308,7 +307,6 @@ static void kmain_fs_init(void) {
     yulafs_init();
     vfs_init();
 
-    ttyS0_init();
     mouse_vfs_init();
     fb_vfs_init();
     gpu0_vfs_init();
