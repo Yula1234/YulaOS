@@ -21,8 +21,8 @@ static tty_t* g_ttyS0 = NULL;
 static vfs_node_t g_ttyS0_node;
 
 static int ttyS0_hw_write(___unused tty_t* tty, const void* buf, uint32_t size) {
-    if (!buf
-        || size == 0u) {
+    if (unlikely(!buf
+        || size == 0u)) {
         return 0;
     }
 
@@ -51,9 +51,7 @@ static const tty_driver_ops_t g_ttyS0_ops = {
     .close = NULL, .set_termios = NULL,
 };
 
-static void ttyS0_rx_kthread(void* arg) {
-    (void)arg;
-
+static void ttyS0_rx_kthread(___unused void* arg) {
     uint8_t rx_buf[64];
 
     for (;;) {
@@ -61,7 +59,7 @@ static void ttyS0_rx_kthread(void* arg) {
 
         const size_t n = serial_core_read(rx_buf, sizeof(rx_buf));
 
-        if (n > 0) {
+        if (likely(n > 0)) {
             tty_receive(g_ttyS0, rx_buf, (uint32_t)n);
         } else {
             proc_usleep(2000);
@@ -72,7 +70,7 @@ static void ttyS0_rx_kthread(void* arg) {
 static int ttyS0_driver_init(void) {
     g_ttyS0 = tty_alloc(&g_ttyS0_ops, NULL);
 
-    if (!g_ttyS0) {
+    if (unlikely(!g_ttyS0)) {
         return -1;
     }
 
