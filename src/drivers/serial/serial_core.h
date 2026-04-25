@@ -1,9 +1,11 @@
-#pragma once
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
+#ifndef DRIVERS_SERIAL_SERIAL_CORE_H
+#define DRIVERS_SERIAL_SERIAL_CORE_H
 
 #include <stddef.h>
 #include <stdint.h>
-
-#include <drivers/serial/ns16550.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,6 +14,7 @@ extern "C" {
 void serial_core_init(uint16_t port);
 
 size_t serial_core_write(const void* data, size_t size);
+
 size_t serial_core_read(void* data, size_t size);
 
 size_t serial_core_rx_available(void);
@@ -23,4 +26,6 @@ void serial_core_console_write(void* ctx, const char* data, size_t size);
 
 #ifdef __cplusplus
 }
+#endif
+
 #endif
