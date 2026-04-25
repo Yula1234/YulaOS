@@ -102,3 +102,7 @@ void kernel_panic(const char* message, const char* file, uint32_t line, register
         __asm__ volatile("hlt");
     }
 }
+
+int panic_in_progress(void) {
+    return __atomic_load_n(&g_kernel_panic_in_progress, __ATOMIC_RELAXED);
+}

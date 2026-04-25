@@ -15,6 +15,8 @@ extern volatile int g_kernel_panic_in_progress;
 
 void kernel_panic(const char* message, const char* file, uint32_t line, registers_t* regs);
 
+int panic_in_progress(void);
+
 #ifdef __cplusplus
 }
 #endif
