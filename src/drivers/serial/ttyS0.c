@@ -61,13 +61,13 @@ static void ttyS0_rx_kthread(void* arg) {
     uint8_t rx_buf[128];
 
     for (;;) {
-        uart_port_wait_rx(&g_com1_port);
+        size_t n;
 
-        const size_t n = uart_port_read(&g_com1_port, rx_buf, sizeof(rx_buf));
-
-        if (n > 0u) {
+        while ((n = uart_port_read(&g_com1_port, rx_buf, sizeof(rx_buf))) > 0u) {
             tty_receive(g_ttyS0, rx_buf, (uint32_t)n);
         }
+        
+        uart_port_wait_rx(&g_com1_port);
     }
 }
 
