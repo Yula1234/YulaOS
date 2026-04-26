@@ -34,7 +34,7 @@ void call_rcu(rcu_head_t* head, void (*func)(rcu_head_t*));
 void rcu_process_local(void);
 
 ___inline void rcu_ptr_init(rcu_ptr_t* r) {
-    __atomic_store_n(&r->ptr, NULL, __ATOMIC_RELAXED);
+    WRITE_ONCE(r->ptr, NULL);
 }
 
 ___inline void* rcu_ptr_read(const rcu_ptr_t* r) {
@@ -54,7 +54,7 @@ ___inline void rcu_read_unlock(void) {
 }
 
 ___inline uint32_t rcu_qs_count_read(int cpu_idx) {
-    return __atomic_load_n(&cpus[cpu_idx].rcu_qs_count, __ATOMIC_RELAXED);
+    return READ_ONCE(cpus[cpu_idx].rcu_qs_count);
 }
 
 ___inline void rcu_qs_count_inc(void) {
