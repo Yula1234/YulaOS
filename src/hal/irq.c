@@ -12,18 +12,19 @@ extern irq_handler_t irq_vector_handlers[256];
 int irq_alloc_vector(void) {
     guard(spinlock_safe)(&g_irq_vector_lock);
 
-    for (int vec = 48; vec < 240; vec++) {
-        if (vec == 0x80) {
-            continue;
-        }
-        
-        int idx = vec / 32;
-        int bit = vec % 32;
+    for (int i = 1; i < 8; i++) {
+        uint32_t free_bits = ~g_irq_vector_bitmap[i];
 
-        if ((g_irq_vector_bitmap[idx] & (1u << bit)) == 0) {
-            g_irq_vector_bitmap[idx] |= (1u << bit);
+        if (i == 1) free_bits &= ~0x0000FFFFu;
+        if (i == 4) free_bits &= ~0x00000001u;
+        if (i == 7) free_bits &= 0x0000FFFFu;
 
-            return vec;
+        if (free_bits != 0) {
+            int bit = __builtin_ctz(free_bits);
+
+            g_irq_vector_bitmap[i] |= (1u << bit);
+            
+            return (i * 32) + bit;
         }
     }
 
