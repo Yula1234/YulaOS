@@ -29,7 +29,7 @@ void mutex_init(mutex_t* m) {
  * Returns 1 if the lock became free and we should attempt to grab it.
  * Returns 0 if we should stop spinning and yield the CPU.
  */
-static int mutex_spin_on_owner(mutex_t* m) {
+___noinline static int mutex_spin_on_owner(mutex_t* m) {
     uint32_t backoff = 1;
 
     for (uint32_t i = 0; i < 1024u; i += backoff) {
@@ -65,7 +65,7 @@ static int mutex_spin_on_owner(mutex_t* m) {
     return 0;
 }
 
-static void mutex_lock_slowpath(mutex_t* m, task_t* curr) {
+___noinline static void mutex_lock_slowpath(mutex_t* m, task_t* curr) {
     const uintptr_t curr_val = (uintptr_t)curr;
 
     if (mutex_spin_on_owner(m)) {
@@ -172,7 +172,7 @@ void mutex_lock(mutex_t* m) {
     mutex_lock_slowpath(m, curr);
 }
 
-static void mutex_unlock_slowpath(mutex_t* m, task_t* curr) {
+___noinline static void mutex_unlock_slowpath(mutex_t* m, task_t* curr) {
     const uintptr_t curr_val = (uintptr_t)curr;
     const uintptr_t current_owner = READ_ONCE(m->owner);
 
