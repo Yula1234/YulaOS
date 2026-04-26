@@ -46,8 +46,7 @@ static int mutex_spin_on_owner(mutex_t* m) {
              * If the owner is not actively running (e.g., blocked on I/O),
              * spinning is a pure waste of CPU cycles. Abort immediately.
              */
-            const task_state_t owner_state = 
-                (task_state_t)__atomic_load_n(&owner_task->state, __ATOMIC_RELAXED);
+            const task_state_t owner_state = (task_state_t)READ_ONCE(owner_task->state);
 
             if (unlikely(owner_state != TASK_RUNNING)) {
                 return 0;
@@ -175,7 +174,7 @@ void mutex_lock(mutex_t* m) {
 
 static void mutex_unlock_slowpath(mutex_t* m, task_t* curr) {
     const uintptr_t curr_val = (uintptr_t)curr;
-    const uintptr_t current_owner = __atomic_load_n(&m->owner, __ATOMIC_RELAXED);
+    const uintptr_t current_owner = READ_ONCE(m->owner);
 
     if (unlikely((current_owner & ~MUTEX_FLAG_WAITERS) != curr_val)) {
         panic("MUTEX: unlock by non-owner task");
