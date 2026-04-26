@@ -12,7 +12,7 @@
 #define READ_ONCE(x)       __atomic_load_n(&(x), __ATOMIC_RELAXED)
 #define WRITE_ONCE(x, val) __atomic_store_n(&(x), (val), __ATOMIC_RELAXED)
 
-#ifdef __cplusplus
+#ifdef __cplusplus /* C++ */
 
 namespace kernel {
 
@@ -34,7 +34,18 @@ namespace kernel {
 
 }
 
-#else
+#else /* C */
+
+#define CLASS(name, var) \
+    class_##name##_t var __attribute__((cleanup(class_##name##_destructor))) = class_##name##_constructor
+
+#define DEFINE_CLASS(_name, _type, _exit, _init, _init_args...)     \
+    typedef _type class_##_name##_t;                                \
+    ___inline void class_##_name##_destructor(_type *p)             \
+    { _type _T = *p; _exit; }                                       \
+    ___inline _type class_##name##_constructor(_init_args)          \
+    { _type t = _init; return t; }
+
 
 #if defined(__GNUC__) || defined(__clang__)
     #define likely(x)       __builtin_expect(!!(x), 1)

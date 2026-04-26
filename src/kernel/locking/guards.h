@@ -12,9 +12,6 @@
 #define __GUARD_CONCAT(x, y) __GUARD_CONCAT_IMPL(x, y)
 #define __GUARD_UNIQUE_ID(prefix) __GUARD_CONCAT(prefix, __COUNTER__)
 
-#define CLASS(name, var) \
-    class_##name##_t var __attribute__((cleanup(class_##name##_destructor))) = class_##name##_constructor
-
 #define guard(name) CLASS(name, __GUARD_UNIQUE_ID(_guard_obj_))
 
 #define scoped_guard(name, ...) \
