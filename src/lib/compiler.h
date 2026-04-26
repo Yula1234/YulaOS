@@ -39,11 +39,13 @@ namespace kernel {
 #define CLASS(name, var) \
     class_##name##_t var __attribute__((cleanup(class_##name##_destructor))) = class_##name##_constructor
 
+#define no_free_ptr(p) ({ typeof(p) __tmp = (p); (p) = 0; __tmp; })
+
 #define DEFINE_CLASS(_name, _type, _exit, _init, _init_args...)     \
     typedef _type class_##_name##_t;                                \
     ___inline void class_##_name##_destructor(_type *p)             \
     { _type _T = *p; _exit; }                                       \
-    ___inline _type class_##name##_constructor(_init_args)          \
+    ___inline _type class_##_name##_constructor(_init_args)         \
     { _type t = _init; return t; }
 
 
