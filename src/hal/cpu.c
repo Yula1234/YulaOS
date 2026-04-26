@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
-
-#include <hal/cpu.h>
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #include <kernel/smp/cpu.h>
+
+#include "cpu.h"
 
 #include <stdint.h>
 
