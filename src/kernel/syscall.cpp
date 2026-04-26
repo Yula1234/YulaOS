@@ -20,7 +20,6 @@
 #include <fs/yulafs.h>
 #include <fs/vfs.h>
 
-#include <hal/lock.h>
 #include <hal/simd.h>
 #include <hal/apic.h>
 

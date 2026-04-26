@@ -1,16 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include <kernel/locking/guards.h>
+#include <lib/compiler.h>
+#include <lib/atomic.h>
+
 #include <kernel/panic.h>
 #include <kernel/proc.h>
 
-#include <hal/lock.h>
 #include <hal/irq.h>
 #include <hal/cpu.h>
-
-#include <lib/compiler.h>
-#include <lib/atomic.h>
 
 #include "poll_waitq.h"
 
@@ -106,7 +104,7 @@ int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
         panic("poll_waitq_register: some of arguments are null\n");
     }
 
-    guard_spinlock_safe(&q->lock);
+    guard(spinlock_safe)(&q->lock);
 
     if (unlikely(!poll_waitq_waiter_is_clean(w))) {
         return -1;
@@ -119,7 +117,7 @@ int poll_waitq_register(poll_waitq_t* q, poll_waiter_t* w, struct task* task) {
     poll_waitq_retain(q);
 
     {
-        guard_spinlock(&task->poll_lock);
+        guard(spinlock)(&task->poll_lock);
 
         w->task = task;
         w->q = q;
@@ -141,7 +139,7 @@ static int poll_waitq_do_unregister(struct task* task, poll_waiter_t* target_w) 
     int status = 1;
 
     {
-        guard_spinlock(&task->poll_lock);
+        guard(spinlock)(&task->poll_lock);
 
         poll_waiter_t* w = target_w;
         
@@ -213,7 +211,7 @@ void poll_waitq_wake_all(poll_waitq_t* q, uint32_t events) {
         panic("poll_waitq_wake_all: called on null poll_waitq_t*\n");
     }
 
-    guard_spinlock_safe(&q->lock);
+    guard(spinlock_safe)(&q->lock);
 
     for (dlist_head_t* it = q->waiters.next; it != &q->waiters; it = it->next) {
         
@@ -234,7 +232,7 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
         panic("poll_waitq_detach_all: called on null poll_waitq_t*\n");
     }
 
-    guard_spinlock_safe(&q->lock);
+    guard(spinlock_safe)(&q->lock);
 
     while (!dlist_empty(&q->waiters)) {
         poll_waiter_t* w = container_of(q->waiters.next, poll_waiter_t, q_node);
@@ -242,7 +240,7 @@ void poll_waitq_detach_all(poll_waitq_t* q) {
         task_t* task = w->task;
 
         if (task) {
-            guard_spinlock(&task->poll_lock);
+            guard(spinlock)(&task->poll_lock);
 
             if (poll_waitq_try_unlink_node(&w->task_node)) {
                 w->task = 0;

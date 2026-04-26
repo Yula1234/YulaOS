@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <hal/pmio.h>
-#include <hal/lock.h>
+#include <kernel/locking/spinlock.h>
 
+#include "align.h"
+#include "pmio.h"
 #include "pic.h"
 
 #define PIC_MASTER_PORT 0x21u

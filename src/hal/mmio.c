@@ -1,16 +1,17 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
+#include "kernel/locking/rwspinlock.h"
 
 #include <lib/string.h>
 #include <lib/rbtree.h>
-
-#include <hal/mmio.h>
-#include <hal/lock.h>
 
 #include <mm/heap.h>
 #include <mm/vmm.h>
 
 #include <arch/i386/paging.h>
+
+#include "mmio.h"
 
 enum {
     MMIO_REGION_MAGIC = 0x4D4D494Fu,

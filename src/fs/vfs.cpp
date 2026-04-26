@@ -9,22 +9,23 @@ extern "C" {
 
 }
 
-#include <kernel/proc.h>
-#include <kernel/uaccess/uaccess.h>
-#include <kernel/panic.h>
-#include <hal/lock.h>
-#include <arch/i386/paging.h>
-#include <mm/heap.h>
-
-#include <kernel/rcu.h>
-
 #include <lib/cpp/hash_traits.h>
-#include <lib/cpp/atomic.h>
-#include <lib/cpp/dlist.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/string.h>
+#include <lib/cpp/atomic.h>
+#include <lib/cpp/dlist.h>
+
+#include <kernel/uaccess/uaccess.h>
+#include <kernel/panic.h>
+#include <kernel/proc.h>
+#include <kernel/rcu.h>
+
 #include <lib/hash_map.h>
 #include <lib/string.h>
+
+#include <arch/i386/paging.h>
+
+#include <mm/heap.h>
 
 struct vfs_fs_instance;
 

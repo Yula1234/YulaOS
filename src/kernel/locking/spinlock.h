@@ -8,6 +8,8 @@
 
 #include <hal/irq.h>
 
+#include "guards.h"
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -105,6 +107,11 @@ ___inline void spinlock_release_safe(spinlock_t* lock, uint32_t flags) {
         irq_enable();
     }
 }
+
+#ifndef __cplusplus
+DEFINE_GUARD     (spinlock,      spinlock_t, spinlock_acquire,      spinlock_release)
+DEFINE_GUARD_SAFE(spinlock_safe, spinlock_t, spinlock_acquire_safe, spinlock_release_safe)
+#endif
 
 #ifdef __cplusplus
 }

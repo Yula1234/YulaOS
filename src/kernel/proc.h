@@ -4,18 +4,19 @@
 #ifndef KERNEL_PROC_H
 #define KERNEL_PROC_H
 
+#include <kernel/locking/rwspinlock.h>
+#include <kernel/locking/spinlock.h>
+#include <kernel/locking/sem.h>
+#include <kernel/smp/cpu.h>
+
+#include <lib/maple_tree.h>
 #include <lib/compiler.h>
 #include <lib/rbtree.h>
 #include <lib/dlist.h>
-#include <lib/maple_tree.h>
-
-#include <kernel/smp/cpu.h>
-#include <kernel/rcu.h>
-
-#include <hal/align.h>
-#include <hal/lock.h>
 
 #include <arch/i386/idt.h>
+
+#include <hal/align.h>
 
 #include <yos/proc.h>
 
@@ -24,6 +25,8 @@
 #include <mm/vma.h>
 
 #include <stdint.h>
+
+#include "rcu.h"
 
 #define KSTACK_SIZE 32768
 

@@ -19,8 +19,6 @@
 
 #include <kernel/proc.h>
 
-#include <hal/lock.h>
-
 #include <fs/vfs.h>
 
 #include <yos/gpu.h>

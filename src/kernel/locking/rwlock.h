@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "spinlock.h"
+#include "guards.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +34,11 @@ void rwlock_release_read(rwlock_t* rw);
 void rwlock_acquire_write(rwlock_t* rw);
 
 void rwlock_release_write(rwlock_t* rw);
+
+#ifndef __cplusplus
+DEFINE_GUARD(rwlock_read,  rwlock_t, rwlock_acquire_read,  rwlock_release_read)
+DEFINE_GUARD(rwlock_write, rwlock_t, rwlock_acquire_write, rwlock_release_write)
+#endif
 
 #ifdef __cplusplus
 }

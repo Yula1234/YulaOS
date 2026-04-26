@@ -1,23 +1,24 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
-#include <arch/i386/idt.h>
-#include <fs/vfs.h>
-
+#include <kernel/locking/spinlock.h>
+#include <kernel/waitq/poll_waitq.h>
+#include <kernel/input_focus.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
-#include <kernel/input_focus.h>
-#include <kernel/waitq/poll_waitq.h>
-#include <drivers/video/fbdev.h>
 
-#include <hal/io.h>
+#include <drivers/video/fbdev.h>
+#include <drivers/driver.h>
+#include <drivers/cdev.h>
+
 #include <hal/irq.h>
-#include <hal/lock.h>
+#include <hal/io.h>
+
+#include <arch/i386/idt.h>
 
 #include <lib/string.h>
 
-#include <drivers/cdev.h>
-#include <drivers/driver.h>
+#include <fs/vfs.h>
 
 #include "keyboard.h"
 

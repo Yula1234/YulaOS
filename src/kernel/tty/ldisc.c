@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <kernel/locking/guards.h>
+#include <kernel/locking/spinlock.h>
 #include <kernel/locking/mutex.h>
 #include <kernel/locking/sem.h>
 
@@ -14,7 +14,6 @@
 #include <lib/string.h>
 #include <lib/dlist.h>
 
-#include <hal/lock.h>
 #include <hal/apic.h>
 #include <hal/irq.h>
 #include <hal/cpu.h>
@@ -160,7 +159,7 @@ static void echo_worker_task(work_struct_t* work) {
         uint32_t to_emit = 0u;
 
         {
-            guard_spinlock_safe(&ld->echo_lock_);
+            guard(spinlock_safe)(&ld->echo_lock_);
 
             to_emit = ld->echo_count_;
             
@@ -191,7 +190,7 @@ static void queue_echo_bytes_locked(ldisc_t* ld, const uint8_t* data, size_t len
         return;
     }
 
-    guard_spinlock_safe(&ld->echo_lock_);
+    guard(spinlock_safe)(&ld->echo_lock_);
 
     ring_push_chunk(
         ld->echo_buf_, &ld->echo_head_, &ld->echo_count_, 
@@ -394,7 +393,7 @@ void ldisc_destroy(ldisc_t* ld) {
     }
 
     {
-        guard_spinlock_safe(&ld->rx_lock_);
+        guard(spinlock_safe)(&ld->rx_lock_);
 
         wake_read_waiters_locked(ld);
     }
@@ -410,7 +409,7 @@ void ldisc_set_config(ldisc_t* ld, const ldisc_config_t* cfg) {
         return;
     }
 
-    guard_spinlock_safe(&ld->rx_lock_);
+    guard(spinlock_safe)(&ld->rx_lock_);
 
     ld->cfg_ = *cfg;
 }
@@ -421,7 +420,7 @@ void ldisc_get_config(const ldisc_t* ld, ldisc_config_t* out_cfg) {
         return;
     }
 
-    guard_spinlock_safe((spinlock_t*)&ld->rx_lock_);
+    guard(spinlock_safe)((spinlock_t*)&ld->rx_lock_);
 
     *out_cfg = ld->cfg_;
 }
@@ -435,7 +434,7 @@ void ldisc_set_callbacks(
         return;
     }
 
-    guard_spinlock_safe(&ld->rx_lock_);
+    guard(spinlock_safe)(&ld->rx_lock_);
 
     ld->echo_emit_ = echo_emit;
     ld->echo_ctx_  = echo_ctx;
@@ -451,7 +450,7 @@ size_t ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size) {
         return 0u;
     }
 
-    guard_spinlock_safe(&ld->rx_lock_);
+    guard(spinlock_safe)(&ld->rx_lock_);
 
     size_t written = 0;
 
@@ -559,7 +558,7 @@ size_t ldisc_read(ldisc_t* ld, void* out, size_t size) {
         return 0u;
     }
 
-    guard_mutex(&ld->read_mutex_);
+    guard(mutex)(&ld->read_mutex_);
 
     uint8_t* dst = (uint8_t*)out;
 
@@ -661,12 +660,12 @@ size_t ldisc_write_transform(
         return 0u;
     }
 
-    guard_mutex(&ld->write_mutex_);
+    guard(mutex)(&ld->write_mutex_);
 
     bool opost, onlcr;
 
     {
-        guard_spinlock_safe(&ld->rx_lock_);
+        guard(spinlock_safe)(&ld->rx_lock_);
 
         opost = ld->cfg_.opost_;
         onlcr = ld->cfg_.onlcr_;
@@ -714,7 +713,7 @@ bool ldisc_has_readable(const ldisc_t* ld) {
         return false;
     }
 
-    guard_spinlock_safe((spinlock_t*)&ld->rx_lock_);
+    guard(spinlock_safe)((spinlock_t*)&ld->rx_lock_);
 
     if (ld->cfg_.canonical_) {
         return ld->canon_count_ > 0u;

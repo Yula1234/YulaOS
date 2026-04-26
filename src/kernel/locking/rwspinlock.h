@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "spinlock.h"
+#include "guards.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,6 +73,18 @@ void percpu_rwspinlock_release_read_safe(percpu_rwspinlock_t* rw, uint32_t flags
 uint32_t percpu_rwspinlock_acquire_write_safe(percpu_rwspinlock_t* rw);
 
 void percpu_rwspinlock_release_write_safe(percpu_rwspinlock_t* rw, uint32_t flags);
+
+#ifndef __cplusplus
+DEFINE_GUARD     (rwspin_read,       rwspinlock_t, rwspinlock_acquire_read,       rwspinlock_release_read)
+DEFINE_GUARD     (rwspin_write,      rwspinlock_t, rwspinlock_acquire_write,      rwspinlock_release_write)
+DEFINE_GUARD_SAFE(rwspin_read_safe,  rwspinlock_t, rwspinlock_acquire_read_safe,  rwspinlock_release_read_safe)
+DEFINE_GUARD_SAFE(rwspin_write_safe, rwspinlock_t, rwspinlock_acquire_write_safe, rwspinlock_release_write_safe)
+
+DEFINE_GUARD     (percpu_rwspin_read,       percpu_rwspinlock_t, percpu_rwspinlock_acquire_read,       percpu_rwspinlock_release_read)
+DEFINE_GUARD     (percpu_rwspin_write,      percpu_rwspinlock_t, percpu_rwspinlock_acquire_write,      percpu_rwspinlock_release_write)
+DEFINE_GUARD_SAFE(percpu_rwspin_read_safe,  percpu_rwspinlock_t, percpu_rwspinlock_acquire_read_safe,  percpu_rwspinlock_release_read_safe)
+DEFINE_GUARD_SAFE(percpu_rwspin_write_safe, percpu_rwspinlock_t, percpu_rwspinlock_acquire_write_safe, percpu_rwspinlock_release_write_safe)
+#endif
 
 #ifdef __cplusplus
 }

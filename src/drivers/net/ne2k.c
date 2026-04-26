@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <hal/lock.h>
+#include <kernel/locking/mutex.h>
+#include <kernel/proc.h>
+
 #include <hal/pmio.h>
 #include <hal/io.h>
-
-#include <kernel/proc.h>
 
 #include <lib/string.h>
 

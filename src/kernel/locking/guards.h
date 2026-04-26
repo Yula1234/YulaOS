@@ -6,138 +6,45 @@
 
 #include <lib/compiler.h>
 
-#include "rwspinlock.h"
-#include "spinlock.h"
-#include "rwlock.h"
-#include "mutex.h"
-
 #ifndef __cplusplus
 
-#define __cleanup_func(func) __attribute__((cleanup(func), unused))
+#define __GUARD_CONCAT_IMPL(x, y) x##y
+#define __GUARD_CONCAT(x, y) __GUARD_CONCAT_IMPL(x, y)
+#define __GUARD_UNIQUE_ID(prefix) __GUARD_CONCAT(prefix, __COUNTER__)
 
-#define _GUARD_CONCAT_IMPL(x, y) x##y
-#define _GUARD_CONCAT(x, y) _GUARD_CONCAT_IMPL(x, y)
-#define _GUARD_NAME(prefix) _GUARD_CONCAT(prefix, __COUNTER__)
+#define CLASS(name, var) \
+    class_##name##_t var __attribute__((cleanup(class_##name##_destructor))) = class_##name##_constructor
 
-___inline void _cleanup_spinlock(spinlock_t **lock) {
-    spinlock_release(*lock);
-}
+#define guard(name) CLASS(name, __GUARD_UNIQUE_ID(_guard_obj_))
 
-#define guard_spinlock(lock_ptr) \
-    spinlock_t* _GUARD_NAME(_sl_guard_) __cleanup_func(_cleanup_spinlock) = \
-    (spinlock_acquire(lock_ptr), (lock_ptr))
+#define scoped_guard(name, ...) \
+    for (CLASS(name, __GUARD_UNIQUE_ID(_scope_))(__VA_ARGS__), \
+         *__GUARD_UNIQUE_ID(_done_) = (void*)0; \
+         !__GUARD_UNIQUE_ID(_done_); \
+         __GUARD_UNIQUE_ID(_done_) = (void*)1)
 
-typedef struct {
-    spinlock_t *lock;
-    uint32_t flags;
-} _spinlock_safe_ctx_t;
+#define DEFINE_GUARD(name, lock_type, lock_fn, unlock_fn) \
+    typedef struct { lock_type *lock; } class_##name##_t; \
+    ___inline void class_##name##_destructor(class_##name##_t *_T) { \
+        if (_T->lock) { unlock_fn(_T->lock); } \
+    } \
+    ___inline class_##name##_t class_##name##_constructor(lock_type *l) { \
+        class_##name##_t _t = { .lock = l }; \
+        if (l) { lock_fn(l); } \
+        return _t; \
+    }
 
-___inline void _cleanup_spinlock_safe(_spinlock_safe_ctx_t *ctx) {
-    spinlock_release_safe(ctx->lock, ctx->flags);
-}
+#define DEFINE_GUARD_SAFE(name, lock_type, lock_fn, unlock_fn) \
+    typedef struct { lock_type *lock; uint32_t flags; } class_##name##_t; \
+    ___inline void class_##name##_destructor(class_##name##_t *_T) { \
+        if (_T->lock) { unlock_fn(_T->lock, _T->flags); } \
+    } \
+    ___inline class_##name##_t class_##name##_constructor(lock_type *l) { \
+        class_##name##_t _t = { .lock = l, .flags = 0 }; \
+        if (l) { _t.flags = lock_fn(l); } \
+        return _t; \
+    }
 
-#define guard_spinlock_safe(lock_ptr) \
-    _spinlock_safe_ctx_t _GUARD_NAME(_sl_safe_guard_) __cleanup_func(_cleanup_spinlock_safe) = \
-    { .lock = (lock_ptr), .flags = spinlock_acquire_safe(lock_ptr) }
+#endif /* __cplusplus */
 
-___inline void _cleanup_mutex(mutex_t **m) {
-    mutex_unlock(*m);
-}
-
-#define guard_mutex(mutex_ptr) \
-    mutex_t* _GUARD_NAME(_mtx_guard_) __cleanup_func(_cleanup_mutex) = \
-    (mutex_lock(mutex_ptr), (mutex_ptr))
-
-___inline void _cleanup_percpu_rwspin_write(percpu_rwspinlock_t **rw) {
-    percpu_rwspinlock_release_write(*rw);
-}
-
-#define guard_percpu_rwspin_write(rw_ptr) \
-    percpu_rwspinlock_t* _GUARD_NAME(_prw_w_guard_) __cleanup_func(_cleanup_percpu_rwspin_write) = \
-    (percpu_rwspinlock_acquire_write(rw_ptr), (rw_ptr))
-
-___inline void _cleanup_percpu_rwspin_read(percpu_rwspinlock_t **rw) {
-    percpu_rwspinlock_release_read(*rw);
-}
-
-#define guard_percpu_rwspin_read(rw_ptr) \
-    percpu_rwspinlock_t* _GUARD_NAME(_prw_r_guard_) __cleanup_func(_cleanup_percpu_rwspin_read) = \
-    (percpu_rwspinlock_acquire_read(rw_ptr), (rw_ptr))
-
-typedef struct {
-    percpu_rwspinlock_t *lock;
-    uint32_t flags;
-} _percpu_rwspin_safe_ctx_t;
-
-___inline void _cleanup_percpu_rwspin_write_safe(_percpu_rwspin_safe_ctx_t *ctx) {
-    percpu_rwspinlock_release_write_safe(ctx->lock, ctx->flags);
-}
-
-#define guard_percpu_rwspin_write_safe(rw_ptr) \
-    _percpu_rwspin_safe_ctx_t _GUARD_NAME(_prw_ws_guard_) __cleanup_func(_cleanup_percpu_rwspin_write_safe) = \
-    { .lock = (rw_ptr), .flags = percpu_rwspinlock_acquire_write_safe(rw_ptr) }
-
-___inline void _cleanup_percpu_rwspin_read_safe(_percpu_rwspin_safe_ctx_t *ctx) {
-    percpu_rwspinlock_release_read_safe(ctx->lock, ctx->flags);
-}
-
-#define guard_percpu_rwspin_read_safe(rw_ptr) \
-    _percpu_rwspin_safe_ctx_t _GUARD_NAME(_prw_rs_guard_) __cleanup_func(_cleanup_percpu_rwspin_read_safe) = \
-    { .lock = (rw_ptr), .flags = percpu_rwspinlock_acquire_read_safe(rw_ptr) }
-
-___inline void _cleanup_rwspin_write(rwspinlock_t **rw) {
-    rwspinlock_release_write(*rw);
-}
-
-#define guard_rwspin_write(rw_ptr) \
-    rwspinlock_t* _GUARD_NAME(_rw_w_guard_) __cleanup_func(_cleanup_rwspin_write) = \
-    (rwspinlock_acquire_write(rw_ptr), (rw_ptr))
-
-___inline void _cleanup_rwspin_read(rwspinlock_t **rw) {
-    rwspinlock_release_read(*rw);
-}
-
-#define guard_rwspin_read(rw_ptr) \
-    rwspinlock_t* _GUARD_NAME(_rw_r_guard_) __cleanup_func(_cleanup_rwspin_read) = \
-    (rwspinlock_acquire_read(rw_ptr), (rw_ptr))
-
-typedef struct {
-    rwspinlock_t *lock;
-    uint32_t flags;
-} _rwspin_safe_ctx_t;
-
-___inline void _cleanup_rwspin_write_safe(_rwspin_safe_ctx_t *ctx) {
-    rwspinlock_release_write_safe(ctx->lock, ctx->flags);
-}
-
-#define guard_rwspin_write_safe(rw_ptr) \
-    _rwspin_safe_ctx_t _GUARD_NAME(_rw_ws_guard_) __cleanup_func(_cleanup_rwspin_write_safe) = \
-    { .lock = (rw_ptr), .flags = rwspinlock_acquire_write_safe(rw_ptr) }
-
-___inline void _cleanup_rwspin_read_safe(_rwspin_safe_ctx_t *ctx) {
-    rwspinlock_release_read_safe(ctx->lock, ctx->flags);
-}
-
-#define guard_rwspin_read_safe(rw_ptr) \
-    _rwspin_safe_ctx_t _GUARD_NAME(_rw_rs_guard_) __cleanup_func(_cleanup_rwspin_read_safe) = \
-    { .lock = (rw_ptr), .flags = rwspinlock_acquire_read_safe(rw_ptr) }
-
-___inline void _cleanup_rwlock_write(rwlock_t **rw) {
-    rwlock_release_write(*rw);
-}
-
-#define guard_rwlock_write(rw_ptr) \
-    rwlock_t* _GUARD_NAME(_rwl_w_guard_) __cleanup_func(_cleanup_rwlock_write) = \
-    (rwlock_acquire_write(rw_ptr), (rw_ptr))
-
-___inline void _cleanup_rwlock_read(rwlock_t **rw) {
-    rwlock_release_read(*rw);
-}
-
-#define guard_rwlock_read(rw_ptr) \
-    rwlock_t* _GUARD_NAME(_rwl_r_guard_) __cleanup_func(_cleanup_rwlock_read) = \
-    (rwlock_acquire_read(rw_ptr), (rw_ptr))
-
-#endif
-
-#endif
+#endif /* KERNEL_LOCKING_GUARDS_H */

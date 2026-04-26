@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
+
+#include <kernel/locking/spinlock.h>
 
 #include <drivers/virtio/core.h>
-
-#include <hal/lock.h>
 
 static dlist_head_t g_virtio_drivers;
 static spinlock_t g_virtio_drivers_lock;

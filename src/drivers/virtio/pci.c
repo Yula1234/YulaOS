@@ -1,31 +1,30 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <drivers/acpi.h>
-#include <drivers/driver.h>
-#include <drivers/pci/pci.h>
 #include <drivers/virtio/core.h>
+#include <drivers/pci/pci.h>
+#include <drivers/driver.h>
+#include <drivers/acpi.h>
 
-#include <mm/dma/api.h>
-#include <mm/heap.h>
-#include <mm/iomem.h>
+#include <kernel/locking/spinlock.h>
+#include <kernel/smp/cpu.h>
+#include <kernel/smp/mb.h>
 
-#include <hal/io.h>
 #include <hal/ioapic.h>
 #include <hal/irq.h>
-#include <hal/lock.h>
+#include <hal/io.h>
 
-#include <kernel/smp/cpu.h>
-
-#include <kernel/smp/mb.h>
+#include <mm/dma/api.h>
+#include <mm/iomem.h>
+#include <mm/heap.h>
 
 #include <lib/dlist.h>
 #include <lib/string.h>
 
-#include <stddef.h>
-
-#include "pci.h"
 #include "virtqueue.h"
+#include "pci.h"
+
+#include <stddef.h>
 
 #define VIRTIO_PCI_CAP_ID 0x09u
 

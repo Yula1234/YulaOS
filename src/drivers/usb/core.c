@@ -1,17 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <drivers/usb/core.h>
-
+#include <kernel/locking/spinlock.h>
 #include <kernel/workqueue.h>
 #include <kernel/proc.h>
-
-#include <hal/lock.h>
 
 #include <mm/heap.h>
 
 #include <lib/string.h>
 #include <lib/dlist.h>
+
+#include "core.h"
 
 #include <stdint.h>
 

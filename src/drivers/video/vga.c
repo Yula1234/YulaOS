@@ -1,14 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
-#include <lib/string.h>
-#include <mm/heap.h>
-#include <hal/simd.h>
 #include <drivers/virtio/vgpu.h>
+
 #include <kernel/smp/mb.h>
 
-#include "vga.h"
+#include <lib/string.h>
+
+#include <hal/simd.h>
+
+#include <mm/heap.h>
+
 #include "fbdev.h"
+#include "vga.h"
 
 const uint8_t font8x16_basic[128][16] = {
     [32] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // space

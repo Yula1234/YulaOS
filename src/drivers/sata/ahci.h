@@ -1,11 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #ifndef DRIVERS_AHCI_H
 #define DRIVERS_AHCI_H
 
+#include <kernel/locking/spinlock.h>
+#include <kernel/locking/sem.h>
+
 #include <stdint.h>
-#include <hal/lock.h>
 
 #ifdef __cplusplus
 extern "C" {

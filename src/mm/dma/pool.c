@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <kernel/locking/spinlock.h>
 #include <kernel/output/kprintf.h>
 #include <kernel/smp/cpu_limits.h>
 
@@ -12,7 +13,6 @@
 #include <lib/dlist.h>
 
 #include <hal/align.h>
-#include <hal/lock.h>
 #include <hal/cpu.h>
 #include <hal/irq.h>
 

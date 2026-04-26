@@ -1,7 +1,7 @@
 #ifndef LIB_CPP_SEMAPHORE_H
 #define LIB_CPP_SEMAPHORE_H
 
-#include <hal/lock.h>
+#include <kernel/locking/sem.h>
 
 namespace kernel {
 

@@ -1,15 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <kernel/locking/guards.h>
-#include <kernel/panic.h>
-
 #include <lib/compiler.h>
 #include <lib/string.h>
 
-#include <drivers/serial/core.h>
+#include <kernel/panic.h>
 
 #include <hal/irq.h>
+
+#include "core.h"
 
 ___inline size_t ring_free_space(const uart_ring_t* r) {
     return UART_RING_SIZE - r->count;
@@ -150,7 +149,7 @@ void uart_core_on_rx_ready(uart_port_t* port) {
         return;
     }
 
-    guard_spinlock_safe(&port->rx_lock);
+    guard(spinlock_safe)(&port->rx_lock);
 
     pump_rx_unlocked(port);
 }
@@ -160,7 +159,7 @@ void uart_core_on_tx_ready(uart_port_t* port) {
         return;
     }
 
-    guard_spinlock_safe(&port->tx_lock);
+    guard(spinlock_safe)(&port->tx_lock);
 
     pump_tx_unlocked(port);
 }
@@ -213,7 +212,7 @@ size_t uart_port_write(uart_port_t* port, const void* data, size_t size) {
 
     size_t written = 0u;
 
-    guard_spinlock_safe(&port->tx_lock);
+    guard(spinlock_safe)(&port->tx_lock);
 
     while (written < size) {
         if (ring_free_space(&port->tx_ring) == 0u) {
@@ -247,7 +246,7 @@ size_t uart_port_read(uart_port_t* port, void* data, size_t size) {
 
     size_t read_bytes = 0u;
 
-    guard_spinlock_safe(&port->rx_lock);
+    guard(spinlock_safe)(&port->rx_lock);
 
     while (read_bytes < size) {
         uint8_t b = 0u;
@@ -276,13 +275,13 @@ void uart_port_poll(uart_port_t* port) {
     }
 
     {
-        guard_spinlock_safe(&port->rx_lock);
+        guard(spinlock_safe)(&port->rx_lock);
 
         pump_rx_unlocked(port);
     }
 
     {
-        guard_spinlock_safe(&port->tx_lock);
+        guard(spinlock_safe)(&port->tx_lock);
 
         pump_tx_unlocked(port);
     }

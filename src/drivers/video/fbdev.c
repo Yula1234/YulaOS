@@ -1,24 +1,24 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <fs/vfs.h>
-#include <hal/lock.h>
+#include <kernel/locking/spinlock.h>
+#include <kernel/tty/tty_bridge.h>
 #include <kernel/input_focus.h>
-
 #include <kernel/proc.h>
 
-#include <kernel/tty/tty_bridge.h>
+#include <drivers/virtio/vgpu.h>
 
 #include <yos/ioctl.h>
 
-#include "fbdev.h"
+#include <fs/vfs.h>
 
-#include <drivers/virtio/vgpu.h>
+#include "fbdev.h"
 
 uint32_t* fb_ptr = 0;
 uint32_t  fb_width = 0;
 uint32_t  fb_height = 0;
 uint32_t  fb_pitch = 0;
+
 volatile int g_fb_mapped = 0;
 
 static spinlock_t fb_owner_lock;

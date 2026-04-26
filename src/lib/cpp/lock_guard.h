@@ -1,7 +1,10 @@
 #ifndef LIB_CPP_LOCK_GUARD_H
 #define LIB_CPP_LOCK_GUARD_H
 
-#include <hal/lock.h>
+#include <kernel/locking/rwspinlock.h>
+#include <kernel/locking/spinlock.h>
+#include <kernel/locking/rwlock.h>
+#include <kernel/locking/mutex.h>
 
 #include <stdint.h>
 

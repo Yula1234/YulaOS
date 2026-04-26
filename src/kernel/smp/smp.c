@@ -1,21 +1,28 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
-#include <stdint.h>
-#include <lib/string.h>
-#include <hal/apic.h>
-#include <hal/io.h>
-#include <hal/simd.h>
-#include <hal/lock.h>
-#include <mm/heap.h>
-#include <mm/pmm.h>
-#include <kernel/smp/mb.h>
+#include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
 #include <arch/i386/idt.h>
-#include <arch/i386/paging.h>
-#include <drivers/video/fbdev.h>
+
+#include <hal/simd.h>
+#include <hal/apic.h>
+#include <hal/io.h>
+
+#include <kernel/locking/spinlock.h>
 #include <kernel/sched.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
+#include <drivers/video/fbdev.h>
+
+#include <lib/string.h>
+
 #include "cpu.h"
+#include "mb.h"
+
+#include <stdint.h>
 
 extern uint8_t smp_trampoline_start[];
 extern uint8_t smp_trampoline_end[];

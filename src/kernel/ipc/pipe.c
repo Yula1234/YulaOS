@@ -4,7 +4,6 @@
 #include <kernel/waitq/poll_waitq.h>
 #include <kernel/uaccess/uaccess.h>
 
-#include <kernel/locking/guards.h>
 #include <kernel/locking/mutex.h>
 #include <kernel/locking/sem.h>
 
@@ -127,7 +126,7 @@ ___inline int pipe_read_impl(vfs_node_t* node, uint32_t size, void* buffer, int 
 
         for (;;) {
             {
-                guard_mutex(&p->read_lock);
+                guard(mutex)(&p->read_lock);
 
                 if (waited) {
                     while (sem_try_acquire(&p->sem_read)) {}
@@ -252,7 +251,7 @@ ___inline int pipe_write_impl(vfs_node_t* node, uint32_t size, const void* buffe
 
         for (;;) {
             {
-                guard_mutex(&p->write_lock);
+                guard(mutex)(&p->write_lock);
 
                 if (waited) {
                     while (sem_try_acquire(&p->sem_write)) {}

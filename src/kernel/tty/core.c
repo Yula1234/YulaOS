@@ -2,8 +2,6 @@
 /* Copyright (C) 2026 Yula1234 */
 
 #include <kernel/waitq/poll_waitq.h>
-#include <kernel/locking/guards.h>
-#include <kernel/tty/core.h>
 #include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/proc.h>
@@ -13,6 +11,7 @@
 
 #include <mm/heap.h>
 
+#include "core.h"
 
 static int tty_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, void* buffer);
 static int tty_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const void* buffer);
@@ -75,7 +74,7 @@ static void tty_signal_callback(int sig, void* ctx) {
     uint32_t pgid = 0u;
 
     {
-        guard_spinlock_safe(&tty->lock);
+        guard(spinlock_safe)(&tty->lock);
         
         pgid = tty->fg_pgid;
     }
@@ -321,7 +320,7 @@ static int tty_check_job_control(tty_t* tty, int is_write) {
     yos_termios_t termios;
 
     {
-        guard_spinlock_safe(&tty->lock);
+        guard(spinlock_safe)(&tty->lock);
 
         fg = tty->fg_pgid;
         
@@ -407,7 +406,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
                 return -1;
             }
             
-            guard_spinlock_safe(&tty->lock);
+            guard(spinlock_safe)(&tty->lock);
 
             memcpy(arg, &tty->termios, sizeof(tty->termios));
             return 0;
@@ -421,7 +420,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             yos_termios_t old_termios;
 
             {
-                guard_spinlock_safe(&tty->lock);
+                guard(spinlock_safe)(&tty->lock);
 
                 old_termios = tty->termios;
                 
@@ -442,7 +441,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
                 return -1;
             }
             
-            guard_spinlock_safe(&tty->lock);
+            guard(spinlock_safe)(&tty->lock);
             
             memcpy(arg, &tty->winsz, sizeof(tty->winsz));
             return 0;
@@ -453,7 +452,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
                 return -1;
             }
             
-            guard_spinlock_safe(&tty->lock);
+            guard(spinlock_safe)(&tty->lock);
 
             *(uint32_t*)arg = tty->session_sid;
             return 0;
@@ -465,7 +464,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             }
 
             {
-                guard_spinlock_safe(&tty->lock);
+                guard(spinlock_safe)(&tty->lock);
 
                 memcpy(&tty->winsz, arg, sizeof(tty->winsz));
             }
@@ -483,7 +482,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
             vfs_node_retain(node);
             curr->controlling_tty = node;
 
-            guard_spinlock_safe(&tty->lock);
+            guard(spinlock_safe)(&tty->lock);
 
             tty->session_sid = curr->sid;
             
@@ -499,7 +498,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
                 return -1;
             }
             
-            guard_spinlock_safe(&tty->lock);
+            guard(spinlock_safe)(&tty->lock);
 
             *(uint32_t*)arg = tty->fg_pgid;
             return 0;
@@ -517,7 +516,7 @@ static int tty_vfs_ioctl(vfs_node_t* node, uint32_t req, void* arg) {
                 return -1;
             }
 
-            guard_spinlock_safe(&tty->lock);
+            guard(spinlock_safe)(&tty->lock);
             
             if (tty->session_sid != 0u && tty->session_sid != curr->sid) {
                 return -1;

@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <kernel/locking/spinlock.h>
 #include <kernel/waitq/poll_waitq.h>
-#include <kernel/locking/guards.h>
 #include <kernel/input_focus.h>
 #include <kernel/workqueue.h>
 #include <kernel/sched.h>
@@ -10,7 +10,6 @@
 
 #include <hal/delay.h>
 #include <hal/align.h>
-#include <hal/lock.h>
 #include <hal/pmio.h>
 #include <hal/pic.h>
 #include <hal/irq.h>
@@ -157,7 +156,7 @@ void mouse_inject_delta(int dx, int dy, int buttons) {
     mouse_get_display_bounds(&max_w, &max_h);
 
     {
-        guard_rwspin_write_safe(&g_mouse_state_lock);
+        guard(rwspin_write_safe)(&g_mouse_state_lock);
 
         mouse_buttons = buttons & 0x07;
 
@@ -348,7 +347,7 @@ void mouse_wait(uint8_t type) {
         return;
     }
 
-    guard_spinlock_safe(&g_ps2_lock);
+    guard(spinlock_safe)(&g_ps2_lock);
 
     mouse_wait_unlocked(type);
 }
@@ -358,7 +357,7 @@ void mouse_write(uint8_t a) {
         return;
     }
 
-    guard_spinlock_safe(&g_ps2_lock);
+    guard(spinlock_safe)(&g_ps2_lock);
 
     mouse_write_unlocked(a);
 }
@@ -368,7 +367,7 @@ uint8_t mouse_read(void) {
         return 0u;
     }
 
-    guard_spinlock_safe(&g_ps2_lock);
+    guard(spinlock_safe)(&g_ps2_lock);
 
     return mouse_read_unlocked();
 }
@@ -383,7 +382,7 @@ void mouse_irq_handler(___unused registers_t* regs) {
     int has_data = 0;
 
     {
-        guard_spinlock_safe(&g_ps2_lock);
+        guard(spinlock_safe)(&g_ps2_lock);
 
         const uint8_t status = mouse_ps2_read_status();
 
@@ -413,7 +412,7 @@ void mouse_init(void) {
         return;
     }
 
-    guard_spinlock_safe(&g_ps2_lock);
+    guard(spinlock_safe)(&g_ps2_lock);
 
     mouse_wait_unlocked(1u);
     mouse_ps2_write_command(0xA8u);
@@ -460,7 +459,7 @@ static int mouse_vfs_read(
     mouse_state_t st;
 
     {
-        guard_rwspin_read_safe(&g_mouse_state_lock);
+        guard(rwspin_read_safe)(&g_mouse_state_lock);
 
         st.x = mouse_x;
         st.y = mouse_y;

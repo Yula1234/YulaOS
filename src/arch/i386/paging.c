@@ -1,13 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include <lib/string.h>
-#include <mm/pmm.h>
-#include <mm/heap.h>
-#include <hal/lock.h>
-#include <hal/io.h>
+#include <kernel/locking/spinlock.h>
 #include <kernel/smp/cpu.h>
 #include <kernel/proc.h>
+
+#include <mm/heap.h>
+#include <mm/pmm.h>
+
+#include <lib/string.h>
+
+#include <hal/io.h>
+
 #include "paging.h"
 
 extern void smp_tlb_shootdown(uint32_t virt);

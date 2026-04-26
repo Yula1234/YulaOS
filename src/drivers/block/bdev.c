@@ -1,16 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <lib/compiler.h>
+#include <lib/string.h>
+#include <lib/dlist.h>
+
+#include <kernel/locking/spinlock.h>
+
 #include <drivers/block/bdev.h>
 
 #include <mm/heap.h>
-
-#include <lib/string.h>
-#include <lib/dlist.h>
-#include <lib/compiler.h>
-
-#include <hal/lock.h>
-
 
 typedef struct {
     spinlock_t lock_;

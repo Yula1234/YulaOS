@@ -5,20 +5,20 @@
 #include <drivers/pci/pci.h>
 #include <drivers/driver.h>
 
-#include <mm/dma/api.h>
-#include <mm/iomem.h>
-#include <mm/heap.h>
-
-#include <kernel/workqueue.h>
-#include <kernel/smp/cpu.h>
-
 #include <lib/string.h>
 #include <lib/dlist.h>
 #include <lib/idr.h>
 
+#include <mm/dma/api.h>
+#include <mm/iomem.h>
+#include <mm/heap.h>
+
 #include <hal/delay.h>
 #include <hal/cpu.h>
 #include <hal/irq.h>
+
+#include <kernel/workqueue.h>
+#include <kernel/smp/cpu.h>
 
 #include "ahci.h"
 

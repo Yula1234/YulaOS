@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "spinlock.h"
+#include "guards.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,10 @@ void mutex_lock(mutex_t* m);
 void mutex_unlock(mutex_t* m);
 
 int mutex_try_lock(mutex_t* m);
+
+#ifndef __cplusplus
+DEFINE_GUARD(mutex, mutex_t, mutex_lock, mutex_unlock)
+#endif
 
 #ifdef __cplusplus
 }

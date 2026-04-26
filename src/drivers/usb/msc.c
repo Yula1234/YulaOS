@@ -1,20 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
-#include <drivers/usb/msc.h>
+#include <lib/string.h>
+#include <lib/idr.h>
 
-#include <drivers/usb/core.h>
+#include <kernel/locking/mutex.h>
 
 #include <drivers/block/bdev.h>
 
-#include <hal/lock.h>
-
-#include <lib/idr.h>
-
 #include <mm/heap.h>
 
-#include <lib/string.h>
-
+#include "core.h"
+#include "msc.h"
 
 #define USB_CLASS_MASS_STORAGE 0x08u
 

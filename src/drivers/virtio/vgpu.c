@@ -1,3 +1,9 @@
+#include <kernel/locking/spinlock.h>
+#include <kernel/locking/mutex.h>
+#include <kernel/locking/sem.h>
+#include <kernel/smp/mb.h>
+#include <kernel/proc.h>
+
 #include <drivers/virtio/virtqueue.h>
 #include <drivers/virtio/vgpu.h>
 #include <drivers/virtio/core.h>
@@ -8,12 +14,7 @@
 #include <mm/pmm.h>
 
 #include <hal/cpu.h>
-#include <hal/lock.h>
 #include <hal/irq.h>
-
-#include <kernel/locking/guards.h>
-#include <kernel/smp/mb.h>
-#include <kernel/proc.h>
 
 #include <lib/string.h>
 #include <lib/chashmap.h>
@@ -1099,7 +1100,7 @@ int virtio_gpu_resource_create_3d(uint32_t resource_id,
                                   uint32_t last_level,
                                   uint32_t nr_samples,
                                   uint32_t flags) {
-    guard_mutex(&g_vgpu.lock);
+    guard(mutex)(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
         return -1;
@@ -1139,7 +1140,7 @@ int virtio_gpu_transfer_to_host_3d(uint32_t resource_id,
                                    uint32_t h,
                                    uint32_t d,
                                    uint64_t offset) {
-    guard_mutex(&g_vgpu.lock);
+    guard(mutex)(&g_vgpu.lock);
 
     if (!g_vgpu.active || !g_vgpu.virgl_supported) {
         return -1;
@@ -1169,14 +1170,14 @@ int virtio_gpu_transfer_to_host_3d(uint32_t resource_id,
 }
 
 int virtio_gpu_virgl_resource_attach(uint32_t resource_id) {
-    guard_mutex(&g_vgpu.lock);
+    guard(mutex)(&g_vgpu.lock);
 
     const int ok = vgpu_virgl_attach_resource_locked(resource_id);
     return ok ? 0 : -1;
 }
 
 int virtio_gpu_virgl_resource_detach(uint32_t resource_id) {
-    guard_mutex(&g_vgpu.lock);
+    guard(mutex)(&g_vgpu.lock);
 
     const int ok = vgpu_virgl_detach_resource_locked(resource_id);
     return ok ? 0 : -1;

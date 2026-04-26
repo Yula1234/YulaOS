@@ -1,13 +1,10 @@
 #include <kernel/output/kprintf.h>
 #include <kernel/output/console.h>
 
-#include <hal/lock.h>
-
 #include <lib/cpp/lock_guard.h>
-
 #include <lib/string.h>
-
 #include <lib/types.h>
+
 #include <stddef.h>
 #include <stdint.h>
 

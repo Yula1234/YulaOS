@@ -1,6 +1,4 @@
-#include <kernel/locking/guards.h>
-
-#include <hal/lock.h>
+#include <kernel/locking/spinlock.h>
 
 #include <stdint.h>
 
@@ -12,7 +10,7 @@ static spinlock_t g_irq_vector_lock;
 extern irq_handler_t irq_vector_handlers[256];
 
 int irq_alloc_vector(void) {
-    guard_spinlock_safe(&g_irq_vector_lock);
+    guard(spinlock_safe)(&g_irq_vector_lock);
 
     for (int vec = 48; vec < 240; vec++) {
         if (vec == 0x80) {
@@ -40,7 +38,7 @@ void irq_free_vector(int vector) {
         return;
     }
 
-    guard_spinlock_safe(&g_irq_vector_lock);
+    guard(spinlock_safe)(&g_irq_vector_lock);
     
     int idx = vector / 32;
     int bit = vector % 32;

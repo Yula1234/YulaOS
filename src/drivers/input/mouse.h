@@ -1,14 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2025 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2025 Yula1234 */
 
 #ifndef DRIVERS_MOUSE_H
 #define DRIVERS_MOUSE_H
 
-#include <stdint.h>
-
 #include <kernel/waitq/poll_waitq.h>
 
 #include <arch/i386/idt.h>
+
+#include <stdint.h>
 
 struct task;
 

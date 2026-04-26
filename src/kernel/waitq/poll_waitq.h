@@ -4,9 +4,12 @@
 #ifndef KERNEL_WAITQ_POLL_WAITQ_H
 #define KERNEL_WAITQ_POLL_WAITQ_H
 
-#include <lib/atomic.h>
+#include <kernel/locking/spinlock.h>
 
-#include <hal/lock.h>
+#include <lib/atomic.h>
+#include <lib/dlist.h>
+
+#include <stdint.h>
 
 struct task;
 

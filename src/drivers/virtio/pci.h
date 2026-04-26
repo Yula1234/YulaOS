@@ -1,14 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #ifndef DRIVERS_VIRTIO_PCI_H
 #define DRIVERS_VIRTIO_PCI_H
 
-#include <arch/i386/idt.h>
-
 #include <drivers/pci/pci.h>
 
 #include <kernel/workqueue.h>
+
+#include <arch/i386/idt.h>
 
 #include <mm/iomem.h>
 

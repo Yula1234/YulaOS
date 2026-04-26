@@ -4,12 +4,11 @@
 #ifndef KERNEL_TTY_CORE_H
 #define KERNEL_TTY_CORE_H
 
+#include <kernel/locking/spinlock.h>
 #include <kernel/waitq/poll_waitq.h>
 #include <kernel/tty/ldisc.h>
 
 #include <yos/ioctl.h>
-
-#include <hal/lock.h>
 
 #include <fs/vfs.h>
 

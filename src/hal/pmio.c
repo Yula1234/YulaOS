@@ -1,15 +1,17 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
-#include <hal/pmio.h>
-
-#include <hal/io.h>
-#include <hal/lock.h>
-
-#include <mm/heap.h>
+#include <kernel/locking/rwspinlock.h>
+#include <kernel/locking/spinlock.h>
 
 #include <lib/string.h>
 #include <lib/rbtree.h>
+
+#include <mm/heap.h>
+
+#include <hal/io.h>
+
+#include "pmio.h"
 
 enum {
     PMIO_REGION_MAGIC = 0x504D494Fu,
@@ -17,15 +19,21 @@ enum {
 
 struct pmio_region {
     uint32_t magic;
+
     struct rb_node rb_node;
+    
     uint16_t start;
     uint16_t end;
+    
     uint16_t max_end;
+    
     spinlock_t bus_lock;
+    
     char name[32];
 };
 
 static struct rb_root g_pmio_regions;
+
 static percpu_rwspinlock_t g_pmio_lock;
 
 void pmio_init(void) {

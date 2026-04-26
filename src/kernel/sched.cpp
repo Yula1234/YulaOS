@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Yula1234 */
 
-#include <hal/lock.h>
-#include <hal/apic.h>
-#include <hal/simd.h>
-#include <hal/io.h>
-
 #include <arch/i386/context.h>
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
+
+#include <hal/apic.h>
+#include <hal/simd.h>
+#include <hal/io.h>
 
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/atomic.h>

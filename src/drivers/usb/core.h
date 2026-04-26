@@ -4,11 +4,11 @@
 #ifndef DRIVERS_USB_USB_CORE_H
 #define DRIVERS_USB_USB_CORE_H
 
-#include <stdint.h>
+#include "usb.h"
+#include "hcd.h"
+#include "urb.h"
 
-#include <drivers/usb/usb.h>
-#include <drivers/usb/hcd.h>
-#include <drivers/usb/urb.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {

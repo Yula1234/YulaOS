@@ -16,13 +16,12 @@
 #include <lib/string.h>
 #include <lib/rbtree.h>
 
-#include <hal/lock.h>
-#include <hal/cpu.h>
-
 #include <mm/shrinker.h>
 #include <mm/heap.h>
 
 #include <drivers/block/bdev.h>
+
+#include <hal/cpu.h>
 
 #include "yulafs.h"
 #include "bcache.h"

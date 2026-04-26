@@ -4,13 +4,14 @@
 #ifndef KERNEL_CPU_H
 #define KERNEL_CPU_H
 
-#include <kernel/smp/cpu_limits.h>
+#include <kernel/locking/spinlock.h>
 
 #include <lib/compiler.h>
 #include <lib/rbtree.h>
 
-#include <hal/lock.h>
 #include <hal/align.h>
+
+#include "cpu_limits.h"
 
 #include <stdint.h>
 #include <stdbool.h>

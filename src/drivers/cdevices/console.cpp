@@ -1,18 +1,20 @@
-#include <stdint.h>
-
-#include <hal/irq.h>
-#include <fs/vfs.h>
-#include <lib/string.h>
-#include <kernel/proc.h>
-#include <kernel/sched.h>
-#include <hal/lock.h>
-#include <yos/ioctl.h>
-
-#include <drivers/cdev.h>
-#include <drivers/driver.h>
-
 #include <kernel/tty/tty_internal.h>
 #include <kernel/tty/tty_service.h>
+#include <kernel/sched.h>
+#include <kernel/proc.h>
+
+#include <drivers/driver.h>
+#include <drivers/cdev.h>
+
+#include <hal/irq.h>
+
+#include <fs/vfs.h>
+
+#include <lib/string.h>
+
+#include <yos/ioctl.h>
+
+#include <stdint.h>
 
 namespace {
 

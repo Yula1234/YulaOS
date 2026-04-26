@@ -1,5 +1,4 @@
 #include <kernel/locking/rwspinlock.h>
-#include <kernel/locking/guards.h>
 
 #include <drivers/driver.h>
 #include <drivers/cdev.h>
@@ -68,7 +67,7 @@ static int clipboard_read(vfs_node_t* node, uint32_t offset, uint32_t size, void
         return -1;
     }
 
-    guard_percpu_rwspin_read_safe(&g_clipboard_lock);
+    guard(percpu_rwspin_read_safe)(&g_clipboard_lock);
 
     const uint32_t bytes = clipboard_copy_out_locked(offset, buffer, size);
     node->size = clipboard_len_locked();
@@ -81,7 +80,7 @@ static int clipboard_write(vfs_node_t* node, uint32_t ___unused offset, uint32_t
         return -1;
     }
 
-    guard_percpu_rwspin_write_safe(&g_clipboard_lock);
+    guard(percpu_rwspin_write_safe)(&g_clipboard_lock);
 
     const uint32_t bytes = clipboard_replace_locked(buffer, size);
     node->size = clipboard_len_locked();

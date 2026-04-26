@@ -16,7 +16,6 @@
 #include <fs/bcache.h>
 #include <fs/vfs.h>
 
-#include <hal/lock.h>
 #include <hal/io.h>
 
 #include <lib/string.h>

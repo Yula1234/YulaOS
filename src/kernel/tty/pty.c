@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2026 Yula1234 */
 
+#include <kernel/locking/spinlock.h>
 #include <kernel/waitq/poll_waitq.h>
-#include <kernel/locking/guards.h>
-#include <kernel/tty/core.h>
-#include <kernel/tty/pty.h>
+
 #include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/proc.h>
@@ -14,9 +13,10 @@
 
 #include <yos/ioctl.h>
 
-#include <hal/lock.h>
-
 #include <mm/heap.h>
+
+#include "core.h"
+#include "pty.h"
 
 typedef struct {
     uint32_t   id;
@@ -141,7 +141,7 @@ static int pty_master_hw_write(tty_t* tty, const void* buf, uint32_t size) {
         int is_slave_open = 0;
 
         {
-            guard_spinlock_safe(&p->lock);
+            guard(spinlock_safe)(&p->lock);
 
             is_slave_open = p->slave_open;
         }
@@ -186,7 +186,7 @@ static void pty_master_hw_close(tty_t* tty) {
     uint32_t pts_id = 0u;
 
     {
-        guard_spinlock_safe(&p->lock);
+        guard(spinlock_safe)(&p->lock);
         
         if (p->master_open > 0) {
             p->master_open--;
@@ -234,7 +234,7 @@ static int pty_master_hw_poll_status(tty_t* tty, int events) {
     int slave_open = 0;
 
     {
-        guard_spinlock_safe(&p->lock);
+        guard(spinlock_safe)(&p->lock);
         
         slave_open = p->slave_open;
     }
@@ -286,7 +286,7 @@ static int pty_slave_hw_open(tty_t* tty) {
 
     pty_pair_t* p = (pty_pair_t*)tty->driver_data;
 
-    guard_spinlock_safe(&p->lock);
+    guard(spinlock_safe)(&p->lock);
     
     p->slave_open++;
     p->slave_ever_opened = 1;
@@ -311,7 +311,7 @@ static int pty_slave_hw_write(tty_t* tty, const void* buf, uint32_t size) {
         int is_master_open = 0;
 
         {
-            guard_spinlock_safe(&p->lock);
+            guard(spinlock_safe)(&p->lock);
             is_master_open = p->master_open;
         }
 
@@ -353,7 +353,7 @@ static void pty_slave_hw_close(tty_t* tty) {
     pty_pair_t* p = (pty_pair_t*)tty->driver_data;
 
     {
-        guard_spinlock_safe(&p->lock);
+        guard(spinlock_safe)(&p->lock);
         
         if (p->slave_open > 0) {
             p->slave_open--;
@@ -378,7 +378,7 @@ static int pty_slave_hw_poll_status(tty_t* tty, int events) {
     int master_open = 0;
 
     {
-        guard_spinlock_safe(&p->lock);
+        guard(spinlock_safe)(&p->lock);
         
         master_open = p->master_open;
     }
@@ -506,7 +506,7 @@ static int pty_ptmx_open(vfs_node_t* node) {
     devfs_register(slave_node);
 
     {
-        guard_spinlock_safe(&p->lock);
+        guard(spinlock_safe)(&p->lock);
         
         p->master_open = 1;
         p->devfs_registered = 1;

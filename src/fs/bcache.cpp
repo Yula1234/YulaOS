@@ -21,8 +21,6 @@
 
 #include <drivers/block/bdev.h>
 
-#include <hal/lock.h>
-
 #include "bcache.h"
 
 /*

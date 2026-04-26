@@ -5,13 +5,12 @@
 #include <mm/iomem.h>
 #include <mm/heap.h>
 
-#include <kernel/locking/guards.h>
-#include <kernel/smp/mb.h>
-
 #include <lib/compiler.h>
 #include <lib/string.h>
 
 #include <arch/i386/paging.h>
+
+#include <kernel/smp/mb.h>
 
 #include <stdbool.h>
 
@@ -292,7 +291,7 @@ ___inline int __virtqueue_do_submit(
     virtqueue_token_t* token = NULL;
 
     {
-        guard_spinlock_safe(&vq->lock);
+        guard(spinlock_safe)(&vq->lock);
 
 
         if (unlikely(!virtqueue_alloc_desc_chain(vq, count, &head))) {
@@ -451,7 +450,7 @@ void virtqueue_handle_irq(virtqueue_t* vq) {
         bool has_more = false;
 
         {
-            guard_spinlock_safe(&vq->lock);
+            guard(spinlock_safe)(&vq->lock);
 
             const uint16_t used_idx = vq->used->idx;
 
@@ -527,7 +526,7 @@ void virtqueue_set_event_idx(virtqueue_t* vq, int enabled) {
         return;
     }
 
-    guard_spinlock_safe(&vq->lock);
+    guard(spinlock_safe)(&vq->lock);
 
     vq->event_idx_enabled = enabled ? 1u : 0u;
 }
