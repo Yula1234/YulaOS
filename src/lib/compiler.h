@@ -9,6 +9,9 @@
 #define ___noinline __attribute__((noinline))
 #define ___unused __attribute__((unused))
 
+#define READ_ONCE(x)       __atomic_load_n(&(x), __ATOMIC_RELAXED)
+#define WRITE_ONCE(x, val) __atomic_store_n(&(x), (val), __ATOMIC_RELAXED)
+
 #ifdef __cplusplus
 
 namespace kernel {
