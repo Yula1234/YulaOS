@@ -5,10 +5,9 @@
 #include <mm/pmm.h>
 #include <mm/vmm.h>
 
-#include <lib/compiler.h>
-#include <lib/string.h>
-
 #include <arch/i386/paging.h>
+
+#include <lib/string.h>
 
 #include "api.h"
 

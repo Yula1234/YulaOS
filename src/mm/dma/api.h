@@ -4,6 +4,8 @@
 #ifndef HAL_DMA_H
 #define HAL_DMA_H
 
+#include <lib/compiler.h>
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -48,6 +50,13 @@ uint32_t dma_virt_to_phys(void* vaddr);
 
 #ifdef __cplusplus
 }
+#else
+DEFINE_CLASS(
+    dma_sg, dma_sg_list_t*, 
+    if (_T) dma_unmap_buffer(_T), 
+    dma_map_buffer(buf, size, dir), 
+    void* buf, size_t size, uint32_t dir
+)
 #endif
 
 #endif

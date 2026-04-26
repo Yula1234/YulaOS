@@ -6,7 +6,6 @@
 #include <kernel/smp/cpu_limits.h>
 
 #include <lib/tagged_ptr.h>
-#include <lib/compiler.h>
 #include <lib/lfslist.h>
 #include <lib/lflist.h>
 #include <lib/string.h>
