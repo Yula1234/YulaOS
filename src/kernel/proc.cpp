@@ -19,13 +19,14 @@
 #include <lib/string.h>
 #include <lib/dlist.h>
 
-#include <hal/apic.h>
-#include <hal/simd.h>
-#include <hal/io.h>
-
 #include <mm/heap.h>
 #include <mm/pmm.h>
 #include <mm/vma.h>
+
+#include <hal/apic.h>
+#include <hal/simd.h>
+#include <hal/cpu.h>
+#include <hal/io.h>
 
 #include <arch/i386/paging.h>
 #include <arch/i386/gdt.h>
@@ -2601,7 +2602,7 @@ void proc_sleep_add(task_t* t, uint32_t wake_tick) {
         const int old_cpu_idx = __atomic_load_n(&t->sleep_cpu, __ATOMIC_ACQUIRE);
 
         if (old_wake != 0u && (old_cpu_idx < 0 || old_cpu_idx >= MAX_CPUS)) {
-            kernel::cpu_relax();
+            cpu_relax();
             continue;
         }
 
@@ -2755,7 +2756,9 @@ void proc_sleep_remove(task_t* t) {
             if (__atomic_load_n(&t->wake_tick, __ATOMIC_ACQUIRE) == 0u) {
                 return;
             }
-            kernel::cpu_relax();
+            
+            cpu_relax();
+            
             continue;
         }
 

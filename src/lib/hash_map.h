@@ -561,13 +561,16 @@ public:
 
         while (1) {
             uint32_t total = 0u;
+
             for (int i = 0; i < MAX_CPUS; i++) {
                 total += active_ops_per_cpu[i].count.load(kernel::memory_order::acquire);
             }
+
             if (total == 0u) {
                 break;
             }
-            kernel::cpu_relax();
+
+            cpu_relax();
         }
 
         if (buckets && bucket_count > 0u) {
@@ -577,7 +580,9 @@ public:
         }
 
         size_.store(0u, kernel::memory_order::relaxed);
+
         resizing.store(0u, kernel::memory_order::release);
+
         seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
     }
 
@@ -931,13 +936,16 @@ private:
 
         while (1) {
             uint32_t total = 0u;
+
             for (int i = 0; i < MAX_CPUS; i++) {
                 total += active_ops_per_cpu[i].count.load(kernel::memory_order::acquire);
             }
+
             if (total == 0u) {
                 break;
             }
-            kernel::cpu_relax();
+
+            cpu_relax();
         }
     }
 
@@ -1072,12 +1080,14 @@ private:
     bool begin_op(Bucket*& out_buckets, size_t& out_mask, int& out_cpu_idx) {
         while (1) {
             uint32_t seq1 = seqlock_.load(kernel::memory_order::acquire);
+
             if ((seq1 & 1u) != 0u) {
-                kernel::cpu_relax();
+                cpu_relax();
                 continue;
             }
 
             Bucket* b = buckets;
+
             size_t bc = bucket_count;
             size_t bm = bucket_mask;
 
@@ -1088,7 +1098,9 @@ private:
 
             if (b && bc > 0u) {
                 out_cpu_idx = cpu_current()->index;
+
                 active_ops_per_cpu[out_cpu_idx].count.fetch_add(1u, kernel::memory_order::seq_cst);
+
                 kernel::atomic_thread_fence(kernel::memory_order::acquire);
 
                 out_buckets = b;
@@ -1100,17 +1112,21 @@ private:
 
             if (buckets && bucket_count > 0u) {
                 out_cpu_idx = cpu_current()->index;
+
                 active_ops_per_cpu[out_cpu_idx].count.fetch_add(1u, kernel::memory_order::seq_cst);
+
                 out_buckets = buckets;
                 out_mask = bucket_mask;
                 return true;
             }
 
             size_t fresh_count = normalize_bucket_count(Buckets);
+
             Bucket* fresh = allocate_buckets(fresh_count);
             if (!fresh) {
                 out_buckets = nullptr;
                 out_mask = 0u;
+
                 return false;
             }
 
@@ -1123,9 +1139,12 @@ private:
             seqlock_.store(seqlock_.load(kernel::memory_order::relaxed) + 1u, kernel::memory_order::release);
 
             out_cpu_idx = cpu_current()->index;
+            
             active_ops_per_cpu[out_cpu_idx].count.fetch_add(1u, kernel::memory_order::seq_cst);
+            
             out_buckets = buckets;
             out_mask = bucket_mask;
+
             return true;
         }
     }
@@ -1161,13 +1180,16 @@ private:
 
         while (1) {
             uint32_t total = 0u;
+            
             for (int i = 0; i < MAX_CPUS; i++) {
                 total += active_ops_per_cpu[i].count.load(kernel::memory_order::acquire);
             }
+            
             if (total == 0u) {
                 break;
             }
-            kernel::cpu_relax();
+            
+            cpu_relax();
         }
 
         target = grow_target_count();

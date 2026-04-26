@@ -6,6 +6,8 @@
 
 #include <lib/dlist.h>
 
+#include <hal/cpu.h>
+
 namespace kernel::tty {
 
 TtyService& TtyService::instance() {
@@ -48,7 +50,7 @@ void TtyService::ensure_init() {
     while (
         decode_init_state(m_init_state.load(kernel::memory_order::acquire)) != InitState::Ready
     ) {
-        kernel::cpu_relax();
+        cpu_relax();
     }
 }
 

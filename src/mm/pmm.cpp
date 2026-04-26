@@ -946,7 +946,7 @@ static size_t pcp_shrinker_cb(size_t target_pages, void* ctx) {
     pmm_drain_local_pcp_caches();
 
     while (kernel::g_pmm_drain_ack_mask.load(kernel::memory_order::acquire) != 0) {
-        kernel::cpu_relax();
+        cpu_relax();
     }
 
     return target_pages; 

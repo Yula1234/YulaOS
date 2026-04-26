@@ -1,6 +1,8 @@
 #ifndef LIB_CPP_ATOMIC_H
 #define LIB_CPP_ATOMIC_H
 
+#include <hal/cpu.h>
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,14 +23,6 @@ inline void atomic_thread_fence(memory_order order) noexcept {
 
 inline void atomic_signal_fence(memory_order order) noexcept {
     __atomic_signal_fence(static_cast<int>(order));
-}
-
-inline void cpu_relax() noexcept {
-#if defined(__i386__) || defined(__x86_64__)
-    __asm__ volatile("pause" ::: "memory");
-#else
-    __asm__ volatile("" ::: "memory");
-#endif
 }
 
 template<typename T>

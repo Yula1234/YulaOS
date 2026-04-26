@@ -4,16 +4,18 @@
 #ifndef HAL_CPU_H
 #define HAL_CPU_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 int hal_cpu_index(void);
 
-#define cpu_relax() __asm__ volatile("pause" ::: "memory")
+#define cpu_relax(...) __asm__ volatile("pause" ::: "memory")
 
 __attribute__((always_inline)) static inline uint32_t this_cpu_inc(uint32_t* var) {
-    const uint32_t val = 1;
+    uint32_t val = 1;
 
     __asm__ volatile("xaddl %0, %1" : "+r" (val), "+m" (*var) :: "memory");
 

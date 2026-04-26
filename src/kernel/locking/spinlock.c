@@ -60,7 +60,7 @@ void spinlock_acquire_slowpath(spinlock_t* lock) {
         panic("SPINLOCK: invalid CPU index");
     }
 
-    const uint32_t idx = __atomic_fetch_add(&g_qnode_idx[cpu], 1u, __ATOMIC_RELAXED);
+    const uint32_t idx = this_cpu_inc(&g_qnode_idx[cpu]);
 
     if (unlikely(idx >= QNODE_DEPTH)) {
         panic("SPINLOCK: queue depth overflow (IRQs nested too deeply)");
@@ -73,7 +73,7 @@ void spinlock_acquire_slowpath(spinlock_t* lock) {
 
     const uint32_t tail = encode_tail(cpu, idx);
 
-    uint32_t old_val = __atomic_load_n(&lock->val, __ATOMIC_RELAXED);
+    uint32_t old_val = READ_ONCE(lock->val);
     uint32_t prev_tail = 0u;
 
     /*
@@ -141,7 +141,7 @@ void spinlock_acquire_slowpath(spinlock_t* lock) {
      * We can safely use a non-atomic store here because we are the undisputed
      * head of the queue, and nobody else is allowed to write to the locked byte.
      */
-    __atomic_store_n(&lock->locked, 1u, __ATOMIC_RELAXED);
+    WRITE_ONCE(lock->locked, 1u);
 
     /* Wait for the next guy to finish linking his node to ours. */
     qnode_t* next;
@@ -160,5 +160,5 @@ void spinlock_acquire_slowpath(spinlock_t* lock) {
     __atomic_store_n(&next->locked, 0u, __ATOMIC_RELEASE);
 
 release_node:
-    __atomic_fetch_sub(&g_qnode_idx[cpu], 1u, __ATOMIC_RELAXED);
+    this_cpu_dec(&g_qnode_idx[cpu]);
 }
