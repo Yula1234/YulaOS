@@ -199,7 +199,7 @@ done
 cp bin/kernel.bin "$ISODIR/boot/kernel.bin"
 
 cat << EOF > "$ISODIR/boot/grub/grub.cfg"
-set timeout=0
+set timeout=4
 set default=0
 menuentry "YulaOS" {
     multiboot /boot/kernel.bin
