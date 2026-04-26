@@ -841,14 +841,11 @@ static int ahci_send_command(
     ahci_port_extended_t* ex, uint32_t lba,
     uint8_t* buf, int is_write, uint32_t count
 ) {
-    if (!ex) {
+    if (!ex
+        || !buf) {
         return 0;
     }
-
-    if (!buf) {
-        return 0;
-    }
-
+    
     if (count == 0u
         || count > AHCI_MAX_IO_SECTORS) {
         return 0;
@@ -875,15 +872,13 @@ static int ahci_send_command(
     const uint32_t byte_count = count * AHCI_SECTOR_SIZE;
     const uint32_t dma_dir = is_write ? DMA_DIR_TO_DEVICE : DMA_DIR_FROM_DEVICE;
 
-    dma_sg_list_t* sg = dma_map_buffer(buf, byte_count, dma_dir);
+    CLASS(dma_sg, sg)(buf, byte_count, dma_dir);
 
     if (!sg) {
         return 0;
     }
 
     if (sg->count > AHCI_MAX_PRDT_ENTRIES) {
-        dma_unmap_buffer(sg);
-
         return 0;
     }
 
@@ -905,8 +900,6 @@ static int ahci_send_command(
     if (slot < 0
         || slot >= 32) {
         spinlock_release(&state->lock);
-        dma_unmap_buffer(sg);
-
         return 0;
     }
 
@@ -971,8 +964,6 @@ static int ahci_send_command(
         const int reset_ok = ahci_port_comreset(ex);
 
         if (!reset_ok) {
-            dma_unmap_buffer(sg);
-
             return 0;
         }
 
@@ -982,8 +973,6 @@ static int ahci_send_command(
 
         if (new_slot == -1) {
             spinlock_release(&state->lock);
-            dma_unmap_buffer(sg);
-
             return 0;
         }
 
@@ -1034,8 +1023,6 @@ static int ahci_send_command(
             result = 1;
         }
 
-        dma_unmap_buffer(sg);
-
         return result;
     }
 
@@ -1059,8 +1046,6 @@ static int ahci_send_command(
         result = 0;
         ahci_port_comreset(ex);
     }
-
-    dma_unmap_buffer(sg);
 
     return result;
 }
