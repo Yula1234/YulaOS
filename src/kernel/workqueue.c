@@ -29,7 +29,7 @@ struct WorkQueue {
 };
 
 ___inline void mpsc_push(workqueue_t* wq, work_struct_t* work) {
-    __atomic_store_n(&work->next_, 0, __ATOMIC_RELAXED);
+    WRITE_ONCE(work->next_, 0);
 
     work_struct_t* prev = __atomic_exchange_n(
         &wq->head_, work, __ATOMIC_ACQ_REL
@@ -83,7 +83,7 @@ static work_struct_t* mpsc_pop(workqueue_t* wq) {
      * The queue is genuinely empty. Inject the stub node to securely
      * reset the queue state and catch the tail.
      */
-    __atomic_store_n(&wq->stub_.next_, 0, __ATOMIC_RELAXED);
+    WRITE_ONCE(wq->stub_.next_, 0);
 
     work_struct_t* prev = __atomic_exchange_n(
         &wq->head_, &wq->stub_, __ATOMIC_ACQ_REL
@@ -115,7 +115,7 @@ static void workqueue_worker_task(void* arg) {
 
             __atomic_store_n(&work->pending_, 0, __ATOMIC_RELEASE);
 
-            __atomic_store_n(&work->executing_, 1, __ATOMIC_RELAXED);
+            WRITE_ONCE(work->executing_, 1);
 
             if (likely(func)) {
                 func(work);
@@ -145,7 +145,7 @@ static void workqueue_worker_task(void* arg) {
 
             __atomic_store_n(&work->pending_, 0, __ATOMIC_RELEASE);
 
-            __atomic_store_n(&work->executing_, 1, __ATOMIC_RELAXED);
+            WRITE_ONCE(work->executing_, 1);
 
             if (likely(func)) {
                 func(work);
