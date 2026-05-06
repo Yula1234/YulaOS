@@ -4,6 +4,7 @@
 #include <kernel/panic.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
+#include <kernel/waitq/waitqueue.h>
 
 #include <lib/compiler.h>
 
@@ -21,7 +22,7 @@ extern "C" void sem_init(semaphore_t* sem, int init_count) {
     sem->count = init_count;
 
     spinlock_init(&sem->lock);
-    dlist_init(&sem->wait_list);
+    waitqueue_init(&sem->waitq, static_cast<void*>(sem), TASK_BLOCK_SEM);
 }
 
 extern "C" void sem_reset(semaphore_t* sem, int value) {
@@ -31,7 +32,7 @@ extern "C" void sem_reset(semaphore_t* sem, int value) {
 
     const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
-    if (kernel::unlikely(!dlist_empty(&sem->wait_list))) {
+    if (kernel::unlikely(!dlist_empty(&sem->waitq.waiters))) {
         panic("SEM: reset called with active waiters");
     }
 
@@ -128,23 +129,7 @@ extern "C" void sem_wait(semaphore_t* sem) {
             return;
         }
 
-        curr->blocked_on_sem = static_cast<void*>(sem);
-        curr->blocked_kind = TASK_BLOCK_SEM;
-
-        if (kernel::unlikely(curr->sem_node.next != nullptr || curr->sem_node.prev != nullptr)) {
-            panic("SEM: Task is trying to wait, but its sem_node is already linked!");
-        }
-
-        dlist_add_tail(&curr->sem_node, &sem->wait_list);
-
-        if (kernel::unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
-            dlist_del(&curr->sem_node);
-
-            curr->sem_node.next = nullptr;
-            curr->sem_node.prev = nullptr;
-            curr->blocked_on_sem = nullptr;
-            curr->blocked_kind = TASK_BLOCK_NONE;
-        }
+        (void)waitqueue_wait_prepare_locked(&sem->waitq, curr);
 
         spinlock_release_safe(&sem->lock, flags);
 
@@ -212,19 +197,7 @@ extern "C" int sem_wait_timeout(semaphore_t* sem, uint32_t deadline_tick) {
             return 1;
         }
 
-        curr->blocked_on_sem = static_cast<void*>(sem);
-        curr->blocked_kind = TASK_BLOCK_SEM;
-
-        dlist_add_tail(&curr->sem_node, &sem->wait_list);
-
-        if (kernel::unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
-            dlist_del(&curr->sem_node);
-
-            curr->sem_node.next = nullptr;
-            curr->sem_node.prev = nullptr;
-            curr->blocked_on_sem = nullptr;
-            curr->blocked_kind = TASK_BLOCK_NONE;
-        }
+        (void)waitqueue_wait_prepare_locked(&sem->waitq, curr);
 
         spinlock_release_safe(&sem->lock, flags);
 
@@ -257,39 +230,7 @@ extern "C" void sem_signal(semaphore_t* sem) {
 
     __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
-    while (!dlist_empty(&sem->wait_list)) {
-        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
-
-        if (kernel::unlikely(t->blocked_on_sem != sem)) {
-            panic("SEM: Corrupted wait_list! Task points to a different semaphore.");
-        }
-
-        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-        dlist_del(&t->sem_node);
-
-        t->sem_node.next = nullptr;
-        t->sem_node.prev = nullptr;
-        t->blocked_on_sem = nullptr;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        if (kernel::unlikely(t->state == TASK_ZOMBIE || t->state == TASK_UNUSED)) {
-            __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-            continue;
-        }
-
-        if (kernel::likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
-            sched_add(t);
-        }
-
-        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-
-        /*
-         * Wake only the first valid task. The task itself will consume the token
-         * when it wakes up and attempts to acquire the semaphore.
-         */
-        break;
-    }
+    (void)waitqueue_wake_one_locked(&sem->waitq);
 
     spinlock_release_safe(&sem->lock, flags);
 }
@@ -301,36 +242,22 @@ extern "C" void sem_signal_all(semaphore_t* sem) {
 
     const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
-    if (kernel::unlikely(dlist_empty(&sem->wait_list))) {
-        __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
-        spinlock_release_safe(&sem->lock, flags);
-        return;
+    dlist_head_t local;
+    waitqueue_detach_all_locked(&sem->waitq, &local);
+
+    uint32_t detached_count = 0u;
+
+    for (dlist_head_t* it = local.next; it != &local; it = it->next) {
+        detached_count++;
     }
 
-    while (!dlist_empty(&sem->wait_list)) {
-        task_t* t = container_of(sem->wait_list.next, task_t, sem_node);
-
-        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-        dlist_del(&t->sem_node);
-
-        t->sem_node.next = nullptr;
-        t->sem_node.prev = nullptr;
-        t->blocked_on_sem = nullptr;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
-
-        if (kernel::likely(t->state != TASK_ZOMBIE && t->state != TASK_UNUSED)) {
-            if (kernel::likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
-                sched_add(t);
-            }
-        }
-
-        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
+    if (detached_count != 0u) {
+        __atomic_fetch_add(&sem->count, (int)detached_count, __ATOMIC_RELEASE);
     }
 
     spinlock_release_safe(&sem->lock, flags);
+
+    waitqueue_wake_detached_list(&local);
 }
 
 extern "C" void sem_remove_task(task_t* t) {
@@ -351,17 +278,7 @@ extern "C" void sem_remove_task(task_t* t) {
 
     const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
-    if (kernel::likely(t->blocked_on_sem == sem && t->blocked_kind == TASK_BLOCK_SEM)) {
-        if (t->sem_node.next && t->sem_node.prev) {
-            dlist_del(&t->sem_node);
-
-            t->sem_node.next = nullptr;
-            t->sem_node.prev = nullptr;
-        }
-
-        t->blocked_on_sem = nullptr;
-        t->blocked_kind = TASK_BLOCK_NONE;
-    }
+    waitqueue_wait_cancel_locked(&sem->waitq, t);
 
     spinlock_release_safe(&sem->lock, flags);
 }

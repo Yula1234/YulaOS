@@ -10,9 +10,10 @@
 #include <kernel/panic.h>
 #include <kernel/proc.h>
 
+#include <kernel/waitq/waitqueue.h>
+
 #include <lib/compiler.h>
 #include <lib/string.h>
-#include <lib/dlist.h>
 
 #include <hal/apic.h>
 #include <hal/irq.h>
@@ -38,7 +39,7 @@ struct ldisc {
     spinlock_t rx_lock_;
     spinlock_t echo_lock_;
 
-    dlist_head_t read_waiters_;
+    waitqueue_t read_waitq_;
 
     semaphore_t write_sem_;
 
@@ -126,29 +127,7 @@ static void ring_pop_chunk(
 }
 
 static void wake_read_waiters_locked(ldisc_t* ld) {
-    while (!dlist_empty(&ld->read_waiters_)) {
-        dlist_head_t* node = ld->read_waiters_.next;
-
-        task_t* t = container_of(node, task_t, sem_node);
-
-        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-        dlist_del(node);
-
-        node->next = NULL;
-        node->prev = NULL;
-
-        t->blocked_on_sem = NULL;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        if (likely(t->state != TASK_ZOMBIE && t->state != TASK_UNUSED)) {
-            if (proc_change_state(t, TASK_RUNNABLE) == 0) {
-                sched_add(t);
-            }
-        }
-
-        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-    }
+    (void)waitqueue_wake_all_locked(&ld->read_waitq_);
 }
 
 static void echo_worker_task(work_struct_t* work) {
@@ -366,7 +345,7 @@ ldisc_t* ldisc_create(void) {
     spinlock_init(&ld->rx_lock_);
     spinlock_init(&ld->echo_lock_);
 
-    dlist_init(&ld->read_waiters_);
+    waitqueue_init(&ld->read_waitq_, ld, TASK_BLOCK_SEM);
 
     sem_init(&ld->write_sem_, 0);
 
@@ -507,20 +486,7 @@ static bool wait_for_data_locked(
         }
 
         if (curr) {
-            curr->blocked_on_sem = ld; 
-            curr->blocked_kind = TASK_BLOCK_SEM; 
-            
-            dlist_add_tail(&curr->sem_node, &ld->read_waiters_);
-
-            if (unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
-                dlist_del(&curr->sem_node);
-                
-                curr->sem_node.next = NULL;
-                curr->sem_node.prev = NULL;
-                
-                curr->blocked_on_sem = NULL;
-                curr->blocked_kind = TASK_BLOCK_NONE;
-            }
+            (void)waitqueue_wait_prepare_locked(&ld->read_waitq_, curr);
         }
 
         spinlock_release_safe(&ld->rx_lock_, *io_flags);
@@ -537,16 +503,8 @@ static bool wait_for_data_locked(
 
         *io_flags = spinlock_acquire_safe(&ld->rx_lock_);
 
-        if (curr && curr->blocked_on_sem == ld) {
-            if (curr->sem_node.next && curr->sem_node.prev) {
-                dlist_del(&curr->sem_node);
-                
-                curr->sem_node.next = NULL;
-                curr->sem_node.prev = NULL;
-            }
-
-            curr->blocked_on_sem = NULL;
-            curr->blocked_kind = TASK_BLOCK_NONE;
+        if (curr) {
+            waitqueue_wait_cancel_locked(&ld->read_waitq_, curr);
         }
     }
 }

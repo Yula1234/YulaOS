@@ -9,6 +9,8 @@
 #include <kernel/locking/sem.h>
 #include <kernel/smp/cpu.h>
 
+#include <kernel/proc_types.h>
+
 #include <lib/maple_tree.h>
 #include <lib/compiler.h>
 #include <lib/rbtree.h>
@@ -108,12 +110,6 @@ typedef struct file_desc {
     
     rcu_head_t rcu;
 } file_desc_t;
-
-typedef enum {
-    TASK_BLOCK_NONE = 0,
-    TASK_BLOCK_SEM = 1,
-    TASK_BLOCK_FUTEX = 2,
-} task_block_kind_t;
 
 typedef struct fd_table {
     uint32_t refs;

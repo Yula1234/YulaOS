@@ -4,7 +4,7 @@
 #ifndef KERNEL_LOCKING_SEM_H
 #define KERNEL_LOCKING_SEM_H
 
-#include <lib/dlist.h>
+#include <kernel/waitq/waitqueue.h>
 
 #include <hal/align.h>
 
@@ -23,7 +23,7 @@ typedef struct {
     uint8_t pad[HAL_CACHELINE_SIZE - sizeof(int)];
 
     spinlock_t lock;
-    dlist_head_t wait_list;
+    waitqueue_t waitq;
 } semaphore_t;
 
 void sem_init(semaphore_t* sem, int init_count);

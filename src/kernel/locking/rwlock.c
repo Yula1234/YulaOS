@@ -5,6 +5,8 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 
+#include <kernel/waitq/waitqueue.h>
+
 #include <lib/compiler.h>
 
 #include <hal/cpu.h>
@@ -26,31 +28,8 @@ void rwlock_init(rwlock_t* rw) {
 
     spinlock_init(&rw->wait_lock_);
 
-    dlist_init(&rw->read_waiters_);
-    dlist_init(&rw->write_waiters_);
-}
-
-__attribute__((always_inline)) static inline void rwlock_do_wake_task(task_t* t) {
-    if (unlikely(!t)) {
-        return;
-    }
-
-    __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-    t->sem_node.next = 0;
-    t->sem_node.prev = 0;
-    t->blocked_on_sem = 0;
-    t->blocked_kind = TASK_BLOCK_NONE;
-
-    if (likely(t->state != TASK_ZOMBIE 
-               && t->state != TASK_UNUSED)) {
-        
-        if (likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
-            sched_add(t);
-        }
-    }
-
-    __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
+    waitqueue_init(&rw->read_waitq_, (void*)rw, TASK_BLOCK_SEM);
+    waitqueue_init(&rw->write_waitq_, (void*)rw, TASK_BLOCK_SEM);
 }
 
 static void rwlock_wake_waiters(rwlock_t* rw) {
@@ -66,42 +45,29 @@ static void rwlock_wake_waiters(rwlock_t* rw) {
     {
         const uint32_t flags = spinlock_acquire_safe(&rw->wait_lock_);
 
-        if (likely(!dlist_empty(&rw->write_waiters_))) {
-            writer_to_wake = container_of(rw->write_waiters_.next, task_t, sem_node);
+        writer_to_wake = waitqueue_dequeue_locked(&rw->write_waitq_);
 
-            dlist_del(&writer_to_wake->sem_node);
-
-            if (unlikely(dlist_empty(&rw->write_waiters_))) {
+        if (writer_to_wake) {
+            if (dlist_empty(&rw->write_waitq_.waiters)) {
                 __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_WRITER, __ATOMIC_RELAXED);
             }
-        } else if (unlikely(!dlist_empty(&rw->read_waiters_))) {
+        } else {
+            waitqueue_detach_all_locked(&rw->read_waitq_, &local_read_waiters);
 
-            local_read_waiters.next = rw->read_waiters_.next;
-            local_read_waiters.prev = rw->read_waiters_.prev;
-
-            local_read_waiters.next->prev = &local_read_waiters;
-            local_read_waiters.prev->next = &local_read_waiters;
-
-            dlist_init(&rw->read_waiters_);
-
-            __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_READER, __ATOMIC_RELAXED);
+            if (!dlist_empty(&local_read_waiters)) {
+                __atomic_fetch_and(&rw->state_, ~RWLOCK_WAITING_READER, __ATOMIC_RELAXED);
+            }
         }
 
         spinlock_release_safe(&rw->wait_lock_, flags);
     }
 
     if (writer_to_wake) {
-        rwlock_do_wake_task(writer_to_wake);
+        waitqueue_wake_task(writer_to_wake);
         return;
     }
 
-    while (!dlist_empty(&local_read_waiters)) {
-        task_t* t = container_of(local_read_waiters.next, task_t, sem_node);
-
-        dlist_del(&t->sem_node);
-
-        rwlock_do_wake_task(t);
-    }
+    waitqueue_wake_detached_list(&local_read_waiters);
 }
 
 /*
@@ -170,33 +136,16 @@ static void rwlock_acquire_read_slowpath(rwlock_t* rw) {
             __atomic_fetch_or(&rw->state_, RWLOCK_WAITING_READER, __ATOMIC_RELAXED);
         }
 
-        curr->blocked_on_sem = (void*)rw;
-        curr->blocked_kind = TASK_BLOCK_SEM;
-
-        dlist_add_tail(&curr->sem_node, &rw->read_waiters_);
-
-        if (unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
-            dlist_del(&curr->sem_node);
-
-            curr->sem_node.next = 0;
-            curr->sem_node.prev = 0;
-            curr->blocked_on_sem = 0;
-            curr->blocked_kind = TASK_BLOCK_NONE;
-        }
+        (void)waitqueue_wait_prepare_locked(&rw->read_waitq_, curr);
 
         spinlock_release_safe(&rw->wait_lock_, flags);
 
         sched_yield();
 
         flags = spinlock_acquire_safe(&rw->wait_lock_);
-        
-        if (curr->sem_node.next && curr->sem_node.prev) {
-            dlist_del(&curr->sem_node);
-        
-            curr->sem_node.next = 0;
-            curr->sem_node.prev = 0;
-        }
-        
+
+        waitqueue_wait_cancel_locked(&rw->read_waitq_, curr);
+
         spinlock_release_safe(&rw->wait_lock_, flags);
     }
 }
@@ -275,32 +224,15 @@ static void rwlock_acquire_write_slowpath(rwlock_t* rw, task_t* curr) {
             __atomic_fetch_or(&rw->state_, RWLOCK_WAITING_WRITER, __ATOMIC_RELAXED);
         }
 
-        curr->blocked_on_sem = (void*)rw;
-        curr->blocked_kind = TASK_BLOCK_SEM;
-
-        dlist_add_tail(&curr->sem_node, &rw->write_waiters_);
-
-        if (unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
-            dlist_del(&curr->sem_node);
-
-            curr->sem_node.next = 0;
-            curr->sem_node.prev = 0;
-            curr->blocked_on_sem = 0;
-            curr->blocked_kind = TASK_BLOCK_NONE;
-        }
+        (void)waitqueue_wait_prepare_locked(&rw->write_waitq_, curr);
 
         spinlock_release_safe(&rw->wait_lock_, flags);
 
         sched_yield();
 
         flags = spinlock_acquire_safe(&rw->wait_lock_);
-        
-        if (curr->sem_node.next && curr->sem_node.prev) {
-            dlist_del(&curr->sem_node);
-        
-            curr->sem_node.next = 0;
-            curr->sem_node.prev = 0;
-        }
+
+        waitqueue_wait_cancel_locked(&rw->write_waitq_, curr);
 
         spinlock_release_safe(&rw->wait_lock_, flags);
     }

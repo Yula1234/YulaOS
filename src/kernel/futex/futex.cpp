@@ -9,6 +9,8 @@
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 
+#include <kernel/waitq/waitqueue.h>
+
 #include <lib/cpp/intrusive_ref.h>
 #include <lib/cpp/lock_guard.h>
 #include <lib/cpp/dlist.h>
@@ -29,7 +31,7 @@ struct futex_entry_t {
     uint32_t refs;
 
     kernel::SpinLock lock;
-    dlist_head_t wait_list;
+    waitqueue_t waitq;
 
     FutexShard* shard;
 
@@ -77,7 +79,7 @@ public:
         entry->refs = 1u;
         entry->shard = &shard;
 
-        dlist_init(&entry->wait_list);
+        waitqueue_init(&entry->waitq, entry, TASK_BLOCK_FUTEX);
 
         const bool inserted = shard.map.insert_unique(key, entry);
 
@@ -149,7 +151,7 @@ private:
     static bool entry_is_unused(futex_entry_t& entry) {
         kernel::SpinLockSafeGuard guard(entry.lock);
 
-        const bool unused = dlist_empty(&entry.wait_list);
+        const bool unused = dlist_empty(&entry.waitq.waiters);
 
         return unused;
     }
@@ -203,29 +205,15 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
                 return -1;
             }
 
-            curr->blocked_on_sem = (void*)entry;
-            curr->blocked_kind = TASK_BLOCK_FUTEX;
-
-            dlist_add_tail(&curr->sem_node, &entry->wait_list);
-
-            if (proc_change_state(curr, TASK_WAITING) != 0) {
-                dlist_del(&curr->sem_node);
-
-                curr->sem_node.next = nullptr;
-                curr->sem_node.prev = nullptr;
-                curr->blocked_on_sem = 0;
-                curr->blocked_kind = TASK_BLOCK_NONE;
-            }
+            (void)waitqueue_wait_prepare_locked(&entry->waitq, curr);
         }
 
         v = 0u;
         if (uaccess_copy_from_user(&v, (const void*)uaddr, sizeof(v)) != 0) {
             kernel::SpinLockSafeGuard guard(entry->lock);
-            if (curr && curr->blocked_on_sem == entry) {
-                if (dlist_unlink_consistent(&curr->sem_node)) {
-                    curr->blocked_on_sem = 0;
-                    curr->blocked_kind = TASK_BLOCK_NONE;
-                }
+
+            if (curr) {
+                waitqueue_wait_cancel_locked(&entry->waitq, curr);
             }
 
             if (curr) {
@@ -238,11 +226,8 @@ static int futex_do_wait(futex_entry_t* entry, volatile const uint32_t* uaddr, u
         if (v != expected) {
             kernel::SpinLockSafeGuard guard(entry->lock);
 
-            if (curr && curr->blocked_on_sem == entry) {
-                if (dlist_unlink_consistent(&curr->sem_node)) {
-                    curr->blocked_on_sem = 0;
-                    curr->blocked_kind = TASK_BLOCK_NONE;
-                }
+            if (curr) {
+                waitqueue_wait_cancel_locked(&entry->waitq, curr);
             }
             
             if (curr) {
@@ -268,34 +253,19 @@ static int futex_do_wake(futex_entry_t* entry, uint32_t max_wake) {
     {
         kernel::SpinLockSafeGuard guard(entry->lock);
 
-        kernel::CDBLinkedListView<task_t, &task_t::sem_node> waiters(entry->wait_list);
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstringop-overflow"
-
-        while (woken < max_wake && !waiters.empty()) {
-            task_t& t = waiters.front();
-
-            __atomic_fetch_add(&t.in_transit, 1u, __ATOMIC_ACQUIRE);
-
-            if (!dlist_unlink_consistent(&t.sem_node)) {
-                panic("FUTEX: waiter unlink failed");
+        while (woken < max_wake) {
+            task_t* t = waitqueue_dequeue_locked(&entry->waitq);
+            if (!t) {
+                break;
             }
 
-            t.blocked_on_sem = 0;
-            t.blocked_kind = TASK_BLOCK_NONE;
-
-            if (proc_change_state(&t, TASK_RUNNABLE) == 0) {
-                sched_add(&t);
+            if (t->state == TASK_ZOMBIE || t->state == TASK_UNUSED) {
+                continue;
             }
 
-            __atomic_fetch_sub(&t.in_transit, 1u, __ATOMIC_RELEASE);
-
+            waitqueue_wake_task(t);
             woken++;
         }
-
-#pragma GCC diagnostic pop
-
     }
 
     return (int)woken;
@@ -341,15 +311,5 @@ extern "C" void futex_remove_task(struct task* t) {
 
     kernel::SpinLockSafeGuard guard(entry->lock);
 
-    if (t->blocked_on_sem == entry && t->blocked_kind == TASK_BLOCK_FUTEX) {
-        if (t->sem_node.next && t->sem_node.prev) {
-            dlist_del(&t->sem_node);
-            
-            t->sem_node.next = nullptr;
-            t->sem_node.prev = nullptr;
-        }
-
-        t->blocked_on_sem = nullptr;
-        t->blocked_kind = TASK_BLOCK_NONE;
-    }
+    waitqueue_wait_cancel_locked(&entry->waitq, t);
 }

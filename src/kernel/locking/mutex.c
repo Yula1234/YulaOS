@@ -4,6 +4,7 @@
 #include <kernel/panic.h>
 #include <kernel/sched.h>
 #include <kernel/proc.h>
+#include <kernel/waitq/waitqueue.h>
 
 #include <lib/compiler.h>
 
@@ -21,7 +22,7 @@ void mutex_init(mutex_t* m) {
     m->owner = 0u;
 
     spinlock_init(&m->wait_lock);
-    dlist_init(&m->wait_list);
+    waitqueue_init(&m->waitq, (void*)m, TASK_BLOCK_SEM);
 }
 
 /*
@@ -89,7 +90,7 @@ ___noinline static void mutex_lock_slowpath(mutex_t* m, task_t* curr) {
         if (owner == 0u) {
             uintptr_t new_owner = curr_val;
 
-            if (unlikely(!dlist_empty(&m->wait_list))) {
+            if (unlikely(!dlist_empty(&m->waitq.waiters))) {
                 new_owner |= MUTEX_FLAG_WAITERS;
             }
 
@@ -118,19 +119,7 @@ ___noinline static void mutex_lock_slowpath(mutex_t* m, task_t* curr) {
             }
         }
 
-        curr->blocked_on_sem = (void*)m;
-        curr->blocked_kind = TASK_BLOCK_SEM;
-
-        dlist_add_tail(&curr->sem_node, &m->wait_list);
-
-        if (unlikely(proc_change_state(curr, TASK_WAITING) != 0)) {
-            dlist_del(&curr->sem_node);
-
-            curr->sem_node.next = 0;
-            curr->sem_node.prev = 0;
-            curr->blocked_on_sem = 0;
-            curr->blocked_kind = TASK_BLOCK_NONE;
-        }
+        (void)waitqueue_wait_prepare_locked(&m->waitq, curr);
 
         spinlock_release_safe(&m->wait_lock, flags);
 
@@ -138,12 +127,7 @@ ___noinline static void mutex_lock_slowpath(mutex_t* m, task_t* curr) {
 
         flags = spinlock_acquire_safe(&m->wait_lock);
 
-        if (curr->sem_node.next && curr->sem_node.prev) {
-            dlist_del(&curr->sem_node);
-            
-            curr->sem_node.next = 0;
-            curr->sem_node.prev = 0;
-        }
+        waitqueue_wait_cancel_locked(&m->waitq, curr);
     }
 
     spinlock_release_safe(&m->wait_lock, flags);
@@ -188,28 +172,13 @@ ___noinline static void mutex_unlock_slowpath(mutex_t* m, task_t* curr) {
      */
     __atomic_store_n(&m->owner, 0u, __ATOMIC_RELEASE);
 
-    if (likely(!dlist_empty(&m->wait_list))) {
-        task_t* t = container_of(m->wait_list.next, task_t, sem_node);
-
-        __atomic_fetch_add(&t->in_transit, 1u, __ATOMIC_ACQUIRE);
-
-        dlist_del(&t->sem_node);
-
-        t->sem_node.next = 0;
-        t->sem_node.prev = 0;
-        t->blocked_on_sem = 0;
-        t->blocked_kind = TASK_BLOCK_NONE;
-
-        if (likely(t->state != TASK_ZOMBIE && t->state != TASK_UNUSED)) {
-            if (likely(proc_change_state(t, TASK_RUNNABLE) == 0)) {
-                sched_add(t);
-            }
-        }
-
-        __atomic_fetch_sub(&t->in_transit, 1u, __ATOMIC_RELEASE);
-    }
+    task_t* t = waitqueue_dequeue_locked(&m->waitq);
 
     spinlock_release_safe(&m->wait_lock, flags);
+
+    if (t) {
+        waitqueue_wake_task(t);
+    }
 }
 
 void mutex_unlock(mutex_t* m) {

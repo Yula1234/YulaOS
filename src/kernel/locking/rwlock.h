@@ -4,7 +4,7 @@
 #ifndef KERNEL_LOCKING_RWLOCK_H
 #define KERNEL_LOCKING_RWLOCK_H
 
-#include <lib/dlist.h>
+#include <kernel/waitq/waitqueue.h>
 
 #include <stdint.h>
 
@@ -21,8 +21,8 @@ typedef struct {
 
     spinlock_t wait_lock_;
 
-    dlist_head_t read_waiters_;
-    dlist_head_t write_waiters_;
+    waitqueue_t read_waitq_;
+    waitqueue_t write_waitq_;
 } rwlock_t;
 
 void rwlock_init(rwlock_t* rw);

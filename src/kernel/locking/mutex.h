@@ -4,7 +4,7 @@
 #ifndef KERNEL_LOCKING_MUTEX_H
 #define KERNEL_LOCKING_MUTEX_H
 
-#include <lib/dlist.h>
+#include <kernel/waitq/waitqueue.h>
 
 #include <stdint.h>
 
@@ -19,7 +19,7 @@ typedef struct {
     volatile uintptr_t owner;
 
     spinlock_t wait_lock;
-    dlist_head_t wait_list;
+    waitqueue_t waitq;
 } mutex_t;
 
 void mutex_init(mutex_t* m);
