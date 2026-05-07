@@ -36,7 +36,7 @@ CXXFLAGS_KERN="$CFLAGS_BASE -std=c++23 -O2 -Wall -Wextra -I src -mno-mmx -mno-ss
 
 CFLAGS_USER="$CFLAGS_BASE -I usr -msse -msse2 -O2 -fomit-frame-pointer"
 
-CXXFLAGS_USER="$CFLAGS_USER -std=c++23 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit"
+CXXFLAGS_USER="$CFLAGS_USER -std=c++23 -O2 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit"
 
 LDFLAGS_USER="--no-warn-rwx-segments -T usr/linker.ld"
 
