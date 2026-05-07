@@ -126,8 +126,8 @@ static void ring_pop_chunk(
     *count -= len;
 }
 
-static void wake_read_waiters_locked(ldisc_t* ld) {
-    (void)waitqueue_wake_all_locked(&ld->read_waitq_);
+static void detach_read_waiters_locked(ldisc_t* ld, dlist_head_t* out_list) {
+    waitqueue_detach_all_locked(&ld->read_waitq_, out_list);
 }
 
 static void echo_worker_task(work_struct_t* work) {
@@ -245,8 +245,6 @@ static bool try_isig_locked(ldisc_t* ld, uint8_t b) {
 
     ld->sig_emit_(sig, ld->sig_ctx_);
 
-    wake_read_waiters_locked(ld);
-
     return true;
 }
 
@@ -273,8 +271,6 @@ static bool receive_byte_locked(ldisc_t* ld, uint8_t b) {
         ring_push_chunk(ld->rx_buf_, &ld->rx_head_, &ld->rx_count_, LDISC_RX_CAP, &b, 1u);
 
         queue_echo_char_locked(ld, b);
-        
-        wake_read_waiters_locked(ld);
         return true;
     }
 
@@ -314,8 +310,6 @@ static bool receive_byte_locked(ldisc_t* ld, uint8_t b) {
         ld->canon_count_++;
 
         ld->line_len_ = 0u;
-
-        wake_read_waiters_locked(ld);
         return true;
     }
 
@@ -371,11 +365,15 @@ void ldisc_destroy(ldisc_t* ld) {
         return;
     }
 
+    dlist_head_t local_waiters;
+
     {
         guard(spinlock_safe)(&ld->rx_lock_);
 
-        wake_read_waiters_locked(ld);
+        detach_read_waiters_locked(ld, &local_waiters);
     }
+
+    waitqueue_wake_detached_list(&local_waiters);
 
     flush_work(&ld->echo_work_);
 
@@ -429,17 +427,26 @@ size_t ldisc_receive(ldisc_t* ld, const uint8_t* data, size_t size) {
         return 0u;
     }
 
-    guard(spinlock_safe)(&ld->rx_lock_);
-
+    dlist_head_t local_waiters;
     size_t written = 0;
 
-    for (size_t i = 0u; i < size; i++) {
-        if (!receive_byte_locked(ld, data[i])) {
-            break;
+    dlist_init(&local_waiters);
+
+    {
+        guard(spinlock_safe)(&ld->rx_lock_);
+
+        for (size_t i = 0u; i < size; i++) {
+            if (!receive_byte_locked(ld, data[i])) {
+                break;
+            }
+
+            written++;
         }
 
-        written++;
+        detach_read_waiters_locked(ld, &local_waiters);
     }
+
+    waitqueue_wake_detached_list(&local_waiters);
 
     return written;
 }

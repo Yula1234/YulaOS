@@ -149,45 +149,16 @@ static int get_best_cpu(void) {
 }
 
 ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
-#if SCHED_DEBUG
-    if (p->rb_node.__parent_color != 0 || p->rb_node.rb_left != nullptr || p->rb_node.rb_right != nullptr) {
-        if (cpu->runq_root.rb_node != &p->rb_node) {
-            panic("SCHED: enqueue_task - task already has RB-tree links!");
-        }
-    }
-    if (p->state == TASK_WAITING || p->state == TASK_STOPPED) {
-        panic("SCHED: enqueue_task - trying to enqueue sleeping task!");
-    }
-
-    if (p->state != TASK_RUNNABLE && p->state != TASK_RUNNING) {
-        panic("SCHED: enqueue_task() on non-runnable task!");
-    }
-    if (cpu->runq_count > 1000000) { 
-        panic("SCHED: runq_count corrupted (underflow?)");
-    }
-#endif
-
     proc_task_retain(p);
+    
     p->is_queued = 1;
 
     struct rb_node **link = &cpu->runq_root.rb_node;
     struct rb_node *parent = nullptr;
-
+    
     struct task *entry;
 
     int leftmost = 1;
-
-    if (kernel::likely(cpu->runq_leftmost && p->vruntime < cpu->runq_leftmost->vruntime)) {
-        parent = &cpu->runq_leftmost->rb_node;
-
-        rb_link_node(&p->rb_node, parent, &parent->rb_left);
-        rb_insert_color(&p->rb_node, &cpu->runq_root);
-        
-        cpu->runq_leftmost = p;
-
-        __atomic_fetch_add(&cpu->runq_count, 1, __ATOMIC_RELAXED);
-        return; 
-    }
 
     while (*link) {
         parent = *link;
@@ -204,7 +175,7 @@ ___inline void enqueue_task(cpu_t* cpu, task_t* p) {
     rb_link_node(&p->rb_node, parent, link);
     rb_insert_color(&p->rb_node, &cpu->runq_root);
     
-    if (kernel::likely(leftmost)) {
+    if (leftmost) {
         cpu->runq_leftmost = p;
     }
         

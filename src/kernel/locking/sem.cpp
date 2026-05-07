@@ -226,13 +226,19 @@ extern "C" void sem_signal(semaphore_t* sem) {
         return;
     }
 
+    task_t* to_wake = nullptr;
+
     const uint32_t flags = spinlock_acquire_safe(&sem->lock);
 
     __atomic_fetch_add(&sem->count, 1, __ATOMIC_RELEASE);
 
-    (void)waitqueue_wake_one_locked(&sem->waitq);
+    to_wake = waitqueue_dequeue_locked(&sem->waitq);
 
     spinlock_release_safe(&sem->lock, flags);
+
+    if (to_wake) {
+        waitqueue_wake_task(to_wake);
+    }
 }
 
 extern "C" void sem_signal_all(semaphore_t* sem) {
