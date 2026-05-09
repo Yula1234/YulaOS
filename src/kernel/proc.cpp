@@ -15,6 +15,7 @@
 #include <lib/cpp/atomic.h>
 #include <lib/cpp/dlist.h>
 
+#include <lib/radixtree.h>
 #include <lib/hash_map.h>
 #include <lib/string.h>
 #include <lib/dlist.h>
@@ -42,12 +43,7 @@
 #include "proc.h"
 #include "elf.h"
 
-#define PID_L2_BITS 10
-#define PID_L1_BITS 12
-
-#define PID_L2_SIZE (1 << PID_L2_BITS)
-#define PID_L1_SIZE (1 << PID_L1_BITS)
-#define MAX_PID     ((1 << (PID_L1_BITS + PID_L2_BITS)) - 1)
+#define MAX_PID 0x3FFFFFFF
 
 #define PGROUP_MAP_BUCKETS 256
 
@@ -577,16 +573,7 @@ int proc_pgrp_in_session(uint32_t pgid, uint32_t sid) {
 static kernel::atomic<task_t*> g_zombie_head{nullptr};
 static kernel::Semaphore g_zombie_sem{};
 
-struct PidL2Node {
-    rcu_ptr_t tasks[PID_L2_SIZE];
-};
-
-struct PidL1Node {
-    rcu_ptr_t leaves[PID_L1_SIZE];
-};
-
-static PidL1Node g_pid_map;
-static spinlock_t g_pid_write_lock;
+static radix_tree_t g_pid_tree;
 
 static uint8_t* initial_fpu_state = 0;
 static uint32_t initial_fpu_state_size = 0;
@@ -776,59 +763,28 @@ private:
 };
 
 static void pid_map_insert(uint32_t pid, task_t* t) {
-    if (!t || pid == 0 || pid > MAX_PID) {
+    if (!t
+        || pid == 0
+        || pid > MAX_PID)
         return;
-    }
 
-    const uint32_t l1_idx = pid >> PID_L2_BITS;
-    const uint32_t l2_idx = pid & (PID_L2_SIZE - 1);
-
-    kernel::SpinLockNativeGuard guard(g_pid_write_lock);
-
-    PidL2Node* l2 = static_cast<PidL2Node*>(rcu_ptr_read(&g_pid_map.leaves[l1_idx]));
-
-    if (!l2) {
-        l2 = static_cast<PidL2Node*>(kmalloc(sizeof(PidL2Node)));
-        if (!l2) {
-            return;
-        }
-
-        memset(l2, 0, sizeof(PidL2Node));
-        rcu_ptr_assign(&g_pid_map.leaves[l1_idx], l2);
-    }
-
-    if (!::proc_task_retain(t)) {
+    if (!::proc_task_retain(t))
         return;
-    }
 
-    rcu_ptr_assign(&l2->tasks[l2_idx], t);
+    if (radix_tree_insert(&g_pid_tree, pid, t) != 0)
+        ::proc_task_put(t);
 }
 
 static void pid_map_remove(uint32_t pid) {
-    if (pid == 0 || pid > MAX_PID) {
+    if (pid == 0 || pid > MAX_PID)
         return;
-    }
 
-    const uint32_t l1_idx = pid >> PID_L2_BITS;
-    const uint32_t l2_idx = pid & (PID_L2_SIZE - 1);
+    task_t* removed = static_cast<task_t*>(
+        radix_tree_remove(&g_pid_tree, pid)
+    );
 
-    task_t* removed = nullptr;
-
-    {
-        kernel::SpinLockNativeGuard guard(g_pid_write_lock);
-
-        PidL2Node* l2 = static_cast<PidL2Node*>(rcu_ptr_read(&g_pid_map.leaves[l1_idx]));
-        if (l2) {
-            removed = static_cast<task_t*>(rcu_ptr_read(&l2->tasks[l2_idx]));
-            if (removed) {
-                rcu_ptr_assign(&l2->tasks[l2_idx], nullptr);
-            }
-        }
-    }
-
-    if (removed) {
+    if (removed)
         ::proc_task_put(removed);
-    }
 }
 
 }
@@ -905,8 +861,7 @@ void proc_init(void) {
 
     spinlock_init(&proc::detail::all_tasks_write_lock);
 
-    spinlock_init(&proc::detail::g_pid_write_lock);
-    memset(&proc::detail::g_pid_map, 0, sizeof(proc::detail::g_pid_map));
+    radix_tree_init(&proc::detail::g_pid_tree);
 
     dlist_init(&proc::detail::all_tasks_head);
 
@@ -1332,30 +1287,21 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
 }
 
 task_t* proc_find_by_pid(uint32_t pid) {
-    if (pid == 0 || pid > MAX_PID) {
+    if (pid == 0 || pid > MAX_PID)
         return nullptr;
-    }
-
-    const uint32_t l1_idx = pid >> PID_L2_BITS;
-    const uint32_t l2_idx = pid & (PID_L2_SIZE - 1);
 
     kernel::RcuReadGuard rcu_guard;
 
-    proc::detail::PidL2Node* l2 = static_cast<proc::detail::PidL2Node*>(
-        rcu_ptr_read(&proc::detail::g_pid_map.leaves[l1_idx])
+    task_t* t = static_cast<task_t*>(
+        radix_tree_lookup(&proc::detail::g_pid_tree, pid)
     );
-    if (!l2) {
-        return nullptr;
-    }
 
-    task_t* t = static_cast<task_t*>(rcu_ptr_read(&l2->tasks[l2_idx]));
-    if (!t || t->state == TASK_UNUSED) {
+    if (!t
+        || t->state == TASK_UNUSED)
         return nullptr;
-    }
 
-    if (!proc_task_retain(t)) {
+    if (!proc_task_retain(t))
         return nullptr;
-    }
 
     return t;
 }
