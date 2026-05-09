@@ -41,6 +41,8 @@ ___inline void ringbuf_init(ringbuf_t* rb, uint8_t* buffer, size_t capacity) {
         || capacity == 0u))
         return;
 
+    memset(buffer, 0, capacity);
+
     rb->buffer_   = buffer;
     rb->capacity_ = capacity;
     
