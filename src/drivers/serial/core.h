@@ -7,6 +7,8 @@
 #include <kernel/locking/spinlock.h>
 #include <kernel/locking/sem.h>
 
+#include <lib/ringbuf.h>
+
 #include <mm/iomem.h>
 
 #include <stdint.h>
@@ -40,15 +42,6 @@ typedef struct uart_ops {
     void (*handle_irq)(uart_port_t* port);
 } uart_ops_t;
 
-typedef struct uart_ring {
-    uint8_t data[UART_RING_SIZE];
-
-    size_t head;
-    size_t tail;
-    
-    size_t count;
-} uart_ring_t;
-
 struct uart_port {
     const char* name;
 
@@ -61,10 +54,14 @@ struct uart_port {
     uint8_t  irq_line;
 
     spinlock_t  tx_lock;
-    uart_ring_t tx_ring;
+    ringbuf_t   tx_ring;
+    
+    uint8_t     tx_buf[UART_RING_SIZE];
 
     spinlock_t  rx_lock;
-    uart_ring_t rx_ring;
+    ringbuf_t   rx_ring;
+
+    uint8_t     rx_buf[UART_RING_SIZE];
 
     semaphore_t rx_sem;
 };
