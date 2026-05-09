@@ -1,8 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2026 Yula1234
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) 2026 Yula1234 */
 
 #ifndef _LIB_RBTREE_H
 #define _LIB_RBTREE_H
+
+#include <lib/compiler.h>
 
 #include <stdint.h>
 
@@ -12,6 +14,7 @@ extern "C" {
 
 struct rb_node {
     uintptr_t  __parent_color;
+
     struct rb_node *rb_right;
     struct rb_node *rb_left;
 } __attribute__((aligned(sizeof(long))));
@@ -34,27 +37,26 @@ struct rb_augment_callbacks {
 };
 
 void rb_insert_color_augmented(
-    struct rb_node* node,
-    struct rb_root* root,
+    struct rb_node* node, struct rb_root* root,
     const struct rb_augment_callbacks* callbacks
 );
 
 void rb_erase_augmented(
-    struct rb_node* node,
-    struct rb_root* root,
+    struct rb_node* node, struct rb_root* root,
     const struct rb_augment_callbacks* callbacks
 );
 
 struct rb_node *rb_next(const struct rb_node *node);
 struct rb_node *rb_prev(const struct rb_node *node);
+
 struct rb_node *rb_first(const struct rb_root *root);
 struct rb_node *rb_last(const struct rb_root *root);
 
-static inline struct rb_node* rb_parent(const struct rb_node* node) {
+___inline struct rb_node* rb_parent(const struct rb_node* node) {
     return node ? (struct rb_node*)(node->__parent_color & ~3u) : 0;
 }
 
-static inline void rb_link_node(struct rb_node *node, struct rb_node *parent,
+___inline void rb_link_node(struct rb_node *node, struct rb_node *parent,
                                 struct rb_node **rb_link)
 {
     node->__parent_color = (uintptr_t)parent;
