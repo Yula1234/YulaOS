@@ -4,6 +4,10 @@
 #ifndef LIB_IDR_H
 #define LIB_IDR_H
 
+#include <kernel/locking/spinlock.h>
+
+#include <lib/radixtree.h>
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -11,7 +15,10 @@ extern "C" {
 #endif
 
 typedef struct idr {
-    void* opaque;
+    radix_tree_t tree;
+    spinlock_t   lock;
+
+    uint32_t     next_id;
 } idr_t;
 
 void idr_init(idr_t* idr);
