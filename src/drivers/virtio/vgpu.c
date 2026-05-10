@@ -13,11 +13,11 @@
 #include <mm/heap.h>
 #include <mm/pmm.h>
 
+#include <lib/radixtree.h>
+#include <lib/string.h>
+
 #include <hal/cpu.h>
 #include <hal/irq.h>
-
-#include <lib/string.h>
-#include <lib/chashmap.h>
 
 #include <stddef.h>
 
@@ -197,25 +197,38 @@ typedef struct __attribute__((packed)) {
 
 typedef struct {
     int active;
+
     int virgl_supported;
     int virgl_ctx_ready;
+    
     virtio_device_t* vdev;
+    
     virtqueue_t ctrlq;
     mutex_t lock;
     int ctrlq_async_failed;
+    
     uint32_t scanout_id;
     uint32_t scanout_bound_resource_id;
+    
     virtio_gpu_rect_t scanout_bound_rect;
+    
     uint32_t resource_id;
     uint32_t virgl_ctx_id;
+    
     size_t fb_dma_size;
+    
     void* ctrl_cmd;
     void* ctrl_resp;
+    
     uint32_t ctrl_cmd_phys;
     uint32_t ctrl_resp_phys;
+    
     void* async_ctrl_slots;
+    
     virtio_gpu_fb_t fb;
-    chashmap_t* attached;
+    
+    radix_tree_t attached;
+    int attached_inited;
 } virtio_gpu_state_t;
 
 static virtio_gpu_state_t g_vgpu;
@@ -404,12 +417,16 @@ static int vgpu_virgl_ctx_ensure_locked(void) {
 }
 
 static int vgpu_virgl_attach_resource_locked(uint32_t resource_id) {
-    if (resource_id == 0u) return 0;
-    if (!vgpu_virgl_ctx_ensure_locked()) return 0;
+    if (resource_id == 0u)
+        return 0;
+    
+    if (!vgpu_virgl_ctx_ensure_locked())
+        return 0;
 
-    if (chashmap_find(g_vgpu.attached, resource_id)) {
+    void* exists = radix_tree_lookup(&g_vgpu.attached, resource_id);
+    
+    if (exists)
         return 1;
-    }
 
     virtio_gpu_ctx_resource_t* cmd = (virtio_gpu_ctx_resource_t*)g_vgpu.ctrl_cmd;
     memset(cmd, 0, sizeof(*cmd));
@@ -422,20 +439,24 @@ static int vgpu_virgl_attach_resource_locked(uint32_t resource_id) {
         return 0;
     }
 
-    chashmap_insert_unique(g_vgpu.attached, resource_id, (void*)1);
+    radix_tree_insert(&g_vgpu.attached, resource_id, (void*)1);
     return 1;
 }
 
 static int vgpu_virgl_detach_resource_locked(uint32_t resource_id) {
-    if (resource_id == 0u) return 0;
-    if (!g_vgpu.active || !g_vgpu.virgl_supported) return 0;
+    if (resource_id == 0u)
+        return 0;
+    
+    if (!g_vgpu.active || !g_vgpu.virgl_supported)
+        return 0;
 
-    if (!chashmap_find(g_vgpu.attached, resource_id)) {
+    void* exists = radix_tree_lookup(&g_vgpu.attached, resource_id);
+    
+    if (!exists)
         return 1;
-    }
 
     if (!g_vgpu.virgl_ctx_ready) {
-        chashmap_remove(g_vgpu.attached, resource_id);
+        radix_tree_remove(&g_vgpu.attached, resource_id);
         return 1;
     }
 
@@ -450,7 +471,7 @@ static int vgpu_virgl_detach_resource_locked(uint32_t resource_id) {
         return 0;
     }
 
-    chashmap_remove(g_vgpu.attached, resource_id);
+    radix_tree_remove(&g_vgpu.attached, resource_id);
     return 1;
 }
 
@@ -482,15 +503,36 @@ static void vgpu_cleanup_state(void) {
     vgpu_mark_inactive_locked();
 
     virtio_pci_dev_t* pci = vgpu_pci_dev();
+
     if (pci && pci->msi_enabled && pci->msi_vector > 0) {
         irq_free_vector(pci->msi_vector);
+
         pci->msi_enabled = 0;
         pci->msi_vector = 0;
     }
 
-    if (g_vgpu.attached) {
-        chashmap_destroy(g_vgpu.attached);
-        g_vgpu.attached = NULL;
+    if (g_vgpu.attached_inited) {
+        uint32_t key = 0;
+
+        for (;;) {
+            void* val = NULL;
+
+            val = radix_tree_find_next(&g_vgpu.attached, &key);
+
+            if (!val)
+                break;
+
+            radix_tree_remove(&g_vgpu.attached, key);
+
+            if (key == 0xFFFFFFFFu)
+                break;
+            
+            key++;
+        }
+
+        radix_tree_destroy(&g_vgpu.attached);
+        
+        g_vgpu.attached_inited = 0;
     }
 
     g_vgpu.virgl_supported = 0;
@@ -806,11 +848,8 @@ static int virtio_gpu_probe(virtio_device_t* vdev) {
     memset(&g_vgpu, 0, sizeof(g_vgpu));
     mutex_init(&g_vgpu.lock);
 
-    g_vgpu.attached = chashmap_create();
-    if (!g_vgpu.attached) {
-        vgpu_cleanup_state();
-        return -1;
-    }
+    radix_tree_init(&g_vgpu.attached);
+    g_vgpu.attached_inited = 1;
 
     g_vgpu.vdev = vdev;
 
