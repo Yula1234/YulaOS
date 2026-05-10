@@ -886,6 +886,181 @@ static inline rcu_ptr_t* alloc_fd_array(uint32_t cap) {
     return reinterpret_cast<rcu_ptr_t*>(mem + sizeof(rcu_head_t));
 }
 
+static inline uint32_t fd_bitmap_words_for_bits(uint32_t bits) {
+    if (bits == 0u) {
+        return 0u;
+    }
+
+    return (bits + 63u) / 64u;
+}
+
+static inline void fd_bitmap_set_invalid_bits(uint64_t* used, uint32_t bits) {
+    if (!used || bits == 0u) {
+        return;
+    }
+
+    const uint32_t rem = bits & 63u;
+    if (rem == 0u) {
+        return;
+    }
+
+    const uint32_t last_word = (bits - 1u) / 64u;
+    const uint64_t valid_mask = (1ull << rem) - 1ull;
+
+    used[last_word] |= ~valid_mask;
+}
+
+static inline void fd_bitmap_summary_clear_all(fd_table_t* ft) {
+    if (!ft || !ft->fd_summary || ft->fd_summary_words == 0u) {
+        return;
+    }
+
+    memset(ft->fd_summary, 0, sizeof(uint64_t) * ft->fd_summary_words);
+}
+
+static inline void fd_bitmap_summary_set_bit(fd_table_t* ft, uint32_t used_word_idx, bool has_free) {
+    if (!ft || !ft->fd_summary) {
+        return;
+    }
+
+    const uint32_t summary_word = used_word_idx / 64u;
+    const uint32_t summary_bit = used_word_idx & 63u;
+
+    if (summary_word >= ft->fd_summary_words) {
+        return;
+    }
+
+    const uint64_t mask = 1ull << summary_bit;
+
+    if (has_free) {
+        ft->fd_summary[summary_word] |= mask;
+    } else {
+        ft->fd_summary[summary_word] &= ~mask;
+    }
+}
+
+static inline void fd_bitmap_summary_refresh_word(fd_table_t* ft, uint32_t used_word_idx) {
+    if (!ft || !ft->fd_used || used_word_idx >= ft->fd_used_words) {
+        return;
+    }
+
+    const bool has_free = ft->fd_used[used_word_idx] != ~0ull;
+
+    fd_bitmap_summary_set_bit(ft, used_word_idx, has_free);
+}
+
+static inline void fd_bitmap_summary_rebuild(fd_table_t* ft) {
+    if (!ft || !ft->fd_used || !ft->fd_summary) {
+        return;
+    }
+
+    fd_bitmap_summary_clear_all(ft);
+
+    for (uint32_t i = 0u; i < ft->fd_used_words; i++) {
+        fd_bitmap_summary_refresh_word(ft, i);
+    }
+}
+
+static inline void fd_bitmap_mark_used(fd_table_t* ft, uint32_t fd) {
+    if (!ft || !ft->fd_used) {
+        return;
+    }
+
+    const uint32_t word = fd / 64u;
+    const uint32_t bit = fd & 63u;
+
+    if (word >= ft->fd_used_words) {
+        return;
+    }
+
+    ft->fd_used[word] |= (1ull << bit);
+
+    fd_bitmap_summary_refresh_word(ft, word);
+}
+
+static inline void fd_bitmap_mark_free(fd_table_t* ft, uint32_t fd) {
+    if (!ft || !ft->fd_used) {
+        return;
+    }
+
+    const uint32_t word = fd / 64u;
+    const uint32_t bit = fd & 63u;
+
+    if (word >= ft->fd_used_words) {
+        return;
+    }
+
+    ft->fd_used[word] &= ~(1ull << bit);
+
+    fd_bitmap_summary_refresh_word(ft, word);
+}
+
+static bool fd_bitmap_find_free_from(const fd_table_t* ft, uint32_t start_fd, uint32_t* out_fd) {
+    if (!out_fd) {
+        return false;
+    }
+
+    *out_fd = 0u;
+
+    if (!ft
+        || !ft->fd_used
+        || !ft->fd_summary
+        || ft->max_fds == 0u
+        || ft->fd_used_words == 0u
+        || ft->fd_summary_words == 0u) {
+        return false;
+    }
+
+    if (start_fd >= ft->max_fds) {
+        return false;
+    }
+
+    const uint32_t start_word = start_fd / 64u;
+    const uint32_t start_bit = start_fd & 63u;
+
+    const uint32_t summary_start_word = start_word / 64u;
+    const uint32_t summary_start_bit = start_word & 63u;
+
+    for (uint32_t sw = summary_start_word; sw < ft->fd_summary_words; sw++) {
+        uint64_t summary = ft->fd_summary[sw];
+
+        if (sw == summary_start_word && summary_start_bit != 0u) {
+            summary &= ~((1ull << summary_start_bit) - 1ull);
+        }
+
+        while (summary != 0u) {
+            const uint32_t bit = (uint32_t)__builtin_ctzll(summary);
+            const uint32_t used_word = sw * 64u + bit;
+
+            if (used_word >= ft->fd_used_words) {
+                return false;
+            }
+
+            uint64_t used = ft->fd_used[used_word];
+
+            if (used_word == start_word && start_bit != 0u) {
+                used |= (1ull << start_bit) - 1ull;
+            }
+
+            const uint64_t free_mask = ~used;
+
+            if (free_mask != 0u) {
+                const uint32_t free_bit = (uint32_t)__builtin_ctzll(free_mask);
+                const uint32_t fd = used_word * 64u + free_bit;
+
+                if (fd < ft->max_fds) {
+                    *out_fd = fd;
+                    return true;
+                }
+            }
+
+            summary &= summary - 1ull;
+        }
+    }
+
+    return false;
+}
+
 static void free_fd_array_rcu_cb(rcu_head_t* head) {
     kfree(head);
 }
@@ -926,7 +1101,7 @@ void proc_fd_table_init(task_t* t) {
     memset(ft, 0, sizeof(*ft));
 
     ft->refs = 1;
-    rwspinlock_init(&ft->lock);
+    spinlock_init(&ft->lock);
     
     ft->max_fds = 32;
     ft->fds = alloc_fd_array(ft->max_fds);
@@ -939,6 +1114,35 @@ void proc_fd_table_init(task_t* t) {
     for (uint32_t i = 0; i < ft->max_fds; i++) {
         rcu_ptr_init(&ft->fds[i]);
     }
+
+    ft->fd_used_words = fd_bitmap_words_for_bits(ft->max_fds);
+    ft->fd_used = static_cast<uint64_t*>(
+        kmalloc(sizeof(uint64_t) * ft->fd_used_words)
+    );
+    if (!ft->fd_used) {
+        free_fd_array_sync(ft->fds);
+        kfree(ft);
+        t->fd_table = 0;
+        return;
+    }
+
+    memset(ft->fd_used, 0, sizeof(uint64_t) * ft->fd_used_words);
+    fd_bitmap_set_invalid_bits(ft->fd_used, ft->max_fds);
+
+    ft->fd_summary_words = fd_bitmap_words_for_bits(ft->fd_used_words);
+    ft->fd_summary = static_cast<uint64_t*>(
+        kmalloc(sizeof(uint64_t) * ft->fd_summary_words)
+    );
+    if (!ft->fd_summary) {
+        kfree(ft->fd_used);
+        free_fd_array_sync(ft->fds);
+        kfree(ft);
+        t->fd_table = 0;
+        return;
+    }
+
+    memset(ft->fd_summary, 0, sizeof(uint64_t) * ft->fd_summary_words);
+    fd_bitmap_summary_rebuild(ft);
     
     ft->fd_next = 0;
     t->fd_table = ft;
@@ -989,6 +1193,16 @@ static void fd_table_release_rcu(rcu_head_t* head) {
         free_fd_array_sync(ft->fds); 
     }
 
+    if (ft->fd_used) {
+        kfree(ft->fd_used);
+        ft->fd_used = nullptr;
+    }
+
+    if (ft->fd_summary) {
+        kfree(ft->fd_summary);
+        ft->fd_summary = nullptr;
+    }
+
     kfree(ft);
 }
 
@@ -1031,8 +1245,25 @@ static void file_desc_release_rcu(rcu_head_t* head) {
     file_desc_release(d);
 }
 
-static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd, rcu_ptr_t** out_old_fds) {
-    if (out_old_fds) *out_old_fds = nullptr;
+static int fd_table_ensure_cap(
+    fd_table_t* ft,
+    uint32_t required_fd,
+    rcu_ptr_t** out_old_fds,
+    uint64_t** out_old_used,
+    uint64_t** out_old_summary
+) {
+    if (out_old_fds) {
+        *out_old_fds = nullptr;
+    }
+
+    if (out_old_used) {
+        *out_old_used = nullptr;
+    }
+
+    if (out_old_summary) {
+        *out_old_summary = nullptr;
+    }
+
     if (required_fd < ft->max_fds) return 0;
     
     uint32_t new_cap = ft->max_fds ? ft->max_fds : 32;
@@ -1054,16 +1285,79 @@ static int fd_table_ensure_cap(fd_table_t* ft, uint32_t required_fd, rcu_ptr_t**
 
     rcu_ptr_t* old_fds = ft->fds;
 
+    uint64_t* new_used = nullptr;
+    uint64_t* new_summary = nullptr;
+
+    const uint32_t new_used_words = fd_bitmap_words_for_bits(new_cap);
+    const uint32_t new_summary_words = fd_bitmap_words_for_bits(new_used_words);
+
+    new_used = static_cast<uint64_t*>(kmalloc(sizeof(uint64_t) * new_used_words));
+    if (!new_used) {
+        free_fd_array_sync(new_fds);
+        return -1;
+    }
+
+    memset(new_used, 0, sizeof(uint64_t) * new_used_words);
+
+    if (ft->fd_used && ft->fd_used_words != 0u) {
+        const uint32_t copy_words = (ft->fd_used_words < new_used_words)
+            ? ft->fd_used_words
+            : new_used_words;
+
+        memcpy(new_used, ft->fd_used, sizeof(uint64_t) * copy_words);
+    }
+
+    fd_bitmap_set_invalid_bits(new_used, new_cap);
+
+    new_summary = static_cast<uint64_t*>(kmalloc(sizeof(uint64_t) * new_summary_words));
+    if (!new_summary) {
+        kfree(new_used);
+        free_fd_array_sync(new_fds);
+        return -1;
+    }
+
+    memset(new_summary, 0, sizeof(uint64_t) * new_summary_words);
+
+    {
+        fd_table_t tmp = *ft;
+        tmp.max_fds = new_cap;
+        tmp.fd_used = new_used;
+        tmp.fd_used_words = new_used_words;
+        tmp.fd_summary = new_summary;
+        tmp.fd_summary_words = new_summary_words;
+
+        fd_bitmap_summary_rebuild(&tmp);
+    }
+
     if (old_fds) {
         for (uint32_t i = 0; i < ft->max_fds; i++) {
             rcu_ptr_assign(&new_fds[i], rcu_ptr_read(&old_fds[i]));
         }
     }
     
+    uint64_t* old_used = ft->fd_used;
+    uint64_t* old_summary = ft->fd_summary;
+
     ft->fds = new_fds;
     ft->max_fds = new_cap;
 
-    if (out_old_fds) *out_old_fds = old_fds;
+    ft->fd_used = new_used;
+    ft->fd_used_words = new_used_words;
+
+    ft->fd_summary = new_summary;
+    ft->fd_summary_words = new_summary_words;
+
+    if (out_old_fds) {
+        *out_old_fds = old_fds;
+    }
+
+    if (out_old_used) {
+        *out_old_used = old_used;
+    }
+
+    if (out_old_summary) {
+        *out_old_summary = old_summary;
+    }
 
     return 0;
 }
@@ -1076,13 +1370,21 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
     if (!ft) return -1;
 
     rcu_ptr_t* old_fds = nullptr;
+    uint64_t* old_used = nullptr;
+    uint64_t* old_summary = nullptr;
     int ret = -1;
     file_desc_t* d = nullptr;
 
     {
-        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        kernel::SpinLockNativeGuard guard(ft->lock);
         
-        if (fd_table_ensure_cap(ft, (uint32_t)fd, &old_fds) == 0) {
+        if (fd_table_ensure_cap(
+            ft,
+            (uint32_t)fd,
+            &old_fds,
+            &old_used,
+            &old_summary
+        ) == 0) {
             if (!rcu_ptr_read(&ft->fds[fd])) {
                 d = static_cast<file_desc_t*>(kmalloc(sizeof(*d)));
                 if (d) {
@@ -1091,6 +1393,8 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
                     spinlock_init(&d->lock);
 
                     rcu_ptr_assign(&ft->fds[fd], d);
+
+                    fd_bitmap_mark_used(ft, (uint32_t)fd);
 
                     if (fd >= ft->fd_next) {
                         ft->fd_next = fd + 1;
@@ -1107,6 +1411,14 @@ int proc_fd_add_at(task_t* t, int fd, file_desc_t** out_desc) {
         free_fd_array_deferred(old_fds);
     }
 
+    if (old_used) {
+        kfree(old_used);
+    }
+
+    if (old_summary) {
+        kfree(old_summary);
+    }
+
     return ret;
 }
 
@@ -1117,15 +1429,25 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
     if (!ft) return -1;
 
     rcu_ptr_t* old_fds = nullptr;
+    uint64_t* old_used = nullptr;
+    uint64_t* old_summary = nullptr;
     int ret = -1;
 
     {
-        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        kernel::SpinLockNativeGuard guard(ft->lock);
         
-        if (fd_table_ensure_cap(ft, (uint32_t)fd, &old_fds) == 0) {
+        if (fd_table_ensure_cap(
+            ft,
+            (uint32_t)fd,
+            &old_fds,
+            &old_used,
+            &old_summary
+        ) == 0) {
             if (!rcu_ptr_read(&ft->fds[fd])) {
                 rcu_ptr_assign(&ft->fds[fd], desc);
                 file_desc_retain(desc);
+
+                fd_bitmap_mark_used(ft, (uint32_t)fd);
 
                 if (fd >= ft->fd_next) {
                     ft->fd_next = fd + 1;
@@ -1138,6 +1460,14 @@ int proc_fd_install_at(task_t* t, int fd, file_desc_t* desc) {
 
     if (old_fds) {
         free_fd_array_deferred(old_fds);
+    }
+
+    if (old_used) {
+        kfree(old_used);
+    }
+
+    if (old_summary) {
+        kfree(old_summary);
     }
     
     return ret;
@@ -1152,40 +1482,45 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
 
     int found = -1;
     rcu_ptr_t* old_fds = nullptr;
+    uint64_t* old_used = nullptr;
+    uint64_t* old_summary = nullptr;
     file_desc_t* d = nullptr;
 
     {
-        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        kernel::SpinLockNativeGuard guard(ft->lock);
 
         int expected = ft->fd_next;
         if (expected < 0) {
             expected = 0;
         }
 
-        uint32_t limit = ft->max_fds;
-        uint32_t start = (uint32_t)expected;
+        const uint32_t start = (uint32_t)expected;
 
-        for (uint32_t i = start; i < limit; i++) {
-            if (!rcu_ptr_read(&ft->fds[i])) {
-                found = (int)i;
-                break;
-            }
+        uint32_t found_u32 = 0u;
+        const bool found_from_next = fd_bitmap_find_free_from(ft, start, &found_u32);
+
+        bool ok = found_from_next;
+
+        if (!ok && start != 0u) {
+            ok = fd_bitmap_find_free_from(ft, 0u, &found_u32);
         }
 
-        if (found == -1 && start > 0) {
-            for (uint32_t i = 0; i < start; i++) {
-                if (!rcu_ptr_read(&ft->fds[i])) {
-                    found = (int)i;
-                    break;
-                }
-            }
-        }
+        if (!ok) {
+            const uint32_t old_limit = ft->max_fds;
 
-        if (found == -1) {
-            found = (int)limit;
-            if (fd_table_ensure_cap(ft, limit, &old_fds) != 0) {
+            if (fd_table_ensure_cap(
+                ft,
+                old_limit,
+                &old_fds,
+                &old_used,
+                &old_summary
+            ) != 0) {
                 found = -1;
+            } else {
+                found = (int)old_limit;
             }
+        } else {
+            found = (int)found_u32;
         }
 
         if (found != -1) {
@@ -1196,6 +1531,9 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
                 spinlock_init(&d->lock);
 
                 rcu_ptr_assign(&ft->fds[found], d);
+
+                fd_bitmap_mark_used(ft, (uint32_t)found);
+
                 ft->fd_next = found + 1;
             } else {
                 found = -1;
@@ -1205,6 +1543,14 @@ int proc_fd_alloc(task_t* t, file_desc_t** out_desc) {
 
     if (old_fds) {
         free_fd_array_deferred(old_fds);
+    }
+
+    if (old_used) {
+        kfree(old_used);
+    }
+
+    if (old_summary) {
+        kfree(old_summary);
     }
     
     if (found == -1) return -1;
@@ -1222,7 +1568,7 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
     file_desc_t* d = nullptr;
 
     {
-        kernel::RwSpinLockNativeWriteGuard guard(ft->lock);
+        kernel::SpinLockNativeGuard guard(ft->lock);
         
         if ((uint32_t)fd >= ft->max_fds || !ft->fds) {
             return -1;
@@ -1234,6 +1580,8 @@ int proc_fd_remove(task_t* t, int fd, file_desc_t** out_desc) {
         }
 
         rcu_ptr_assign(&ft->fds[fd], nullptr);
+
+        fd_bitmap_mark_free(ft, (uint32_t)fd);
 
         if (fd < ft->fd_next) {
             ft->fd_next = fd;
@@ -1259,9 +1607,10 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
 
     memset(ft.get(), 0, sizeof(*ft.get()));
     ft.get()->refs = 1;
-    rwspinlock_init(&ft.get()->lock);
 
-    kernel::RwSpinLockNativeReadGuard src_guard(src->lock);
+    spinlock_init(&ft.get()->lock);
+
+    kernel::SpinLockNativeGuard src_guard(src->lock);
     
     ft.get()->max_fds = src->max_fds;
     ft.get()->fds = alloc_fd_array(ft.get()->max_fds);
@@ -1274,6 +1623,37 @@ static fd_table_t* proc_fd_table_clone(fd_table_t* src) {
     }
     
     ft.get()->fd_next = src->fd_next;
+
+    ft.get()->fd_used_words = fd_bitmap_words_for_bits(ft.get()->max_fds);
+    ft.get()->fd_used = static_cast<uint64_t*>(
+        kmalloc(sizeof(uint64_t) * ft.get()->fd_used_words)
+    );
+    if (!ft.get()->fd_used) {
+        return 0;
+    }
+
+    memset(ft.get()->fd_used, 0, sizeof(uint64_t) * ft.get()->fd_used_words);
+
+    if (src->fd_used && src->fd_used_words != 0u) {
+        const uint32_t copy_words = (src->fd_used_words < ft.get()->fd_used_words)
+            ? src->fd_used_words
+            : ft.get()->fd_used_words;
+
+        memcpy(ft.get()->fd_used, src->fd_used, sizeof(uint64_t) * copy_words);
+    }
+
+    fd_bitmap_set_invalid_bits(ft.get()->fd_used, ft.get()->max_fds);
+
+    ft.get()->fd_summary_words = fd_bitmap_words_for_bits(ft.get()->fd_used_words);
+    ft.get()->fd_summary = static_cast<uint64_t*>(
+        kmalloc(sizeof(uint64_t) * ft.get()->fd_summary_words)
+    );
+    if (!ft.get()->fd_summary) {
+        return 0;
+    }
+
+    memset(ft.get()->fd_summary, 0, sizeof(uint64_t) * ft.get()->fd_summary_words);
+    fd_bitmap_summary_rebuild(ft.get());
 
     for (uint32_t i = 0; i < ft.get()->max_fds; i++) {
         file_desc_t* d = static_cast<file_desc_t*>(rcu_ptr_read(&src->fds[i]));

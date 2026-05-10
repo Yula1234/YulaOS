@@ -114,11 +114,17 @@ typedef struct file_desc {
 typedef struct fd_table {
     uint32_t refs;
 
-    rwspinlock_t lock;
+    spinlock_t lock;
     rcu_ptr_t* fds;
     
     uint32_t max_fds;
     int fd_next;
+
+    uint64_t* fd_used;
+    uint32_t fd_used_words;
+
+    uint64_t* fd_summary;
+    uint32_t fd_summary_words;
     
     rcu_head_t rcu;
 } fd_table_t;
