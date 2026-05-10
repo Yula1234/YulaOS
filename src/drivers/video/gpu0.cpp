@@ -3,11 +3,13 @@
 
 #include <lib/cpp/ioctl_dispatch.h>
 #include <lib/cpp/intrusive_ref.h>
+#include <lib/cpp/lock_guard.h>
 #include <lib/cpp/unique_ptr.h>
 #include <lib/cpp/expected.h>
 #include <lib/cpp/utility.h>
 #include <lib/cpp/mutex.h>
-#include <lib/hash_map.h>
+#include <lib/radixtree.h>
+#include <lib/cpp/dlist.h>
 #include <lib/cpp/vfs.h>
 #include <lib/cpp/new.h>
 #include <lib/string.h>
@@ -294,7 +296,9 @@ public:
 
 class SlotRecord {
 public:
-    SlotRecord() = default;
+    SlotRecord() {
+        dlist_init(&context_node_);
+    }
 
     SlotRecord(const SlotRecord&) = delete;
     SlotRecord& operator=(const SlotRecord&) = delete;
@@ -354,8 +358,12 @@ public:
         return slot_;
     }
 
+    dlist_head_t context_node_{};
+
 private:
+
     mutable kernel::SpinLock ref_lock_;
+    
     uint32_t refcount_ = 1u;
     uint32_t closing_ = 0u;
 
@@ -585,7 +593,9 @@ private:
 
 class Context {
 public:
-    Context() = default;
+    Context() {
+        radix_tree_init(&slots_tree_);
+    }
 
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
@@ -595,40 +605,33 @@ public:
 
     ~Context() {
         destroy_resources();
+
+        radix_tree_destroy(&slots_tree_);
     }
 
     bool init() {
         return true;
     }
 
-    bool find_and_retain(uint32_t resource_id, kernel::IntrusiveRef<SlotRecord>& out) {
+     bool find_and_retain(uint32_t resource_id, kernel::IntrusiveRef<SlotRecord>& out) {
         if (resource_id == 0u) {
             return false;
         }
 
-        SlotRecord* ptr = nullptr;
-        const bool ok = slots_.with_value_locked(
-            resource_id,
-            [&](SlotRecord*& v) -> bool {
-                if (!v) {
-                    return false;
-                }
+        SlotRecord* rec = nullptr;
 
-                if (!v->retain()) {
-                    return false;
-                }
+        {
+            kernel::RcuReadGuard rcu_guard;
 
-                ptr = v;
-
-                return true;
+            rec = static_cast<SlotRecord*>(radix_tree_lookup(&slots_tree_, resource_id));
+            
+            if (!rec
+                || !rec->retain()) {
+                return false;
             }
-        );
-
-        if (!ok) {
-            return false;
         }
 
-        out = kernel::IntrusiveRef<SlotRecord>::adopt(ptr);
+        out = kernel::IntrusiveRef<SlotRecord>::adopt(rec);
 
         return true;
     }
@@ -669,17 +672,25 @@ public:
             return false;
         }
 
-        SlotRecord* rec = new SlotRecord();
-        rec->slot() = kernel::move(slot);
-
-        const auto result = slots_.insert_unique_ex(resource_id, rec);
-        if (result == decltype(slots_)::InsertUniqueResult::Inserted) {
-            return true;
+        SlotRecord* rec = new (kernel::nothrow) SlotRecord();
+        
+        if (!rec) {
+            return false;
         }
 
-        rec->release();
+        rec->slot() = kernel::move(slot);
 
-        return false;
+        if (radix_tree_insert(&slots_tree_, resource_id, rec) != 0) {
+            delete rec;
+
+            return false;
+        }
+
+        kernel::SpinLockSafeGuard guard(list_lock_);
+
+        records_list_.push_back(*rec);
+
+        return true;
     }
 
     bool begin_close_and_remove(uint32_t resource_id, kernel::IntrusiveRef<SlotRecord>& out) {
@@ -687,30 +698,18 @@ public:
             return false;
         }
 
-        const bool marked = slots_.with_value_locked(
-            resource_id,
-            [&](SlotRecord*& v) -> bool {
-                if (!v) {
-                    return false;
-                }
-
-                v->begin_close();
-
-                return true;
-            }
-        );
-
-        if (!marked) {
-            return false;
-        }
-
-        SlotRecord* rec = nullptr;
-        if (!slots_.remove_and_get(resource_id, rec)) {
-            return false;
-        }
+        SlotRecord* rec = static_cast<SlotRecord*>(radix_tree_remove(&slots_tree_, resource_id));
 
         if (!rec) {
             return false;
+        }
+
+        rec->begin_close();
+
+        {
+            kernel::SpinLockSafeGuard guard(list_lock_);
+
+            dlist_remove_node_if_present(records_list_.native_head(), &rec->context_node_);
         }
 
         out = kernel::IntrusiveRef<SlotRecord>::adopt(rec);
@@ -719,107 +718,68 @@ public:
     }
 
     bool remove_locked(uint32_t resource_id) {
-        if (resource_id == 0u) {
-            return false;
-        }
-
-        SlotRecord* rec = nullptr;
-        if (!slots_.remove_and_get(resource_id, rec)) {
-            return false;
-        }
-
-        if (rec) {
-            rec->begin_close();
-            rec->release();
-        }
-
-        return true;
+        kernel::IntrusiveRef<SlotRecord> dummy;
+        
+        return begin_close_and_remove(resource_id, dummy);
     }
 
 private:
     void destroy_resources() {
-        struct CleanupItem {
-            uint32_t resource_id;
-            kernel::VirtualFSNode shm;
-            SlotRecord* rec;
-        };
-
-        CleanupItem* items = nullptr;
-        uint32_t item_count = 0u;
+        kernel::CDBLinkedList<SlotRecord, &SlotRecord::context_node_> local_list;
 
         {
-            auto view = slots_.locked_view();
-            for (auto it = view.begin(); it != view.end(); ++it) {
-                ++item_count;
-            }
+            kernel::SpinLockSafeGuard guard(list_lock_);
 
-            if (item_count != 0u) {
-                items = new (kernel::nothrow) CleanupItem[item_count];
-                if (items) {
-                    uint32_t i = 0u;
-                    for (auto it = view.begin(); it != view.end(); ++it) {
-                        auto pair = *it;
-                        SlotRecord* rec = pair.second;
-                        if (!rec) {
-                            continue;
-                        }
-
-                        kernel::MutexGuard slot_guard(rec->mutex());
-                        Slot& s = rec->slot();
-
-                        items[i] = {
-                            .resource_id = s.resource_id,
-                            .shm = kernel::move(s.backing.shm),
-                            .rec = rec,
-                        };
-
-                        s.backing.offset = 0u;
-                        s.backing.size_bytes = 0u;
-
-                        i++;
-                    }
-
-                    item_count = i;
-                } else {
-                    item_count = 0u;
-                }
+            while (!records_list_.empty()) {
+                SlotRecord& rec = records_list_.front();
+            
+                dlist_del(&rec.context_node_);
+            
+                local_list.push_back(rec);
             }
         }
 
-        slots_.clear();
+        while (!local_list.empty()) {
+            SlotRecord& rec = local_list.front();
 
-        if (!items
-            || item_count == 0u) {
-            if (items) {
-                delete[] items;
+            dlist_del(&rec.context_node_);
+
+            uint32_t resource_id = 0u;
+            
+            kernel::VirtualFSNode shm_node;
+
+            {
+                kernel::MutexGuard slot_guard(rec.mutex());
+
+                Slot& s = rec.slot();
+                
+                resource_id = s.resource_id;
+                
+                shm_node = kernel::move(s.backing.shm);
+                
+                s.backing.offset = 0u;
+                s.backing.size_bytes = 0u;
             }
-
-            return;
-        }
-
-        for (uint32_t i = 0; i < item_count; ++i) {
-            const uint32_t resource_id = items[i].resource_id;
-            kernel::VirtualFSNode shm_node = kernel::move(items[i].shm);
-            SlotRecord* rec = items[i].rec;
 
             if (shm_node) {
                 (void)virtio_gpu_resource_detach_backing(resource_id);
+
                 shm_node.reset();
             }
 
             (void)virtio_gpu_resource_unref(resource_id);
+            (void)radix_tree_remove(&slots_tree_, resource_id);
 
-            if (rec) {
-                rec->begin_close();
-                rec->release();
-            }
+            rec.begin_close();
+            rec.release();
         }
-
-        delete[] items;
     }
 
 private:
-    HashMap<uint32_t, SlotRecord*, 128> slots_;
+    radix_tree_t slots_tree_;
+
+    kernel::SpinLock list_lock_;
+    kernel::CDBLinkedList<SlotRecord, &SlotRecord::context_node_> records_list_;
 };
 
 static int ioctl_get_info(Context& ctx, yos_gpu_info_t& info);
