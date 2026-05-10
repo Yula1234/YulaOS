@@ -45,13 +45,16 @@ typedef struct radix_tree {
 } radix_tree_t;
 
 void radix_tree_init(radix_tree_t* tree);
+
 void radix_tree_destroy(radix_tree_t* tree);
 
 int radix_tree_insert(radix_tree_t* tree, uint32_t key, void* value);
 
+void* radix_tree_remove(radix_tree_t* tree, uint32_t key);
+
 void* radix_tree_lookup(radix_tree_t* tree, uint32_t key);
 
-void* radix_tree_remove(radix_tree_t* tree, uint32_t key);
+void* radix_tree_find_next(radix_tree_t* tree, uint32_t* inout_key);
 
 #ifdef __cplusplus
 }

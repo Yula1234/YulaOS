@@ -268,6 +268,95 @@ unlock_rcu:
 	return res;
 }
 
+void* radix_tree_find_next(radix_tree_t* tree, uint32_t* inout_key) {
+    if (unlikely(!tree
+        || !inout_key))
+        return NULL;
+
+    uint32_t key = *inout_key;
+
+    rcu_read_lock();
+
+restart:
+    radix_node_t* current = (radix_node_t*)rcu_ptr_read(&tree->root_);
+
+    if (unlikely(current == NULL))
+        goto ret_null;
+
+    if (unlikely(key > max_key_for_shift(current->shift_)))
+        goto ret_null;
+
+    while (current->shift_ > 0u) {
+        const uint8_t shift = current->shift_;
+        const uint8_t offset = (uint8_t)((key >> shift) & RADIX_TREE_MAP_MASK);
+
+        radix_node_t* child = NULL;
+
+        for (uint8_t i = offset; i < RADIX_TREE_MAP_SIZE; i++) {
+            child = (radix_node_t*)rcu_ptr_read(&current->slots_[i]);
+
+            if (child != NULL) {
+                if (i > offset) {
+                    const uint64_t mask = (1ull << (shift + RADIX_TREE_MAP_SHIFT)) - 1ull;
+                    
+                    key = (uint32_t)((key & ~mask) | ((uint64_t)i << shift));
+                }
+
+                break;
+            }
+        }
+
+        if (child == NULL) {
+            const uint8_t parent_shift = shift + RADIX_TREE_MAP_SHIFT;
+            
+            if (parent_shift >= 32u)
+                goto ret_null;
+
+            const uint64_t step = 1ull << parent_shift;
+            const uint64_t next_key = (key & ~(step - 1ull)) + step;
+
+            if (next_key > 0xFFFFFFFFull)
+                goto ret_null;
+
+            key = (uint32_t)next_key;
+            
+            goto restart;
+        }
+
+        current = child;
+    }
+
+    const uint8_t leaf_offset = (uint8_t)(key & RADIX_TREE_MAP_MASK);
+
+    for (uint8_t i = leaf_offset; i < RADIX_TREE_MAP_SIZE; i++) {
+        void* value = rcu_ptr_read(&current->slots_[i]);
+
+        if (value != NULL) {
+            key = (key & ~RADIX_TREE_MAP_MASK) | i;
+            *inout_key = key;
+
+            rcu_read_unlock();
+
+            return value;
+        }
+    }
+
+    const uint64_t leaf_step = RADIX_TREE_MAP_SIZE;
+    const uint64_t next_leaf_key = (key & ~RADIX_TREE_MAP_MASK) + leaf_step;
+
+    if (next_leaf_key > 0xFFFFFFFFull)
+        goto ret_null;
+
+    key = (uint32_t)next_leaf_key;
+    
+    goto restart;
+
+ret_null:
+    rcu_read_unlock();
+    
+    return NULL;
+}
+
 void* radix_tree_remove(radix_tree_t* tree, uint32_t key) {
     if (unlikely(!tree))
         return NULL;
