@@ -434,6 +434,8 @@ size_t ldisc_read(ldisc_t* ld, void* out, size_t size) {
 
     bool intr = false;
 
+    uint32_t flags = irq_save();
+
     guard(spinlock_safe)(&ld->rx_lock_);
 
     if (ld->cfg_.canonical_) {
