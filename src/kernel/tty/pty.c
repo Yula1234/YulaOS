@@ -9,6 +9,7 @@
 #include <kernel/proc.h>
 
 #include <lib/string.h>
+#include <lib/kref.h>
 #include <lib/idr.h>
 
 #include <yos/ioctl.h>
@@ -23,7 +24,7 @@ typedef struct {
 
     spinlock_t lock;
 
-    volatile uint32_t refs;
+    kref_t refs;
 
     int master_open;
 
@@ -67,61 +68,24 @@ static void pty_make_pts_name(char out[32], uint32_t id) {
     out[pos] = '\0';
 }
 
-static void pty_pair_destroy(pty_pair_t* p) {
-    if (unlikely(!p)) {
-        return;
-    }
+static void pty_pair_destroy_cb(kref_t* kref) {
+    pty_pair_t* p = container_of(kref, pty_pair_t, refs);
 
     kfree(p);
 }
 
 static void pty_pair_retain(pty_pair_t* p) {
-    if (unlikely(!p)) {
+    if (unlikely(!p))
         return;
-    }
 
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
-        
-        if (unlikely(expected == 0u)) {
-            panic("PTY: pair_retain after free");
-        }
-
-        if (__atomic_compare_exchange_n(
-                &p->refs, &expected, expected + 1u,
-                0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
-            )) {
-            return;
-        }
-    }
+    kref_get(&p->refs);
 }
 
 static void pty_pair_release(pty_pair_t* p) {
-    if (unlikely(!p)) {
+    if (unlikely(!p))
         return;
-    }
 
-    for (;;) {
-        uint32_t expected = __atomic_load_n(&p->refs, __ATOMIC_RELAXED);
-        
-        if (unlikely(expected == 0u)) {
-            panic("PTY: pair_release underflow");
-        }
-
-        const uint32_t desired = expected - 1u;
-
-        if (__atomic_compare_exchange_n(
-                &p->refs, &expected, desired,
-                0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED
-            )) {
-            
-            if (desired == 0u) {
-                pty_pair_destroy(p);
-            }
-            
-            return;
-        }
-    }
+    kref_put(&p->refs);
 }
 
 static int pty_master_hw_write(tty_t* tty, const void* buf, uint32_t size) {
@@ -439,7 +403,7 @@ static int pty_ptmx_open(vfs_node_t* node) {
 
     memset(p, 0, sizeof(*p));
 
-    p->refs = 1u;
+    kref_init(&p->refs, pty_pair_destroy_cb);
 
     spinlock_init(&p->lock);
 
